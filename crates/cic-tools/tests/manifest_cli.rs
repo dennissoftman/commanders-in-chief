@@ -615,6 +615,19 @@ fn installed_profile_exports_single_glb_by_default_and_optional_gltf() {
         root.join("textured_textures/m000_t0000_checker_additive-preview.png")
             .is_file()
     );
+    let capture_path = root.join("textured.ppm");
+    let output = run_model_render(&root, &capture_path);
+    if output.status.success() {
+        let capture = fs::read(&capture_path).expect("read W3D render capture");
+        assert!(capture.starts_with(b"P6\n512 512\n255\n"));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("vertices\t3\n"));
+        assert!(stdout.contains("indices\t3\n"));
+        assert!(stdout.contains("rgba_sha256\t"));
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("requesting a graphics adapter"), "{stderr}");
+    }
     fs::remove_dir_all(root).expect("remove test tree");
 }
 
@@ -656,6 +669,18 @@ fn run_model_export(
         command.arg(output);
     }
     command.output().expect("run model export")
+}
+
+fn run_model_render(root: &std::path::Path, output: &std::path::Path) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_cic-inspect"))
+        .current_dir(root)
+        .arg("--game-dir")
+        .arg(root)
+        .arg("w3d-render")
+        .arg("art/w3d/textured_skn.w3d")
+        .arg(output)
+        .output()
+        .expect("run W3D render")
 }
 
 fn parse_glb(bytes: &[u8]) -> (serde_json::Value, &[u8]) {

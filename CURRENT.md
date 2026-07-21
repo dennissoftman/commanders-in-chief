@@ -2,8 +2,8 @@
 
 ## Objective
 
-Begin the R2 renderer-ingestion and animated-viewer gate using the now-complete bounded W3D
-format/interchange surface.
+Continue the R2 renderer-ingestion and animated-viewer gate after establishing BIG-backed
+composed-model bind-pose capture.
 
 ## Implemented foundation
 
@@ -88,6 +88,20 @@ format/interchange surface.
 - The installed `abarfrccmd.w3d` airstrip lights verified opaque source DDS alpha plus `ONE + ONE`
   shader blending. Their preserved source PNGs remain byte-equivalent after decode, while derived
   preview images make black texels transparent and route only the visible glTF materials to them.
+- `cic-render` now depends downward on immutable `cic-formats` values and stages validated W3D
+  positions, normals, and triangle indices in stable file order without parser, VFS, filesystem,
+  clock, window, or simulation ownership.
+- The selected `wgpu` 30 backend enables native Vulkan, Metal, and Direct3D 12 plus WGSL. A
+  surface-free RGBA8 path renders an explicitly posed synthetic triangle, strips copy-row padding,
+  and returns bounded readback bytes with a SHA-256 diagnostic.
+- A local RTX 4080 SUPER headless capture matched the checked-in 64x64 translated-triangle hash
+  `7e1894e3ad60f3236f628efdef3e61f3d724e351a37bab9612273190fa8c1ee0`.
+- `cic-inspect w3d-render` now uses the same installed profile or explicit BIG overlay path as W3D
+  inspection, composes hierarchy/HLOD/skin companions, applies rigid and one-bone bind transforms,
+  and emits a 512x512 depth-tested PPM with explicit adapter, geometry-count, and RGBA-hash output.
+- The synthetic two-BIG model fixture renders through the CLI. A local installed
+  `abarfrccmd.w3d` capture staged 1,561 vertices and 2,535 indices on an RTX 4080 SUPER and produced
+  RGBA SHA-256 `f6c70e3ff1d8d8900cae066fc0ee5c9d163a806fd03104b9b1a41bf584789e2a` without retaining the image.
 
 ## Known blockers
 
@@ -96,9 +110,10 @@ format/interchange surface.
   behavior; complete decoded metadata is available for the renderer gate.
 - Adaptive-delta animation is synthetic-verified but has not yet been observed in an installed
   export.
+- The renderer does not yet submit decoded material passes/stages or textures, sample animation,
+  present an interactive surface, or capture an installed animated pose.
 
 ## Next verified step
 
-Write the renderer-boundary ADR, select the minimal cross-platform graphics backend, and introduce
-the renderer crate with a headless synthetic triangle/pose capture before adding an interactive
-animated viewer.
+Add stable decoded material-pass/stage draw commands and VFS-resolved texture uploads, then compare
+a pass-zero textured installed-building capture before sampling an explicit animation frame.

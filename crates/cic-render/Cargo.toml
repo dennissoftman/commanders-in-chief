@@ -1,0 +1,18 @@
+[package]
+name = "cic-render"
+description = "Deterministic renderer boundary for Commanders in Chief"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+cic-formats = { path = "../cic-formats" }
+sha2 = "0.10"
+wgpu = { version = "30", default-features = false, features = ["std", "dx12", "metal", "vulkan", "wgsl"] }
+
+[dev-dependencies]
+pollster = "0.4"
+
+[lints]
+workspace = true

@@ -8,9 +8,11 @@ rust-version.workspace = true
 
 [dependencies]
 cic-formats = { path = "../cic-formats" }
+cic-render = { path = "../cic-render" }
 cic-vfs = { path = "../cic-vfs" }
 image = { version = "0.25", default-features = false, features = ["dds", "png", "tga"] }
 png = "0.18"
+pollster = "0.4"
 serde_json = "1"
 
 [lints]

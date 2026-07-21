@@ -11,6 +11,7 @@ BIG archive mounting, and a CLI that inventories mounted resources.
 ```powershell
 cargo test --workspace
 cargo run -p cic-tools -- manifest path\to\base path\to\archive.big path\to\override
+cargo run -p cic-render --example headless_capture -- target/synthetic-capture.ppm
 ```
 
 Complete W3D models can be exported to glTF 2.0 for Blender or a browser-based model
@@ -20,6 +21,7 @@ default resource profile and `--zh` layers Zero Hour over its required Generals 
 ```powershell
 cargo run -p cic-tools -- config show
 cargo run -p cic-tools -- w3d-export art/w3d/model.w3d
+cargo run -p cic-tools -- w3d-render art/w3d/model.w3d model-capture.ppm
 cargo run -p cic-tools -- --zh w3d-export art/w3d/model_skn.w3d custom-name.glb
 cargo run -p cic-tools -- w3d-export --gltf art/w3d/model.w3d preview.gltf
 ```
@@ -48,6 +50,13 @@ cargo run -p cic-tools -- config set zero-hour-dir "D:\Games\Zero Hour"
 
 Explicit directory or BIG mounts remain supported after the command arguments for
 synthetic fixtures and custom overlays.
+
+The renderer boundary can produce a window-free synthetic PPM and RGBA SHA-256 with an explicit
+pose. It consumes validated `cic-formats` values and owns no parser, filesystem, clock, or
+simulation resources; interactive presentation is a later R2 gate.
+`cic-inspect w3d-render` connects that boundary to the existing installed-resource profiles or
+explicit BIG mounts and produces a depth-tested bind-pose geometry diagnostic. Textures and exact
+fixed-function material passes are not yet applied by this command.
 
 On Windows, Rust's MSVC target also requires Visual Studio Build Tools with the Desktop
 development with C++ workload. The same checks run on Linux in GitHub Actions.

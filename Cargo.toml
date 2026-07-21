@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/cic-core",
     "crates/cic-formats",
+    "crates/cic-render",
     "crates/cic-vfs",
     "crates/cic-tools",
 ]

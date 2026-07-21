@@ -56,4 +56,10 @@ All notable user-visible changes are recorded here.
 - W3D `ONE + ONE` additive materials use separate alpha-coverage PNGs in the core-glTF preview,
   eliminating black sprite rectangles while retaining untouched decoded source RGBA images for
   fixed-function metadata consumers.
+- Added the `cic-render` boundary with stable W3D geometry staging, a `wgpu` 30 Vulkan/Metal/DX12
+  backend, explicit pose inputs, and bounded surface-free RGBA8 capture/readback.
+- Added a synthetic translated-triangle capture example and checked-in SHA-256 completion hash.
+- Added `cic-inspect w3d-render` for installed profiles or explicit BIG overlays. It composes the
+  selected HLOD and hierarchy, stages rigid/one-bone bind geometry, and writes a depth-tested PPM
+  plus adapter, geometry-count, and RGBA-hash diagnostics.
 - Synthetic unit and integration tests plus CI quality gates.

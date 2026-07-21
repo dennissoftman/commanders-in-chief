@@ -8,6 +8,7 @@ use cic_formats::{
     CsfLimits, W3dFile, W3dLimits, W3dMeshLimits, W3dSceneLimits, decode_static_mesh,
     decode_w3d_model_set, parse_csf, parse_w3d, w3d_model_hierarchy_name,
 };
+use cic_render::{HeadlessRenderer, StagedModel};
 use cic_tools::resource::{
     GameEdition, ResourceKind, StoredLocations, config_path, discover_steam_locations,
     resolve_archives, validate_installation,
@@ -26,6 +27,7 @@ const USAGE: &str = "Usage:\n\
   cic-inspect csf <virtual-path> <mount> [<mount> ...]\n\
   cic-inspect w3d <virtual-path> <mount> [<mount> ...]\n\
   cic-inspect w3d-mesh <virtual-path> <top-level-index> <mount> [<mount> ...]\n\
+  cic-inspect w3d-render <virtual-path> [<output.ppm>] [<mount> ...]\n\
   cic-inspect w3d-export [--gltf] <virtual-path> [<output.glb|output.gltf>] [<mount> ...]\n\
 Each mount is a directory or BIG archive. Mounts are applied from left to right; later mounts override earlier mounts.";
 
@@ -127,6 +129,7 @@ fn run(arguments: impl IntoIterator<Item = String>) -> Result<String, Box<dyn Er
             let mesh = decode_static_mesh(chunk, W3dMeshLimits::default())?;
             Ok(render_w3d_mesh(&mesh))
         }
+        "w3d-render" => render_model_capture(&mut arguments, &options),
         "w3d-export" => export_model(&mut arguments, &options),
         _ => Err(format!("unknown command {command:?}").into()),
     }
@@ -168,19 +171,77 @@ where
         options,
         ResourceKind::W3dWithTextures,
     )?;
+    let model = load_composed_model(&vfs, &resource_path)?;
+    write_model_export(&vfs, &model, &output_path, format)?;
+    Ok(format!("wrote {}\n", output_path.display()))
+}
+
+fn render_model_capture<I>(
+    arguments: &mut std::iter::Peekable<I>,
+    options: &CliOptions,
+) -> Result<String, Box<dyn Error>>
+where
+    I: Iterator<Item = String>,
+{
+    let resource_name = arguments
+        .next()
+        .ok_or("w3d-render requires a virtual path")?;
+    let resource_path = VirtualPath::new(&resource_name)?;
+    let remaining = arguments.collect::<Vec<_>>();
+    let (output_path, mounts) = if remaining.first().is_some_and(|candidate| {
+        Path::new(candidate)
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("ppm"))
+    }) {
+        (PathBuf::from(&remaining[0]), remaining[1..].to_vec())
+    } else {
+        (default_render_path(&resource_path)?, remaining)
+    };
+    if !output_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("ppm"))
+    {
+        return Err("W3D render capture requires a .ppm output path".into());
+    }
+    let vfs = mount_all("w3d-render", &mounts, options, ResourceKind::W3d)?;
+    let model = load_composed_model(&vfs, &resource_path)?;
+    let staged = StagedModel::from_w3d(&model)?;
+    let renderer = pollster::block_on(HeadlessRenderer::new())?;
+    let capture = renderer.capture_model(512, 512, &staged)?;
+    fs::write(&output_path, capture.ppm())?;
+    Ok(format!(
+        "adapter\t{}\nvertices\t{}\nindices\t{}\nrgba_sha256\t{}\nwrote\t{}\n",
+        renderer.adapter_info().name,
+        staged.vertex_count(),
+        staged.index_count(),
+        capture.sha256(),
+        output_path.display()
+    ))
+}
+
+fn default_render_path(resource_path: &VirtualPath) -> Result<PathBuf, Box<dyn Error>> {
+    let stem = Path::new(resource_path.as_str())
+        .file_stem()
+        .ok_or("W3D resource path has no file name")?;
+    Ok(PathBuf::from(stem).with_extension("ppm"))
+}
+
+fn load_composed_model(
+    vfs: &Vfs,
+    resource_path: &VirtualPath,
+) -> Result<cic_formats::W3dModel, Box<dyn Error>> {
     let entry = vfs
-        .resolve(&resource_path)
+        .resolve(resource_path)
         .ok_or_else(|| format!("resource not found: {resource_path}"))?;
     let w3d = parse_w3d(entry.bytes(), resource_path.as_str(), W3dLimits::default())?;
-    let files = collect_model_files(&vfs, &resource_path, w3d)?;
+    let files = collect_model_files(vfs, resource_path, w3d)?;
     let file_refs = files.iter().collect::<Vec<_>>();
-    let model = decode_w3d_model_set(
+    Ok(decode_w3d_model_set(
         &file_refs,
         W3dMeshLimits::default(),
         W3dSceneLimits::default(),
-    )?;
-    write_model_export(&vfs, &model, &output_path, format)?;
-    Ok(format!("wrote {}\n", output_path.display()))
+    )?)
 }
 
 fn has_export_extension(path: &Path) -> bool {

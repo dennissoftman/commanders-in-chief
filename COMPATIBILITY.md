@@ -36,6 +36,12 @@ observable behavior.
 | W3D | Additive light-sprite glTF preview | verified | Synthetic source/derived image test + installed `abarfrccmd.w3d` airstrip lights |
 | W3D | Exact fixed-function visual blending | unknown | Exact shader/pass/stage data retained; core glTF preview is explicitly pass 0/stage 0 |
 | W3D | GLB/glTF 2.0 preview export | verified | Synthetic CLI/PNG tests + Blender 3.3 GLB import |
+| Renderer | Stable validated W3D geometry staging | verified | Original fixture + synthetic two-BIG CLI + installed building |
+| Renderer | Headless RGBA8 triangle/pose capture | verified | Checked-in SHA-256 + local RTX 4080 SUPER capture |
+| Renderer | BIG-backed composed bind-pose capture | verified | Synthetic CLI PPM + installed `abarfrccmd.w3d` capture |
+| Renderer | Material pass/stage submission | unknown | Next renderer gate |
+| Renderer | Rigid/one-bone hierarchy bind pose | verified | Synthetic skinned fixture + installed rigid building capture |
+| Renderer | Animated hierarchy pose | unknown | Explicit-frame sampling not connected yet |
 | Resources | Generals install profile and Steam discovery | verified | Installed Steam export + synthetic `--game-dir` test |
 | Resources | Zero Hour base/delta profile | verified | Installed layered `--zh` exports |
 | MAP | Chunk inventory | unknown | Not started |
