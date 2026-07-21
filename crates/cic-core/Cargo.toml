@@ -1,0 +1,11 @@
+[package]
+name = "cic-core"
+description = "Core invariants and bounded binary input for Commanders in Chief"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+

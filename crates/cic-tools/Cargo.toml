@@ -1,0 +1,18 @@
+[package]
+name = "cic-tools"
+description = "Diagnostic command-line tools for Commanders in Chief"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+cic-vfs = { path = "../cic-vfs" }
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "cic-inspect"
+path = "src/main.rs"
+
