@@ -156,8 +156,9 @@ pub fn render_w3d_mesh(mesh: &W3dStaticMesh) -> String {
 /// Converts immutable static mesh geometry to deterministic Wavefront OBJ text.
 ///
 /// Object-space coordinates, vertex normals, triangle order, and winding are preserved.
-/// Material and texture-coordinate records are intentionally omitted until their W3D
-/// semantics are implemented.
+/// Resolved first-pass diffuse colors use the widely supported `v x y z r g b` extension.
+/// Texture-coordinate records are intentionally omitted until their W3D semantics are
+/// implemented.
 #[must_use]
 pub fn render_w3d_obj(mesh: &W3dStaticMesh) -> String {
     let header = mesh.header();
@@ -173,7 +174,7 @@ pub fn render_w3d_obj(mesh: &W3dStaticMesh) -> String {
 
     let mut output = String::from(
         "# Commanders in Chief W3D static geometry export\n\
-         # Object-space coordinates and winding are preserved; materials and UVs are omitted.\n",
+         # Object-space coordinates and winding are preserved; UVs are omitted.\n",
     );
     writeln!(
         output,
@@ -186,9 +187,24 @@ pub fn render_w3d_obj(mesh: &W3dStaticMesh) -> String {
     )
     .expect("writing to a String cannot fail");
 
-    for vertex in mesh.vertices() {
-        writeln!(output, "v {} {} {}", vertex.x(), vertex.y(), vertex.z())
+    let colors = mesh.preview_vertex_colors();
+    for (index, vertex) in mesh.vertices().iter().enumerate() {
+        if let Some(color) = colors.as_ref().and_then(|colors| colors.get(index)) {
+            writeln!(
+                output,
+                "v {} {} {} {} {} {}",
+                vertex.x(),
+                vertex.y(),
+                vertex.z(),
+                normalized_color(color.red()),
+                normalized_color(color.green()),
+                normalized_color(color.blue())
+            )
             .expect("writing to a String cannot fail");
+        } else {
+            writeln!(output, "v {} {} {}", vertex.x(), vertex.y(), vertex.z())
+                .expect("writing to a String cannot fail");
+        }
     }
     for normal in mesh.normals() {
         writeln!(output, "vn {} {} {}", normal.x(), normal.y(), normal.z())
@@ -200,6 +216,10 @@ pub fn render_w3d_obj(mesh: &W3dStaticMesh) -> String {
             .expect("writing to a String cannot fail");
     }
     output
+}
+
+fn normalized_color(value: u8) -> f32 {
+    f32::from(value) / f32::from(u8::MAX)
 }
 
 fn obj_name(bytes: &[u8]) -> String {
@@ -458,7 +478,7 @@ mod tests {
         assert_eq!(
             render_w3d_obj(&mesh),
             "# Commanders in Chief W3D static geometry export\n\
-             # Object-space coordinates and winding are preserved; materials and UVs are omitted.\n\
+             # Object-space coordinates and winding are preserved; UVs are omitted.\n\
              o Test.Tri\n\
              v 0 0 0\n\
              v 1 0 0\n\
@@ -468,5 +488,27 @@ mod tests {
              vn 0 0 1\n\
              f 1//1 2//2 3//3\n"
         );
+    }
+
+    #[test]
+    fn static_mesh_obj_emits_resolved_diffuse_vertex_colors() {
+        let hex = include_str!("../../cic-formats/tests/fixtures/colored-mesh.w3d.hex");
+        let digits = hex
+            .bytes()
+            .filter(u8::is_ascii_hexdigit)
+            .collect::<Vec<_>>();
+        let bytes = digits
+            .chunks_exact(2)
+            .map(|pair| {
+                let pair = std::str::from_utf8(pair).expect("ASCII fixture");
+                u8::from_str_radix(pair, 16).expect("valid hex fixture")
+            })
+            .collect::<Vec<_>>();
+        let w3d = parse_w3d(&bytes, "colored-mesh.w3d", W3dLimits::default()).expect("valid W3D");
+        let mesh = decode_static_mesh(&w3d.chunks()[0], W3dMeshLimits::default())
+            .expect("valid colored mesh");
+        let obj = render_w3d_obj(&mesh);
+
+        assert!(obj.contains("v 0 0 0 1 0 0\nv 1 0 0 1 0 0\nv 0 1 0 1 0 0\n"));
     }
 }

@@ -2,8 +2,8 @@
 
 ## Objective
 
-Begin evidence-backed W3D material and texture-reference decoding on top of verified
-static geometry.
+Continue evidence-backed W3D material decoding with shaders, textures, and UV references
+on top of verified static geometry and diffuse colors.
 
 ## Implemented foundation
 
@@ -24,7 +24,7 @@ static geometry.
   slash-separated tree paths, and 73 known chunk names.
 - Deterministic `cic-inspect w3d` reports through loose-directory or BIG mounts.
 - Original nested W3D fixture and synthetic BIG-to-W3D CLI completion artifact.
-- Local formatting, strict Clippy, and all 40 runtime tests pass.
+- Local formatting, strict Clippy, and all 45 runtime tests pass.
 - All 18 installed Steam Generals BIG archives have matching declared sizes and bounded
   verified directory trailers; `INI.big` resolves 92 deterministic manifest entries.
 - The installed Steam Generals CSF parses exactly to its 282,246-byte member boundary and
@@ -43,15 +43,23 @@ static geometry.
 - Deterministic geometry-only Wavefront OBJ export preserves coordinates, normals, triangle
   order, and winding; the installed verification mesh exported as 24 vertices, 24 normals,
   and 12 faces.
+- Material inventories, 32-byte vertex materials, singleton/per-vertex first-pass IDs, and
+  explicit DCG arrays decode into immutable values with count, size, name, scalar, and index
+  validation.
+- First-pass DCG colors override vertex-material diffuse colors; colored OBJ exports append
+  normalized RGB values to vertex records.
+- Original colored-triangle and synthetic BIG-backed completion artifacts pass. Two
+  installed static meshes decode their material inventories and assignments directly from
+  the user-owned W3D archive.
 
 ## Known blockers
 
 - `BIG4` remains implemented from corroborating source but unverified against retail data.
-- W3D material counts, shader/material/texture identifiers, passes, and texture-coordinate
+- W3D shader records, texture names/info, per-pass shader/texture IDs, and texture-coordinate
   references require the next evidence-backed semantic specification.
 
 ## Next verified step
 
-Specify material info, vertex materials, shaders, textures, material passes, and their
-index/count invariants; then attach immutable material references to static meshes without
+Specify shaders, texture names/info, pass shader/texture IDs, and UV arrays with their
+index/count invariants; then emit OBJ texture coordinates and material references without
 introducing rendering dependencies.

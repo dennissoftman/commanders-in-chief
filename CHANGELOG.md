@@ -22,6 +22,7 @@ All notable user-visible changes are recorded here.
   exact record-size checks, static-channel validation, and range-checked triangle indices.
 - `cic-inspect w3d-mesh` exact-bit geometry reports through mounted directories and BIG
   archives.
-- `cic-inspect w3d-obj` deterministic geometry-only Wavefront OBJ exports for external
-  model viewers.
+- `cic-inspect w3d-obj` deterministic Wavefront OBJ exports for external model viewers.
+- Bounded W3D material inventories, vertex-material colors, first-pass material IDs, and
+  explicit per-vertex diffuse color arrays with colored OBJ vertex output.
 - Synthetic unit and integration tests plus CI quality gates.

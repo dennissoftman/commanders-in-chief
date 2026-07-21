@@ -12,6 +12,7 @@ use std::fmt::{self, Display, Formatter};
 use cic_core::{BinaryError, BinaryReader};
 
 use crate::w3d::W3dChunk;
+use crate::w3d_material::{W3dMaterialError, W3dMaterialSet, W3dRgba8, decode_materials};
 
 const MESH_CHUNK: u32 = 0x0000_0000;
 const VERTICES_CHUNK: u32 = 0x0000_0002;
@@ -36,6 +37,16 @@ pub struct W3dMeshLimits {
     pub maximum_vertices: usize,
     /// Maximum triangles declared by the mesh header.
     pub maximum_triangles: usize,
+    /// Maximum material passes declared by material info.
+    pub maximum_material_passes: usize,
+    /// Maximum vertex materials declared by material info.
+    pub maximum_vertex_materials: usize,
+    /// Maximum shaders declared by material info.
+    pub maximum_shaders: usize,
+    /// Maximum textures declared by material info.
+    pub maximum_textures: usize,
+    /// Maximum vertex-material name length, excluding its terminator.
+    pub maximum_material_name_bytes: usize,
 }
 
 impl Default for W3dMeshLimits {
@@ -43,6 +54,11 @@ impl Default for W3dMeshLimits {
         Self {
             maximum_vertices: 4_000_000,
             maximum_triangles: 4_000_000,
+            maximum_material_passes: 64,
+            maximum_vertex_materials: 65_536,
+            maximum_shaders: 65_536,
+            maximum_textures: 65_536,
+            maximum_material_name_bytes: 255,
         }
     }
 }
@@ -243,6 +259,7 @@ pub struct W3dStaticMesh {
     vertices: Vec<W3dVector3>,
     normals: Vec<W3dVector3>,
     triangles: Vec<W3dTriangle>,
+    materials: W3dMaterialSet,
 }
 
 impl W3dStaticMesh {
@@ -269,6 +286,20 @@ impl W3dStaticMesh {
     pub fn triangles(&self) -> &[W3dTriangle] {
         &self.triangles
     }
+
+    /// Returns decoded material colors and first-pass assignments.
+    #[must_use]
+    pub const fn materials(&self) -> &W3dMaterialSet {
+        &self.materials
+    }
+
+    /// Resolves first-pass per-vertex diffuse colors for geometry previews.
+    ///
+    /// Explicit per-vertex DCG colors take precedence over vertex-material diffuse colors.
+    #[must_use]
+    pub fn preview_vertex_colors(&self) -> Option<Vec<W3dRgba8>> {
+        self.materials.preview_vertex_colors(self.vertices.len())
+    }
 }
 
 /// A structured static-mesh decoding failure.
@@ -276,6 +307,8 @@ impl W3dStaticMesh {
 pub enum W3dMeshError {
     /// A bounded binary read or geometry count limit failed.
     Binary(BinaryError),
+    /// Material metadata or color assignment was malformed.
+    Material(W3dMaterialError),
     /// The supplied chunk was not `W3D_CHUNK_MESH`.
     NotMeshChunk {
         /// Actual numeric chunk identifier.
@@ -355,6 +388,7 @@ impl Display for W3dMeshError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Binary(error) => Display::fmt(error, formatter),
+            Self::Material(error) => Display::fmt(error, formatter),
             Self::NotMeshChunk { actual } => {
                 write!(formatter, "expected W3D mesh chunk, found 0x{actual:08X}")
             }
@@ -425,6 +459,7 @@ impl Error for W3dMeshError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Binary(error) => Some(error),
+            Self::Material(error) => Some(error),
             _ => None,
         }
     }
@@ -433,6 +468,12 @@ impl Error for W3dMeshError {
 impl From<BinaryError> for W3dMeshError {
     fn from(error: BinaryError) -> Self {
         Self::Binary(error)
+    }
+}
+
+impl From<W3dMaterialError> for W3dMeshError {
+    fn from(error: W3dMaterialError) -> Self {
+        Self::Material(error)
     }
 }
 
@@ -495,12 +536,14 @@ pub fn decode_static_mesh(
     )?;
     let triangles = parse_triangles(required_data(children, TRIANGLES_CHUNK)?, triangle_count)?;
     validate_indices(&triangles, vertex_count)?;
+    let materials = decode_materials(children, vertex_count, limits)?;
 
     Ok(W3dStaticMesh {
         header,
         vertices,
         normals,
         triangles,
+        materials,
     })
 }
 

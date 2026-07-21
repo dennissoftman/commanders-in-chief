@@ -98,8 +98,10 @@ and `cic-inspect w3d` report are complete. A 113,980-byte installed W3D closes e
 525 records. Header3 versions 3.0 through 4.2, vertices, normals, and triangles now decode
 into immutable renderer-neutral values with exact count/size and vertex-index validation.
 The BIG-backed `cic-inspect w3d-mesh` report is deterministic, and one installed version
-4.2 mesh verified at 24 vertices and 12 triangles. Material and texture references are
-next.
+4.2 mesh verified at 24 vertices and 12 triangles. The first material slice now decodes
+bounded material inventories, vertex-material diffuse colors, singleton/per-vertex pass
+IDs, and DCG color arrays; OBJ preview output includes resolved first-pass vertex colors.
+Shader, texture, and UV references are next.
 
 ## R3: MAP terrain inspection and viewer
 

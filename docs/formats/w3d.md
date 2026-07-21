@@ -104,14 +104,37 @@ values:
 The default semantic limits are 4,000,000 vertices and 4,000,000 triangles per mesh.
 Decoded values have no rendering, filesystem, or simulation dependencies.
 
+## Material colors
+
+The first material gate decodes color-relevant values without interpreting shaders or
+textures. `W3D_CHUNK_MATERIAL_INFO` is exactly four little-endian 32-bit counts: material
+passes, vertex materials, shaders, and textures. Vertex materials are child containers;
+their optional zero-terminated name and required 32-byte info record contain:
+
+| Size | Field |
+|---:|---|
+| 4 | attributes |
+| 4 each | ambient, diffuse, specular, and emissive RGB plus pad byte |
+| 4 each | finite IEEE-754 shininess, opacity, and translucency |
+
+Each `W3D_CHUNK_MATERIAL_PASS` may contain one vertex-material ID shared by the mesh or
+one ID per vertex. IDs must be below the declared and decoded vertex-material count. An
+optional DCG chunk contains exactly one four-byte RGBA value per vertex.
+
+For preview output, the first pass resolves explicit DCG colors first; otherwise it maps
+each vertex to its vertex material's diffuse RGB. The semantic defaults limit meshes to
+64 passes, 65,536 vertex materials, 65,536 shaders, 65,536 textures, and 255 name bytes.
+Names, counts, payload sizes, and IDs are checked before allocation or lookup.
+
 `cic-inspect w3d-mesh <virtual-path> <top-level-index> <mount>...` produces a stable
 geometry report. Floating-point values are rendered as exact hexadecimal bit patterns so
 host locale and formatting do not affect output.
 
 `cic-inspect w3d-obj <virtual-path> <top-level-index> <output.obj> <mount>...` writes a
 deterministic Wavefront OBJ sanity-check export. It preserves object-space coordinates,
-per-vertex normals, triangle order, and winding while deliberately omitting UVs and
-materials from the not-yet-decoded material gate.
+per-vertex normals, triangle order, and winding. Resolved first-pass diffuse colors use
+the `v x y z r g b` extension supported by Blender and other viewers. UVs and texture
+images remain deferred.
 
 ## Current safety limits
 
@@ -131,3 +154,7 @@ It contains no retail art or derived asset data.
 version 4.2 mesh containing one triangle, three vertices, and three normals. Unit and
 BIG-backed CLI tests cover exact decoding plus count, size, channel, type, duplication,
 allocation-limit, and index failures.
+
+`crates/cic-formats/tests/fixtures/colored-mesh.w3d.hex` extends that original triangle
+with one red vertex material and one material pass. Tests also synthesize an explicit
+red/green/blue DCG array and cover precedence, count, ID, name, and allocation failures.

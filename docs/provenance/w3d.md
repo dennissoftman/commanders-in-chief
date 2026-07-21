@@ -12,12 +12,14 @@
 - Static mesh readers:
   - `GeneralsMD/Code/Libraries/Source/WWVegas/WW3D2/meshmdlio.cpp`
   - `GeneralsMD/Code/Libraries/Source/WWVegas/WW3D2/meshgeometry.cpp`
+  - `GeneralsMD/Code/Libraries/Source/WWVegas/WW3D2/vertmaterial.cpp`
 - Permanent links:
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/Libraries/Source/WWVegas/WWLib/chunkio.h>
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/Libraries/Source/WWVegas/WWLib/chunkio.cpp>
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/GeneralsMD/Code/Libraries/Source/WWVegas/WW3D2/w3d_file.h>
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/GeneralsMD/Code/Libraries/Source/WWVegas/WW3D2/meshmdlio.cpp>
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/GeneralsMD/Code/Libraries/Source/WWVegas/WW3D2/meshgeometry.cpp>
+  - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/GeneralsMD/Code/Libraries/Source/WWVegas/WW3D2/vertmaterial.cpp>
 - Upstream notice: Command & Conquer Generals Zero Hour; Copyright 2025 Electronic Arts
   Inc.; historical notices identify Westwood Studios.
 - License: GNU GPL version 3 or later with the Electronic Arts Section 7 additional terms
@@ -25,8 +27,9 @@
 
 The source establishes native 32-bit chunk type/size words, a payload-only 31-bit length,
 the high-bit child-container flag, nested boundary accounting, W3D identifiers, the
-116-byte Header3 layout, 12-byte vectors, 32-byte triangles, and header-driven record
-counts.
+116-byte Header3 layout, 12-byte vectors, 32-byte triangles, header-driven record counts,
+the 16-byte material inventory, 32-byte vertex materials, material-pass ID cardinality,
+and four-byte DCG colors.
 
 ## Runtime verification
 
@@ -41,10 +44,16 @@ user-owned member. Its header declared 24 vertices and 12 triangles; the vertex,
 and triangle payload lengths matched exactly and all 36 triangle indices were below 24.
 No retail bytes, names, or float values were retained in the repository.
 
+The same installed mesh verified two material passes and two vertex materials, with all
+first-pass assignments in range. A second installed static mesh also decoded its material
+inventory and assignments through the BIG-backed VFS. Their texture-driven diffuse values
+are white, which is preserved accurately; no retail names or material values are retained.
+
 ## Implementation record
 
-The Rust implementations in `crates/cic-formats/src/w3d.rs` and `w3d_mesh.rs` were
-authored for this project from the facts in `docs/formats/w3d.md`. No C++ source code was
-copied, translated line by line, or imported. The immutable tree and mesh values,
-structured errors, limits, exact-size checks, index validation, absolute offsets, and
-unknown-payload preservation policy are native to this repository.
+The Rust implementations in `crates/cic-formats/src/w3d.rs`, `w3d_mesh.rs`, and
+`w3d_material.rs` were authored for this project from the facts in `docs/formats/w3d.md`.
+No C++ source code was copied, translated line by line, or imported. The immutable tree,
+mesh and material values, structured errors, limits, exact-size checks, index validation,
+color resolution, absolute offsets, and unknown-payload preservation policy are native to
+this repository.

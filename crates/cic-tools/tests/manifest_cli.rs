@@ -239,3 +239,49 @@ fn static_mesh_fixture() -> Vec<u8> {
         })
         .collect()
 }
+
+#[test]
+fn colored_mesh_inside_big_exports_diffuse_vertex_colors() {
+    let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("colored-w3d-cli");
+    if root.exists() {
+        fs::remove_dir_all(&root).expect("remove stale test tree");
+    }
+    fs::create_dir_all(&root).expect("create test tree");
+    let archive_path = root.join("colored.big");
+    fs::write(
+        &archive_path,
+        big_with_entry(r"Art\W3D\colored.w3d", &colored_mesh_fixture()),
+    )
+    .expect("write synthetic archive");
+    let obj_path = root.join("colored.obj");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cic-inspect"))
+        .arg("w3d-obj")
+        .arg("ART/W3D/COLORED.W3D")
+        .arg("0")
+        .arg(&obj_path)
+        .arg(&archive_path)
+        .output()
+        .expect("run colored OBJ export");
+
+    assert!(output.status.success());
+    let obj = fs::read_to_string(obj_path).expect("read colored OBJ");
+    assert!(obj.contains("v 0 0 0 1 0 0\nv 1 0 0 1 0 0\nv 0 1 0 1 0 0\n"));
+
+    fs::remove_dir_all(root).expect("remove test tree");
+}
+
+fn colored_mesh_fixture() -> Vec<u8> {
+    let hex = include_str!("../../cic-formats/tests/fixtures/colored-mesh.w3d.hex");
+    let digits = hex
+        .bytes()
+        .filter(u8::is_ascii_hexdigit)
+        .collect::<Vec<_>>();
+    digits
+        .chunks_exact(2)
+        .map(|pair| {
+            let pair = std::str::from_utf8(pair).expect("ASCII hex");
+            u8::from_str_radix(pair, 16).expect("valid hex fixture")
+        })
+        .collect()
+}
