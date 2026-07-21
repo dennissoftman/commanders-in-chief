@@ -39,4 +39,11 @@ All notable user-visible changes are recorded here.
   layering.
 - Missing referenced retail textures produce warned magenta placeholders so geometry and
   animation remain inspectable.
+- glTF animation preview maps legacy offscreen attachment-bone hiding to bounded nonsingular
+  near-zero-scale states, preventing carried props from expanding animated scene bounds by orders
+  of magnitude or producing invalid joint rotations in glTF viewers.
+- glTF skinned meshes are scene roots, and alpha cutoff is limited to masked materials, eliminating
+  the corresponding Khronos validator findings.
+- W3D bone-local skin vertices now use identity glTF inverse binds, fixing separated body parts and
+  exploded animated infantry poses.
 - Synthetic unit and integration tests plus CI quality gates.

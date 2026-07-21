@@ -1,6 +1,8 @@
 use std::fs;
 use std::process::Command;
 
+use serde_json::json;
+
 #[test]
 fn directory_and_big_archive_produce_a_stable_overlay_manifest() {
     let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("manifest-cli");
@@ -469,6 +471,9 @@ fn installed_profile_exports_single_glb_by_default_and_optional_gltf() {
     assert_eq!(document["meshes"].as_array().map(Vec::len), Some(1));
     assert_eq!(document["animations"].as_array().map(Vec::len), Some(1));
     assert_eq!(document["skins"].as_array().map(Vec::len), Some(1));
+    assert!(document["skins"][0].get("inverseBindMatrices").is_none());
+    assert!(document["materials"][0].get("alphaCutoff").is_none());
+    assert_skinned_mesh_is_scene_root(&document);
     assert_eq!(document["images"][0]["mimeType"], "image/png");
     assert!(document["images"][0].get("uri").is_none());
     let image_view = document["images"][0]["bufferView"]
@@ -517,6 +522,25 @@ fn installed_profile_exports_single_glb_by_default_and_optional_gltf() {
         .expect("read converted PNG");
     assert_png_preserves_srgb_texels(&tga, &png);
     fs::remove_dir_all(root).expect("remove test tree");
+}
+
+fn assert_skinned_mesh_is_scene_root(document: &serde_json::Value) {
+    let skinned_node = document["nodes"]
+        .as_array()
+        .and_then(|nodes| nodes.iter().position(|node| node.get("skin").is_some()))
+        .expect("skinned mesh node");
+    assert!(
+        document["scenes"][0]["nodes"]
+            .as_array()
+            .is_some_and(|nodes| nodes.contains(&json!(skinned_node)))
+    );
+    assert!(!document["nodes"].as_array().is_some_and(|nodes| {
+        nodes.iter().any(|node| {
+            node["children"]
+                .as_array()
+                .is_some_and(|children| children.contains(&json!(skinned_node)))
+        })
+    }));
 }
 
 fn run_model_export(

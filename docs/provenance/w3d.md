@@ -42,7 +42,8 @@ and four-byte DCG colors.
 
 The same revision establishes the hierarchy and pivot layouts, parent-before-child world
 transform composition, last-array HLOD selection, one-bone vertex influences, classic raw
-animation headers and channels, and post-multiplied translation/quaternion application.
+animation headers and channels, post-multiplied translation/quaternion application, and direct
+bone-transform deformation of bone-local skin vertices.
 
 ## Runtime verification
 
@@ -62,11 +63,18 @@ first-pass assignments in range. A second installed static mesh also decoded its
 inventory and assignments through the BIG-backed VFS. Their texture-driven diffuse values
 are white, which is preserved accurately; no retail names or material values are retained.
 
+On 2026-07-21, an installed split infantry export verified that raw animation channels use
+model-scale-outlier translations to hide carried attachments. Literal glTF mapping expanded
+animated bounds by orders of magnitude. The tools-layer nonsingular near-zero-scale preview policy
+was authored for this project and verified to retain all clips while removing those remote output
+positions. No retail bytes, names, or numeric channel values were retained.
+
 ## Implementation record
 
 The Rust implementations in `crates/cic-formats/src/w3d.rs`, `w3d_mesh.rs`,
-`w3d_material.rs`, and `w3d_scene.rs` were authored for this project from the facts in
-`docs/formats/w3d.md`.
+`w3d_material.rs`, and `w3d_scene.rs`, plus the preview mapping in
+`crates/cic-tools/src/gltf.rs`, were authored for this project from the facts in
+`docs/formats/w3d.md` and the runtime verification above.
 No C++ source code was copied, translated line by line, or imported. The immutable tree,
 mesh and material values, structured errors, limits, exact-size checks, index validation,
 color resolution, absolute offsets, and unknown-payload preservation policy are native to

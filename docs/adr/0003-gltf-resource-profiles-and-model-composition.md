@@ -22,6 +22,20 @@ Preview materials select pass zero and stage zero while the decoder retains all 
 records. Converted base-color images preserve decoded straight-alpha RGBA texels and declare
 sRGB in their PNG metadata; no additional gamma transform is applied.
 
+Raw attachment animations may use extreme helper-bone translations as a visibility convention.
+For glTF preview only, a translation farther than both 100 W3D units and 32 bind-pose model
+diagonals is represented at a safe nearby translation with a step-interpolated 0.0001 node scale.
+The nonzero scale avoids singular joint matrices while keeping hidden geometry imperceptible and
+animated bounds useful. Decoded W3D channel values remain lossless and renderer-neutral in the
+formats crate.
+
+Skinned mesh nodes are emitted as scene roots instead of children of the axis-conversion node.
+The skeleton remains beneath that conversion node, allowing joint matrices to perform the axis
+conversion without relying on non-portable parent transforms for skinned meshes. Alpha cutoff is
+present only when the material alpha mode is `MASK`, as required by glTF 2.0.
+W3D skin vertices are bone-local and are transformed directly by their referenced hierarchy bone,
+so the glTF skin uses the format's default identity inverse-bind matrices.
+
 Resource edition is an explicit tools-layer policy, separate from future simulation
 compatibility policies. Generals is the default. `--zh` mounts Generals resources first and
 Zero Hour resources second. Resolution precedence is a selected-edition `--game-dir`,
@@ -36,5 +50,8 @@ Explicit CLI mounts bypass automatic profiles and retain normal left-to-right VF
   external glTF output and never enter the repo.
 - Missing texture images are visible magenta placeholders with warnings; malformed model
   structure remains a hard structured error.
+- Legacy offscreen attachment hiding no longer makes ordinary glTF viewers frame remote geometry
+  or encounter singular hidden-joint transforms; this preview heuristic does not claim exact
+  fixed-function visibility equivalence.
 - Compressed animation, secondary material passes/stages, mapper behavior, and exact legacy
   fixed-function blending remain future compatibility work.

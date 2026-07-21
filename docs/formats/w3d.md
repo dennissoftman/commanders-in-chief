@@ -156,10 +156,12 @@ declares its subobject count and screen size; each 36-byte subobject binds a nam
 object to one hierarchy pivot. The final array is the highest-detail representation used
 by preview export. Named box render objects are recognized and omitted from mesh output.
 
-Skin geometry carries one 16-bit bone index per vertex. The decoder requires the skin
-geometry flag, bone channel, and influence chunk to agree, and checks every influence
-against the composed hierarchy before export. Rigid HLOD meshes are attached to their
-selected pivot instead.
+Skin geometry carries one 16-bit bone index per vertex. Its vertex and normal values are in
+the referenced bone's local space; the runtime applies the current bone transform directly.
+Consequently glTF export uses identity inverse-bind matrices rather than cancelling the hierarchy's
+bind transform. The decoder requires the skin geometry flag, bone channel, and influence chunk to
+agree, and checks every influence against the composed hierarchy before export. Rigid HLOD meshes
+are attached to their selected pivot instead.
 
 Classic raw-animation headers contain fixed animation and hierarchy names, a 32-bit frame
 count, and frame rate. Translation and quaternion channels use checked 16-bit inclusive
@@ -175,7 +177,17 @@ same VFS. The default output is one self-contained GLB named after the resource 
 an explicit output path overrides it. Passing `--gltf` before the virtual path instead
 writes glTF 2.0 JSON, an external `.bin`, and PNG images, using `.gltf` for an inferred
 name. A root quaternion converts W3D Z-up coordinates to glTF Y-up for Blender and standard
-viewers.
+viewers. Skinned mesh nodes are scene roots as required by portable glTF skinning; their joints
+remain beneath the axis-conversion node, so the joint matrices apply the same conversion. Material
+`alphaCutoff` is emitted only for `MASK` materials.
+
+Some assets encode attachment visibility by translating a helper bone hundreds or thousands
+of model widths away. Literal glTF export makes those remote vertices dominate animated bounds.
+The preview exporter detects translations beyond both 100 W3D units and 32 times the model's
+bind-pose diagonal, retains the nearest visible attachment position, and emits a step-interpolated
+nonzero scale of 0.0001 for hidden samples. The nonzero value avoids singular joint transforms in
+glTF viewers. Ordinary model-scale translation channels remain unchanged. This is an explicit
+tools-layer preview policy rather than a change to decoded animation values.
 
 All directory and BIG inputs share one VFS. Texture resolution tries the encoded name and
 `art/textures/<name>`; a `.tga` reference may resolve to the retail `.dds` replacement.

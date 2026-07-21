@@ -68,6 +68,11 @@ classic raw animation.
 - The synthetic completion artifact splits model, hierarchy, animation, and texture data
   across W3Ds and two BIGs. Retail Generals and Zero Hour exports succeeded; Blender 3.3
   imported a self-contained GLB with a 32-joint Zero Hour skin and 23 animation actions.
+- Installed split-infantry animation exposed legacy offscreen helper-bone visibility values;
+  glTF preview now maps those model-scale outliers to bounded nonsingular attachment states while
+  preserving ordinary motion and every decoded clip.
+- W3D skin vertices are exported in their decoded bone-local space with identity glTF inverse binds;
+  installed infantry bind poses and animation no longer separate into local-origin body parts.
 
 ## Known blockers
 

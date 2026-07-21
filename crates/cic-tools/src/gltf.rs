@@ -9,6 +9,18 @@ use cic_formats::{
 };
 use serde_json::{Map, Value, json};
 
+// Provenance: project-authored preview policy based on user-owned asset verification and the raw
+// channel semantics in GeneralsGameCode revision `9f7abb866f5afd446db14149979e744c7216baaf`;
+// see `docs/provenance/w3d.md`. W3D assets can hide carried or equipped geometry by translating
+// its attachment bone hundreds or thousands of model widths away. The legacy renderer tolerates
+// that convention, but glTF viewers include the remote geometry in animated bounds and reduce the
+// actual model to a speck. Keep this policy local to interchange export: translations farther than
+// both this absolute floor and the model-relative multiplier become near-zero-scale attachment
+// states without introducing singular joint transforms.
+const HIDDEN_ATTACHMENT_MIN_DISTANCE: f32 = 100.0;
+const HIDDEN_ATTACHMENT_MODEL_MULTIPLIER: f32 = 32.0;
+const HIDDEN_ATTACHMENT_SCALE: f32 = 0.000_1;
+
 /// One source image that the caller must resolve and convert to the named PNG.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GltfTextureRequest {
@@ -389,7 +401,9 @@ pub fn render_w3d_gltf(
 
     let (nodes, mesh_nodes, pivot_nodes) = build_nodes(model);
     let mut nodes = nodes;
-    for (model_mesh, (node_index, mesh_index)) in model.meshes().iter().zip(mesh_nodes) {
+    for (model_mesh, (node_index, mesh_index)) in
+        model.meshes().iter().zip(mesh_nodes.iter().copied())
+    {
         let mut node = Map::new();
         node.insert(
             "name".into(),
@@ -401,17 +415,22 @@ pub fn render_w3d_gltf(
         }
         nodes[node_index] = Value::Object(node);
     }
+    let mut scene_nodes = vec![0];
+    scene_nodes.extend(
+        model
+            .meshes()
+            .iter()
+            .zip(&mesh_nodes)
+            .filter(|(model_mesh, _)| model_mesh.mesh().vertex_bones().is_some())
+            .map(|(_, (node_index, _))| *node_index),
+    );
 
     let has_skin = model
         .meshes()
         .iter()
         .any(|mesh| mesh.mesh().vertex_bones().is_some());
     let skins = if has_skin {
-        let matrices = inverse_bind_matrices(model);
-        let accessor = buffer.f32_accessor(&matrices, 16, "MAT4", None, false);
-        vec![
-            json!({"name": "W3D hierarchy", "inverseBindMatrices": accessor, "skeleton": pivot_nodes[0], "joints": pivot_nodes}),
-        ]
+        vec![json!({"name": "W3D hierarchy", "skeleton": pivot_nodes[0], "joints": pivot_nodes})]
     } else {
         Vec::new()
     };
@@ -423,7 +442,10 @@ pub fn render_w3d_gltf(
         json!({"version":"2.0", "generator":"Commanders in Chief"}),
     );
     root.insert("scene".into(), json!(0));
-    root.insert("scenes".into(), json!([{"name":"W3D model", "nodes":[0]}]));
+    root.insert(
+        "scenes".into(),
+        json!([{"name":"W3D model", "nodes":scene_nodes}]),
+    );
     root.insert("nodes".into(), Value::Array(nodes));
     root.insert("meshes".into(), Value::Array(meshes));
     root.insert("materials".into(), Value::Array(materials));
@@ -610,8 +632,19 @@ fn build_material(
         }
     });
     let material_index = materials.len();
-    materials.push(json!({"name":format!("mesh {mesh_index} material {}", material_index), "pbrMetallicRoughness":pbr, "alphaMode":alpha_mode, "alphaCutoff":0.5, "doubleSided":false,
-        "extras":{"w3dShader":key.shader}}));
+    let mut material = Map::new();
+    material.insert(
+        "name".into(),
+        json!(format!("mesh {mesh_index} material {material_index}")),
+    );
+    material.insert("pbrMetallicRoughness".into(), Value::Object(pbr));
+    material.insert("alphaMode".into(), json!(alpha_mode));
+    if alpha_mode == "MASK" {
+        material.insert("alphaCutoff".into(), json!(0.5));
+    }
+    material.insert("doubleSided".into(), json!(false));
+    material.insert("extras".into(), json!({"w3dShader":key.shader}));
+    materials.push(Value::Object(material));
     material_index
 }
 
@@ -627,29 +660,14 @@ fn build_nodes(model: &W3dModel) -> (Vec<Value>, Vec<(usize, usize)>, Vec<usize>
     let first_mesh_node = 1 + pivot_count;
     for (mesh_index, model_mesh) in model.meshes().iter().enumerate() {
         let node_index = first_mesh_node + mesh_index;
-        let parent = if model_mesh.mesh().vertex_bones().is_some() {
-            0
-        } else {
-            usize::try_from(model_mesh.pivot()).expect("decoded pivot")
-        };
-        if parent == 0 && model_mesh.mesh().vertex_bones().is_some() {
-            // Skinned meshes are siblings of the skeleton beneath the axis-conversion root.
-        } else {
+        if model_mesh.mesh().vertex_bones().is_none() {
+            let parent = usize::try_from(model_mesh.pivot()).expect("decoded pivot");
             children[parent].push(node_index);
         }
         mesh_nodes.push((node_index, mesh_index));
     }
     let mut nodes = Vec::with_capacity(first_mesh_node + model.meshes().len());
-    let mut root_children = vec![1];
-    root_children.extend(
-        model
-            .meshes()
-            .iter()
-            .enumerate()
-            .filter(|(_, mesh)| mesh.mesh().vertex_bones().is_some())
-            .map(|(index, _)| first_mesh_node + index),
-    );
-    nodes.push(json!({"name":"W3D Z-up to glTF Y-up", "rotation":[-0.707_106_77,0.0,0.0,0.707_106_77], "children":root_children}));
+    nodes.push(json!({"name":"W3D Z-up to glTF Y-up", "rotation":[-0.707_106_77,0.0,0.0,0.707_106_77], "children":[1]}));
     for (index, pivot) in model.hierarchy().pivots().iter().enumerate() {
         let mut node = Map::new();
         node.insert(
@@ -680,6 +698,7 @@ fn build_animations(
     buffer: &mut BufferBuilder,
 ) -> Vec<Value> {
     let mut result = Vec::new();
+    let hidden_attachment_distance = hidden_attachment_distance(model);
     for animation in model.animations() {
         let times = (0..animation.frame_count())
             .map(|frame| frame as f32 / animation.frame_rate() as f32)
@@ -708,21 +727,13 @@ fn build_animations(
                         | W3dAnimationChannelKind::Z
                 )
             }) {
-                let mut values = Vec::with_capacity(times.len() * 3);
-                for frame in 0..animation.frame_count() {
-                    let delta = [
-                        sample_scalar(&pivot_channels, W3dAnimationChannelKind::X, frame),
-                        sample_scalar(&pivot_channels, W3dAnimationChannelKind::Y, frame),
-                        sample_scalar(&pivot_channels, W3dAnimationChannelKind::Z, frame),
-                    ];
-                    let rotated = rotate(base.rotation().components(), delta);
-                    let translation = base.translation();
-                    values.extend_from_slice(&[
-                        translation[0] + rotated[0],
-                        translation[1] + rotated[1],
-                        translation[2] + rotated[2],
-                    ]);
-                }
+                let (values, scales) = build_translation_samples(
+                    &pivot_channels,
+                    animation.frame_count(),
+                    base.translation(),
+                    base.rotation().components(),
+                    hidden_attachment_distance,
+                );
                 add_animation_channel(
                     buffer,
                     &mut samplers,
@@ -733,7 +744,22 @@ fn build_animations(
                     "VEC3",
                     pivot_nodes[usize::from(pivot)],
                     "translation",
+                    "LINEAR",
                 );
+                if let Some(scales) = scales {
+                    add_animation_channel(
+                        buffer,
+                        &mut samplers,
+                        &mut channels_json,
+                        time_accessor,
+                        &scales,
+                        3,
+                        "VEC3",
+                        pivot_nodes[usize::from(pivot)],
+                        "scale",
+                        "STEP",
+                    );
+                }
             }
             if pivot_channels
                 .iter()
@@ -762,6 +788,7 @@ fn build_animations(
                     "VEC4",
                     pivot_nodes[usize::from(pivot)],
                     "rotation",
+                    "LINEAR",
                 );
             }
         }
@@ -783,11 +810,108 @@ fn add_animation_channel(
     kind: &str,
     node: usize,
     path: &str,
+    interpolation: &str,
 ) {
     let output = buffer.f32_accessor(values, components, kind, None, false);
     let sampler = samplers.len();
-    samplers.push(json!({"input":input, "output":output, "interpolation":"LINEAR"}));
+    samplers.push(json!({"input":input, "output":output, "interpolation":interpolation}));
     channels.push(json!({"sampler":sampler, "target":{"node":node, "path":path}}));
+}
+
+fn build_translation_samples(
+    channels: &[&W3dAnimationChannel],
+    frame_count: u32,
+    base_translation: [f32; 3],
+    base_rotation: [f32; 4],
+    hidden_attachment_distance: f32,
+) -> (Vec<f32>, Option<Vec<f32>>) {
+    let mut translations = Vec::with_capacity(frame_count as usize);
+    for frame in 0..frame_count {
+        let delta = [
+            sample_scalar(channels, W3dAnimationChannelKind::X, frame),
+            sample_scalar(channels, W3dAnimationChannelKind::Y, frame),
+            sample_scalar(channels, W3dAnimationChannelKind::Z, frame),
+        ];
+        let rotated = rotate(base_rotation, delta);
+        translations.push([
+            base_translation[0] + rotated[0],
+            base_translation[1] + rotated[1],
+            base_translation[2] + rotated[2],
+        ]);
+    }
+    let scales = mask_hidden_attachment_translations(
+        &mut translations,
+        base_translation,
+        hidden_attachment_distance,
+    );
+    (
+        translations.into_iter().flatten().collect::<Vec<_>>(),
+        scales,
+    )
+}
+
+fn hidden_attachment_distance(model: &W3dModel) -> f32 {
+    let mut minimum = [f32::INFINITY; 3];
+    let mut maximum = [f32::NEG_INFINITY; 3];
+    for vertex in model
+        .meshes()
+        .iter()
+        .flat_map(|model_mesh| model_mesh.mesh().vertices())
+    {
+        for (axis, value) in [vertex.x(), vertex.y(), vertex.z()].into_iter().enumerate() {
+            minimum[axis] = minimum[axis].min(value);
+            maximum[axis] = maximum[axis].max(value);
+        }
+    }
+    if !minimum[0].is_finite() {
+        return HIDDEN_ATTACHMENT_MIN_DISTANCE;
+    }
+    let extent = [
+        maximum[0] - minimum[0],
+        maximum[1] - minimum[1],
+        maximum[2] - minimum[2],
+    ];
+    let diagonal = (extent[0] * extent[0] + extent[1] * extent[1] + extent[2] * extent[2]).sqrt();
+    HIDDEN_ATTACHMENT_MIN_DISTANCE.max(diagonal * HIDDEN_ATTACHMENT_MODEL_MULTIPLIER)
+}
+
+fn mask_hidden_attachment_translations(
+    translations: &mut [[f32; 3]],
+    base: [f32; 3],
+    distance: f32,
+) -> Option<Vec<f32>> {
+    let distance_squared = distance * distance;
+    let hidden = translations
+        .iter()
+        .map(|translation| {
+            let delta = [
+                translation[0] - base[0],
+                translation[1] - base[1],
+                translation[2] - base[2],
+            ];
+            delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2] > distance_squared
+        })
+        .collect::<Vec<_>>();
+    if !hidden.iter().any(|hidden| *hidden) {
+        return None;
+    }
+
+    let first_visible = hidden
+        .iter()
+        .position(|hidden| !hidden)
+        .map_or(base, |index| translations[index]);
+    let mut last_visible = first_visible;
+    let mut scales = Vec::with_capacity(translations.len() * 3);
+    for (translation, hidden) in translations.iter_mut().zip(hidden) {
+        if hidden {
+            *translation = last_visible;
+            scales.extend_from_slice(&[HIDDEN_ATTACHMENT_SCALE; 3]);
+        } else {
+            last_visible = *translation;
+            scales.extend_from_slice(&[1.0, 1.0, 1.0]);
+        }
+    }
+    Some(scales)
 }
 
 fn sample_scalar(
@@ -824,76 +948,6 @@ fn sample_quaternion(channels: &[&W3dAnimationChannel], frame: u32) -> [f32; 4] 
     )
 }
 
-fn inverse_bind_matrices(model: &W3dModel) -> Vec<f32> {
-    let mut globals = Vec::with_capacity(model.hierarchy().pivots().len());
-    for (index, pivot) in model.hierarchy().pivots().iter().enumerate() {
-        let local = if index == 0 {
-            identity()
-        } else {
-            matrix(
-                pivot.translation(),
-                normalize(pivot.rotation().components()),
-            )
-        };
-        let global = pivot.parent().map_or(local, |parent| {
-            multiply_matrix(
-                globals[usize::try_from(parent).expect("decoded parent")],
-                local,
-            )
-        });
-        globals.push(global);
-    }
-    globals.into_iter().flat_map(invert_rigid).collect()
-}
-
-fn identity() -> [f32; 16] {
-    [
-        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
-    ]
-}
-fn matrix(translation: [f32; 3], quaternion: [f32; 4]) -> [f32; 16] {
-    let [qx, qy, qz, qw] = quaternion;
-    [
-        1.0 - 2.0 * (qy * qy + qz * qz),
-        2.0 * (qx * qy + qz * qw),
-        2.0 * (qx * qz - qy * qw),
-        0.0,
-        2.0 * (qx * qy - qz * qw),
-        1.0 - 2.0 * (qx * qx + qz * qz),
-        2.0 * (qy * qz + qx * qw),
-        0.0,
-        2.0 * (qx * qz + qy * qw),
-        2.0 * (qy * qz - qx * qw),
-        1.0 - 2.0 * (qx * qx + qy * qy),
-        0.0,
-        translation[0],
-        translation[1],
-        translation[2],
-        1.0,
-    ]
-}
-fn multiply_matrix(a: [f32; 16], b: [f32; 16]) -> [f32; 16] {
-    let mut out = [0.0; 16];
-    for column in 0..4 {
-        for row in 0..4 {
-            out[column * 4 + row] = (0..4).map(|k| a[k * 4 + row] * b[column * 4 + k]).sum();
-        }
-    }
-    out
-}
-fn invert_rigid(m: [f32; 16]) -> [f32; 16] {
-    let mut out = identity();
-    for c in 0..3 {
-        for r in 0..3 {
-            out[c * 4 + r] = m[r * 4 + c];
-        }
-    }
-    let t = [m[12], m[13], m[14]];
-    out[12] = -(out[0] * t[0] + out[4] * t[1] + out[8] * t[2]);
-    out[13] = -(out[1] * t[0] + out[5] * t[1] + out[9] * t[2]);
-    out[14] = -(out[2] * t[0] + out[6] * t[1] + out[10] * t[2]);
-    out
-}
 fn multiply(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
     [
         a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
@@ -979,4 +1033,58 @@ fn safe_stem(bytes: &[u8]) -> String {
     name.rsplit_once('.')
         .filter(|(stem, _)| !stem.is_empty())
         .map_or(name.clone(), |(stem, _)| stem.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HIDDEN_ATTACHMENT_SCALE, mask_hidden_attachment_translations};
+
+    #[test]
+    fn ordinary_animation_translation_is_unchanged() {
+        let mut translations = [[1.0, 2.0, 3.0], [2.0, 2.0, 3.0]];
+        assert_eq!(
+            mask_hidden_attachment_translations(&mut translations, [1.0, 2.0, 3.0], 100.0),
+            None
+        );
+        assert_eq!(translations, [[1.0, 2.0, 3.0], [2.0, 2.0, 3.0]]);
+    }
+
+    #[test]
+    fn remote_attachment_translations_become_safe_nonsingular_states() {
+        let mut translations = [
+            [0.0, 0.0, -1_000.0],
+            [4.0, 5.0, 6.0],
+            [0.0, 0.0, -2_000.0],
+            [7.0, 8.0, 9.0],
+        ];
+        let scales = mask_hidden_attachment_translations(&mut translations, [1.0, 2.0, 3.0], 100.0)
+            .expect("remote samples require a visibility scale channel");
+
+        assert_eq!(
+            translations,
+            [
+                [4.0, 5.0, 6.0],
+                [4.0, 5.0, 6.0],
+                [4.0, 5.0, 6.0],
+                [7.0, 8.0, 9.0],
+            ]
+        );
+        assert_eq!(
+            scales,
+            [
+                HIDDEN_ATTACHMENT_SCALE,
+                HIDDEN_ATTACHMENT_SCALE,
+                HIDDEN_ATTACHMENT_SCALE,
+                1.0,
+                1.0,
+                1.0,
+                HIDDEN_ATTACHMENT_SCALE,
+                HIDDEN_ATTACHMENT_SCALE,
+                HIDDEN_ATTACHMENT_SCALE,
+                1.0,
+                1.0,
+                1.0
+            ]
+        );
+    }
 }
