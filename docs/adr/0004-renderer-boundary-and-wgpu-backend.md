@@ -57,6 +57,21 @@ project's glTF preview semantics; scalar rotation channels compose X/Y/Z axis ro
 offscreen helper-bone translations use the same model-relative bounded near-zero-scale preview
 policy as glTF export. The decoded channels remain unchanged.
 
+Clip selection computes one model-space center and conservative bounding-sphere scale from frame
+zero. Every subsequent tick applies only the decoded pose and Z-up model rotation relative to that
+fixed framing; it does not recenter or rescale from the current animated bounds. Resizing adjusts
+only the projection aspect ratio. Selecting another clip computes a new framing once.
+
+Texture lookup and image decoding remain in `cic-tools`, which resolves only pass-zero/stage-zero
+images through the VFS. It skips repeated decoding when aliases resolve to the same virtual path.
+The renderer's bounded `TextureResourceManager` validates dimensions and RGBA length, caps each
+image and aggregate retained bytes, normalizes aliases, and deduplicates decoded content by
+dimensions plus SHA-256 of straight-alpha RGBA bytes. Mesh staging expands triangle corners for
+per-face UV indices, preserves triangle order, and deduplicates effective materials by texture ID,
+sampler clamp state, alpha test, and blend policy. GPU upload creates each unique sRGB image once;
+opaque, source-alpha, and `ONE + ONE` additive pipelines reuse those image views and material bind
+groups. Remaining W3D passes, additional stages, and mapper animation stay explicit later gates.
+
 ## Consequences
 
 - Core, formats, VFS, and simulation remain renderer-independent.

@@ -66,4 +66,11 @@ All notable user-visible changes are recorded here.
   45-degree elevated camera, continuous Z-up rotation, explicit-frame hierarchy/one-bone animation
   sampling, and Left/Right clip selection. The viewer applies the established bounded hidden-helper
   policy so legacy offscreen attachment sentinels cannot collapse animated model framing.
+- Viewer framing is now computed once when a clip is selected; individual animation ticks preserve
+  that fixed center and scale, removing per-frame alignment bobbing while Z-up rotation remains
+  continuous.
+- Added pass-zero/stage-zero W3D material rendering with expanded per-face UVs, source-alpha
+  sampling, alpha testing, and opaque, source-alpha, or `ONE + ONE` additive GPU pipelines.
+- Added a bounded texture resource manager with stable aliases, SHA-256 RGBA-content deduplication,
+  resolved-VFS decode reuse, and effective GPU-material reuse across mesh draw ranges.
 - Synthetic unit and integration tests plus CI quality gates.

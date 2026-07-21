@@ -62,7 +62,8 @@ animation, tree, and top-level identifiers from the pinned GPL header.
 - Unknown data chunks preserve all raw payload bytes.
 - Unknown container chunks preserve their complete child trees.
 - The inventory remains lossless even when a separate semantic decoder recognizes geometry.
-- Material, hierarchy, and animation semantics remain opaque in this gate.
+- Material, hierarchy, and animation semantics are decoded separately into immutable values;
+  inventory output remains lossless and independent of those decoders.
 - Exact boundary closure is required because the format has no independent file magic.
 
 ## Static mesh geometry
@@ -219,7 +220,15 @@ uses an explicit `fixed-function-metadata-v1` policy: pass zero/stage zero suppl
 metallic-roughness approximation, every referenced base texture is packaged, and mesh extras retain
 all passes, stages, assignments, shader bytes, mapper arguments, animated-texture descriptors,
 color arrays, and exact float bits. This closes the interchange/inspection surface without claiming
-visual blend equivalence; a project renderer can consume the same immutable values later.
+visual blend equivalence.
+
+`cic-inspect w3d-view` consumes the same immutable values and resolves only referenced images
+through the VFS. Its current preview submits pass zero/stage zero, expands triangle corners for
+per-face UV seams, preserves source alpha, and selects opaque, source-alpha, or additive blending.
+Bounded decoded RGBA images are deduplicated by dimensions and SHA-256 content, while normalized
+aliases and effective GPU materials reuse those retained images. Model center and scale are fixed
+when a clip is selected; animation ticks apply only the sampled pose and Z-up rotation. Additional
+passes/stages, animated mapper inputs, and deterministic textured animated-pose capture remain open.
 
 ## Current safety limits
 

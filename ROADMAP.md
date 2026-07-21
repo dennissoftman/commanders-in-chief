@@ -64,7 +64,8 @@ verification remains open.
 
 ## R2: W3D inspection and viewer
 
-**Status:** In progress; format compatibility and external animated-model preview gates complete.
+**Status:** In progress; format compatibility, external preview, and the base interactive textured
+viewer gates are complete.
 
 **Scope:** Bounded recursive chunk inventory followed by separately gated static geometry,
 materials, hierarchies, animation, and an animated viewer.
@@ -74,11 +75,11 @@ distribution.
 
 **Inputs:** Original synthetic W3D streams and user-owned W3D resources through the VFS.
 
-**Outputs:** Stable unknown-preserving chunk reports, immutable decoded asset values, and
-portable glTF sanity-check artifacts before renderer integration.
+**Outputs:** Stable unknown-preserving chunk reports, immutable decoded asset values, portable glTF
+sanity-check artifacts, deterministic renderer captures, and an interactive animated viewer.
 
-**Owner:** `cic-formats` for decoding and `cic-tools` for inspection; a renderer crate is
-introduced only when the viewer gate begins.
+**Owner:** `cic-formats` for decoding, `cic-render` for staging/presentation/resources, and
+`cic-tools` for VFS-backed inspection and launch commands.
 
 **Acceptance tests:** Exact nested boundary closure, truncation and depth/count/size limits,
 unknown payload preservation, semantic count/index checks, split-resource BIG-backed CLI
@@ -87,12 +88,12 @@ integration, retail smoke verification, and external importer validation.
 **Determinism:** File-order chunk trees, slash-separated numeric paths, stable identifier
 names, and no renderer or host-order dependency in reports.
 
-**Documentation:** `docs/formats/w3d.md`, provenance, compatibility matrix, and later ADRs
-for renderer boundaries.
+**Documentation:** `docs/formats/w3d.md`, provenance, compatibility matrix, and renderer-boundary
+ADR 0004.
 
-**Completion artifact:** Original nested and composed textured/animated fixtures, stable
-chunk and exact-bit geometry reports, and a Blender-importable synthetic GLB; later
-renderer gates add screenshot and animation capture artifacts.
+**Completion artifact:** Original nested and composed textured/animated fixtures, stable chunk and
+exact-bit geometry reports, a Blender-importable synthetic GLB, headless renderer hashes/captures,
+and installed-resource window smokes that retain no retail content.
 
 **Progress:** The recursive inventory, 73-name identifier table, original nested fixture,
 and `cic-inspect w3d` report are complete. A 113,980-byte installed W3D closes exactly into
@@ -112,7 +113,7 @@ verification without retaining retail data. Additive `ONE + ONE` light materials
 unchanged source RGBA images and use separate alpha-coverage preview images; installed airstrip
 lights verified that black sprite backgrounds no longer become opaque rectangles.
 
-### R2 next gate: renderer ingestion and animated viewer
+### R2 renderer ingestion and animated viewer gate
 
 **Scope:** Introduce a renderer crate that consumes immutable `cic-formats` model values, renders
 the selected HLOD with hierarchy/skinning/animation, and begins fixed-function pass/stage
@@ -151,8 +152,13 @@ applies rigid/one-bone bind transforms, and emits a depth-tested geometry captur
 building smoke capture succeeded. `cic-inspect w3d-view` now presents a 960x720 auto-fitted,
 45-degree elevated, Z-up rotating model, samples raw or compressed hierarchy animation at explicit
 integer frames, and switches clips with Left/Right. Installed building and 39-clip infantry window
-smokes passed, including bounded legacy helper-bone hiding. Stable material-pass/texture commands
-and a deterministic explicit animated-pose capture remain open.
+smokes passed, including bounded legacy helper-bone hiding. Clip framing is now fixed at selection
+time rather than recomputed per animation tick. Pass-zero/stage-zero materials resolve textures
+through the VFS, expand per-face UV seams, preserve source alpha, select opaque/alpha/additive GPU
+pipelines, and reuse content-deduplicated texture images and material bind groups. An installed
+airstrip used 15 effective materials and 13 unique textures without black sprite backgrounds; the
+39-clip infantry used four materials and four textures. Remaining multi-pass/stage equivalence,
+animated mappers, and a deterministic textured animated-pose capture remain open.
 
 ## R3: MAP terrain inspection and viewer
 

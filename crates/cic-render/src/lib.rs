@@ -1,6 +1,7 @@
 //! Renderer boundary and deterministic headless capture support.
 
 mod model;
+mod resource;
 mod viewer;
 
 use std::error::Error;
@@ -12,6 +13,7 @@ use cic_formats::W3dStaticMesh;
 use sha2::{Digest, Sha256};
 
 pub use model::{AnimatedModel, StagedModel};
+pub use resource::{TextureId, TextureImage, TextureResourceManager};
 pub use viewer::{ViewerError, run_model_viewer};
 
 const CAPTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -617,6 +619,9 @@ pub enum RenderError {
     InvalidHierarchy,
     GeometryOutsideLimits,
     InvalidAnimation,
+    InvalidMaterial,
+    InvalidTexture,
+    TextureTooLarge,
 }
 
 impl Display for RenderError {
@@ -642,6 +647,15 @@ impl Display for RenderError {
                 formatter.write_str("transformed model geometry is non-finite or outside limits")
             }
             Self::InvalidAnimation => formatter.write_str("animation clip index is invalid"),
+            Self::InvalidMaterial => {
+                formatter.write_str("staged material or texture reference is invalid")
+            }
+            Self::InvalidTexture => {
+                formatter.write_str("decoded texture dimensions or RGBA length are invalid")
+            }
+            Self::TextureTooLarge => {
+                formatter.write_str("decoded texture resources exceed renderer limits")
+            }
         }
     }
 }

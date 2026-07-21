@@ -1,6 +1,8 @@
+use std::collections::BTreeMap;
 use std::env;
 use std::error::Error;
 use std::fs;
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -8,7 +10,10 @@ use cic_formats::{
     CsfLimits, W3dFile, W3dLimits, W3dMeshLimits, W3dSceneLimits, decode_static_mesh,
     decode_w3d_model_set, parse_csf, parse_w3d, w3d_model_hierarchy_name,
 };
-use cic_render::{AnimatedModel, HeadlessRenderer, StagedModel, run_model_viewer};
+use cic_render::{
+    AnimatedModel, HeadlessRenderer, StagedModel, TextureId, TextureResourceManager,
+    run_model_viewer,
+};
 use cic_tools::resource::{
     GameEdition, ResourceKind, StoredLocations, config_path, discover_steam_locations,
     resolve_archives, validate_installation,
@@ -147,14 +152,99 @@ where
     let resource_name = arguments.next().ok_or("w3d-view requires a virtual path")?;
     let resource_path = VirtualPath::new(&resource_name)?;
     let mounts = arguments.collect::<Vec<_>>();
-    let vfs = mount_all("w3d-view", &mounts, options, ResourceKind::W3d)?;
+    let vfs = mount_all("w3d-view", &mounts, options, ResourceKind::W3dWithTextures)?;
     let model = load_composed_model(&vfs, &resource_path)?;
-    let staged = AnimatedModel::from_w3d(&model)?;
+    let textures = load_viewer_textures(&vfs, &model)?;
+    let staged = AnimatedModel::from_w3d_with_textures(&model, textures)?;
     let animation_count = staged.animation_count();
+    let material_count = staged.material_count();
+    let texture_count = staged.unique_texture_count();
+    let texture_alias_count = staged.texture_alias_count();
+    eprintln!(
+        "viewer resources: {material_count} materials, {texture_count} unique textures from {texture_alias_count} names"
+    );
     run_model_viewer(staged, format!("Commanders in Chief — {resource_path}"))?;
     Ok(format!(
-        "closed viewer for {resource_path} ({animation_count} animations)\n"
+        "closed viewer for {resource_path} ({animation_count} animations, {material_count} materials, {texture_count} unique textures from {texture_alias_count} names)\n"
     ))
+}
+
+fn load_viewer_textures(
+    vfs: &Vfs,
+    model: &cic_formats::W3dModel,
+) -> Result<TextureResourceManager, Box<dyn Error>> {
+    let mut resources = TextureResourceManager::default();
+    let mut resolved_images: BTreeMap<String, TextureId> = BTreeMap::new();
+    for model_mesh in model.meshes() {
+        let mesh = model_mesh.mesh();
+        let Some(pass) = mesh.materials().passes().first() else {
+            continue;
+        };
+        let Some(stage) = pass.texture_stages().first() else {
+            continue;
+        };
+        for triangle in 0..mesh.triangles().len() {
+            let texturing_disabled = pass
+                .shader_ids()
+                .and_then(|ids| ids.for_triangle(triangle))
+                .and_then(|id| usize::try_from(id).ok())
+                .and_then(|id| mesh.materials().shaders().get(id))
+                .is_some_and(|shader| shader.texturing() == 0);
+            if texturing_disabled {
+                continue;
+            }
+            let Some(texture) = stage
+                .texture_ids()
+                .and_then(|ids| ids.for_triangle(triangle))
+                .filter(|id| *id != u32::MAX)
+                .and_then(|id| usize::try_from(id).ok())
+                .and_then(|id| mesh.materials().textures().get(id))
+            else {
+                continue;
+            };
+            if resources.contains_alias(texture.name_bytes()) {
+                continue;
+            }
+            match resolve_texture(vfs, texture.name_bytes()) {
+                Ok((path, bytes)) => {
+                    if let Some(existing) = resolved_images.get(path.as_str()) {
+                        resources.insert_alias(texture.name_bytes(), *existing)?;
+                        continue;
+                    }
+                    let format = image_format(&path)?;
+                    let image = decode_viewer_texture(bytes, format)?;
+                    let id = resources.insert(
+                        texture.name_bytes(),
+                        image.width(),
+                        image.height(),
+                        image.into_raw(),
+                    )?;
+                    resolved_images.insert(path.to_string(), id);
+                }
+                Err(error) => {
+                    eprintln!(
+                        "warning: {error}; using a magenta viewer placeholder for {}",
+                        String::from_utf8_lossy(texture.name_bytes())
+                    );
+                    resources.insert(texture.name_bytes(), 1, 1, vec![255, 0, 255, 255])?;
+                }
+            }
+        }
+    }
+    Ok(resources)
+}
+
+fn decode_viewer_texture(
+    bytes: &[u8],
+    format: image::ImageFormat,
+) -> Result<image::RgbaImage, image::ImageError> {
+    let mut reader = image::ImageReader::with_format(Cursor::new(bytes), format);
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(8_192);
+    limits.max_image_height = Some(8_192);
+    limits.max_alloc = Some(256 * 1_024 * 1_024);
+    reader.limits(limits);
+    Ok(reader.decode()?.to_rgba8())
 }
 
 fn export_model<I>(

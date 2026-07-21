@@ -94,12 +94,20 @@ shader selectors were source `ONE` and destination `ONE`. A project-authored cor
 policy generated separate alpha-coverage images; the source images remained unchanged. No retail
 bytes or images were retained in the repository.
 
+On 2026-07-21, the interactive renderer resolved the same user-owned airstrip through the VFS and
+rendered its pass-zero/stage-zero materials with source-alpha or additive GPU blending. Its 15
+effective materials reused 13 unique decoded textures, and the additive lights displayed without
+opaque black rectangles. A second installed smoke rendered four materials and four textures while
+switching among 39 infantry clips with fixed per-clip framing. No retail bytes, images, names, or
+captures were retained in the repository.
+
 ## Implementation record
 
 The Rust implementations in `crates/cic-formats/src/w3d.rs`, `w3d_mesh.rs`,
 `w3d_material.rs`, and `w3d_scene.rs`, plus the preview mapping in
-`crates/cic-tools/src/gltf.rs`, were authored for this project from the facts in
-`docs/formats/w3d.md` and the runtime verification above.
+`crates/cic-tools/src/gltf.rs` and renderer staging in `crates/cic-render/src/model.rs`,
+were authored for this project from the facts in `docs/formats/w3d.md` and the runtime
+verification above.
 No C++ source code was copied, translated line by line, or imported. The immutable tree,
 mesh and material values, structured errors, limits, exact-size checks, index validation,
 color resolution, absolute offsets, and unknown-payload preservation policy are native to

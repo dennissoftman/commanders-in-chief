@@ -109,6 +109,17 @@ interactive viewer.
 - Installed window smokes verified the complete `abarfrccmd.w3d` building remains framed throughout
   rotation and `aihero_skn.w3d` visibly animates across 39 switchable clips. The established bounded
   hidden-helper policy prevents legacy offscreen attachment translations from collapsing framing.
+- Viewer center and scale are now computed only when a clip is selected. Animation ticks preserve
+  that fixed framing and apply only pose plus Z-up rotation, removing bounds-driven bobbing and
+  scale jitter.
+- Pass-zero/stage-zero materials now expand per-face UV seams and render VFS-resolved sRGB textures
+  with source alpha, alpha testing, depth policy, and opaque, source-alpha, or additive blending.
+- The bounded texture resource manager reuses VFS decodes by resolved path, normalizes W3D aliases,
+  deduplicates retained images by dimensions and RGBA SHA-256, and reuses effective GPU materials
+  across stable file-order draw ranges.
+- Installed visual smokes rendered the airstrip with 15 effective materials and 13 unique textures,
+  including black-background-free additive lights, and textured the 39-clip infantry with four
+  materials and four textures.
 
 ## Known blockers
 
@@ -117,10 +128,10 @@ interactive viewer.
   behavior; complete decoded metadata is available for the renderer gate.
 - Adaptive-delta animation is synthetic-verified but has not yet been observed in an installed
   export.
-- The renderer does not yet submit decoded material passes/stages or textures or produce a
-  deterministic explicit animated-pose capture.
+- The renderer does not yet reproduce additional fixed-function passes/stages, animated mapper
+  behavior, or a deterministic textured animated-pose capture.
 
 ## Next verified step
 
-Add stable decoded material-pass/stage draw commands and VFS-resolved texture uploads, then compare
-a pass-zero textured installed-building capture before sampling an explicit animation frame.
+Extend the stable material commands beyond pass zero/stage zero, implement animated mapper inputs,
+and add a deterministic textured capture at an explicit animation frame.

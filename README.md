@@ -56,10 +56,14 @@ The renderer boundary can produce a window-free synthetic PPM and RGBA SHA-256 w
 pose. It consumes validated `cic-formats` values and owns no parser, filesystem, or simulation
 resources. `cic-inspect w3d-view` opens a 960x720 depth-tested viewer, frames the model from a
 45-degree elevated camera, rotates it around W3D's Z-up axis, and plays the selected animation.
-Left/Right switch clips and Escape closes the window; the title shows the active clip.
+Framing is computed once per selected clip, so animation frames do not recenter or rescale the
+model. Pass-zero/stage-zero textures, UVs, source alpha, alpha testing, and common alpha/additive
+blend modes are rendered directly. A bounded resource manager deduplicates decoded images by RGBA
+content and reuses effective GPU materials across meshes. Left/Right switch clips and Escape closes
+the window; the title shows the active clip.
 `cic-inspect w3d-render` connects that boundary to the existing installed-resource profiles or
 explicit BIG mounts and produces a depth-tested bind-pose geometry diagnostic. Textures and exact
-fixed-function material passes are not yet applied by this command.
+fixed-function material passes are not yet applied by the headless command.
 
 On Windows, Rust's MSVC target also requires Visual Studio Build Tools with the Desktop
 development with C++ workload. The same checks run on Linux in GitHub Actions.
