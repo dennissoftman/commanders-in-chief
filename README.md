@@ -13,6 +13,17 @@ cargo test --workspace
 cargo run -p cic-tools -- manifest path\to\base path\to\archive.big path\to\override
 ```
 
+Static W3D meshes can be exported to Wavefront OBJ for a quick geometry preview. First use
+the `w3d` report to find a top-level mesh index, then export that mesh:
+
+```powershell
+cargo run -p cic-tools -- w3d art/w3d/model.w3d path\to\W3D.big
+cargo run -p cic-tools -- w3d-obj art/w3d/model.w3d 2 preview.obj path\to\W3D.big
+```
+
+The OBJ preserves object-space coordinates, vertex normals, triangle order, and winding.
+Materials and texture coordinates are omitted until their W3D semantics are implemented.
+
 On Windows, Rust's MSVC target also requires Visual Studio Build Tools with the Desktop
 development with C++ workload. The same checks run on Linux in GitHub Actions.
 

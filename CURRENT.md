@@ -2,7 +2,8 @@
 
 ## Objective
 
-Begin evidence-backed W3D static-mesh decoding on top of the verified chunk inventory.
+Begin evidence-backed W3D material and texture-reference decoding on top of verified
+static geometry.
 
 ## Implemented foundation
 
@@ -23,23 +24,34 @@ Begin evidence-backed W3D static-mesh decoding on top of the verified chunk inve
   slash-separated tree paths, and 73 known chunk names.
 - Deterministic `cic-inspect w3d` reports through loose-directory or BIG mounts.
 - Original nested W3D fixture and synthetic BIG-to-W3D CLI completion artifact.
-- Local formatting, strict Clippy, and all 31 runtime tests pass.
+- Local formatting, strict Clippy, and all 40 runtime tests pass.
 - All 18 installed Steam Generals BIG archives have matching declared sizes and bounded
   verified directory trailers; `INI.big` resolves 92 deterministic manifest entries.
 - The installed Steam Generals CSF parses exactly to its 282,246-byte member boundary and
   reports version 3, 2,806 labels, and 2,805 strings.
 - A 113,980-byte installed Steam Generals W3D parses exactly into 525 stable inventory
   records; 12 sampled W3Ds use the documented container flag.
+- The CSF AddressSanitizer/libFuzzer smoke gate completed 4,077,155 inputs in 31 seconds
+  without a crash or sanitizer finding.
+- Header3 versions 3.0 through 4.2, vertices, normals, and triangles decode into immutable,
+  renderer-neutral values with explicit 4,000,000-record limits.
+- Static meshes require exact count-sized payloads, mandatory static channels, unique data
+  chunks, and in-range triangle indices.
+- The original three-vertex/one-triangle fixture and BIG-backed `cic-inspect w3d-mesh`
+  completion artifact pass; reports preserve floating-point values as exact bits.
+- One installed version 4.2 mesh verified at 24 vertices, 24 normals, and 12 triangles.
+- Deterministic geometry-only Wavefront OBJ export preserves coordinates, normals, triangle
+  order, and winding; the installed verification mesh exported as 24 vertices, 24 normals,
+  and 12 faces.
 
 ## Known blockers
 
 - `BIG4` remains implemented from corroborating source but unverified against retail data.
-- The checked-in CSF fuzz target compile-checks with `libfuzzer-sys`; a bounded runtime
-  smoke test remains pending because the `cargo-fuzz` runner is not installed.
-- Mesh header versions, fixed structure sizes, vertex/triangle validation, and material
-  references require an evidence-backed semantic W3D specification.
+- W3D material counts, shader/material/texture identifiers, passes, and texture-coordinate
+  references require the next evidence-backed semantic specification.
 
 ## Next verified step
 
-Specify `W3D_CHUNK_MESH_HEADER3`, vertices, normals, triangles, and index/count invariants;
-then decode one immutable static mesh without introducing rendering dependencies.
+Specify material info, vertex materials, shaders, textures, material passes, and their
+index/count invariants; then attach immutable material references to static meshes without
+introducing rendering dependencies.

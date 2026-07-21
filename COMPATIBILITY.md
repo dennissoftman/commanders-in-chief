@@ -20,7 +20,10 @@ observable behavior.
 | W3D | Nested chunk inventory | verified | Original fixture + 113,980-byte installed asset |
 | W3D | Unknown payload preservation | verified | Nested synthetic round-trip values and CLI report |
 | W3D | Known identifier reporting | implemented | 73 identifiers from pinned GPL header |
-| W3D | Static mesh geometry | unknown | Next gate |
+| W3D | Static mesh geometry | verified | Original fixture + version 4.2 Steam Generals mesh |
+| W3D | Deterministic static mesh report | verified | Synthetic BIG-backed CLI integration test |
+| W3D | Geometry-only Wavefront OBJ export | verified | Synthetic BIG-backed CLI test + installed mesh |
+| W3D | Materials and texture references | unknown | Next gate |
 | MAP | Chunk inventory | unknown | Not started |
 | Simulation | Fixed 30 Hz tick kernel | unknown | Not started |
 | Profiles | `ZeroHourLegacy` policy set | unknown | Not started |

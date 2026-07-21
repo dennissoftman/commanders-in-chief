@@ -2,7 +2,7 @@
 
 use std::fmt::Write;
 
-use cic_formats::{CsfFile, W3dChunk, W3dFile, w3d_chunk_name};
+use cic_formats::{CsfFile, W3dChunk, W3dFile, W3dStaticMesh, W3dVector3, w3d_chunk_name};
 use cic_vfs::Vfs;
 
 /// Formats winning VFS entries as deterministic tab-separated records.
@@ -78,6 +78,169 @@ pub fn render_w3d(w3d: &W3dFile) -> String {
     output
 }
 
+/// Formats immutable static mesh geometry with exact floating-point bit patterns.
+#[must_use]
+pub fn render_w3d_mesh(mesh: &W3dStaticMesh) -> String {
+    let header = mesh.header();
+    let mesh_name = escape_bytes(fixed_name(header.mesh_name_bytes()));
+    let container_name = escape_bytes(fixed_name(header.container_name_bytes()));
+    let mut output = String::from(
+        "version\tattributes\tmesh\tcontainer\tvertices\ttriangles\tmaterials\tdamage_stages\tsort_level\tprelit\tvertex_channels\tface_channels\n",
+    );
+    writeln!(
+        output,
+        "0x{:08X}\t0x{:08X}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t0x{:08X}\t0x{:08X}\t0x{:08X}",
+        header.version(),
+        header.attributes(),
+        mesh_name,
+        container_name,
+        header.vertex_count(),
+        header.triangle_count(),
+        header.material_count(),
+        header.damage_stage_count(),
+        header.sort_level(),
+        header.prelit_version(),
+        header.vertex_channels(),
+        header.face_channels()
+    )
+    .expect("writing to a String cannot fail");
+
+    output.push_str("bound\tx\ty\tz\tradius\n");
+    render_bound(&mut output, "minimum", header.minimum(), None);
+    render_bound(&mut output, "maximum", header.maximum(), None);
+    render_bound(
+        &mut output,
+        "sphere",
+        header.sphere_center(),
+        Some(header.sphere_radius()),
+    );
+
+    output.push_str("vertex\tx\ty\tz\tnx\tny\tnz\n");
+    for (index, (vertex, normal)) in mesh.vertices().iter().zip(mesh.normals()).enumerate() {
+        writeln!(
+            output,
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            index,
+            float_bits(vertex.x()),
+            float_bits(vertex.y()),
+            float_bits(vertex.z()),
+            float_bits(normal.x()),
+            float_bits(normal.y()),
+            float_bits(normal.z())
+        )
+        .expect("writing to a String cannot fail");
+    }
+
+    output.push_str("triangle\tv0\tv1\tv2\tattributes\tnx\tny\tnz\tdistance\n");
+    for (index, triangle) in mesh.triangles().iter().enumerate() {
+        let vertices = triangle.vertex_indices();
+        let normal = triangle.normal();
+        writeln!(
+            output,
+            "{}\t{}\t{}\t{}\t0x{:08X}\t{}\t{}\t{}\t{}",
+            index,
+            vertices[0],
+            vertices[1],
+            vertices[2],
+            triangle.attributes(),
+            float_bits(normal.x()),
+            float_bits(normal.y()),
+            float_bits(normal.z()),
+            float_bits(triangle.distance())
+        )
+        .expect("writing to a String cannot fail");
+    }
+    output
+}
+
+/// Converts immutable static mesh geometry to deterministic Wavefront OBJ text.
+///
+/// Object-space coordinates, vertex normals, triangle order, and winding are preserved.
+/// Material and texture-coordinate records are intentionally omitted until their W3D
+/// semantics are implemented.
+#[must_use]
+pub fn render_w3d_obj(mesh: &W3dStaticMesh) -> String {
+    let header = mesh.header();
+    let mesh_name = obj_name(fixed_name(header.mesh_name_bytes()));
+    let container_name = obj_name(fixed_name(header.container_name_bytes()));
+    let object_name = if container_name.is_empty() {
+        mesh_name
+    } else if mesh_name.is_empty() {
+        container_name
+    } else {
+        format!("{container_name}.{mesh_name}")
+    };
+
+    let mut output = String::from(
+        "# Commanders in Chief W3D static geometry export\n\
+         # Object-space coordinates and winding are preserved; materials and UVs are omitted.\n",
+    );
+    writeln!(
+        output,
+        "o {}",
+        if object_name.is_empty() {
+            "mesh"
+        } else {
+            &object_name
+        }
+    )
+    .expect("writing to a String cannot fail");
+
+    for vertex in mesh.vertices() {
+        writeln!(output, "v {} {} {}", vertex.x(), vertex.y(), vertex.z())
+            .expect("writing to a String cannot fail");
+    }
+    for normal in mesh.normals() {
+        writeln!(output, "vn {} {} {}", normal.x(), normal.y(), normal.z())
+            .expect("writing to a String cannot fail");
+    }
+    for triangle in mesh.triangles() {
+        let [v0, v1, v2] = triangle.vertex_indices().map(|index| u64::from(index) + 1);
+        writeln!(output, "f {v0}//{v0} {v1}//{v1} {v2}//{v2}")
+            .expect("writing to a String cannot fail");
+    }
+    output
+}
+
+fn obj_name(bytes: &[u8]) -> String {
+    let mut name = String::new();
+    for byte in bytes {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-' | b'.' => {
+                name.push(char::from(*byte));
+            }
+            _ => write!(name, "_{byte:02X}").expect("writing to a String cannot fail"),
+        }
+    }
+    name
+}
+
+fn render_bound(output: &mut String, name: &str, value: W3dVector3, radius: Option<f32>) {
+    let radius = radius.map_or_else(String::new, float_bits);
+    writeln!(
+        output,
+        "{}\t{}\t{}\t{}\t{}",
+        name,
+        float_bits(value.x()),
+        float_bits(value.y()),
+        float_bits(value.z()),
+        radius
+    )
+    .expect("writing to a String cannot fail");
+}
+
+fn float_bits(value: f32) -> String {
+    format!("0x{:08X}", value.to_bits())
+}
+
+fn fixed_name(bytes: &[u8; 16]) -> &[u8] {
+    let length = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len());
+    &bytes[..length]
+}
+
 fn render_w3d_level(output: &mut String, chunks: &[W3dChunk], path: &mut Vec<usize>) {
     for (index, chunk) in chunks.iter().enumerate() {
         path.push(index);
@@ -148,10 +311,12 @@ fn escape_text(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use cic_formats::{CsfLimits, W3dLimits, parse_csf, parse_w3d};
+    use cic_formats::{
+        CsfLimits, W3dLimits, W3dMeshLimits, decode_static_mesh, parse_csf, parse_w3d,
+    };
     use cic_vfs::{Vfs, VirtualPath};
 
-    use super::{render_csf, render_manifest, render_w3d};
+    use super::{render_csf, render_manifest, render_w3d, render_w3d_mesh, render_w3d_obj};
 
     #[test]
     fn manifest_is_sorted_and_reports_winning_provenance() {
@@ -236,6 +401,72 @@ mod tests {
              0/1\t1\t19\t0x22222222\tcontainer\t10\tunknown\n\
              0/1/0\t2\t27\t0x33333333\tdata\t2\tunknown\n\
              1\t0\t37\t0xDEADBEEF\tdata\t4\tunknown\n"
+        );
+    }
+
+    #[test]
+    fn static_mesh_report_preserves_exact_geometry_bits() {
+        let hex = include_str!("../../cic-formats/tests/fixtures/static-mesh.w3d.hex");
+        let digits = hex
+            .bytes()
+            .filter(u8::is_ascii_hexdigit)
+            .collect::<Vec<_>>();
+        let bytes = digits
+            .chunks_exact(2)
+            .map(|pair| {
+                let pair = std::str::from_utf8(pair).expect("ASCII fixture");
+                u8::from_str_radix(pair, 16).expect("valid hex fixture")
+            })
+            .collect::<Vec<_>>();
+        let w3d = parse_w3d(&bytes, "static-mesh.w3d", W3dLimits::default()).expect("valid W3D");
+        let mesh = decode_static_mesh(&w3d.chunks()[0], W3dMeshLimits::default())
+            .expect("valid static mesh");
+        let report = render_w3d_mesh(&mesh);
+
+        assert!(report.starts_with(
+            "version\tattributes\tmesh\tcontainer\tvertices\ttriangles\tmaterials\tdamage_stages\tsort_level\tprelit\tvertex_channels\tface_channels\n\
+             0x00040002\t0x00000000\tTri\tTest\t3\t1\t0\t0\t0\t0x00000000\t0x00000001\t0x00000001\n"
+        ));
+        assert!(report.contains(
+            "vertex\tx\ty\tz\tnx\tny\tnz\n\
+             0\t0x00000000\t0x00000000\t0x00000000\t0x00000000\t0x00000000\t0x3F800000\n"
+        ));
+        assert!(report.ends_with(
+            "triangle\tv0\tv1\tv2\tattributes\tnx\tny\tnz\tdistance\n\
+             0\t0\t1\t2\t0x00000000\t0x00000000\t0x00000000\t0x3F800000\t0x00000000\n"
+        ));
+    }
+
+    #[test]
+    fn static_mesh_obj_preserves_coordinates_normals_and_winding() {
+        let hex = include_str!("../../cic-formats/tests/fixtures/static-mesh.w3d.hex");
+        let digits = hex
+            .bytes()
+            .filter(u8::is_ascii_hexdigit)
+            .collect::<Vec<_>>();
+        let bytes = digits
+            .chunks_exact(2)
+            .map(|pair| {
+                let pair = std::str::from_utf8(pair).expect("ASCII fixture");
+                u8::from_str_radix(pair, 16).expect("valid hex fixture")
+            })
+            .collect::<Vec<_>>();
+        let w3d = parse_w3d(&bytes, "static-mesh.w3d", W3dLimits::default()).expect("valid W3D");
+        let mesh = decode_static_mesh(&w3d.chunks()[0], W3dMeshLimits::default())
+            .expect("valid static mesh");
+
+        assert_eq!(
+            render_w3d_obj(&mesh),
+            "# Commanders in Chief W3D static geometry export\n\
+             # Object-space coordinates and winding are preserved; materials and UVs are omitted.\n\
+             o Test.Tri\n\
+             v 0 0 0\n\
+             v 1 0 0\n\
+             v 0 1 0\n\
+             vn 0 0 1\n\
+             vn 0 0 1\n\
+             vn 0 0 1\n\
+             f 1//1 2//2 3//3\n"
         );
     }
 }

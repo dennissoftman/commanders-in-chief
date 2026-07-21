@@ -58,12 +58,13 @@ manifest snapshot.
 installed Steam Generals archives. Mixed-endian fields, slash-normalized paths, and
 none/`L225`/`L231` directory trailers are verified. The bounded CSF decoder, lossless
 record IR, original fixture, deterministic report, and synthetic BIG-to-CSF CLI artifact
-are implemented and verified against the installed Generals CSF. The CSF fuzz smoke gate
-and BIG4 retail verification remain open.
+are implemented and verified against the installed Generals CSF. A 30-second AddressSanitizer
+libFuzzer smoke run completed 4,077,155 CSF inputs without a finding. BIG4 retail
+verification remains open.
 
 ## R2: W3D inspection and viewer
 
-**Status:** In progress; chunk-inventory gate complete.
+**Status:** In progress; chunk-inventory and static-geometry gates complete.
 
 **Scope:** Bounded recursive chunk inventory followed by separately gated static geometry,
 materials, hierarchies, animation, and an animated viewer.
@@ -88,12 +89,17 @@ names, and no renderer or host-order dependency in reports.
 **Documentation:** `docs/formats/w3d.md`, provenance, compatibility matrix, and later ADRs
 for renderer boundaries.
 
-**Completion artifact:** Original nested fixture and stable chunk report; later gates add a
-synthetic mesh screenshot and animation capture.
+**Completion artifact:** Original nested and static-triangle fixtures, stable chunk and
+exact-bit geometry reports; later gates add a synthetic mesh screenshot and animation
+capture.
 
 **Progress:** The recursive inventory, 73-name identifier table, original nested fixture,
 and `cic-inspect w3d` report are complete. A 113,980-byte installed W3D closes exactly into
-525 records. Static mesh semantics are next.
+525 records. Header3 versions 3.0 through 4.2, vertices, normals, and triangles now decode
+into immutable renderer-neutral values with exact count/size and vertex-index validation.
+The BIG-backed `cic-inspect w3d-mesh` report is deterministic, and one installed version
+4.2 mesh verified at 24 vertices and 12 triangles. Material and texture references are
+next.
 
 ## R3: MAP terrain inspection and viewer
 

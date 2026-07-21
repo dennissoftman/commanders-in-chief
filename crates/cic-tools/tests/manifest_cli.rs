@@ -175,3 +175,67 @@ fn w3d_fixture() -> Vec<u8> {
         })
         .collect()
 }
+
+#[test]
+fn static_mesh_inside_big_produces_exact_geometry_report() {
+    let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("w3d-mesh-cli");
+    if root.exists() {
+        fs::remove_dir_all(&root).expect("remove stale test tree");
+    }
+    fs::create_dir_all(&root).expect("create test tree");
+    let archive_path = root.join("mesh.big");
+    let mesh = static_mesh_fixture();
+    fs::write(
+        &archive_path,
+        big_with_entry(r"Art\W3D\static-mesh.w3d", &mesh),
+    )
+    .expect("write synthetic archive");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cic-inspect"))
+        .arg("w3d-mesh")
+        .arg("ART/W3D/STATIC-MESH.W3D")
+        .arg("0")
+        .arg(&archive_path)
+        .output()
+        .expect("run cic-inspect");
+
+    assert!(output.status.success());
+    let report = String::from_utf8(output.stdout).expect("UTF-8 output");
+    assert!(report.contains(
+        "0x00040002\t0x00000000\tTri\tTest\t3\t1\t0\t0\t0\t0x00000000\t0x00000001\t0x00000001\n"
+    ));
+    assert!(
+        report
+            .ends_with("0\t0\t1\t2\t0x00000000\t0x00000000\t0x00000000\t0x3F800000\t0x00000000\n")
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cic-inspect"))
+        .arg("w3d-obj")
+        .arg("ART/W3D/STATIC-MESH.W3D")
+        .arg("0")
+        .arg(root.join("static-mesh.obj"))
+        .arg(&archive_path)
+        .output()
+        .expect("run OBJ export");
+    assert!(output.status.success());
+    let obj = fs::read_to_string(root.join("static-mesh.obj")).expect("read UTF-8 OBJ");
+    assert!(obj.contains("o Test.Tri\nv 0 0 0\nv 1 0 0\nv 0 1 0\n"));
+    assert!(obj.ends_with("f 1//1 2//2 3//3\n"));
+
+    fs::remove_dir_all(root).expect("remove test tree");
+}
+
+fn static_mesh_fixture() -> Vec<u8> {
+    let hex = include_str!("../../cic-formats/tests/fixtures/static-mesh.w3d.hex");
+    let digits = hex
+        .bytes()
+        .filter(u8::is_ascii_hexdigit)
+        .collect::<Vec<_>>();
+    digits
+        .chunks_exact(2)
+        .map(|pair| {
+            let pair = std::str::from_utf8(pair).expect("ASCII hex");
+            u8::from_str_radix(pair, 16).expect("valid hex fixture")
+        })
+        .collect()
+}
