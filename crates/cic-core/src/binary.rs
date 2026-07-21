@@ -160,8 +160,96 @@ impl<'a> BinaryReader<'a> {
         }
 
         let start = self.position;
-        self.position += length;
-        Ok(&self.bytes[start..self.position])
+        let Some(end) = start.checked_add(length) else {
+            return Err(BinaryError::UnexpectedEof {
+                source: self.source.clone(),
+                offset: start,
+                requested: length,
+                remaining,
+            });
+        };
+        let Some(result) = self.bytes.get(start..end) else {
+            return Err(BinaryError::UnexpectedEof {
+                source: self.source.clone(),
+                offset: start,
+                requested: length,
+                remaining,
+            });
+        };
+        self.position = end;
+        Ok(result)
+    }
+
+    /// Reads bytes up to, but not including, a required zero terminator.
+    ///
+    /// The terminator is consumed. The cursor is unchanged if the terminator is missing
+    /// or lies beyond `maximum_length`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BinaryError::LimitExceeded`] when a terminator was not found within the
+    /// configured maximum, or [`BinaryError::UnexpectedEof`] when the bounded region ends
+    /// before a terminator is found.
+    pub fn read_c_string_bytes(&mut self, maximum_length: usize) -> Result<&'a [u8], BinaryError> {
+        let Some(remaining) = self.bytes.get(self.position..) else {
+            return Err(BinaryError::InvalidSeek {
+                source: self.source.clone(),
+                offset: self.position,
+                length: self.bytes.len(),
+            });
+        };
+        let search_length = remaining.len().min(maximum_length.saturating_add(1));
+        let Some(search_region) = remaining.get(..search_length) else {
+            return Err(BinaryError::UnexpectedEof {
+                source: self.source.clone(),
+                offset: self.position,
+                requested: search_length,
+                remaining: remaining.len(),
+            });
+        };
+
+        if let Some(length) = search_region.iter().position(|byte| *byte == 0) {
+            let start = self.position;
+            let Some(end) = start.checked_add(length) else {
+                return Err(BinaryError::LimitExceeded {
+                    what: "zero-terminated string end offset",
+                    actual: usize::MAX,
+                    maximum: self.bytes.len(),
+                });
+            };
+            let Some(following) = end.checked_add(1) else {
+                return Err(BinaryError::LimitExceeded {
+                    what: "zero-terminated string end offset",
+                    actual: usize::MAX,
+                    maximum: self.bytes.len(),
+                });
+            };
+            let Some(result) = self.bytes.get(start..end) else {
+                return Err(BinaryError::UnexpectedEof {
+                    source: self.source.clone(),
+                    offset: start,
+                    requested: length,
+                    remaining: remaining.len(),
+                });
+            };
+            self.position = following;
+            return Ok(result);
+        }
+
+        if remaining.len() > maximum_length {
+            return Err(BinaryError::LimitExceeded {
+                what: "zero-terminated string length",
+                actual: maximum_length.saturating_add(1),
+                maximum: maximum_length,
+            });
+        }
+
+        Err(BinaryError::UnexpectedEof {
+            source: self.source.clone(),
+            offset: self.bytes.len(),
+            requested: 1,
+            remaining: 0,
+        })
     }
 
     /// Creates a reader bounded to the next `length` bytes and advances the parent.
@@ -285,5 +373,31 @@ mod tests {
             })
         ));
         assert_eq!(reader.position(), 2);
+    }
+
+    #[test]
+    fn reads_bounded_zero_terminated_bytes() {
+        let bytes = b"name\0tail";
+        let mut reader = BinaryReader::new(bytes, "string.bin");
+
+        assert_eq!(reader.read_c_string_bytes(4), Ok(b"name".as_slice()));
+        assert_eq!(reader.position(), 5);
+    }
+
+    #[test]
+    fn zero_terminated_read_does_not_advance_on_error() {
+        let mut too_long = BinaryReader::new(b"long\0", "long.bin");
+        assert!(matches!(
+            too_long.read_c_string_bytes(3),
+            Err(BinaryError::LimitExceeded { .. })
+        ));
+        assert_eq!(too_long.position(), 0);
+
+        let mut unterminated = BinaryReader::new(b"name", "unterminated.bin");
+        assert!(matches!(
+            unterminated.read_c_string_bytes(8),
+            Err(BinaryError::UnexpectedEof { .. })
+        ));
+        assert_eq!(unterminated.position(), 0);
     }
 }

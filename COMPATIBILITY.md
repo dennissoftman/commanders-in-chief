@@ -6,9 +6,12 @@ observable behavior.
 
 | Area | Capability | Status | Evidence |
 |---|---|---|---|
-| VFS | ASCII case-insensitive virtual paths | implemented | Tests compile; execution pending |
-| VFS | Deterministic loose-directory overlays | implemented | Tests compile; execution pending |
-| BIG | Archive index and mounting | unknown | Not started |
+| VFS | ASCII case-insensitive virtual paths | verified | Unit tests + GitHub CI run 29840005186 |
+| VFS | Deterministic loose-directory overlays | verified | Unit/CLI tests + GitHub CI run 29840005186 |
+| BIG | `BIGF` index and mounting | verified | 16-test suite + 18 Steam Generals archives |
+| BIG | Directory trailers | verified | None, `L225`+zero, and `L231`+zero across 18 archives |
+| BIG | `BIG4` index and mounting | implemented | Corroborating GPL evidence; runtime/Generals use unverified |
+| BIG | Duplicate entry resolution | implemented | Static tests: last table entry wins; history retained |
 | CSF | Labels, strings, and optional wave names | unknown | Not started |
 | W3D | Chunk inventory | unknown | Not started |
 | MAP | Chunk inventory | unknown | Not started |

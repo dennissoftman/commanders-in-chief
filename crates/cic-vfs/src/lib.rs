@@ -1,12 +1,16 @@
 //! Deterministic resource paths, mounts, overlays, and provenance.
 
-use std::collections::BTreeMap;
+mod big;
+
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+pub use big::{BigArchiveIndex, BigEntry, BigError, BigLimits, BigVersion, parse_big_archive};
 
 /// A canonical, platform-independent resource path.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -188,7 +192,12 @@ impl Vfs {
     where
         I: IntoIterator<Item = (VirtualPath, Vec<u8>)>,
     {
-        self.mount_entries(name.into(), ProviderKind::Memory, entries)
+        self.mount_entries(
+            name.into(),
+            ProviderKind::Memory,
+            entries,
+            DuplicatePolicy::Reject,
+        )
     }
 
     /// Recursively mounts regular files beneath a directory.
@@ -208,7 +217,84 @@ impl Vfs {
         let root = root.as_ref();
         let mut files = Vec::new();
         collect_directory(root, root, &mut files)?;
-        self.mount_entries(name.into(), ProviderKind::LooseDirectory, files)
+        self.mount_entries(
+            name.into(),
+            ProviderKind::LooseDirectory,
+            files,
+            DuplicatePolicy::Reject,
+        )
+    }
+
+    /// Mounts members from an in-memory BIG archive.
+    ///
+    /// Duplicate normalized names are preserved in file-table order and the last entry
+    /// wins, matching observed retail archive behavior.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MountError::Big`] when the archive index is invalid or exceeds limits,
+    /// or [`MountError::MountIdExhausted`] when no stable mount identifier remains.
+    pub fn mount_big_bytes(
+        &mut self,
+        name: impl Into<String>,
+        bytes: &[u8],
+        limits: BigLimits,
+    ) -> Result<MountId, MountError> {
+        let index = parse_big_archive(bytes, limits).map_err(MountError::Big)?;
+        let mut entries = Vec::with_capacity(index.entries().len());
+        for entry in index.entries() {
+            let payload = entry.bytes(bytes).ok_or_else(|| {
+                MountError::Big(BigError::EntryOutsidePayload {
+                    entry: entries.len(),
+                    offset: entry.offset(),
+                    size: entry.size(),
+                    first_file_offset: index.first_file_offset(),
+                    archive_size: bytes.len(),
+                })
+            })?;
+            entries.push((entry.path().clone(), payload.to_vec()));
+        }
+        self.mount_entries(
+            name.into(),
+            ProviderKind::BigArchive,
+            entries,
+            DuplicatePolicy::Preserve,
+        )
+    }
+
+    /// Reads, validates, and mounts a BIG archive from disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured [`MountError`] for metadata/read failures, archive-size limit
+    /// excess, invalid BIG data, or exhausted mount identifiers.
+    pub fn mount_big_file(
+        &mut self,
+        name: impl Into<String>,
+        path: impl AsRef<Path>,
+        limits: BigLimits,
+    ) -> Result<MountId, MountError> {
+        let path = path.as_ref();
+        let metadata = fs::metadata(path).map_err(|error| MountError::Io {
+            path: path.to_path_buf(),
+            error,
+        })?;
+        let maximum = u64::try_from(limits.maximum_archive_bytes).unwrap_or(u64::MAX);
+        if metadata.len() > maximum {
+            return Err(MountError::Big(BigError::Binary(
+                cic_core::BinaryError::LimitExceeded {
+                    what: "BIG archive size",
+                    actual: usize::try_from(metadata.len()).unwrap_or(usize::MAX),
+                    maximum: limits.maximum_archive_bytes,
+                },
+            )));
+        }
+
+        let bytes = fs::read(path).map_err(|error| MountError::Io {
+            path: path.to_path_buf(),
+            error,
+        })?;
+        self.mount_big_bytes(name, &bytes, limits)
     }
 
     /// Resolves the winning entry for a normalized path.
@@ -235,14 +321,18 @@ impl Vfs {
         name: String,
         kind: ProviderKind,
         entries: I,
+        duplicate_policy: DuplicatePolicy,
     ) -> Result<MountId, MountError>
     where
         I: IntoIterator<Item = (VirtualPath, Vec<u8>)>,
     {
-        let mut batch = BTreeMap::new();
-        for (path, bytes) in entries {
-            if batch.insert(path.clone(), bytes).is_some() {
-                return Err(MountError::DuplicatePath(path));
+        let batch = entries.into_iter().collect::<Vec<_>>();
+        if duplicate_policy == DuplicatePolicy::Reject {
+            let mut seen = BTreeSet::new();
+            for (path, _) in &batch {
+                if !seen.insert(path.clone()) {
+                    return Err(MountError::DuplicatePath(path.clone()));
+                }
             }
         }
 
@@ -266,6 +356,12 @@ impl Vfs {
         self.next_mount_id = following;
         Ok(mount_id)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DuplicatePolicy {
+    Reject,
+    Preserve,
 }
 
 fn collect_directory(
@@ -334,6 +430,8 @@ pub enum MountError {
     },
     /// A virtual resource path was invalid.
     Path(PathError),
+    /// A BIG archive was malformed or exceeded an explicit limit.
+    Big(BigError),
     /// Two entries in one provider normalized to the same path.
     DuplicatePath(VirtualPath),
     /// Symbolic links are outside the loose-directory mount contract.
@@ -353,6 +451,7 @@ impl Display for MountError {
                 root.display()
             ),
             Self::Path(error) => Display::fmt(error, formatter),
+            Self::Big(error) => Display::fmt(error, formatter),
             Self::DuplicatePath(path) => {
                 write!(formatter, "provider contains duplicate virtual path {path}")
             }
@@ -371,6 +470,7 @@ impl Error for MountError {
         match self {
             Self::Io { error, .. } => Some(error),
             Self::Path(error) => Some(error),
+            Self::Big(error) => Some(error),
             Self::OutsideRoot { .. }
             | Self::DuplicatePath(_)
             | Self::SymbolicLink(_)
@@ -447,5 +547,67 @@ mod tests {
 
         assert!(matches!(result, Err(MountError::DuplicatePath(_))));
         assert!(vfs.resolve(&path("data/a.txt")).is_none());
+    }
+
+    #[test]
+    fn duplicate_big_names_preserve_history_and_last_entry_wins() {
+        let archive = synthetic_big(&[(r"Data\A.txt", b"old"), ("data/a.TXT", b"new")]);
+        let mut vfs = Vfs::new();
+        vfs.mount_big_bytes("duplicate.big", &archive, super::BigLimits::default())
+            .expect("BIG mount");
+
+        let resource = vfs.resolve(&path("data/a.txt")).expect("resolved entry");
+        assert_eq!(resource.bytes(), b"new");
+        let history = vfs.history(&path("data/a.txt")).expect("entry history");
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].bytes(), b"old");
+        assert_eq!(history[1].provider().mount_id().get(), 0);
+    }
+
+    fn synthetic_big(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let table_size = entries
+            .iter()
+            .map(|(name, _)| 8 + name.len() + 1)
+            .sum::<usize>();
+        let data_start = 16 + table_size;
+        let archive_size = data_start + entries.iter().map(|(_, bytes)| bytes.len()).sum::<usize>();
+        let mut archive = Vec::with_capacity(archive_size);
+        archive.extend_from_slice(b"BIGF");
+        archive.extend_from_slice(
+            &u32::try_from(archive_size)
+                .expect("synthetic archive size fits u32")
+                .to_le_bytes(),
+        );
+        archive.extend_from_slice(
+            &u32::try_from(entries.len())
+                .expect("synthetic entry count fits u32")
+                .to_be_bytes(),
+        );
+        archive.extend_from_slice(
+            &u32::try_from(data_start)
+                .expect("synthetic data offset fits u32")
+                .to_be_bytes(),
+        );
+
+        let mut offset = data_start;
+        for (name, bytes) in entries {
+            archive.extend_from_slice(
+                &u32::try_from(offset)
+                    .expect("synthetic member offset fits u32")
+                    .to_be_bytes(),
+            );
+            archive.extend_from_slice(
+                &u32::try_from(bytes.len())
+                    .expect("synthetic member size fits u32")
+                    .to_be_bytes(),
+            );
+            archive.extend_from_slice(name.as_bytes());
+            archive.push(0);
+            offset += bytes.len();
+        }
+        for (_, bytes) in entries {
+            archive.extend_from_slice(bytes);
+        }
+        archive
     }
 }

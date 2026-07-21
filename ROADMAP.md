@@ -4,6 +4,8 @@ Progress is measured by compatibility gates, not elapsed time.
 
 ## R0: Repository and resource-probe foundation
 
+**Status:** Complete. GitHub CI run `29840005186` passed the completion suite.
+
 **Scope:** GPL/provenance policy, Rust workspace, bounded reader, normalized VFS paths,
 loose-directory mounts, deterministic manifest CLI, tests, and CI.
 
@@ -26,6 +28,8 @@ output.
 **Completion artifact:** Passing CLI integration test with two synthetic overlay trees.
 
 ## R1: BIG and CSF resource probe
+
+**Status:** In progress.
 
 **Scope:** Evidence-backed BIG archive mounting and complete CSF decoding with resource
 provenance.
@@ -50,6 +54,11 @@ ordering and diagnostics.
 **Completion artifact:** Synthetic archive containing a CSF file and a checked-in stable
 manifest snapshot.
 
+**Progress:** BIGF indexing and mounting pass the complete local suite and all 18
+installed Steam Generals archives. Mixed-endian fields, slash-normalized paths, and
+none/`L225`/`L231` directory trailers are verified. BIG4 retail verification, fuzzing,
+and CSF remain open.
+
 ## R2: W3D inspection and viewer
 
 Gates are separately completed for chunk inventory, static geometry, materials,
@@ -70,4 +79,3 @@ command recording, replay, and subsystem state hashes before gameplay modules.
 
 Derive terrain and locomotor-aware regions, portals, choke points, and dynamic obstacles,
 then complete one build-harvest-combat loop using normal player commands.
-

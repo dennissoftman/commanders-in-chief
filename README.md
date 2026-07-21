@@ -6,17 +6,19 @@ and is not affiliated with or endorsed by Electronic Arts.
 
 The first executable milestone is a deterministic resource inspector. The current code
 provides bounded binary input, normalized virtual paths, deterministic overlay handling,
-and a CLI that inventories mounted directories.
+BIG archive mounting, and a CLI that inventories mounted resources.
 
 ```powershell
 cargo test --workspace
-cargo run -p cic-tools -- manifest path\to\base path\to\override
+cargo run -p cic-tools -- manifest path\to\base path\to\archive.big path\to\override
 ```
 
 On Windows, Rust's MSVC target also requires Visual Studio Build Tools with the Desktop
 development with C++ workload. The same checks run on Linux in GitHub Actions.
 
-Directories are mounted from left to right. Later mounts override earlier mounts.
+Directories and BIG archives are mounted from left to right. Later mounts override
+earlier mounts. Archive backslashes and host separators are normalized; manifests always
+emit portable `/` virtual paths.
 No retail game assets are included in this repository.
 
 See [CURRENT.md](CURRENT.md) for the active objective and [ROADMAP.md](ROADMAP.md) for
