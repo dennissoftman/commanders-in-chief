@@ -13,14 +13,26 @@ Zero Hour resources are a delta over Generals rather than a standalone resource 
 ## Decision
 
 `cic-inspect w3d-export` is the sole model interchange command. The formats crate decodes
-immutable hierarchy, highest-detail HLOD, mesh influence, and classic raw-animation values;
+immutable hierarchy, highest-detail HLOD, mesh influence, classic raw-animation values, and
+time-coded or adaptive-delta compressed animation values;
 the tools crate composes sibling resources and writes a self-contained glTF 2.0 binary
 (`.glb`) by default. `--gltf` selects JSON, an external binary buffer, and PNG images for
 inspection. The output basename defaults to the W3D resource basename, while an explicit
 output path remains available. A root transform converts W3D Z-up coordinates to glTF Y-up.
 Preview materials select pass zero and stage zero while the decoder retains all supported
-records. Converted base-color images preserve decoded straight-alpha RGBA texels and declare
-sRGB in their PNG metadata; no additional gamma transform is applied.
+records. Packaged source images preserve decoded straight-alpha RGBA texels and declare sRGB in
+their PNG metadata; no additional gamma transform is applied. A `ONE + ONE` additive material
+also receives a separate deterministic preview image whose maximum RGB channel becomes alpha
+coverage and whose RGB is unassociated from that coverage. The material uses the derived image;
+`fixed-function-metadata-v1` continues to link the untouched source image.
+
+Core glTF cannot exactly express ordered W3D fixed-function passes, arbitrary stage combiners,
+animated mappers, or their framebuffer blend operations. The visible metallic-roughness preview
+therefore remains pass zero/stage zero. A versioned `fixed-function-metadata-v1` mesh extra retains
+every decoded pass, stage, assignment, shader byte, color array, mapper selector/argument string,
+animated-texture descriptor, and exact float bits. Every table texture is packaged even when it is
+not selected by the visible preview. This is an inspection/interchange contract, not a claim of
+fixed-function visual equivalence.
 
 Raw attachment animations may use extreme helper-bone translations as a visibility convention.
 For glTF preview only, a translation farther than both 100 W3D units and 32 bind-pose model
@@ -53,5 +65,9 @@ Explicit CLI mounts bypass automatic profiles and retain normal left-to-right VF
 - Legacy offscreen attachment hiding no longer makes ordinary glTF viewers frame remote geometry
   or encounter singular hidden-joint transforms; this preview heuristic does not claim exact
   fixed-function visibility equivalence.
-- Compressed animation, secondary material passes/stages, mapper behavior, and exact legacy
-  fixed-function blending remain future compatibility work.
+- Time-coded and adaptive-delta animation share the raw-animation export path after bounded
+  decompression; their source encoding is named in animation extras.
+- Black-backed additive light sprites remain transparent in ordinary glTF viewers without
+  replacing or mutating the decoded source-RGBA interchange image.
+- Exact legacy fixed-function visual equivalence remains renderer work, while the interchange
+  artifact retains the complete decoded input needed for that renderer gate.

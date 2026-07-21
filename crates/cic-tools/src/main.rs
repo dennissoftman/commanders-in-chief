@@ -280,7 +280,10 @@ fn collect_model_files(
         }
         let candidate = parse_w3d(entry.bytes(), name, W3dLimits::default())?;
         if !candidate.chunks().is_empty()
-            && candidate.chunks().iter().all(|chunk| chunk.id() == 0x200)
+            && candidate
+                .chunks()
+                .iter()
+                .all(|chunk| matches!(chunk.id(), 0x200 | 0x280))
         {
             files.push(candidate);
         }
@@ -436,7 +439,10 @@ fn encode_png_texture(
             )
         }
     };
-    let rgba = image.to_rgba8();
+    let mut rgba = image.to_rgba8();
+    if texture.is_additive_preview() {
+        apply_additive_preview_alpha(&mut rgba);
+    }
     let mut bytes = Vec::new();
     {
         let mut encoder = png::Encoder::new(&mut bytes, rgba.width(), rgba.height());
@@ -447,6 +453,29 @@ fn encode_png_texture(
         writer.write_image_data(rgba.as_raw())?;
     }
     Ok(EncodedTexture { source_name, bytes })
+}
+
+/// Converts a black-backed additive source image into a deterministic straight-alpha preview.
+///
+/// Core glTF only defines source-over alpha blending. W3D `ONE + ONE` materials instead add the
+/// source RGB directly and ignore its alpha for color. Treat the largest color channel as coverage
+/// and unassociate the other channels from that coverage. This keeps black pixels invisible and
+/// retains the source color ratios without changing the separately packaged source image.
+fn apply_additive_preview_alpha(image: &mut image::RgbaImage) {
+    for pixel in image.pixels_mut() {
+        let strength = pixel[0].max(pixel[1]).max(pixel[2]);
+        if strength == 0 {
+            pixel[3] = 0;
+            continue;
+        }
+        let strength_u16 = u16::from(strength);
+        for channel in &mut pixel.0[..3] {
+            let numerator = u16::from(*channel) * 255 + strength_u16 / 2;
+            *channel = u8::try_from(numerator / strength_u16)
+                .expect("normalized additive channel fits u8");
+        }
+        pixel[3] = strength;
+    }
 }
 
 fn image_format(path: &VirtualPath) -> Result<image::ImageFormat, Box<dyn Error>> {
@@ -524,4 +553,23 @@ fn mount_all(
         }
     }
     Ok(vfs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apply_additive_preview_alpha;
+
+    #[test]
+    fn additive_preview_makes_black_transparent_and_unassociates_color() {
+        let mut image =
+            image::RgbaImage::from_raw(3, 1, vec![0, 0, 0, 255, 64, 32, 0, 0, 255, 128, 64, 17])
+                .expect("fixture dimensions");
+
+        apply_additive_preview_alpha(&mut image);
+
+        assert_eq!(
+            image.as_raw(),
+            &[0, 0, 0, 0, 255, 128, 0, 64, 255, 128, 64, 255]
+        );
+    }
 }

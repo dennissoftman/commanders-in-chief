@@ -49,8 +49,12 @@ pub struct W3dMeshLimits {
     pub maximum_textures: usize,
     /// Maximum vertex-material name length, excluding its terminator.
     pub maximum_material_name_bytes: usize,
+    /// Maximum mapper-argument string length, excluding its terminator.
+    pub maximum_mapper_argument_bytes: usize,
     /// Maximum texture name length, excluding its terminator.
     pub maximum_texture_name_bytes: usize,
+    /// Maximum frame count declared by one animated texture.
+    pub maximum_texture_animation_frames: usize,
     /// Maximum texture coordinates across one stage.
     pub maximum_texture_coordinates: usize,
     /// Maximum texture stages decoded for one material pass.
@@ -67,7 +71,9 @@ impl Default for W3dMeshLimits {
             maximum_shaders: 65_536,
             maximum_textures: 65_536,
             maximum_material_name_bytes: 255,
+            maximum_mapper_argument_bytes: 4_096,
             maximum_texture_name_bytes: 255,
+            maximum_texture_animation_frames: 65_536,
             maximum_texture_coordinates: 12_000_000,
             maximum_texture_stages_per_pass: 8,
         }

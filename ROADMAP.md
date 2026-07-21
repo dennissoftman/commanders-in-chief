@@ -64,7 +64,7 @@ verification remains open.
 
 ## R2: W3D inspection and viewer
 
-**Status:** In progress; external animated-model preview gates complete.
+**Status:** In progress; format compatibility and external animated-model preview gates complete.
 
 **Scope:** Bounded recursive chunk inventory followed by separately gated static geometry,
 materials, hierarchies, animation, and an animated viewer.
@@ -103,8 +103,45 @@ UVs, hierarchy/HLOD composition, rigid and skinned models, and classic raw-anima
 decode into immutable bounded values. `cic-inspect w3d-export` composes split retail W3Ds,
 resolves Generals or layered Zero Hour resources, converts TGA/DDS images to sRGB PNG, and
 emits a Blender-importable self-contained GLB by default or external glTF with `--gltf`.
-Compressed animation and richer multi-pass material equivalence remain before the format
-surface is complete.
+The format surface is complete for renderer ingestion: time-coded and adaptive-delta compressed
+animation decode under bounded expansion and use the existing glTF clip path. All fixed-function
+passes, stages, mapper data, animated-texture descriptors, and shader bytes are retained in
+versioned GLB/glTF metadata; the visible core-glTF approximation remains explicitly pass
+zero/stage zero. Installed compressed infantry and two-pass building exports passed local
+verification without retaining retail data. Additive `ONE + ONE` light materials keep their
+unchanged source RGBA images and use separate alpha-coverage preview images; installed airstrip
+lights verified that black sprite backgrounds no longer become opaque rectangles.
+
+### R2 next gate: renderer ingestion and animated viewer
+
+**Scope:** Introduce a renderer crate that consumes immutable `cic-formats` model values, renders
+the selected HLOD with hierarchy/skinning/animation, and begins fixed-function pass/stage
+equivalence behind an explicit preview policy.
+
+**Exclusions:** MAP terrain, gameplay/simulation ownership, asset editing, retail fixtures, and
+claims of complete fixed-function equivalence before image comparisons exist.
+
+**Inputs:** Existing original composed W3D fixtures and user-owned installed resources through the
+VFS; no renderer-side parsing.
+
+**Outputs:** An interactive animated viewer plus deterministic diagnostic captures from synthetic
+fixtures.
+
+**Owner:** A new renderer crate depending on `cic-formats`/`cic-vfs`; simulation and core remain
+renderer-independent.
+
+**Acceptance tests:** Headless synthetic-frame checks, hierarchy/skin pose comparisons, stable
+material-pass command ordering, malformed-resource rejection before renderer ingestion, and a local
+installed-resource smoke capture.
+
+**Determinism:** Stable mesh/pass/stage submission order, explicit animation time input, no host
+filesystem order, and no wall-clock values in diagnostic artifacts.
+
+**Documentation:** A renderer-boundary ADR, compatibility updates, and capture instructions that do
+not distribute retail content.
+
+**Completion artifact:** Checked-in synthetic screenshot/capture hashes plus a locally verified
+animated installed-model capture report.
 
 ## R3: MAP terrain inspection and viewer
 

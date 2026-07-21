@@ -18,6 +18,9 @@
   - `GeneralsMD/Code/Libraries/Source/WWVegas/WW3D2/hlod.cpp`
   - `GeneralsMD/Code/Libraries/Source/WWVegas/WW3D2/hrawanim.cpp`
   - `GeneralsMD/Code/Libraries/Source/WWVegas/WW3D2/motchan.cpp`
+  - `Core/Libraries/Source/WWVegas/WW3D2/hcanim.cpp`
+- Mapper reference:
+  - `Core/Libraries/Source/WWVegas/WW3D2/MAPPERS.TXT`
 - Permanent links:
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/Libraries/Source/WWVegas/WWLib/chunkio.h>
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/Libraries/Source/WWVegas/WWLib/chunkio.cpp>
@@ -29,6 +32,8 @@
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/GeneralsMD/Code/Libraries/Source/WWVegas/WW3D2/hlod.cpp>
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/GeneralsMD/Code/Libraries/Source/WWVegas/WW3D2/hrawanim.cpp>
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/GeneralsMD/Code/Libraries/Source/WWVegas/WW3D2/motchan.cpp>
+  - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/Libraries/Source/WWVegas/WW3D2/hcanim.cpp>
+  - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/Libraries/Source/WWVegas/WW3D2/MAPPERS.TXT>
 - Upstream notice: Command & Conquer Generals Zero Hour; Copyright 2025 Electronic Arts
   Inc.; historical notices identify Westwood Studios.
 - License: GNU GPL version 3 or later with the Electronic Arts Section 7 additional terms
@@ -44,6 +49,13 @@ The same revision establishes the hierarchy and pivot layouts, parent-before-chi
 transform composition, last-array HLOD selection, one-bone vertex influences, classic raw
 animation headers and channels, post-multiplied translation/quaternion application, and direct
 bone-transform deformation of bone-local skin vertices.
+
+The compressed-animation header and loaders establish time-coded and adaptive-delta flavors,
+their fixed channel headers, binary movement flag, sparse interpolation, four-bit signed deltas,
+nine-byte delta packets, and 256-entry filter construction. The vertex-material attributes and
+mapper reference establish two mapper selectors, their argument-string chunks, and the named
+fixed-function mapping modes. The material-pass declarations also establish the `DIG` and `SCG`
+four-byte RGB arrays and texture animation type, count, and rate fields.
 
 ## Runtime verification
 
@@ -68,6 +80,19 @@ model-scale-outlier translations to hide carried attachments. Literal glTF mappi
 animated bounds by orders of magnitude. The tools-layer nonsingular near-zero-scale preview policy
 was authored for this project and verified to retain all clips while removing those remote output
 positions. No retail bytes, names, or numeric channel values were retained.
+
+On 2026-07-21, a bounded top-level scan found compressed-animation chunks in 17 user-owned
+Generals W3Ds and at least three Zero Hour W3Ds. An installed infantry export decoded its
+compressed companions into a self-contained GLB with 20 actions, including the compressed idle
+clip. A separate installed building export preserved two-pass material metadata and a non-UV
+environment mapper on two meshes. No retail bytes, names, mapper strings, or numeric channel
+values were retained in the repository.
+
+On 2026-07-21, installed `abarfrccmd.w3d` airstrip-light materials were verified against their
+user-owned resolved DDS images. The decoded images were fully opaque, while their retained W3D
+shader selectors were source `ONE` and destination `ONE`. A project-authored core-glTF preview
+policy generated separate alpha-coverage images; the source images remained unchanged. No retail
+bytes or images were retained in the repository.
 
 ## Implementation record
 

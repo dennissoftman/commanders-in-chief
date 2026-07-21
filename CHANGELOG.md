@@ -46,4 +46,14 @@ All notable user-visible changes are recorded here.
   the corresponding Khronos validator findings.
 - W3D bone-local skin vertices now use identity glTF inverse binds, fixing separated body parts and
   exploded animated infantry poses.
+- Time-coded and adaptive-delta W3D animations now decode under explicit expansion limits and
+  export through the same glTF animation path as classic raw clips.
+- Vertex-material mapper modes and bounded argument strings, per-pass diffuse illumination and
+  specular colors, and validated animated-texture metadata are retained as immutable values.
+- GLB/glTF mesh extras preserve every fixed-function pass, texture stage, assignment, shader byte,
+  mapper, animated-texture descriptor, and exact UV/scalar bits. All referenced base textures are
+  embedded, while the visible metallic-roughness preview remains explicitly pass 0/stage 0.
+- W3D `ONE + ONE` additive materials use separate alpha-coverage PNGs in the core-glTF preview,
+  eliminating black sprite rectangles while retaining untouched decoded source RGBA images for
+  fixed-function metadata consumers.
 - Synthetic unit and integration tests plus CI quality gates.

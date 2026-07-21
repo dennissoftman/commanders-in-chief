@@ -1,8 +1,8 @@
 //! W3D vertex-material, shader, texture, and texture-coordinate decoding.
 //!
 //! Provenance: this implementation was authored for Commanders in Chief from
-//! `w3d_file.h`, `meshmdlio.cpp`, `vertmaterial.cpp`, and `texture.cpp` at `GeneralsGameCode`
-//! revision `9f7abb866f5afd446db14149979e744c7216baaf`. Those sources are
+//! `w3d_file.h`, `meshmdlio.cpp`, `vertmaterial.cpp`, `texture.cpp`, and `MAPPERS.TXT` at
+//! `GeneralsGameCode` revision `9f7abb866f5afd446db14149979e744c7216baaf`. Those sources are
 //! GPL-3.0-or-later with Electronic Arts Section 7 terms; no source code or retail
 //! content is copied.
 
@@ -20,6 +20,8 @@ const VERTEX_MATERIALS_CHUNK: u32 = 0x0000_002A;
 const VERTEX_MATERIAL_CHUNK: u32 = 0x0000_002B;
 const VERTEX_MATERIAL_NAME_CHUNK: u32 = 0x0000_002C;
 const VERTEX_MATERIAL_INFO_CHUNK: u32 = 0x0000_002D;
+const VERTEX_MAPPER_ARGS0_CHUNK: u32 = 0x0000_002E;
+const VERTEX_MAPPER_ARGS1_CHUNK: u32 = 0x0000_002F;
 const TEXTURES_CHUNK: u32 = 0x0000_0030;
 const TEXTURE_CHUNK: u32 = 0x0000_0031;
 const TEXTURE_NAME_CHUNK: u32 = 0x0000_0032;
@@ -28,6 +30,8 @@ const MATERIAL_PASS_CHUNK: u32 = 0x0000_0038;
 const VERTEX_MATERIAL_IDS_CHUNK: u32 = 0x0000_0039;
 const SHADER_IDS_CHUNK: u32 = 0x0000_003A;
 const DIFFUSE_COLORS_CHUNK: u32 = 0x0000_003B;
+const DIFFUSE_ILLUMINATION_CHUNK: u32 = 0x0000_003C;
+const SPECULAR_COLORS_CHUNK: u32 = 0x0000_003E;
 const TEXTURE_STAGE_CHUNK: u32 = 0x0000_0048;
 const TEXTURE_IDS_CHUNK: u32 = 0x0000_0049;
 const STAGE_TEXCOORDS_CHUNK: u32 = 0x0000_004A;
@@ -150,6 +154,66 @@ pub struct W3dVertexMaterial {
     shininess: f32,
     opacity: f32,
     translucency: f32,
+    mappers: [W3dMapper; 2],
+}
+
+/// One of the two fixed-function texture-coordinate mapper selections encoded in vertex-material
+/// attributes, plus its optional original argument string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct W3dMapper {
+    mode: W3dMapperMode,
+    arguments: Option<Vec<u8>>,
+}
+
+impl W3dMapper {
+    #[must_use]
+    pub const fn mode(&self) -> W3dMapperMode {
+        self.mode
+    }
+
+    #[must_use]
+    pub fn argument_bytes(&self) -> Option<&[u8]> {
+        self.arguments.as_deref()
+    }
+}
+
+/// Raw mapper selector with stable names for every mode defined by the pinned W3D header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct W3dMapperMode(u8);
+
+impl W3dMapperMode {
+    #[must_use]
+    pub const fn code(self) -> u8 {
+        self.0
+    }
+
+    #[must_use]
+    pub const fn name(self) -> Option<&'static str> {
+        match self.0 {
+            0 => Some("uv"),
+            1 => Some("environment"),
+            2 => Some("cheap_environment"),
+            3 => Some("screen"),
+            4 => Some("linear_offset"),
+            5 => Some("silhouette"),
+            6 => Some("scale"),
+            7 => Some("grid"),
+            8 => Some("rotate"),
+            9 => Some("sine_linear_offset"),
+            10 => Some("step_linear_offset"),
+            11 => Some("zigzag_linear_offset"),
+            12 => Some("world_classic_environment"),
+            13 => Some("world_environment"),
+            14 => Some("grid_classic_environment"),
+            15 => Some("grid_environment"),
+            16 => Some("random"),
+            17 => Some("edge"),
+            18 => Some("bump_environment"),
+            19 => Some("grid_world_classic_environment"),
+            20 => Some("grid_world_environment"),
+            _ => None,
+        }
+    }
 }
 
 impl W3dVertexMaterial {
@@ -205,6 +269,12 @@ impl W3dVertexMaterial {
     #[must_use]
     pub const fn translucency(&self) -> f32 {
         self.translucency
+    }
+
+    /// Returns mapper metadata for stage zero or one.
+    #[must_use]
+    pub fn mapper(&self, stage: usize) -> Option<&W3dMapper> {
+        self.mappers.get(stage)
     }
 }
 
@@ -270,9 +340,29 @@ impl W3dShader {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct W3dTextureInfo {
     attributes: u16,
-    animation_type: u16,
+    animation_type: W3dTextureAnimationType,
     frame_count: u32,
     frame_rate: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum W3dTextureAnimationType {
+    Loop,
+    PingPong,
+    Once,
+    Manual,
+}
+
+impl W3dTextureAnimationType {
+    #[must_use]
+    pub const fn code(self) -> u16 {
+        match self {
+            Self::Loop => 0,
+            Self::PingPong => 1,
+            Self::Once => 2,
+            Self::Manual => 3,
+        }
+    }
 }
 
 impl W3dTextureInfo {
@@ -282,6 +372,10 @@ impl W3dTextureInfo {
     }
     #[must_use]
     pub const fn animation_type(self) -> u16 {
+        self.animation_type.code()
+    }
+    #[must_use]
+    pub const fn animation(self) -> W3dTextureAnimationType {
         self.animation_type
     }
     #[must_use]
@@ -383,6 +477,8 @@ pub struct W3dMaterialPass {
     vertex_material_ids: Option<W3dMaterialIds>,
     shader_ids: Option<W3dFaceIds>,
     diffuse_colors: Option<Vec<W3dRgba8>>,
+    diffuse_illumination: Option<Vec<W3dRgb8>>,
+    specular_colors: Option<Vec<W3dRgb8>>,
     texture_stages: Vec<W3dTextureStage>,
 }
 
@@ -397,6 +493,16 @@ impl W3dMaterialPass {
     #[must_use]
     pub fn diffuse_colors(&self) -> Option<&[W3dRgba8]> {
         self.diffuse_colors.as_deref()
+    }
+
+    #[must_use]
+    pub fn diffuse_illumination(&self) -> Option<&[W3dRgb8]> {
+        self.diffuse_illumination.as_deref()
+    }
+
+    #[must_use]
+    pub fn specular_colors(&self) -> Option<&[W3dRgb8]> {
+        self.specular_colors.as_deref()
     }
 
     #[must_use]
@@ -549,7 +655,14 @@ pub enum W3dMaterialError {
         material: usize,
     },
     /// A texture name did not contain a zero terminator.
-    UnterminatedTextureName { texture: usize },
+    UnterminatedTextureName {
+        texture: usize,
+    },
+    /// A vertex-material mapper argument string did not contain a zero terminator.
+    UnterminatedMapperArguments {
+        material: usize,
+        stage: usize,
+    },
     /// A shader, texture, or UV index was outside its decoded table.
     ResourceIndexOutOfRange {
         what: &'static str,
@@ -559,7 +672,20 @@ pub enum W3dMaterialError {
         count: usize,
     },
     /// A texture scalar or coordinate was NaN or infinite.
-    NonFiniteTextureValue { what: &'static str, index: usize },
+    NonFiniteTextureValue {
+        what: &'static str,
+        index: usize,
+    },
+    InvalidTextureAnimationType {
+        texture: usize,
+        animation_type: u16,
+    },
+    ZeroTextureFrameCount {
+        texture: usize,
+    },
+    ZeroAnimatedTextureFrameRate {
+        texture: usize,
+    },
     /// A material scalar was NaN or infinite.
     NonFiniteScalar {
         /// Zero-based vertex-material index.
@@ -575,6 +701,7 @@ pub enum W3dMaterialError {
 }
 
 impl Display for W3dMaterialError {
+    #[allow(clippy::too_many_lines)]
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Binary(error) => Display::fmt(error, formatter),
@@ -646,6 +773,10 @@ impl Display for W3dMaterialError {
             Self::UnterminatedTextureName { texture } => {
                 write!(formatter, "W3D texture {texture} name is not terminated")
             }
+            Self::UnterminatedMapperArguments { material, stage } => write!(
+                formatter,
+                "W3D vertex material {material} mapper stage {stage} arguments are not terminated"
+            ),
             Self::ResourceIndexOutOfRange {
                 what,
                 pass,
@@ -660,6 +791,20 @@ impl Display for W3dMaterialError {
             Self::NonFiniteTextureValue { what, index } => {
                 write!(formatter, "W3D {what} {index} is non-finite")
             }
+            Self::InvalidTextureAnimationType {
+                texture,
+                animation_type,
+            } => write!(
+                formatter,
+                "W3D texture {texture} has unsupported animation type {animation_type}"
+            ),
+            Self::ZeroTextureFrameCount { texture } => {
+                write!(formatter, "W3D texture {texture} has zero animation frames")
+            }
+            Self::ZeroAnimatedTextureFrameRate { texture } => write!(
+                formatter,
+                "W3D animated texture {texture} has a zero frame rate"
+            ),
             Self::NonFiniteScalar { material, field } => write!(
                 formatter,
                 "W3D vertex material {material} has a non-finite {field}"
@@ -853,7 +998,32 @@ fn decode_vertex_material(
     let name = unique_child(children, VERTEX_MATERIAL_NAME_CHUNK)?
         .map(|chunk| parse_name(chunk, material_index, limits.maximum_material_name_bytes))
         .transpose()?;
-    parse_vertex_material(bytes, material_index, name)
+    let mapper_arguments0 = unique_child(children, VERTEX_MAPPER_ARGS0_CHUNK)?
+        .map(|chunk| {
+            parse_mapper_arguments(
+                chunk,
+                material_index,
+                0,
+                limits.maximum_mapper_argument_bytes,
+            )
+        })
+        .transpose()?;
+    let mapper_arguments1 = unique_child(children, VERTEX_MAPPER_ARGS1_CHUNK)?
+        .map(|chunk| {
+            parse_mapper_arguments(
+                chunk,
+                material_index,
+                1,
+                limits.maximum_mapper_argument_bytes,
+            )
+        })
+        .transpose()?;
+    parse_vertex_material(
+        bytes,
+        material_index,
+        name,
+        [mapper_arguments0, mapper_arguments1],
+    )
 }
 
 fn parse_name(
@@ -884,6 +1054,7 @@ fn parse_vertex_material(
     bytes: &[u8],
     material_index: usize,
     name: Option<Vec<u8>>,
+    mapper_arguments: [Option<Vec<u8>>; 2],
 ) -> Result<W3dVertexMaterial, W3dMaterialError> {
     let mut reader = BinaryReader::new(bytes, "W3D vertex material info");
     let attributes = reader.read_u32_le()?;
@@ -894,6 +1065,23 @@ fn parse_vertex_material(
     let shininess = read_finite(&mut reader, material_index, "shininess")?;
     let opacity = read_finite(&mut reader, material_index, "opacity")?;
     let translucency = read_finite(&mut reader, material_index, "translucency")?;
+    let [arguments0, arguments1] = mapper_arguments;
+    let mappers = [
+        W3dMapper {
+            mode: W3dMapperMode(
+                u8::try_from((attributes & 0x00FF_0000) >> 16)
+                    .expect("stage zero mapper bits fit u8"),
+            ),
+            arguments: arguments0,
+        },
+        W3dMapper {
+            mode: W3dMapperMode(
+                u8::try_from((attributes & 0x0000_FF00) >> 8)
+                    .expect("stage one mapper bits fit u8"),
+            ),
+            arguments: arguments1,
+        },
+    ];
     Ok(W3dVertexMaterial {
         name,
         attributes,
@@ -904,7 +1092,30 @@ fn parse_vertex_material(
         shininess,
         opacity,
         translucency,
+        mappers,
     })
+}
+
+fn parse_mapper_arguments(
+    chunk: &W3dChunk,
+    material: usize,
+    stage: usize,
+    maximum: usize,
+) -> Result<Vec<u8>, W3dMaterialError> {
+    let bytes = require_data(chunk)?;
+    let maximum_with_terminator = maximum.saturating_add(1);
+    if bytes.len() > maximum_with_terminator {
+        return Err(W3dMaterialError::Binary(BinaryError::LimitExceeded {
+            what: "W3D mapper argument bytes",
+            actual: bytes.len(),
+            maximum: maximum_with_terminator,
+        }));
+    }
+    let length = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .ok_or(W3dMaterialError::UnterminatedMapperArguments { material, stage })?;
+    Ok(bytes[..length].to_vec())
 }
 
 fn decode_shaders(chunk: &W3dChunk, maximum: usize) -> Result<Vec<W3dShader>, W3dMaterialError> {
@@ -990,13 +1201,40 @@ fn decode_texture(
             require_length(TEXTURE_INFO_CHUNK, bytes.len(), TEXTURE_INFO_BYTES)?;
             let mut reader = BinaryReader::new(bytes, "W3D texture info");
             let attributes = reader.read_u16_le()?;
-            let animation_type = reader.read_u16_le()?;
+            let raw_animation_type = reader.read_u16_le()?;
+            let animation_type = match raw_animation_type {
+                0 => W3dTextureAnimationType::Loop,
+                1 => W3dTextureAnimationType::PingPong,
+                2 => W3dTextureAnimationType::Once,
+                3 => W3dTextureAnimationType::Manual,
+                _ => {
+                    return Err(W3dMaterialError::InvalidTextureAnimationType {
+                        texture: texture_index,
+                        animation_type: raw_animation_type,
+                    });
+                }
+            };
             let frame_count = reader.read_u32_le()?;
+            if frame_count == 0 {
+                return Err(W3dMaterialError::ZeroTextureFrameCount {
+                    texture: texture_index,
+                });
+            }
+            limited_count(
+                frame_count,
+                "W3D texture animation frame count",
+                limits.maximum_texture_animation_frames,
+            )?;
             let frame_rate = f32::from_bits(reader.read_u32_le()?);
             if !frame_rate.is_finite() {
                 return Err(W3dMaterialError::NonFiniteTextureValue {
                     what: "texture frame rate",
                     index: texture_index,
+                });
+            }
+            if frame_count > 1 && frame_rate <= 0.0 {
+                return Err(W3dMaterialError::ZeroAnimatedTextureFrameRate {
+                    texture: texture_index,
                 });
             }
             Ok(W3dTextureInfo {
@@ -1046,6 +1284,26 @@ fn decode_pass(
     let diffuse_colors = unique_child(children, DIFFUSE_COLORS_CHUNK)?
         .map(|chunk| parse_diffuse_colors(require_data(chunk)?, context.vertex_count))
         .transpose()?;
+    let diffuse_illumination = unique_child(children, DIFFUSE_ILLUMINATION_CHUNK)?
+        .map(|chunk| {
+            parse_rgb_colors(
+                require_data(chunk)?,
+                DIFFUSE_ILLUMINATION_CHUNK,
+                context.vertex_count,
+                "diffuse illumination array",
+            )
+        })
+        .transpose()?;
+    let specular_colors = unique_child(children, SPECULAR_COLORS_CHUNK)?
+        .map(|chunk| {
+            parse_rgb_colors(
+                require_data(chunk)?,
+                SPECULAR_COLORS_CHUNK,
+                context.vertex_count,
+                "specular color array",
+            )
+        })
+        .transpose()?;
     let shader_ids = unique_child(children, SHADER_IDS_CHUNK)?
         .map(|chunk| {
             parse_face_ids(
@@ -1084,6 +1342,8 @@ fn decode_pass(
         vertex_material_ids,
         shader_ids,
         diffuse_colors,
+        diffuse_illumination,
+        specular_colors,
         texture_stages,
     })
 }
@@ -1299,6 +1559,22 @@ fn parse_diffuse_colors(
     Ok(colors)
 }
 
+fn parse_rgb_colors(
+    bytes: &[u8],
+    chunk_id: u32,
+    vertex_count: usize,
+    what: &'static str,
+) -> Result<Vec<W3dRgb8>, W3dMaterialError> {
+    let expected = payload_size(vertex_count, COLOR_BYTES, what)?;
+    require_length(chunk_id, bytes.len(), expected)?;
+    let mut reader = BinaryReader::new(bytes, "W3D RGB color array");
+    let mut colors = Vec::with_capacity(vertex_count);
+    for _ in 0..vertex_count {
+        colors.push(read_rgb(&mut reader)?);
+    }
+    Ok(colors)
+}
+
 fn unique_child(children: &[W3dChunk], id: u32) -> Result<Option<&W3dChunk>, W3dMaterialError> {
     let mut matching = children.iter().filter(|child| child.id() == id);
     let first = matching.next();
@@ -1414,10 +1690,13 @@ fn payload_size(
 #[cfg(test)]
 mod tests {
     use super::{
-        DIFFUSE_COLORS_CHUNK, MATERIAL_INFO_CHUNK, MATERIAL_PASS_CHUNK, SHADER_IDS_CHUNK,
-        SHADERS_CHUNK, STAGE_TEXCOORDS_CHUNK, TEXTURE_CHUNK, TEXTURE_IDS_CHUNK, TEXTURE_INFO_CHUNK,
-        TEXTURE_NAME_CHUNK, TEXTURE_STAGE_CHUNK, TEXTURES_CHUNK, VERTEX_MATERIAL_IDS_CHUNK,
-        VERTEX_MATERIAL_NAME_CHUNK, W3dFaceIds, W3dMaterialError, W3dMaterialIds,
+        DIFFUSE_COLORS_CHUNK, DIFFUSE_ILLUMINATION_CHUNK, MATERIAL_INFO_CHUNK, MATERIAL_PASS_CHUNK,
+        SHADER_IDS_CHUNK, SHADERS_CHUNK, SPECULAR_COLORS_CHUNK, STAGE_TEXCOORDS_CHUNK,
+        TEXTURE_CHUNK, TEXTURE_IDS_CHUNK, TEXTURE_INFO_CHUNK, TEXTURE_NAME_CHUNK,
+        TEXTURE_STAGE_CHUNK, TEXTURES_CHUNK, VERTEX_MAPPER_ARGS0_CHUNK, VERTEX_MAPPER_ARGS1_CHUNK,
+        VERTEX_MATERIAL_CHUNK, VERTEX_MATERIAL_IDS_CHUNK, VERTEX_MATERIAL_INFO_CHUNK,
+        VERTEX_MATERIAL_NAME_CHUNK, VERTEX_MATERIALS_CHUNK, W3dFaceIds, W3dMaterialError,
+        W3dMaterialIds,
     };
     use crate::{W3dChunk, W3dLimits, W3dMeshError, W3dMeshLimits, decode_static_mesh, parse_w3d};
 
@@ -1509,6 +1788,78 @@ mod tests {
             + 8
     }
 
+    fn increase_container_length(bytes: &mut [u8], header: usize, addition: usize) {
+        let size = u32::from_le_bytes(
+            bytes[header + 4..header + 8]
+                .try_into()
+                .expect("container size word"),
+        );
+        let payload = (size & 0x7FFF_FFFF)
+            .checked_add(u32::try_from(addition).expect("test addition fits u32"))
+            .expect("test container size fits u32");
+        bytes[header + 4..header + 8].copy_from_slice(&(payload | 0x8000_0000).to_le_bytes());
+    }
+
+    fn enhanced_material_fixture() -> Vec<u8> {
+        let mut bytes = fixture();
+        let file = parse_w3d(&bytes, "enhanced-material.w3d", W3dLimits::default())
+            .expect("valid base fixture");
+        let mesh = &file.chunks()[0];
+        let materials =
+            find_chunk(file.chunks(), VERTEX_MATERIALS_CHUNK).expect("vertex-material wrapper");
+        let material =
+            find_chunk(file.chunks(), VERTEX_MATERIAL_CHUNK).expect("vertex-material container");
+        let mesh_header = mesh.offset();
+        let wrapper_header = materials.offset();
+        let vertex_material_header = material.offset();
+        let insertion = vertex_material_header + 8 + material.payload_length();
+        let mut mapper_chunks = Vec::new();
+        append_chunk(
+            &mut mapper_chunks,
+            VERTEX_MAPPER_ARGS0_CHUNK,
+            false,
+            b"UPerSec=1.0;\0",
+        );
+        append_chunk(
+            &mut mapper_chunks,
+            VERTEX_MAPPER_ARGS1_CHUNK,
+            false,
+            b"Speed=0.25;\0",
+        );
+        let addition = mapper_chunks.len();
+        bytes.splice(insertion..insertion, mapper_chunks);
+        increase_container_length(&mut bytes, vertex_material_header, addition);
+        increase_container_length(&mut bytes, wrapper_header, addition);
+        increase_container_length(&mut bytes, mesh_header, addition);
+
+        let info = payload_offset(&bytes, VERTEX_MATERIAL_INFO_CHUNK);
+        bytes[info..info + 4].copy_from_slice(&0x0004_0800_u32.to_le_bytes());
+
+        let file = parse_w3d(&bytes, "enhanced-material.w3d", W3dLimits::default())
+            .expect("valid mapper fixture");
+        let pass = find_chunk(file.chunks(), MATERIAL_PASS_CHUNK).expect("material pass");
+        let pass_header = pass.offset();
+        let insertion = pass_header + 8 + pass.payload_length();
+        let mut color_chunks = Vec::new();
+        append_chunk(
+            &mut color_chunks,
+            DIFFUSE_ILLUMINATION_CHUNK,
+            false,
+            &[10, 20, 30, 0, 40, 50, 60, 0, 70, 80, 90, 0],
+        );
+        append_chunk(
+            &mut color_chunks,
+            SPECULAR_COLORS_CHUNK,
+            false,
+            &[1, 2, 3, 0, 4, 5, 6, 0, 7, 8, 9, 0],
+        );
+        let addition = color_chunks.len();
+        bytes.splice(insertion..insertion, color_chunks);
+        increase_container_length(&mut bytes, pass_header, addition);
+        increase_container_length(&mut bytes, mesh_header, addition);
+        bytes
+    }
+
     #[test]
     fn decodes_vertex_material_diffuse_color_and_single_assignment() {
         let mesh = decode(&fixture()).expect("valid colored mesh");
@@ -1557,6 +1908,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn decodes_shader_texture_binding_and_uvs() {
         let mesh = decode(&textured_fixture()).expect("valid textured mesh");
         let materials = mesh.materials();
@@ -1618,6 +1970,39 @@ mod tests {
             ))
         ));
 
+        let mut invalid_animation = textured_fixture();
+        let texture_info = payload_offset(&invalid_animation, TEXTURE_INFO_CHUNK);
+        invalid_animation[texture_info + 2..texture_info + 4].copy_from_slice(&4_u16.to_le_bytes());
+        assert!(matches!(
+            decode(&invalid_animation),
+            Err(W3dMeshError::Material(
+                W3dMaterialError::InvalidTextureAnimationType {
+                    texture: 0,
+                    animation_type: 4
+                }
+            ))
+        ));
+
+        let mut zero_frames = textured_fixture();
+        let texture_info = payload_offset(&zero_frames, TEXTURE_INFO_CHUNK);
+        zero_frames[texture_info + 4..texture_info + 8].copy_from_slice(&0_u32.to_le_bytes());
+        assert!(matches!(
+            decode(&zero_frames),
+            Err(W3dMeshError::Material(
+                W3dMaterialError::ZeroTextureFrameCount { texture: 0 }
+            ))
+        ));
+
+        let mut stopped_animation = textured_fixture();
+        let texture_info = payload_offset(&stopped_animation, TEXTURE_INFO_CHUNK);
+        stopped_animation[texture_info + 4..texture_info + 8].copy_from_slice(&2_u32.to_le_bytes());
+        assert!(matches!(
+            decode(&stopped_animation),
+            Err(W3dMeshError::Material(
+                W3dMaterialError::ZeroAnimatedTextureFrameRate { texture: 0 }
+            ))
+        ));
+
         let bytes = textured_fixture();
         let file = parse_w3d(&bytes, "texture-limit.w3d", W3dLimits::default())
             .expect("valid chunk framing");
@@ -1653,6 +2038,36 @@ mod tests {
                     maximum: 0
                 }
             )))
+        ));
+    }
+
+    #[test]
+    fn decodes_mapper_arguments_and_secondary_pass_colors() {
+        let bytes = enhanced_material_fixture();
+        let mesh = decode(&bytes).expect("enhanced material fixture");
+        let material = &mesh.materials().vertex_materials()[0];
+        let mapper0 = material.mapper(0).expect("stage zero mapper");
+        assert_eq!(mapper0.mode().code(), 4);
+        assert_eq!(mapper0.mode().name(), Some("linear_offset"));
+        assert_eq!(mapper0.argument_bytes(), Some(b"UPerSec=1.0;".as_slice()));
+        let mapper1 = material.mapper(1).expect("stage one mapper");
+        assert_eq!(mapper1.mode().code(), 8);
+        assert_eq!(mapper1.argument_bytes(), Some(b"Speed=0.25;".as_slice()));
+        let pass = &mesh.materials().passes()[0];
+        assert_eq!(pass.diffuse_illumination().expect("DIG")[2].green(), 80);
+        assert_eq!(pass.specular_colors().expect("SCG")[1].blue(), 6);
+
+        let mut unterminated = bytes;
+        let arguments = payload_offset(&unterminated, VERTEX_MAPPER_ARGS0_CHUNK);
+        unterminated[arguments + b"UPerSec=1.0;".len()] = b'!';
+        assert!(matches!(
+            decode(&unterminated),
+            Err(W3dMeshError::Material(
+                W3dMaterialError::UnterminatedMapperArguments {
+                    material: 0,
+                    stage: 0
+                }
+            ))
         ));
     }
 

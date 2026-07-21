@@ -5,7 +5,8 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
 use cic_formats::{
-    W3dAnimationChannel, W3dAnimationChannelKind, W3dMaterialIds, W3dModel, W3dStaticMesh,
+    W3dAnimationChannel, W3dAnimationChannelKind, W3dAnimationEncoding, W3dFaceIds, W3dMaterialIds,
+    W3dModel, W3dStaticMesh,
 };
 use serde_json::{Map, Value, json};
 
@@ -26,6 +27,7 @@ const HIDDEN_ATTACHMENT_SCALE: f32 = 0.000_1;
 pub struct GltfTextureRequest {
     source_name: Vec<u8>,
     output_name: String,
+    additive_preview: bool,
 }
 
 impl GltfTextureRequest {
@@ -36,6 +38,13 @@ impl GltfTextureRequest {
     #[must_use]
     pub fn output_name(&self) -> &str {
         &self.output_name
+    }
+
+    /// Returns whether this image is a derived core-glTF approximation of W3D `ONE + ONE`
+    /// additive blending rather than the unmodified decoded source image.
+    #[must_use]
+    pub const fn is_additive_preview(&self) -> bool {
+        self.additive_preview
     }
 }
 
@@ -199,6 +208,12 @@ struct MaterialKey {
     vertex_material: Option<u32>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum TextureVariant {
+    Source,
+    AdditivePreview,
+}
+
 #[derive(Default)]
 struct BufferBuilder {
     bytes: Vec<u8>,
@@ -303,7 +318,8 @@ pub fn render_w3d_gltf(
     let mut textures_json = Vec::new();
     let mut samplers = Vec::new();
     let mut requests = Vec::new();
-    let mut texture_map = BTreeMap::new();
+    let mut source_texture_map = BTreeMap::new();
+    let mut additive_texture_map = BTreeMap::new();
 
     for (mesh_index, model_mesh) in model.meshes().iter().enumerate() {
         let mesh = model_mesh.mesh();
@@ -372,7 +388,8 @@ pub fn render_w3d_gltf(
                 key,
                 !expanded.colors.is_empty(),
                 texture_directory,
-                &mut texture_map,
+                &mut source_texture_map,
+                &mut additive_texture_map,
                 &mut materials,
                 &mut images,
                 &mut textures_json,
@@ -396,7 +413,25 @@ pub fn render_w3d_gltf(
             }
             primitives.push(json!({"attributes": attributes, "indices": index_accessor, "material": material, "mode": 4}));
         }
-        meshes.push(json!({"name": mesh_name(mesh), "primitives": primitives}));
+        for texture_id in 0..mesh.materials().textures().len() {
+            ensure_gltf_texture(
+                mesh,
+                mesh_index,
+                u32::try_from(texture_id).expect("bounded texture index"),
+                texture_directory,
+                TextureVariant::Source,
+                &mut source_texture_map,
+                &mut images,
+                &mut textures_json,
+                &mut samplers,
+                &mut requests,
+            );
+        }
+        meshes.push(json!({
+            "name": mesh_name(mesh),
+            "primitives": primitives,
+            "extras": build_w3d_material_extras(mesh, mesh_index, &source_texture_map)
+        }));
     }
 
     let (nodes, mesh_nodes, pivot_nodes) = build_nodes(model);
@@ -566,33 +601,58 @@ fn build_material(
     key: MaterialKey,
     has_colors: bool,
     texture_directory: &str,
-    texture_map: &mut BTreeMap<(usize, u32), usize>,
+    source_texture_map: &mut BTreeMap<(usize, u32), usize>,
+    additive_texture_map: &mut BTreeMap<(usize, u32), usize>,
     materials: &mut Vec<Value>,
     images: &mut Vec<Value>,
     textures_json: &mut Vec<Value>,
     samplers: &mut Vec<Value>,
     requests: &mut Vec<GltfTextureRequest>,
 ) -> usize {
-    let texture = key.texture.map(|texture_id| {
-        *texture_map.entry((mesh_index, texture_id)).or_insert_with(|| {
-            let source = &mesh.materials().textures()[usize::try_from(texture_id).expect("decoded texture ID")];
-            let output_name = format!(
-                "m{mesh_index:03}_t{texture_id:04}_{}.png",
-                safe_stem(source.name_bytes())
-            );
-            let image_index = images.len();
-            images.push(json!({"name":String::from_utf8_lossy(source.name_bytes()), "uri":format!("{texture_directory}/{output_name}")}));
-            let attributes = source
-                .info()
-                .map_or(0, cic_formats::W3dTextureInfo::attributes);
-            let sampler_index = samplers.len();
-            samplers.push(json!({"wrapS":if attributes & 0x8 != 0 {33071} else {10497}, "wrapT":if attributes & 0x10 != 0 {33071} else {10497}}));
-            let texture_index = textures_json.len();
-            textures_json.push(json!({"source":image_index, "sampler":sampler_index}));
-            requests.push(GltfTextureRequest { source_name: source.name_bytes().to_vec(), output_name });
-            texture_index
-        })
+    let shader = key
+        .shader
+        .and_then(|id| usize::try_from(id).ok())
+        .and_then(|id| mesh.materials().shaders().get(id))
+        .copied();
+    let source_texture = key.texture.map(|texture_id| {
+        ensure_gltf_texture(
+            mesh,
+            mesh_index,
+            texture_id,
+            texture_directory,
+            TextureVariant::Source,
+            source_texture_map,
+            images,
+            textures_json,
+            samplers,
+            requests,
+        )
     });
+    // Provenance: W3DSHADER_SRCBLEND_ONE and W3DSHADER_DESTBLEND_ONE selector values come
+    // from `w3d_file.h` in GeneralsGameCode revision
+    // `9f7abb866f5afd446db14149979e744c7216baaf`; see `docs/provenance/w3d.md`. Core glTF has
+    // no additive blend equation, so use a separate derived image for its visible preview while
+    // retaining the unmodified decoded source image above for fixed-function metadata consumers.
+    let additive_preview =
+        shader.is_some_and(|shader| shader.source_blend() == 1 && shader.destination_blend() == 1);
+    let texture = if additive_preview {
+        key.texture.map(|texture_id| {
+            ensure_gltf_texture(
+                mesh,
+                mesh_index,
+                texture_id,
+                texture_directory,
+                TextureVariant::AdditivePreview,
+                additive_texture_map,
+                images,
+                textures_json,
+                samplers,
+                requests,
+            )
+        })
+    } else {
+        source_texture
+    };
     let vertex_material = key
         .vertex_material
         .and_then(|id| usize::try_from(id).ok())
@@ -617,11 +677,6 @@ fn build_material(
     if let Some(texture) = texture {
         pbr.insert("baseColorTexture".into(), json!({"index":texture}));
     }
-    let shader = key
-        .shader
-        .and_then(|id| usize::try_from(id).ok())
-        .and_then(|id| mesh.materials().shaders().get(id))
-        .copied();
     let alpha_mode = shader.map_or("OPAQUE", |shader| {
         if shader.alpha_test() != 0 {
             "MASK"
@@ -643,9 +698,203 @@ fn build_material(
         material.insert("alphaCutoff".into(), json!(0.5));
     }
     material.insert("doubleSided".into(), json!(false));
-    material.insert("extras".into(), json!({"w3dShader":key.shader}));
+    material.insert(
+        "extras".into(),
+        json!({
+            "w3dShader": key.shader,
+            "w3dPreviewBlend": if additive_preview {
+                "additive-alpha-coverage-v1"
+            } else {
+                "source-rgba"
+            }
+        }),
+    );
     materials.push(Value::Object(material));
     material_index
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ensure_gltf_texture(
+    mesh: &W3dStaticMesh,
+    mesh_index: usize,
+    texture_id: u32,
+    texture_directory: &str,
+    variant: TextureVariant,
+    texture_map: &mut BTreeMap<(usize, u32), usize>,
+    images: &mut Vec<Value>,
+    textures_json: &mut Vec<Value>,
+    samplers: &mut Vec<Value>,
+    requests: &mut Vec<GltfTextureRequest>,
+) -> usize {
+    *texture_map
+        .entry((mesh_index, texture_id))
+        .or_insert_with(|| {
+            let source = &mesh.materials().textures()
+                [usize::try_from(texture_id).expect("decoded texture ID")];
+            let suffix = match variant {
+                TextureVariant::Source => "",
+                TextureVariant::AdditivePreview => "_additive-preview",
+            };
+            let output_name = format!(
+                "m{mesh_index:03}_t{texture_id:04}_{}{suffix}.png",
+                safe_stem(source.name_bytes())
+            );
+            let image_index = images.len();
+            images.push(json!({
+                "name": String::from_utf8_lossy(source.name_bytes()),
+                "uri": format!("{texture_directory}/{output_name}")
+            }));
+            let attributes = source
+                .info()
+                .map_or(0, cic_formats::W3dTextureInfo::attributes);
+            let sampler_index = samplers.len();
+            samplers.push(json!({
+                "wrapS": if attributes & 0x8 != 0 { 33071 } else { 10497 },
+                "wrapT": if attributes & 0x10 != 0 { 33071 } else { 10497 }
+            }));
+            let texture_index = textures_json.len();
+            textures_json.push(json!({"source":image_index, "sampler":sampler_index}));
+            requests.push(GltfTextureRequest {
+                source_name: source.name_bytes().to_vec(),
+                output_name,
+                additive_preview: variant == TextureVariant::AdditivePreview,
+            });
+            texture_index
+        })
+}
+
+#[allow(clippy::too_many_lines)]
+fn build_w3d_material_extras(
+    mesh: &W3dStaticMesh,
+    mesh_index: usize,
+    texture_map: &BTreeMap<(usize, u32), usize>,
+) -> Value {
+    // Project-authored interchange policy. Field meanings come from the GPL-3.0-or-later
+    // GeneralsGameCode revision named in `docs/provenance/w3d.md`; no upstream code is copied.
+    let materials = mesh.materials();
+    let vertex_materials = materials
+        .vertex_materials()
+        .iter()
+        .map(|material| {
+            let mappers = (0..2)
+                .map(|stage| {
+                    let mapper = material.mapper(stage).expect("fixed mapper stage");
+                    json!({
+                        "stage": stage,
+                        "mode": mapper.mode().code(),
+                        "modeName": mapper.mode().name(),
+                        "argumentBytes": mapper.argument_bytes()
+                    })
+                })
+                .collect::<Vec<_>>();
+            json!({
+                "nameBytes": material.name_bytes(),
+                "attributes": material.attributes(),
+                "ambient": rgb_json(material.ambient()),
+                "diffuse": rgb_json(material.diffuse()),
+                "specular": rgb_json(material.specular()),
+                "emissive": rgb_json(material.emissive()),
+                "shininessBits": material.shininess().to_bits(),
+                "opacityBits": material.opacity().to_bits(),
+                "translucencyBits": material.translucency().to_bits(),
+                "mappers": mappers
+            })
+        })
+        .collect::<Vec<_>>();
+    let shaders = materials
+        .shaders()
+        .iter()
+        .map(|shader| json!(shader.bytes()))
+        .collect::<Vec<_>>();
+    let textures = materials
+        .textures()
+        .iter()
+        .enumerate()
+        .map(|(texture_id, texture)| {
+            let info = texture.info().map(|info| {
+                json!({
+                    "attributes": info.attributes(),
+                    "animationType": info.animation_type(),
+                    "frameCount": info.frame_count(),
+                    "frameRateBits": info.frame_rate().to_bits()
+                })
+            });
+            let texture_id = u32::try_from(texture_id).expect("bounded texture index");
+            json!({
+                "nameBytes": texture.name_bytes(),
+                "info": info,
+                "gltfTexture": texture_map.get(&(mesh_index, texture_id))
+            })
+        })
+        .collect::<Vec<_>>();
+    let passes = materials
+        .passes()
+        .iter()
+        .enumerate()
+        .map(|(pass_index, pass)| {
+            let stages = pass
+                .texture_stages()
+                .iter()
+                .enumerate()
+                .map(|(stage_index, stage)| {
+                    let coordinate_bits = stage
+                        .texture_coordinates()
+                        .iter()
+                        .map(|coordinate| [coordinate.u().to_bits(), coordinate.v().to_bits()])
+                        .collect::<Vec<_>>();
+                    json!({
+                        "stage": stage_index,
+                        "textureIds": face_ids_json(stage.texture_ids()),
+                        "textureCoordinateBits": coordinate_bits,
+                        "perFaceTextureCoordinateIds": stage.per_face_coordinate_ids()
+                    })
+                })
+                .collect::<Vec<_>>();
+            json!({
+                "pass": pass_index,
+                "vertexMaterialIds": material_ids_json(pass.vertex_material_ids()),
+                "shaderIds": face_ids_json(pass.shader_ids()),
+                "diffuseColors": pass.diffuse_colors().map(|colors| colors.iter().map(|color| [color.red(), color.green(), color.blue(), color.alpha()]).collect::<Vec<_>>()),
+                "diffuseIllumination": pass.diffuse_illumination().map(|colors| colors.iter().map(|color| [color.red(), color.green(), color.blue()]).collect::<Vec<_>>()),
+                "specularColors": pass.specular_colors().map(|colors| colors.iter().map(|color| [color.red(), color.green(), color.blue()]).collect::<Vec<_>>()),
+                "textureStages": stages
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "w3dMaterialPolicy": "fixed-function-metadata-v1",
+        "visiblePreview": {"pass": 0, "stage": 0, "approximation": "metallic-roughness"},
+        "materialInfo": materials.info().map(|info| json!({
+            "passes": info.pass_count(),
+            "vertexMaterials": info.vertex_material_count(),
+            "shaders": info.shader_count(),
+            "textures": info.texture_count()
+        })),
+        "vertexMaterials": vertex_materials,
+        "shaders": shaders,
+        "textures": textures,
+        "passes": passes
+    })
+}
+
+fn rgb_json(color: cic_formats::W3dRgb8) -> [u8; 3] {
+    [color.red(), color.green(), color.blue()]
+}
+
+fn material_ids_json(ids: Option<&W3dMaterialIds>) -> Value {
+    match ids {
+        None => Value::Null,
+        Some(W3dMaterialIds::Single(id)) => json!({"single": id}),
+        Some(W3dMaterialIds::PerVertex(ids)) => json!({"perVertex": ids}),
+    }
+}
+
+fn face_ids_json(ids: Option<&W3dFaceIds>) -> Value {
+    match ids {
+        None => Value::Null,
+        Some(W3dFaceIds::Single(id)) => json!({"single": id}),
+        Some(W3dFaceIds::PerTriangle(ids)) => json!({"perTriangle": ids}),
+    }
 }
 
 fn build_nodes(model: &W3dModel) -> (Vec<Value>, Vec<(usize, usize)>, Vec<usize>) {
@@ -691,7 +940,7 @@ fn build_nodes(model: &W3dModel) -> (Vec<Value>, Vec<(usize, usize)>, Vec<usize>
     (nodes, mesh_nodes, pivot_nodes)
 }
 
-#[allow(clippy::cast_precision_loss)]
+#[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
 fn build_animations(
     model: &W3dModel,
     pivot_nodes: &[usize],
@@ -793,7 +1042,17 @@ fn build_animations(
             }
         }
         if !channels_json.is_empty() {
-            result.push(json!({"name":String::from_utf8_lossy(animation.name_bytes()), "samplers":samplers, "channels":channels_json}));
+            let encoding = match animation.encoding() {
+                W3dAnimationEncoding::Raw => "raw",
+                W3dAnimationEncoding::TimeCoded => "time-coded",
+                W3dAnimationEncoding::AdaptiveDelta => "adaptive-delta",
+            };
+            result.push(json!({
+                "name": String::from_utf8_lossy(animation.name_bytes()),
+                "samplers": samplers,
+                "channels": channels_json,
+                "extras": {"w3dEncoding": encoding}
+            }));
         }
     }
     result
@@ -922,11 +1181,10 @@ fn sample_scalar(
     let Some(channel) = channels.iter().find(|channel| channel.kind() == kind) else {
         return 0.0;
     };
-    if frame < u32::from(channel.first_frame()) || frame > u32::from(channel.last_frame()) {
+    if frame < channel.first_frame() || frame > channel.last_frame() {
         return 0.0;
     }
-    channel.values()
-        [usize::try_from(frame - u32::from(channel.first_frame())).expect("frame index")]
+    channel.values()[usize::try_from(frame - channel.first_frame()).expect("frame index")]
 }
 
 fn sample_quaternion(channels: &[&W3dAnimationChannel], frame: u32) -> [f32; 4] {
@@ -936,11 +1194,10 @@ fn sample_quaternion(channels: &[&W3dAnimationChannel], frame: u32) -> [f32; 4] 
     else {
         return [0.0, 0.0, 0.0, 1.0];
     };
-    if frame < u32::from(channel.first_frame()) || frame > u32::from(channel.last_frame()) {
+    if frame < channel.first_frame() || frame > channel.last_frame() {
         return [0.0, 0.0, 0.0, 1.0];
     }
-    let offset =
-        usize::try_from(frame - u32::from(channel.first_frame())).expect("frame index") * 4;
+    let offset = usize::try_from(frame - channel.first_frame()).expect("frame index") * 4;
     normalize(
         channel.values()[offset..offset + 4]
             .try_into()

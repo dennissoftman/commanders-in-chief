@@ -106,8 +106,8 @@ Decoded values have no rendering, filesystem, or simulation dependencies.
 
 ## Material colors
 
-The first material gate decodes color-relevant values without interpreting shaders or
-textures. `W3D_CHUNK_MATERIAL_INFO` is exactly four little-endian 32-bit counts: material
+The material decoder retains color, mapper, shader, and texture values without attaching them
+to renderer state. `W3D_CHUNK_MATERIAL_INFO` is exactly four little-endian 32-bit counts: material
 passes, vertex materials, shaders, and textures. Vertex materials are child containers;
 their optional zero-terminated name and required 32-byte info record contain:
 
@@ -120,6 +120,11 @@ their optional zero-terminated name and required 32-byte info record contain:
 Each `W3D_CHUNK_MATERIAL_PASS` may contain one vertex-material ID shared by the mesh or
 one ID per vertex. IDs must be below the declared and decoded vertex-material count. An
 optional DCG chunk contains exactly one four-byte RGBA value per vertex.
+Optional `DIG` diffuse-illumination and `SCG` specular arrays contain one padded four-byte RGB
+value per vertex. The two mapper selectors occupy the stage-zero and stage-one attribute bytes;
+their optional `MAPPER_ARGS0`/`MAPPER_ARGS1` chunks are bounded zero-terminated byte strings.
+All 21 mapping modes named by the pinned header are exposed, while unknown selector bytes remain
+identifiable by their raw value.
 
 For preview output, the first pass resolves explicit DCG colors first; otherwise it maps
 each vertex to its vertex material's diffuse RGB. The semantic defaults limit meshes to
@@ -136,7 +141,9 @@ host locale and formatting do not affect output.
 The shader table is a packed array of 16-byte fixed-function records. Texture entries
 contain one required, bounded zero-terminated filename and an optional 12-byte record:
 16-bit attributes, 16-bit animation type, 32-bit frame count, and a finite 32-bit frame
-rate. Declared shader and texture counts must exactly match their decoded tables.
+rate. Animation types are loop, ping-pong, once, and manual; frame count must be nonzero,
+animated textures require a positive rate, and configured frame limits apply before use.
+Declared shader and texture counts must exactly match their decoded tables.
 
 Material-pass shader IDs and texture-stage texture IDs are either one 32-bit value or one
 value per triangle. Texture ID `0xFFFFFFFF` means no texture; every other shader or texture
@@ -170,8 +177,17 @@ supported channels contain one. Retail exporters can leave unused whole-float sa
 the end of a channel, matching the original loader's bounded close-chunk behavior; partial
 float padding is rejected. Root-pivot animation is ignored as in the runtime.
 
+Compressed-animation headers use the same names and frame count, a 16-bit frame rate, and a
+16-bit flavor. Time-coded channels contain bounded, strictly increasing sparse keys beginning at
+frame zero. The high bit on the following key selects a step instead of linear/scalar or spherical
+quaternion interpolation. Adaptive-delta channels contain initial float values followed by one
+filter byte and eight packed signed four-bit deltas per 16-frame packet. Both flavors are expanded
+into the same immutable per-frame channel values as raw animation, with a separate 64,000,000-value
+budget per animation to prevent compressed expansion attacks. Malformed counts, time codes,
+vectors, packet lengths, non-finite results, and pivot indices return structured errors.
+
 `cic-inspect w3d-export <virtual-path> [<output.glb>] [<mount>...]` composes the final HLOD,
-referenced hierarchy, skinning, and matching raw animation clips. If the retail layout
+referenced hierarchy, skinning, and matching raw or compressed animation clips. If the retail layout
 splits `_SKN`, `_SKL`, and animation W3Ds, sibling resources are discovered through the
 same VFS. The default output is one self-contained GLB named after the resource basename;
 an explicit output path overrides it. Passing `--gltf` before the virtual path instead
@@ -191,12 +207,19 @@ tools-layer preview policy rather than a change to decoded animation values.
 
 All directory and BIG inputs share one VFS. Texture resolution tries the encoded name and
 `art/textures/<name>`; a `.tga` reference may resolve to the retail `.dds` replacement.
-Only referenced user-owned images are decoded and converted to PNG. Decoded straight-alpha
-RGBA texels are preserved and tagged sRGB because they feed glTF base-color textures; no
-extra gamma transform is applied. Later mounts retain the normal override policy. Missing
-images produce a warned 1x1 magenta placeholder so a model remains inspectable. Additional
-W3D passes/stages remain decoded but are not mapped into the first-pass glTF preview
-material.
+Only referenced user-owned images are decoded and converted to PNG. Source straight-alpha
+RGBA texels are preserved and tagged sRGB; no extra gamma transform is applied. For a
+`ONE + ONE` additive shader, core glTF cannot express the source framebuffer blend equation,
+so the exporter retains that source PNG and emits a separate `additive-alpha-coverage-v1`
+preview image. Black pixels receive zero alpha; nonblack RGB is unassociated from coverage
+using deterministic integer arithmetic. Later mounts retain the normal override policy. Missing
+images produce a warned 1x1 magenta placeholder so a model remains inspectable. Additional W3D
+passes and stages do not have a faithful core glTF fixed-function equivalent. Export therefore
+uses an explicit `fixed-function-metadata-v1` policy: pass zero/stage zero supplies the visible
+metallic-roughness approximation, every referenced base texture is packaged, and mesh extras retain
+all passes, stages, assignments, shader bytes, mapper arguments, animated-texture descriptors,
+color arrays, and exact float bits. This closes the interchange/inspection surface without claiming
+visual blend equivalence; a project renderer can consume the same immutable values later.
 
 ## Current safety limits
 
@@ -205,6 +228,9 @@ material.
 - Zero-based nesting depth: 64.
 - Payload lengths are limited to the bounded file region.
 - All offset additions and count increments are checked.
+- Compressed animation output: 64,000,000 float values per animation.
+- Mapper argument string: 4,096 bytes excluding its terminator.
+- Animated texture: 65,536 declared frames.
 
 ## Synthetic fixture
 
@@ -222,8 +248,12 @@ with one red vertex material and one material pass. Tests also synthesize an exp
 red/green/blue DCG array and cover precedence, count, ID, name, and allocation failures.
 
 The composed completion fixture adds an original two-pivot hierarchy, highest-detail HLOD,
-translation animation, fixed-function shader, texture, one stage, and three UV pairs. Its
+raw and time-coded translation animations, fixed-function shader, texture, two passes, two stages,
+and three UV pairs. Its
 skin, hierarchy, and animation are split into separate W3Ds in a synthetic `W3D.big`; an
 independent synthetic `Textures.big` contains an original 2x2 TGA. The CLI integration
 test proves cross-resource composition, a valid single-file GLB, optional external glTF,
-and exact decoded RGBA preservation in sRGB PNG output.
+exact decoded source-RGBA preservation in sRGB PNG output, a separate additive preview image,
+both animation encodings, and deterministic fixed-function mesh metadata. Unit fixtures
+independently cover additive black-pixel transparency, adaptive-delta packets, mapper
+strings, `DIG`/`SCG` arrays, texture-animation validation, truncation, ordering, and expansion limits.

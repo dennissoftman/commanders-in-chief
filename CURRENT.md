@@ -2,9 +2,8 @@
 
 ## Objective
 
-Complete preview-grade W3D model composition and GLB/glTF export, including
-installed-resource profiles, split skeleton/skin resources, textures, skinning, and
-classic raw animation.
+Begin the R2 renderer-ingestion and animated-viewer gate using the now-complete bounded W3D
+format/interchange surface.
 
 ## Implemented foundation
 
@@ -60,8 +59,10 @@ classic raw animation.
   2.0 JSON, an external binary buffer, and PNG images. Both forms include hierarchy nodes,
   rigid and skinned meshes, animation clips, and first-pass materials. The resource basename
   determines the default output name, with an optional explicit output-path override.
-- Converted base-color PNGs preserve decoded RGBA texels, carry explicit sRGB metadata,
-  and remain straight-alpha images; the GLB form embeds them as image buffer views.
+- Source PNGs preserve decoded RGBA texels, carry explicit sRGB metadata, and remain
+  straight-alpha images; the GLB form embeds them as image buffer views. W3D `ONE + ONE`
+  materials additionally receive a separate derived alpha-coverage image for the visible
+  core-glTF preview because core glTF has no additive framebuffer blend equation.
 - Generals is the default installed-resource profile. `--zh` deterministically overlays
   Zero Hour on its Generals base; `--game-dir`, saved configuration, environment roots, and
   validated Steam discovery avoid repeated archive arguments.
@@ -73,14 +74,31 @@ classic raw animation.
   preserving ordinary motion and every decoded clip.
 - W3D skin vertices are exported in their decoded bone-local space with identity glTF inverse binds;
   installed infantry bind poses and animation no longer separate into local-origin body parts.
+- Time-coded and adaptive-delta compressed animations decode to immutable per-frame channels under
+  explicit frame, channel, time-code, packet, and 64,000,000-value expansion limits.
+- Synthetic GLB integration exports raw and compressed sibling clips together. An installed
+  infantry export produced 20 actions, including one verified time-coded compressed clip.
+- Vertex-material mapper modes and bounded argument strings, `DIG`/`SCG` pass colors, and validated
+  animated-texture descriptors decode into renderer-neutral values.
+- `fixed-function-metadata-v1` GLB/glTF mesh extras retain every pass, stage, assignment, shader
+  byte, mapper, texture descriptor, color array, and exact float bit pattern while the visible core
+  glTF approximation remains explicitly pass zero/stage zero.
+- An installed building export verified two-pass metadata, two textures, and a non-UV environment
+  mapper on two meshes; every table texture was packaged without retaining retail data.
+- The installed `abarfrccmd.w3d` airstrip lights verified opaque source DDS alpha plus `ONE + ONE`
+  shader blending. Their preserved source PNGs remain byte-equivalent after decode, while derived
+  preview images make black texels transparent and route only the visible glTF materials to them.
 
 ## Known blockers
 
 - `BIG4` remains implemented from corroborating source but unverified against retail data.
-- Compressed animation, secondary W3D passes/stages, mapper arguments, animated textures,
-  and exact fixed-function blend behavior are not yet represented by the preview policy.
+- Core glTF cannot reproduce exact W3D fixed-function multi-pass blending or animated mapper
+  behavior; complete decoded metadata is available for the renderer gate.
+- Adaptive-delta animation is synthetic-verified but has not yet been observed in an installed
+  export.
 
 ## Next verified step
 
-Decide whether to close the remaining W3D compatibility gaps (compressed animation and
-additional material stages) before advancing R2 toward renderer ingestion or R3 terrain.
+Write the renderer-boundary ADR, select the minimal cross-platform graphics backend, and introduce
+the renderer crate with a headless synthetic triangle/pose capture before adding an interactive
+animated viewer.

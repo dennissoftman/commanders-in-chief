@@ -28,7 +28,13 @@ observable behavior.
 | W3D | Hierarchy and highest-detail HLOD composition | verified | Split synthetic fixture + installed composed models |
 | W3D | One-bone skin influences | verified | Synthetic glTF assertions + installed Zero Hour infantry |
 | W3D | Classic raw animation | verified | Synthetic clip + 23-action Blender import |
-| W3D | Compressed animation | unknown | Not implemented |
+| W3D | Time-coded compressed animation | verified | Synthetic interpolation/step/negative tests + installed infantry GLB |
+| W3D | Adaptive-delta compressed animation | implemented | Synthetic packet/decompression/negative tests |
+| W3D | Secondary material passes/stages | verified | Synthetic two-pass/two-stage GLB metadata + installed two-pass meshes |
+| W3D | Mapper modes and argument strings | verified | Synthetic bounded-string tests + installed environment mapper |
+| W3D | Animated-texture descriptors | implemented | Validated type/count/rate tests + deterministic GLB metadata |
+| W3D | Additive light-sprite glTF preview | verified | Synthetic source/derived image test + installed `abarfrccmd.w3d` airstrip lights |
+| W3D | Exact fixed-function visual blending | unknown | Exact shader/pass/stage data retained; core glTF preview is explicitly pass 0/stage 0 |
 | W3D | GLB/glTF 2.0 preview export | verified | Synthetic CLI/PNG tests + Blender 3.3 GLB import |
 | Resources | Generals install profile and Steam discovery | verified | Installed Steam export + synthetic `--game-dir` test |
 | Resources | Zero Hour base/delta profile | verified | Installed layered `--zh` exports |

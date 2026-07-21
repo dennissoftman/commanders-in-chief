@@ -304,6 +304,7 @@ fn textured_mesh_fixture() -> Vec<u8> {
     bytes[84..88].copy_from_slice(&0x0000_0011_u32.to_le_bytes());
     bytes[276..280].copy_from_slice(&1_u32.to_le_bytes());
     bytes[280..284].copy_from_slice(&1_u32.to_le_bytes());
+    bytes[268..272].copy_from_slice(&2_u32.to_le_bytes());
     append_w3d_chunk(&mut bytes, 0x3A, false, &0_u32.to_le_bytes());
     let mut stage = Vec::new();
     append_w3d_chunk(&mut stage, 0x49, false, &0_u32.to_le_bytes());
@@ -313,12 +314,18 @@ fn textured_mesh_fixture() -> Vec<u8> {
     }
     append_w3d_chunk(&mut stage, 0x4A, false, &uv);
     append_w3d_chunk(&mut bytes, 0x48, true, &stage);
-    bytes[356..360].copy_from_slice(&(76_u32 | 0x8000_0000).to_le_bytes());
+    append_w3d_chunk(&mut bytes, 0x48, true, &stage);
+    bytes[356..360].copy_from_slice(&(128_u32 | 0x8000_0000).to_le_bytes());
+    let mut second_pass = Vec::new();
+    append_w3d_chunk(&mut second_pass, 0x39, false, &0_u32.to_le_bytes());
+    append_w3d_chunk(&mut second_pass, 0x3A, false, &0_u32.to_le_bytes());
+    append_w3d_chunk(&mut second_pass, 0x48, true, &stage);
+    append_w3d_chunk(&mut bytes, 0x38, true, &second_pass);
     append_w3d_chunk(
         &mut bytes,
         0x29,
         false,
-        &[3, 1, 0, 0, 0, 1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0],
+        &[3, 1, 0, 1, 0, 1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0],
     );
     let mut texture = Vec::new();
     append_w3d_chunk(&mut texture, 0x32, false, b"checker.tga\0");
@@ -335,7 +342,8 @@ fn textured_mesh_fixture() -> Vec<u8> {
         influences.extend_from_slice(&[0; 6]);
     }
     append_w3d_chunk(&mut bytes, 0x0E, false, &influences);
-    bytes[4..8].copy_from_slice(&(540_u32 | 0x8000_0000).to_le_bytes());
+    let mesh_payload = u32::try_from(bytes.len() - 8).expect("mesh fixture payload fits u32");
+    bytes[4..8].copy_from_slice(&(mesh_payload | 0x8000_0000).to_le_bytes());
     bytes
 }
 
@@ -361,7 +369,7 @@ fn fixed_name<const N: usize>(name: &[u8]) -> [u8; N] {
     result
 }
 
-fn split_textured_model_fixture() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+fn split_textured_model_fixture() -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) {
     let hierarchy_name = fixed_name::<16>(b"TestHierarchy");
     let mut hierarchy_header = Vec::new();
     hierarchy_header.extend_from_slice(&0x0004_0001_u32.to_le_bytes());
@@ -402,6 +410,25 @@ fn split_textured_model_fixture() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
     append_w3d_chunk(&mut animation, 0x201, false, &animation_header);
     append_w3d_chunk(&mut animation, 0x202, false, &animation_channel);
 
+    let mut compressed_header = Vec::new();
+    compressed_header.extend_from_slice(&1_u32.to_le_bytes());
+    compressed_header.extend_from_slice(&fixed_name::<16>(b"CompressedMove"));
+    compressed_header.extend_from_slice(&hierarchy_name);
+    compressed_header.extend_from_slice(&2_u32.to_le_bytes());
+    compressed_header.extend_from_slice(&30_u16.to_le_bytes());
+    compressed_header.extend_from_slice(&0_u16.to_le_bytes());
+    let mut compressed_channel = Vec::new();
+    compressed_channel.extend_from_slice(&2_u32.to_le_bytes());
+    compressed_channel.extend_from_slice(&1_u16.to_le_bytes());
+    compressed_channel.extend_from_slice(&[1, 2]);
+    compressed_channel.extend_from_slice(&0_u32.to_le_bytes());
+    compressed_channel.extend_from_slice(&0.0_f32.to_le_bytes());
+    compressed_channel.extend_from_slice(&1_u32.to_le_bytes());
+    compressed_channel.extend_from_slice(&1.0_f32.to_le_bytes());
+    let mut compressed_animation = Vec::new();
+    append_w3d_chunk(&mut compressed_animation, 0x281, false, &compressed_header);
+    append_w3d_chunk(&mut compressed_animation, 0x282, false, &compressed_channel);
+
     let mut hlod_header = Vec::new();
     hlod_header.extend_from_slice(&0x0001_0000_u32.to_le_bytes());
     hlod_header.extend_from_slice(&1_u32.to_le_bytes());
@@ -424,12 +451,25 @@ fn split_textured_model_fixture() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
     append_w3d_chunk(&mut hierarchy_file, 0x100, true, &hierarchy);
     let mut animation_file = Vec::new();
     append_w3d_chunk(&mut animation_file, 0x200, true, &animation);
+    let mut compressed_animation_file = Vec::new();
+    append_w3d_chunk(
+        &mut compressed_animation_file,
+        0x280,
+        true,
+        &compressed_animation,
+    );
     let mut model_file = textured_mesh_fixture();
     append_w3d_chunk(&mut model_file, 0x700, true, &hlod);
-    (model_file, hierarchy_file, animation_file)
+    (
+        model_file,
+        hierarchy_file,
+        animation_file,
+        compressed_animation_file,
+    )
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn installed_profile_exports_single_glb_by_default_and_optional_gltf() {
     let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("textured-w3d-cli");
     if root.exists() {
@@ -438,13 +478,17 @@ fn installed_profile_exports_single_glb_by_default_and_optional_gltf() {
     fs::create_dir_all(&root).expect("create test tree");
     let mesh_archive = root.join("W3D.big");
     let texture_archive = root.join("Textures.big");
-    let (model, hierarchy, animation) = split_textured_model_fixture();
+    let (model, hierarchy, animation, compressed_animation) = split_textured_model_fixture();
     fs::write(
         &mesh_archive,
         big_with_entries(&[
             (r"Art\W3D\textured_skn.w3d", &model),
             (r"Art\W3D\testhierarchy.w3d", &hierarchy),
             (r"Art\W3D\testhierarchy_move.w3d", &animation),
+            (
+                r"Art\W3D\testhierarchy_compressed.w3d",
+                &compressed_animation,
+            ),
         ]),
     )
     .expect("write mesh archive");
@@ -469,11 +513,53 @@ fn installed_profile_exports_single_glb_by_default_and_optional_gltf() {
     assert_eq!(document["asset"]["version"], "2.0");
     assert!(document["buffers"][0].get("uri").is_none());
     assert_eq!(document["meshes"].as_array().map(Vec::len), Some(1));
-    assert_eq!(document["animations"].as_array().map(Vec::len), Some(1));
+    assert_eq!(document["animations"].as_array().map(Vec::len), Some(2));
+    let encodings = document["animations"]
+        .as_array()
+        .expect("animation array")
+        .iter()
+        .map(|animation| {
+            animation["extras"]["w3dEncoding"]
+                .as_str()
+                .expect("encoding")
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        encodings,
+        std::collections::BTreeSet::from(["raw", "time-coded"])
+    );
     assert_eq!(document["skins"].as_array().map(Vec::len), Some(1));
     assert!(document["skins"][0].get("inverseBindMatrices").is_none());
     assert!(document["materials"][0].get("alphaCutoff").is_none());
+    assert_eq!(document["materials"][0]["alphaMode"], "BLEND");
+    assert_eq!(
+        document["materials"][0]["extras"]["w3dPreviewBlend"],
+        "additive-alpha-coverage-v1"
+    );
+    assert_eq!(
+        document["materials"][0]["pbrMetallicRoughness"]["baseColorTexture"]["index"],
+        1
+    );
+    let material_extras = &document["meshes"][0]["extras"];
+    assert_eq!(
+        material_extras["w3dMaterialPolicy"],
+        "fixed-function-metadata-v1"
+    );
+    assert_eq!(material_extras["passes"].as_array().map(Vec::len), Some(2));
+    assert_eq!(
+        material_extras["passes"][0]["textureStages"]
+            .as_array()
+            .map(Vec::len),
+        Some(2)
+    );
+    assert_eq!(
+        material_extras["vertexMaterials"][0]["mappers"][0]["modeName"],
+        "uv"
+    );
+    assert_eq!(material_extras["textures"][0]["info"]["frameCount"], 1);
+    assert_eq!(material_extras["textures"][0]["gltfTexture"], 0);
     assert_skinned_mesh_is_scene_root(&document);
+    assert_eq!(document["images"].as_array().map(Vec::len), Some(2));
     assert_eq!(document["images"][0]["mimeType"], "image/png");
     assert!(document["images"][0].get("uri").is_none());
     let image_view = document["images"][0]["bufferView"]
@@ -504,7 +590,7 @@ fn installed_profile_exports_single_glb_by_default_and_optional_gltf() {
     assert_eq!(document["asset"]["version"], "2.0");
     assert_eq!(document["buffers"][0]["uri"], "textured.bin");
     assert_eq!(document["meshes"].as_array().map(Vec::len), Some(1));
-    assert_eq!(document["animations"].as_array().map(Vec::len), Some(1));
+    assert_eq!(document["animations"].as_array().map(Vec::len), Some(2));
     assert_eq!(document["materials"].as_array().map(Vec::len), Some(1));
     assert_eq!(document["skins"].as_array().map(Vec::len), Some(1));
     assert!(document["meshes"][0]["primitives"][0]["attributes"]["JOINTS_0"].is_number());
@@ -512,6 +598,10 @@ fn installed_profile_exports_single_glb_by_default_and_optional_gltf() {
     assert_eq!(
         document["images"][0]["uri"],
         "textured_textures/m000_t0000_checker.png"
+    );
+    assert_eq!(
+        document["images"][1]["uri"],
+        "textured_textures/m000_t0000_checker_additive-preview.png"
     );
     assert!(
         !fs::read(root.join("textured.bin"))
@@ -521,6 +611,10 @@ fn installed_profile_exports_single_glb_by_default_and_optional_gltf() {
     let png = fs::read(root.join("textured_textures/m000_t0000_checker.png"))
         .expect("read converted PNG");
     assert_png_preserves_srgb_texels(&tga, &png);
+    assert!(
+        root.join("textured_textures/m000_t0000_checker_additive-preview.png")
+            .is_file()
+    );
     fs::remove_dir_all(root).expect("remove test tree");
 }
 

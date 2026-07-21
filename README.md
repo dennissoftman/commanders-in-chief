@@ -28,11 +28,15 @@ With no output argument, the resource basename determines the result: `model.w3d
 `model.glb`, or `model.gltf` with `--gltf`. An explicit output path overrides that name.
 GLB is one self-contained file; `--gltf` instead writes JSON, an external `.bin`, and PNG
 images beneath a sibling `_textures` directory. The exporter composes HLOD
-meshes, hierarchy transforms, skins, and classic raw animation clips, including retail
-layouts that split `_SKN`, `_SKL`, and animation W3Ds. First-pass colors, shaders,
-textures, and UVs are preserved for preview; W3D `.tga` references may resolve to installed
-`.dds` replacements. Base-color images preserve decoded RGBA texels and are explicitly
-tagged sRGB in PNG output. A missing retail image produces a visible magenta placeholder
+meshes, hierarchy transforms, skins, and raw or compressed animation clips, including retail
+layouts that split `_SKN`, `_SKL`, and animation W3Ds. Pass-zero/stage-zero colors, shaders,
+textures, and UVs drive the visible core-glTF preview; versioned mesh extras preserve every W3D
+pass, stage, mapper, shader, and animated-texture descriptor for inspection and later renderer
+ingestion. W3D `.tga` references may resolve to installed `.dds` replacements. Source images
+preserve decoded RGBA texels and are explicitly tagged sRGB in PNG output. Additive `ONE + ONE`
+materials use a separate derived alpha-coverage image in the core-glTF preview so black sprite
+backgrounds remain invisible without changing the packaged source image. A missing retail image
+produces a visible magenta placeholder
 and warning instead of preventing geometry inspection.
 
 Use `--game-dir <path>` for a one-off installation or persist roots explicitly:
