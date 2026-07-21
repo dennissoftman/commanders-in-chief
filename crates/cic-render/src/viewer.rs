@@ -208,15 +208,18 @@ impl ApplicationHandler for ViewerApplication {
             }
             WindowEvent::RedrawRequested => {
                 let frame = self.animation_frame();
-                let rotation =
-                    self.viewer_started.elapsed().as_secs_f64() * ROTATION_RADIANS_PER_SECOND;
+                let elapsed = self.viewer_started.elapsed().as_secs_f64();
+                let rotation = elapsed * ROTATION_RADIANS_PER_SECOND;
                 #[allow(clippy::cast_possible_truncation)]
                 let rotation = rotation as f32;
+                #[allow(clippy::cast_possible_truncation)]
+                let mapper_time_seconds = elapsed as f32;
                 let result = self.gpu.as_mut().map_or(Ok(()), |gpu| {
                     gpu.render(
                         &self.model,
                         self.active_animation,
                         frame,
+                        mapper_time_seconds,
                         rotation,
                         self.framing,
                     )
@@ -241,9 +244,7 @@ struct ViewerGpu {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
-    opaque_pipeline: wgpu::RenderPipeline,
-    alpha_pipeline: wgpu::RenderPipeline,
-    additive_pipeline: wgpu::RenderPipeline,
+    pipelines: MaterialPipelines,
     resources: GpuResourceManager,
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
@@ -297,33 +298,8 @@ impl ViewerGpu {
             bind_group_layouts: &[Some(&material_layout)],
             immediate_size: 0,
         });
-        let opaque_pipeline = create_pipeline(
-            &device,
-            &shader,
-            &pipeline_layout,
-            config.format,
-            "cic-render opaque pipeline",
-            None,
-            true,
-        );
-        let alpha_pipeline = create_pipeline(
-            &device,
-            &shader,
-            &pipeline_layout,
-            config.format,
-            "cic-render alpha pipeline",
-            Some(wgpu::BlendState::ALPHA_BLENDING),
-            false,
-        );
-        let additive_pipeline = create_pipeline(
-            &device,
-            &shader,
-            &pipeline_layout,
-            config.format,
-            "cic-render additive pipeline",
-            Some(additive_blend()),
-            false,
-        );
+        let pipelines =
+            MaterialPipelines::new(&device, &shader, &pipeline_layout, config.format, "viewer");
         let resources = GpuResourceManager::new(&device, &queue, model, &material_layout)?;
         let vertex_size = u64::try_from(
             model
@@ -352,9 +328,7 @@ impl ViewerGpu {
             surface,
             device,
             queue,
-            opaque_pipeline,
-            alpha_pipeline,
-            additive_pipeline,
+            pipelines,
             resources,
             vertex_buffer,
             index_buffer,
@@ -379,6 +353,7 @@ impl ViewerGpu {
         model: &AnimatedModel,
         animation: Option<usize>,
         frame: u32,
+        mapper_time_seconds: f32,
         rotation: f32,
         framing: ModelFraming,
     ) -> Result<(), ViewerError> {
@@ -400,7 +375,14 @@ impl ViewerGpu {
         };
         #[allow(clippy::cast_precision_loss)]
         let aspect = self.config.width as f32 / self.config.height as f32;
-        let vertices = model.frame_vertex_bytes(animation, frame, rotation, aspect, framing)?;
+        let vertices = model.frame_vertex_bytes(
+            animation,
+            frame,
+            mapper_time_seconds,
+            rotation,
+            aspect,
+            framing,
+        )?;
         self.queue.write_buffer(&self.vertex_buffer, 0, &vertices);
         let view = surface_texture
             .texture
@@ -450,11 +432,7 @@ impl ViewerGpu {
                     .materials
                     .get(draw.material)
                     .ok_or(RenderError::InvalidMaterial)?;
-                let pipeline = match material.blend {
-                    BlendMode::Opaque => &self.opaque_pipeline,
-                    BlendMode::Alpha => &self.alpha_pipeline,
-                    BlendMode::Additive => &self.additive_pipeline,
-                };
+                let pipeline = self.pipelines.get(material.blend, material.depth_write);
                 let end = draw
                     .first_index
                     .checked_add(draw.index_count)
@@ -474,25 +452,27 @@ impl ViewerGpu {
     }
 }
 
-struct GpuTexture {
+pub(crate) struct GpuTexture {
     _texture: wgpu::Texture,
     view: wgpu::TextureView,
 }
 
-struct GpuMaterial {
+pub(crate) struct GpuMaterial {
     _sampler: wgpu::Sampler,
     _uniform: wgpu::Buffer,
-    bind_group: wgpu::BindGroup,
-    blend: BlendMode,
+    pub(crate) bind_group: wgpu::BindGroup,
+    pub(crate) blend: BlendMode,
+    pub(crate) depth_write: bool,
 }
 
-struct GpuResourceManager {
+pub(crate) struct GpuResourceManager {
     _textures: Vec<GpuTexture>,
-    materials: Vec<GpuMaterial>,
+    pub(crate) materials: Vec<GpuMaterial>,
 }
 
 impl GpuResourceManager {
-    fn new(
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         model: &AnimatedModel,
@@ -592,6 +572,7 @@ impl GpuResourceManager {
                 _uniform: uniform,
                 bind_group,
                 blend: material.blend,
+                depth_write: material.depth_write,
             });
         }
         Ok(Self {
@@ -601,7 +582,7 @@ impl GpuResourceManager {
     }
 }
 
-fn create_material_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+pub(crate) fn create_material_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("cic-render material layout"),
         entries: &[
@@ -641,7 +622,7 @@ fn create_pipeline(
     shader: &wgpu::ShaderModule,
     layout: &wgpu::PipelineLayout,
     format: wgpu::TextureFormat,
-    label: &'static str,
+    label: &str,
     blend: Option<wgpu::BlendState>,
     depth_write_enabled: bool,
 ) -> wgpu::RenderPipeline {
@@ -691,7 +672,7 @@ fn create_pipeline(
         depth_stencil: Some(wgpu::DepthStencilState {
             format: wgpu::TextureFormat::Depth32Float,
             depth_write_enabled: Some(depth_write_enabled),
-            depth_compare: Some(wgpu::CompareFunction::Less),
+            depth_compare: Some(wgpu::CompareFunction::LessEqual),
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),
@@ -713,6 +694,97 @@ fn additive_blend() -> wgpu::BlendState {
             dst_factor: wgpu::BlendFactor::One,
             operation: wgpu::BlendOperation::Add,
         },
+    }
+}
+
+fn multiply_blend() -> wgpu::BlendState {
+    wgpu::BlendState {
+        color: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::Dst,
+            dst_factor: wgpu::BlendFactor::Zero,
+            operation: wgpu::BlendOperation::Add,
+        },
+        alpha: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::DstAlpha,
+            dst_factor: wgpu::BlendFactor::Zero,
+            operation: wgpu::BlendOperation::Add,
+        },
+    }
+}
+
+pub(crate) struct MaterialPipelines {
+    opaque: wgpu::RenderPipeline,
+    overlay: wgpu::RenderPipeline,
+    alpha: wgpu::RenderPipeline,
+    additive: wgpu::RenderPipeline,
+    multiply: wgpu::RenderPipeline,
+}
+
+impl MaterialPipelines {
+    pub(crate) fn new(
+        device: &wgpu::Device,
+        shader: &wgpu::ShaderModule,
+        layout: &wgpu::PipelineLayout,
+        format: wgpu::TextureFormat,
+        label_prefix: &str,
+    ) -> Self {
+        Self {
+            opaque: create_pipeline(
+                device,
+                shader,
+                layout,
+                format,
+                &format!("cic-render {label_prefix} opaque pipeline"),
+                None,
+                true,
+            ),
+            overlay: create_pipeline(
+                device,
+                shader,
+                layout,
+                format,
+                &format!("cic-render {label_prefix} overlay pipeline"),
+                None,
+                false,
+            ),
+            alpha: create_pipeline(
+                device,
+                shader,
+                layout,
+                format,
+                &format!("cic-render {label_prefix} alpha pipeline"),
+                Some(wgpu::BlendState::ALPHA_BLENDING),
+                false,
+            ),
+            additive: create_pipeline(
+                device,
+                shader,
+                layout,
+                format,
+                &format!("cic-render {label_prefix} additive pipeline"),
+                Some(additive_blend()),
+                false,
+            ),
+            multiply: create_pipeline(
+                device,
+                shader,
+                layout,
+                format,
+                &format!("cic-render {label_prefix} multiply pipeline"),
+                Some(multiply_blend()),
+                false,
+            ),
+        }
+    }
+
+    pub(crate) fn get(&self, blend: BlendMode, depth_write: bool) -> &wgpu::RenderPipeline {
+        match (blend, depth_write) {
+            (BlendMode::Opaque, true) => &self.opaque,
+            (BlendMode::Opaque, false) => &self.overlay,
+            (BlendMode::Alpha, _) => &self.alpha,
+            (BlendMode::Additive, _) => &self.additive,
+            (BlendMode::Multiply, _) => &self.multiply,
+        }
     }
 }
 

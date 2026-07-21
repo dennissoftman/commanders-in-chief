@@ -21,6 +21,7 @@
   - `Core/Libraries/Source/WWVegas/WW3D2/hcanim.cpp`
 - Mapper reference:
   - `Core/Libraries/Source/WWVegas/WW3D2/MAPPERS.TXT`
+  - `GeneralsMD/Code/Libraries/Source/WWVegas/WW3D2/mapper.cpp`
 - Permanent links:
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/Libraries/Source/WWVegas/WWLib/chunkio.h>
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/Libraries/Source/WWVegas/WWLib/chunkio.cpp>
@@ -34,6 +35,7 @@
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/GeneralsMD/Code/Libraries/Source/WWVegas/WW3D2/motchan.cpp>
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/Libraries/Source/WWVegas/WW3D2/hcanim.cpp>
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/Libraries/Source/WWVegas/WW3D2/MAPPERS.TXT>
+  - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/GeneralsMD/Code/Libraries/Source/WWVegas/WW3D2/mapper.cpp>
 - Upstream notice: Command & Conquer Generals Zero Hour; Copyright 2025 Electronic Arts
   Inc.; historical notices identify Westwood Studios.
 - License: GNU GPL version 3 or later with the Electronic Arts Section 7 additional terms
@@ -54,7 +56,9 @@ The compressed-animation header and loaders establish time-coded and adaptive-de
 their fixed channel headers, binary movement flag, sparse interpolation, four-bit signed deltas,
 nine-byte delta packets, and 256-entry filter construction. The vertex-material attributes and
 mapper reference establish two mapper selectors, their argument-string chunks, and the named
-fixed-function mapping modes. The material-pass declarations also establish the `DIG` and `SCG`
+fixed-function mapping modes. `mapper.cpp` establishes argument defaults, explicit elapsed-time
+matrix formulas, legacy negative linear-offset rates, atlas frame ordering, and temporal wrapping.
+The material-pass declarations also establish the `DIG` and `SCG`
 four-byte RGB arrays and texture animation type, count, and rate fields.
 
 ## Runtime verification
@@ -101,6 +105,12 @@ opaque black rectangles. A second installed smoke rendered four materials and fo
 switching among 39 infantry clips with fixed per-clip framing. No retail bytes, images, names, or
 captures were retained in the repository.
 
+On 2026-07-21, the completed headless material path rendered the user-owned airstrip as 27 stable
+pass/stage draws with 17 effective materials and 14 unique textures; its additive lights retained
+transparent black backgrounds. The same explicit-input path rendered installed infantry animation
+frame 1 as four textured draws. Only hashes and aggregate counts were recorded; no retail bytes,
+images, names, or captures were retained in the repository.
+
 ## Implementation record
 
 The Rust implementations in `crates/cic-formats/src/w3d.rs`, `w3d_mesh.rs`,
@@ -112,3 +122,7 @@ No C++ source code was copied, translated line by line, or imported. The immutab
 mesh and material values, structured errors, limits, exact-size checks, index validation,
 color resolution, absolute offsets, and unknown-payload preservation policy are native to
 this repository.
+
+The temporal mapper evaluator in `crates/cic-render/src/model.rs` was authored from the pinned
+argument/default/formula facts above. It replaces legacy global sync time with an explicit caller
+value and replaces mutable random state with a deterministic frame-derived preview sequence.

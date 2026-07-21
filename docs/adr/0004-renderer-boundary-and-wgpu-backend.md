@@ -62,15 +62,35 @@ zero. Every subsequent tick applies only the decoded pose and Z-up model rotatio
 fixed framing; it does not recenter or rescale from the current animated bounds. Resizing adjusts
 only the projection aspect ratio. Selecting another clip computes a new framing once.
 
-Texture lookup and image decoding remain in `cic-tools`, which resolves only pass-zero/stage-zero
-images through the VFS. It skips repeated decoding when aliases resolve to the same virtual path.
+Texture lookup and image decoding remain in `cic-tools`, which resolves only referenced images from
+all decoded passes/stages through the VFS. It skips repeated decoding when aliases resolve to the
+same virtual path.
 The renderer's bounded `TextureResourceManager` validates dimensions and RGBA length, caps each
 image and aggregate retained bytes, normalizes aliases, and deduplicates decoded content by
 dimensions plus SHA-256 of straight-alpha RGBA bytes. Mesh staging expands triangle corners for
 per-face UV indices, preserves triangle order, and deduplicates effective materials by texture ID,
 sampler clamp state, alpha test, and blend policy. GPU upload creates each unique sRGB image once;
 opaque, source-alpha, and `ONE + ONE` additive pipelines reuse those image views and material bind
-groups. Remaining W3D passes, additional stages, and mapper animation stay explicit later gates.
+groups.
+
+The completed R2 preview expands vertices for every mesh/pass/stage in stable file order. Stage
+zero uses the pass shader's decoded opaque, source-alpha, or `ONE + ONE` additive preview blend;
+later stages multiply their sampled color into the framebuffer. Only the first opaque pass/stage
+writes depth, and all later submissions use `LessEqual` without depth writes. This is an explicit
+portable preview policy, not a claim of exact legacy texture-combiner equivalence.
+
+Temporal mapper arguments are parsed once during staging and sampled on the CPU from explicit
+seconds. Linear, scale, grid and grid-environment atlas offsets, rotate, sine, step, zigzag,
+deterministic-random, edge, and bump-linear inputs follow the pinned mapper defaults/formulas.
+Random mapping replaces the legacy mutable RNG with a stable frame-derived preview sequence.
+Spatial environment/screen coordinate generation remains outside R2's preview equivalence claim.
+The window supplies elapsed presentation seconds; `ModelFrame` supplies animation index/frame,
+mapper seconds, and rotation to headless capture without renderer clock ownership.
+
+`cic-inspect w3d-render` now stages `AnimatedModel` with VFS-resolved texture resources and uses the
+same material pipelines as the viewer. Its synthetic completion fixture contains two passes, two
+stages, a raw animation, and a linear-offset mapper; the explicit frame/time capture has a checked
+RGBA hash.
 
 ## Consequences
 
@@ -79,6 +99,5 @@ groups. Remaining W3D passes, additional stages, and mapper animation stay expli
 - Backend choice is explicit and versioned; interactive presentation is an opt-in tools workflow.
 - The renderer now owns a `winit` presentation surface for the opt-in viewer while headless capture
   remains window-free.
-- GPU output equality is currently asserted only for the deliberately simple RGBA8 diagnostic.
-  Fixed-function blending, textures, and deterministic animated-pose captures remain subsequent
-  renderer gates.
+- GPU output equality is asserted for both the deliberately simple RGBA8 triangle and the composed
+  synthetic textured multi-pass animated-pose diagnostic.

@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 
 pub use model::{AnimatedModel, StagedModel};
 pub use resource::{TextureId, TextureImage, TextureResourceManager};
+use viewer::{GpuResourceManager, MaterialPipelines, create_material_layout};
 pub use viewer::{ViewerError, run_model_viewer};
 
 const CAPTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -112,6 +113,47 @@ impl Pose {
     }
 }
 
+/// Explicit animation and mapper inputs for one deterministic model frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ModelFrame {
+    animation: Option<usize>,
+    frame: u32,
+    mapper_time_seconds: f32,
+    rotation: f32,
+}
+
+impl ModelFrame {
+    pub const BIND_POSE: Self = Self {
+        animation: None,
+        frame: 0,
+        mapper_time_seconds: 0.0,
+        rotation: 0.0,
+    };
+
+    /// Creates explicit deterministic animation, mapper-time, and model-rotation inputs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RenderError::NonFinitePose`] for negative/non-finite mapper time or non-finite
+    /// rotation.
+    pub fn new(
+        animation: Option<usize>,
+        frame: u32,
+        mapper_time_seconds: f32,
+        rotation: f32,
+    ) -> Result<Self, RenderError> {
+        if !mapper_time_seconds.is_finite() || mapper_time_seconds < 0.0 || !rotation.is_finite() {
+            return Err(RenderError::NonFinitePose);
+        }
+        Ok(Self {
+            animation,
+            frame,
+            mapper_time_seconds,
+            rotation,
+        })
+    }
+}
+
 /// One tightly packed RGBA8 headless frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Capture {
@@ -160,6 +202,8 @@ pub struct HeadlessRenderer {
     queue: wgpu::Queue,
     synthetic_pipeline: wgpu::RenderPipeline,
     model_pipeline: wgpu::RenderPipeline,
+    material_layout: wgpu::BindGroupLayout,
+    material_pipelines: MaterialPipelines,
     pose_buffer: wgpu::Buffer,
     pose_bind_group: wgpu::BindGroup,
     adapter: wgpu::AdapterInfo,
@@ -308,11 +352,31 @@ impl HeadlessRenderer {
             multiview_mask: None,
             cache: None,
         });
+        let textured_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("cic-render textured model shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("viewer.wgsl").into()),
+        });
+        let material_layout = create_material_layout(&device);
+        let material_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("cic-render headless material pipeline layout"),
+                bind_group_layouts: &[Some(&material_layout)],
+                immediate_size: 0,
+            });
+        let material_pipelines = MaterialPipelines::new(
+            &device,
+            &textured_shader,
+            &material_pipeline_layout,
+            CAPTURE_FORMAT,
+            "headless",
+        );
         Ok(Self {
             device,
             queue,
             synthetic_pipeline,
             model_pipeline,
+            material_layout,
+            material_pipelines,
             pose_buffer,
             pose_bind_group,
             adapter: adapter.get_info(),
@@ -533,6 +597,157 @@ impl HeadlessRenderer {
         self.finish_capture(encoder, &readback, width, height, unpadded_row, padded_row)
     }
 
+    /// Renders one textured composed W3D at explicit animation-frame and mapper-time inputs.
+    ///
+    /// The selected clip is framed once from frame zero, matching the interactive viewer. Draws
+    /// are submitted in stable mesh/pass/stage/triangle order and do not read a clock.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured error for invalid explicit inputs, dimensions, animation/material
+    /// references, excessive GPU resources, or submission/readback failures.
+    #[allow(clippy::too_many_lines)]
+    pub fn capture_animated_model(
+        &self,
+        width: u32,
+        height: u32,
+        model: &AnimatedModel,
+        frame: ModelFrame,
+    ) -> Result<Capture, RenderError> {
+        let (unpadded_row, padded_row, buffer_size) = capture_layout(width, height)?;
+        #[allow(clippy::cast_precision_loss)]
+        let aspect = width as f32 / height as f32;
+        let framing = model.framing(frame.animation)?;
+        let vertex_bytes = model.frame_vertex_bytes(
+            frame.animation,
+            frame.frame,
+            frame.mapper_time_seconds,
+            frame.rotation,
+            aspect,
+            framing,
+        )?;
+        let index_bytes = model.index_bytes();
+        let vertex_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cic-render animated model vertices"),
+            size: u64::try_from(vertex_bytes.len()).map_err(|_| RenderError::GeometryTooLarge)?,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let index_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cic-render animated model indices"),
+            size: u64::try_from(index_bytes.len()).map_err(|_| RenderError::GeometryTooLarge)?,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.queue.write_buffer(&vertex_buffer, 0, &vertex_bytes);
+        self.queue.write_buffer(&index_buffer, 0, &index_bytes);
+        let resources =
+            GpuResourceManager::new(&self.device, &self.queue, model, &self.material_layout)?;
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("cic-render animated model target"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: CAPTURE_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let depth = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("cic-render animated model depth"),
+            size: texture.size(),
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cic-render animated model readback"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("cic-render animated model encoder"),
+            });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("cic-render animated model pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.015,
+                            g: 0.02,
+                            b: 0.03,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+            pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            for draw in model.draws() {
+                let material = resources
+                    .materials
+                    .get(draw.material)
+                    .ok_or(RenderError::InvalidMaterial)?;
+                let end = draw
+                    .first_index
+                    .checked_add(draw.index_count)
+                    .ok_or(RenderError::GeometryTooLarge)?;
+                pass.set_pipeline(
+                    self.material_pipelines
+                        .get(material.blend, material.depth_write),
+                );
+                pass.set_bind_group(0, &material.bind_group, &[]);
+                pass.draw_indexed(draw.first_index..end, 0, 0..1);
+            }
+        }
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            texture.size(),
+        );
+        self.finish_capture(encoder, &readback, width, height, unpadded_row, padded_row)
+    }
+
     fn finish_capture(
         &self,
         encoder: wgpu::CommandEncoder,
@@ -637,7 +852,8 @@ impl Display for RenderError {
             Self::MapBuffer(error) => write!(formatter, "mapping headless capture: {error}"),
             Self::MapRange(error) => write!(formatter, "reading headless capture: {error}"),
             Self::MapCallbackTimeout => formatter.write_str("headless capture callback timed out"),
-            Self::NonFinitePose => formatter.write_str("pose translation must be finite"),
+            Self::NonFinitePose => formatter
+                .write_str("pose, rotation, and mapper-time inputs must be finite and valid"),
             Self::EmptyCapture => formatter.write_str("capture dimensions must be positive"),
             Self::CaptureTooLarge => formatter.write_str("capture byte size exceeds limits"),
             Self::EmptyModel => formatter.write_str("model contains no renderable triangles"),
@@ -675,7 +891,7 @@ impl Error for RenderError {
 
 #[cfg(test)]
 mod tests {
-    use super::{Pose, StagedMesh};
+    use super::{ModelFrame, Pose, StagedMesh};
     use cic_formats::{W3dLimits, W3dMeshLimits, decode_static_mesh, parse_w3d};
 
     #[test]
@@ -708,5 +924,13 @@ mod tests {
     fn pose_rejects_non_finite_translation() {
         assert!(Pose::translation(f32::NAN, 0.0).is_err());
         assert!(Pose::translation(0.0, f32::INFINITY).is_err());
+    }
+
+    #[test]
+    fn model_frame_rejects_implicit_or_invalid_time() {
+        assert!(ModelFrame::new(Some(0), 7, 0.5, 0.25).is_ok());
+        assert!(ModelFrame::new(None, 0, -0.1, 0.0).is_err());
+        assert!(ModelFrame::new(None, 0, f32::NAN, 0.0).is_err());
+        assert!(ModelFrame::new(None, 0, 0.0, f32::INFINITY).is_err());
     }
 }

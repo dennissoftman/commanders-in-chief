@@ -1,6 +1,7 @@
 use std::fs;
 use std::process::Command;
 
+use cic_formats::{W3dChunk, W3dLimits, parse_w3d};
 use serde_json::json;
 
 #[test]
@@ -344,7 +345,67 @@ fn textured_mesh_fixture() -> Vec<u8> {
     append_w3d_chunk(&mut bytes, 0x0E, false, &influences);
     let mesh_payload = u32::try_from(bytes.len() - 8).expect("mesh fixture payload fits u32");
     bytes[4..8].copy_from_slice(&(mesh_payload | 0x8000_0000).to_le_bytes());
+    add_linear_mapper(&mut bytes);
     bytes
+}
+
+fn find_w3d_chunk(chunks: &[W3dChunk], id: u32) -> Option<&W3dChunk> {
+    for chunk in chunks {
+        if chunk.id() == id {
+            return Some(chunk);
+        }
+        if let Some(found) = chunk
+            .children()
+            .and_then(|children| find_w3d_chunk(children, id))
+        {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn increase_w3d_container(bytes: &mut [u8], header: usize, addition: usize) {
+    let size = u32::from_le_bytes(
+        bytes[header + 4..header + 8]
+            .try_into()
+            .expect("container size word"),
+    );
+    let payload = (size & 0x7FFF_FFFF)
+        .checked_add(u32::try_from(addition).expect("fixture addition fits u32"))
+        .expect("fixture container remains bounded");
+    bytes[header + 4..header + 8].copy_from_slice(&(payload | 0x8000_0000).to_le_bytes());
+}
+
+fn add_linear_mapper(bytes: &mut Vec<u8>) {
+    let (mesh, wrapper, material, info, insertion) = {
+        let file = parse_w3d(bytes, "textured-mapper.w3d", W3dLimits::default())
+            .expect("valid fixture before mapper insertion");
+        let mesh = file.chunks()[0].offset();
+        let wrapper = find_w3d_chunk(file.chunks(), 0x2A)
+            .expect("vertex-material wrapper")
+            .offset();
+        let material_chunk = find_w3d_chunk(file.chunks(), 0x2B).expect("vertex material");
+        let material = material_chunk.offset();
+        let insertion = material + 8 + material_chunk.payload_length();
+        let info = find_w3d_chunk(file.chunks(), 0x2D)
+            .expect("vertex-material info")
+            .offset()
+            + 8;
+        (mesh, wrapper, material, info, insertion)
+    };
+    bytes[info..info + 4].copy_from_slice(&0x0004_0000_u32.to_le_bytes());
+    let mut mapper = Vec::new();
+    append_w3d_chunk(
+        &mut mapper,
+        0x2E,
+        false,
+        b"UPerSec=0.5;VPerSec=-0.25;UScale=1.0;VScale=1.0;\0",
+    );
+    let addition = mapper.len();
+    bytes.splice(insertion..insertion, mapper);
+    increase_w3d_container(bytes, material, addition);
+    increase_w3d_container(bytes, wrapper, addition);
+    increase_w3d_container(bytes, mesh, addition);
 }
 
 fn checker_tga_fixture() -> Vec<u8> {
@@ -554,7 +615,7 @@ fn installed_profile_exports_single_glb_by_default_and_optional_gltf() {
     );
     assert_eq!(
         material_extras["vertexMaterials"][0]["mappers"][0]["modeName"],
-        "uv"
+        "linear_offset"
     );
     assert_eq!(material_extras["textures"][0]["info"]["frameCount"], 1);
     assert_eq!(material_extras["textures"][0]["gltfTexture"], 0);
@@ -621,9 +682,19 @@ fn installed_profile_exports_single_glb_by_default_and_optional_gltf() {
         let capture = fs::read(&capture_path).expect("read W3D render capture");
         assert!(capture.starts_with(b"P6\n512 512\n255\n"));
         let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("vertices\t3\n"));
-        assert!(stdout.contains("indices\t3\n"));
-        assert!(stdout.contains("rgba_sha256\t"));
+        assert!(stdout.contains("animation\t0\n"));
+        assert!(stdout.contains("frame\t1\n"));
+        assert!(stdout.contains("mapper_time_seconds\t0.5\n"));
+        assert!(stdout.contains("vertices\t9\n"));
+        assert!(stdout.contains("indices\t9\n"));
+        assert!(stdout.contains("draws\t3\n"));
+        assert!(stdout.contains("materials\t2\n"));
+        assert!(stdout.contains("textures\t1\n"));
+        let expected = include_str!("fixtures/textured-animated.rgba.sha256").trim();
+        assert!(
+            stdout.contains(&format!("rgba_sha256\t{expected}\n")),
+            "{stdout}"
+        );
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("requesting a graphics adapter"), "{stderr}");
@@ -677,6 +748,12 @@ fn run_model_render(root: &std::path::Path, output: &std::path::Path) -> std::pr
         .arg("--game-dir")
         .arg(root)
         .arg("w3d-render")
+        .arg("--animation")
+        .arg("0")
+        .arg("--frame")
+        .arg("1")
+        .arg("--time")
+        .arg("0.5")
         .arg("art/w3d/textured_skn.w3d")
         .arg(output)
         .output()

@@ -11,7 +11,7 @@ use cic_formats::{
     decode_w3d_model_set, parse_csf, parse_w3d, w3d_model_hierarchy_name,
 };
 use cic_render::{
-    AnimatedModel, HeadlessRenderer, StagedModel, TextureId, TextureResourceManager,
+    AnimatedModel, HeadlessRenderer, ModelFrame, TextureId, TextureResourceManager,
     run_model_viewer,
 };
 use cic_tools::resource::{
@@ -33,7 +33,7 @@ const USAGE: &str = "Usage:\n\
   cic-inspect w3d <virtual-path> <mount> [<mount> ...]\n\
   cic-inspect w3d-mesh <virtual-path> <top-level-index> <mount> [<mount> ...]\n\
   cic-inspect w3d-view <virtual-path> [<mount> ...]\n\
-  cic-inspect w3d-render <virtual-path> [<output.ppm>] [<mount> ...]\n\
+  cic-inspect w3d-render [--animation <index>] [--frame <frame>] [--time <seconds>] [--rotation <radians>] <virtual-path> [<output.ppm>] [<mount> ...]\n\
   cic-inspect w3d-export [--gltf] <virtual-path> [<output.glb|output.gltf>] [<mount> ...]\n\
 Each mount is a directory or BIG archive. Mounts are applied from left to right; later mounts override earlier mounts.";
 
@@ -154,7 +154,7 @@ where
     let mounts = arguments.collect::<Vec<_>>();
     let vfs = mount_all("w3d-view", &mounts, options, ResourceKind::W3dWithTextures)?;
     let model = load_composed_model(&vfs, &resource_path)?;
-    let textures = load_viewer_textures(&vfs, &model)?;
+    let textures = load_renderer_textures(&vfs, &model)?;
     let staged = AnimatedModel::from_w3d_with_textures(&model, textures)?;
     let animation_count = staged.animation_count();
     let material_count = staged.material_count();
@@ -169,7 +169,7 @@ where
     ))
 }
 
-fn load_viewer_textures(
+fn load_renderer_textures(
     vfs: &Vfs,
     model: &cic_formats::W3dModel,
 ) -> Result<TextureResourceManager, Box<dyn Error>> {
@@ -177,56 +177,54 @@ fn load_viewer_textures(
     let mut resolved_images: BTreeMap<String, TextureId> = BTreeMap::new();
     for model_mesh in model.meshes() {
         let mesh = model_mesh.mesh();
-        let Some(pass) = mesh.materials().passes().first() else {
-            continue;
-        };
-        let Some(stage) = pass.texture_stages().first() else {
-            continue;
-        };
-        for triangle in 0..mesh.triangles().len() {
-            let texturing_disabled = pass
-                .shader_ids()
-                .and_then(|ids| ids.for_triangle(triangle))
-                .and_then(|id| usize::try_from(id).ok())
-                .and_then(|id| mesh.materials().shaders().get(id))
-                .is_some_and(|shader| shader.texturing() == 0);
-            if texturing_disabled {
-                continue;
-            }
-            let Some(texture) = stage
-                .texture_ids()
-                .and_then(|ids| ids.for_triangle(triangle))
-                .filter(|id| *id != u32::MAX)
-                .and_then(|id| usize::try_from(id).ok())
-                .and_then(|id| mesh.materials().textures().get(id))
-            else {
-                continue;
-            };
-            if resources.contains_alias(texture.name_bytes()) {
-                continue;
-            }
-            match resolve_texture(vfs, texture.name_bytes()) {
-                Ok((path, bytes)) => {
-                    if let Some(existing) = resolved_images.get(path.as_str()) {
-                        resources.insert_alias(texture.name_bytes(), *existing)?;
+        for pass in mesh.materials().passes() {
+            for stage in pass.texture_stages() {
+                for triangle in 0..mesh.triangles().len() {
+                    let texturing_disabled = pass
+                        .shader_ids()
+                        .and_then(|ids| ids.for_triangle(triangle))
+                        .and_then(|id| usize::try_from(id).ok())
+                        .and_then(|id| mesh.materials().shaders().get(id))
+                        .is_some_and(|shader| shader.texturing() == 0);
+                    if texturing_disabled {
                         continue;
                     }
-                    let format = image_format(&path)?;
-                    let image = decode_viewer_texture(bytes, format)?;
-                    let id = resources.insert(
-                        texture.name_bytes(),
-                        image.width(),
-                        image.height(),
-                        image.into_raw(),
-                    )?;
-                    resolved_images.insert(path.to_string(), id);
-                }
-                Err(error) => {
-                    eprintln!(
-                        "warning: {error}; using a magenta viewer placeholder for {}",
-                        String::from_utf8_lossy(texture.name_bytes())
-                    );
-                    resources.insert(texture.name_bytes(), 1, 1, vec![255, 0, 255, 255])?;
+                    let Some(texture) = stage
+                        .texture_ids()
+                        .and_then(|ids| ids.for_triangle(triangle))
+                        .filter(|id| *id != u32::MAX)
+                        .and_then(|id| usize::try_from(id).ok())
+                        .and_then(|id| mesh.materials().textures().get(id))
+                    else {
+                        continue;
+                    };
+                    if resources.contains_alias(texture.name_bytes()) {
+                        continue;
+                    }
+                    match resolve_texture(vfs, texture.name_bytes()) {
+                        Ok((path, bytes)) => {
+                            if let Some(existing) = resolved_images.get(path.as_str()) {
+                                resources.insert_alias(texture.name_bytes(), *existing)?;
+                                continue;
+                            }
+                            let format = image_format(&path)?;
+                            let image = decode_viewer_texture(bytes, format)?;
+                            let id = resources.insert(
+                                texture.name_bytes(),
+                                image.width(),
+                                image.height(),
+                                image.into_raw(),
+                            )?;
+                            resolved_images.insert(path.to_string(), id);
+                        }
+                        Err(error) => {
+                            eprintln!(
+                                "warning: {error}; using a magenta viewer placeholder for {}",
+                                String::from_utf8_lossy(texture.name_bytes())
+                            );
+                            resources.insert(texture.name_bytes(), 1, 1, vec![255, 0, 255, 255])?;
+                        }
+                    }
                 }
             }
         }
@@ -295,6 +293,26 @@ fn render_model_capture<I>(
 where
     I: Iterator<Item = String>,
 {
+    let mut animation = None;
+    let mut frame = 0_u32;
+    let mut mapper_time_seconds = 0.0_f32;
+    let mut rotation = 0.0_f32;
+    while arguments
+        .peek()
+        .is_some_and(|argument| argument.starts_with("--"))
+    {
+        let option = arguments.next().expect("peeked renderer option");
+        let value = arguments
+            .next()
+            .ok_or_else(|| format!("{option} requires a value"))?;
+        match option.as_str() {
+            "--animation" => animation = Some(value.parse::<usize>()?),
+            "--frame" => frame = value.parse::<u32>()?,
+            "--time" => mapper_time_seconds = value.parse::<f32>()?,
+            "--rotation" => rotation = value.parse::<f32>()?,
+            _ => return Err(format!("unknown w3d-render option {option:?}").into()),
+        }
+    }
     let resource_name = arguments
         .next()
         .ok_or("w3d-render requires a virtual path")?;
@@ -316,17 +334,30 @@ where
     {
         return Err("W3D render capture requires a .ppm output path".into());
     }
-    let vfs = mount_all("w3d-render", &mounts, options, ResourceKind::W3d)?;
+    let vfs = mount_all(
+        "w3d-render",
+        &mounts,
+        options,
+        ResourceKind::W3dWithTextures,
+    )?;
     let model = load_composed_model(&vfs, &resource_path)?;
-    let staged = StagedModel::from_w3d(&model)?;
+    let textures = load_renderer_textures(&vfs, &model)?;
+    let staged = AnimatedModel::from_w3d_with_textures(&model, textures)?;
+    let explicit_frame = ModelFrame::new(animation, frame, mapper_time_seconds, rotation)?;
     let renderer = pollster::block_on(HeadlessRenderer::new())?;
-    let capture = renderer.capture_model(512, 512, &staged)?;
+    let capture = renderer.capture_animated_model(512, 512, &staged, explicit_frame)?;
     fs::write(&output_path, capture.ppm())?;
     Ok(format!(
-        "adapter\t{}\nvertices\t{}\nindices\t{}\nrgba_sha256\t{}\nwrote\t{}\n",
+        "adapter\t{}\nanimation\t{}\nframe\t{}\nmapper_time_seconds\t{}\nvertices\t{}\nindices\t{}\ndraws\t{}\nmaterials\t{}\ntextures\t{}\nrgba_sha256\t{}\nwrote\t{}\n",
         renderer.adapter_info().name,
+        animation.map_or_else(|| "bind".to_owned(), |index| index.to_string()),
+        frame,
+        mapper_time_seconds,
         staged.vertex_count(),
         staged.index_count(),
+        staged.draw_count(),
+        staged.material_count(),
+        staged.unique_texture_count(),
         capture.sha256(),
         output_path.display()
     ))

@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 
 use cic_formats::{
-    W3dAnimation, W3dAnimationChannel, W3dAnimationChannelKind, W3dModel, W3dStaticMesh,
+    W3dAnimation, W3dAnimationChannel, W3dAnimationChannelKind, W3dMaterialPass, W3dModel,
+    W3dStaticMesh,
 };
 
 use crate::{RenderError, TextureId, TextureResourceManager};
@@ -25,7 +26,23 @@ struct AnimatedVertex {
     normal: [f32; 3],
     color: [f32; 4],
     texcoord: [f32; 2],
+    mapper: StagedMapper,
     pivot: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct StagedMapper {
+    mode: u8,
+    values: [f32; 8],
+}
+
+impl Default for StagedMapper {
+    fn default() -> Self {
+        Self {
+            mode: 0,
+            values: [0.0; 8],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -39,15 +56,18 @@ pub(crate) enum BlendMode {
     Opaque,
     Alpha,
     Additive,
+    Multiply,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct StagedMaterial {
     pub(crate) texture: TextureId,
     pub(crate) clamp_u: bool,
     pub(crate) clamp_v: bool,
     pub(crate) blend: BlendMode,
     pub(crate) alpha_test: bool,
+    pub(crate) depth_write: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +75,8 @@ pub(crate) struct DrawRange {
     pub(crate) material: usize,
     pub(crate) first_index: u32,
     pub(crate) index_count: u32,
+    pub(crate) pass: usize,
+    pub(crate) stage: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -144,97 +166,129 @@ impl AnimatedModel {
     ) -> Result<Self, RenderError> {
         // Exercise the same bounds and hierarchy validation as deterministic bind-pose capture.
         let staged = StagedModel::from_w3d(model)?;
-        let expanded_vertex_count = staged.index_count();
-        if expanded_vertex_count
+        let initial_vertex_count = staged.index_count();
+        if initial_vertex_count
             .checked_mul(36)
             .is_none_or(|bytes| bytes > MAX_GEOMETRY_BUFFER_BYTES)
         {
             return Err(RenderError::GeometryTooLarge);
         }
-        let mut vertices = Vec::with_capacity(expanded_vertex_count);
+        let mut vertices = Vec::with_capacity(initial_vertex_count);
         let mut indices = Vec::with_capacity(staged.index_count());
         let mut materials = Vec::new();
         let mut material_indices = BTreeMap::new();
         let mut draws: Vec<DrawRange> = Vec::new();
         for model_mesh in model.meshes() {
             let mesh = model_mesh.mesh();
-            let colors = mesh.preview_vertex_colors();
-            let stage = mesh
+            let mapper_table = mesh
                 .materials()
-                .passes()
-                .first()
-                .and_then(|pass| pass.texture_stages().first());
-            for (triangle_index, triangle) in mesh.triangles().iter().enumerate() {
-                let material = staged_material(mesh, triangle_index, &texture_resources);
-                let material_index = *material_indices.entry(material).or_insert_with(|| {
-                    let index = materials.len();
-                    materials.push(material);
-                    index
-                });
-                let first_index =
-                    u32::try_from(indices.len()).map_err(|_| RenderError::GeometryTooLarge)?;
-                if let Some(draw) = draws.last_mut()
-                    && draw.material == material_index
-                    && draw
-                        .first_index
-                        .checked_add(draw.index_count)
-                        .is_some_and(|end| end == first_index)
-                {
-                    draw.index_count = draw
-                        .index_count
-                        .checked_add(3)
-                        .ok_or(RenderError::GeometryTooLarge)?;
-                } else {
-                    draws.push(DrawRange {
-                        material: material_index,
-                        first_index,
-                        index_count: 3,
-                    });
-                }
-                let source_indices = triangle.vertex_indices();
-                let uv_indices = stage
-                    .and_then(|stage| stage.coordinate_indices(triangle_index, source_indices));
-                for corner in 0..3 {
-                    let vertex_index = usize::try_from(source_indices[corner])
-                        .map_err(|_| RenderError::GeometryTooLarge)?;
-                    let position = mesh.vertices()[vertex_index];
-                    let normal = mesh.normals()[vertex_index];
-                    let pivot = mesh
-                        .vertex_bones()
-                        .map_or(model_mesh.pivot(), |bones| u32::from(bones[vertex_index]));
-                    if usize::try_from(pivot)
-                        .ok()
-                        .is_none_or(|pivot| pivot >= model.hierarchy().pivots().len())
-                    {
-                        return Err(RenderError::InvalidHierarchy);
-                    }
-                    let color = colors.as_ref().map_or([0.72, 0.78, 0.86, 1.0], |colors| {
-                        let color = colors[vertex_index];
-                        [
-                            channel(color.red()),
-                            channel(color.green()),
-                            channel(color.blue()),
-                            channel(color.alpha()),
-                        ]
-                    });
-                    let texcoord = stage
-                        .zip(uv_indices)
-                        .and_then(|(stage, indices)| {
-                            usize::try_from(indices[corner])
+                .vertex_materials()
+                .iter()
+                .map(|material| {
+                    [
+                        material
+                            .mapper(0)
+                            .map_or_else(StagedMapper::default, stage_mapper),
+                        material
+                            .mapper(1)
+                            .map_or_else(StagedMapper::default, stage_mapper),
+                    ]
+                })
+                .collect::<Vec<_>>();
+            let pass_count = mesh.materials().passes().len().max(1);
+            for pass_index in 0..pass_count {
+                let pass = mesh.materials().passes().get(pass_index);
+                let stage_count = pass.map_or(1, |pass| pass.texture_stages().len().max(1));
+                for stage_index in 0..stage_count {
+                    let stage = pass.and_then(|pass| pass.texture_stages().get(stage_index));
+                    for (triangle_index, triangle) in mesh.triangles().iter().enumerate() {
+                        let material = staged_material(
+                            mesh,
+                            pass_index,
+                            stage_index,
+                            triangle_index,
+                            &texture_resources,
+                        );
+                        let material_index =
+                            *material_indices.entry(material).or_insert_with(|| {
+                                let index = materials.len();
+                                materials.push(material);
+                                index
+                            });
+                        let first_index = u32::try_from(indices.len())
+                            .map_err(|_| RenderError::GeometryTooLarge)?;
+                        if let Some(draw) = draws.last_mut()
+                            && draw.material == material_index
+                            && draw.pass == pass_index
+                            && draw.stage == stage_index
+                            && draw
+                                .first_index
+                                .checked_add(draw.index_count)
+                                .is_some_and(|end| end == first_index)
+                        {
+                            draw.index_count = draw
+                                .index_count
+                                .checked_add(3)
+                                .ok_or(RenderError::GeometryTooLarge)?;
+                        } else {
+                            draws.push(DrawRange {
+                                material: material_index,
+                                first_index,
+                                index_count: 3,
+                                pass: pass_index,
+                                stage: stage_index,
+                            });
+                        }
+                        let source_indices = triangle.vertex_indices();
+                        let uv_indices = stage.and_then(|stage| {
+                            stage.coordinate_indices(triangle_index, source_indices)
+                        });
+                        for corner in 0..3 {
+                            let vertex_index = usize::try_from(source_indices[corner])
+                                .map_err(|_| RenderError::GeometryTooLarge)?;
+                            let position = mesh.vertices()[vertex_index];
+                            let normal = mesh.normals()[vertex_index];
+                            let pivot = mesh
+                                .vertex_bones()
+                                .map_or(model_mesh.pivot(), |bones| u32::from(bones[vertex_index]));
+                            if usize::try_from(pivot)
                                 .ok()
-                                .and_then(|index| stage.texture_coordinates().get(index))
-                        })
-                        .map_or([0.0, 0.0], |uv| [uv.u(), 1.0 - uv.v()]);
-                    let index =
-                        u32::try_from(vertices.len()).map_err(|_| RenderError::GeometryTooLarge)?;
-                    vertices.push(AnimatedVertex {
-                        position: [position.x(), position.y(), position.z()],
-                        normal: [normal.x(), normal.y(), normal.z()],
-                        color,
-                        texcoord,
-                        pivot,
-                    });
-                    indices.push(index);
+                                .is_none_or(|pivot| pivot >= model.hierarchy().pivots().len())
+                            {
+                                return Err(RenderError::InvalidHierarchy);
+                            }
+                            let color = preview_color(mesh, pass, vertex_index);
+                            let texcoord = stage
+                                .zip(uv_indices)
+                                .and_then(|(stage, indices)| {
+                                    usize::try_from(indices[corner])
+                                        .ok()
+                                        .and_then(|index| stage.texture_coordinates().get(index))
+                                })
+                                .map_or([0.0, 0.0], |uv| [uv.u(), uv.v()]);
+                            let mapper =
+                                staged_mapper(pass, stage_index, vertex_index, &mapper_table);
+                            let index = u32::try_from(vertices.len())
+                                .map_err(|_| RenderError::GeometryTooLarge)?;
+                            let next_bytes = vertices
+                                .len()
+                                .checked_add(1)
+                                .and_then(|count| count.checked_mul(36))
+                                .ok_or(RenderError::GeometryTooLarge)?;
+                            if next_bytes > MAX_GEOMETRY_BUFFER_BYTES {
+                                return Err(RenderError::GeometryTooLarge);
+                            }
+                            vertices.push(AnimatedVertex {
+                                position: [position.x(), position.y(), position.z()],
+                                normal: [normal.x(), normal.y(), normal.z()],
+                                color,
+                                texcoord,
+                                mapper,
+                                pivot,
+                            });
+                            indices.push(index);
+                        }
+                    }
                 }
             }
         }
@@ -307,6 +361,11 @@ impl AnimatedModel {
         self.materials.len()
     }
 
+    #[must_use]
+    pub fn draw_count(&self) -> usize {
+        self.draws.len()
+    }
+
     pub(crate) const fn texture_resources(&self) -> &TextureResourceManager {
         &self.texture_resources
     }
@@ -362,11 +421,14 @@ impl AnimatedModel {
         &self,
         animation: Option<usize>,
         frame: u32,
+        mapper_time_seconds: f32,
         rotation: f32,
         aspect: f32,
         framing: ModelFraming,
     ) -> Result<Vec<u8>, RenderError> {
-        if !rotation.is_finite()
+        if !mapper_time_seconds.is_finite()
+            || mapper_time_seconds < 0.0
+            || !rotation.is_finite()
             || !aspect.is_finite()
             || aspect <= 0.0
             || !framing.scale.is_finite()
@@ -400,7 +462,15 @@ impl AnimatedModel {
             }
             let (position, color) =
                 project_fixed_vertex(position, normal, vertex.color, framing.scale, aspect);
-            for value in position.into_iter().chain(color).chain(vertex.texcoord) {
+            let texcoord = mapped_texcoord(vertex.texcoord, vertex.mapper, mapper_time_seconds);
+            if texcoord
+                .into_iter()
+                .any(|value| !value.is_finite() || value.abs() > MAX_ABS_RENDER_COORDINATE)
+            {
+                return Err(RenderError::GeometryOutsideLimits);
+            }
+            let texcoord = [texcoord[0], 1.0 - texcoord[1]];
+            for value in position.into_iter().chain(color).chain(texcoord) {
                 bytes.extend_from_slice(&value.to_le_bytes());
             }
         }
@@ -705,17 +775,201 @@ fn hidden_attachment_distance(model: &StagedModel) -> f32 {
     HIDDEN_ATTACHMENT_MIN_DISTANCE.max(diagonal * HIDDEN_ATTACHMENT_MODEL_MULTIPLIER)
 }
 
+fn preview_color(mesh: &W3dStaticMesh, pass: Option<&W3dMaterialPass>, vertex: usize) -> [f32; 4] {
+    if let Some(color) = pass
+        .and_then(W3dMaterialPass::diffuse_colors)
+        .and_then(|colors| colors.get(vertex))
+    {
+        return [
+            channel(color.red()),
+            channel(color.green()),
+            channel(color.blue()),
+            channel(color.alpha()),
+        ];
+    }
+    if let Some(material) = pass
+        .and_then(W3dMaterialPass::vertex_material_ids)
+        .and_then(|ids| ids.for_vertex(vertex))
+        .and_then(|id| usize::try_from(id).ok())
+        .and_then(|id| mesh.materials().vertex_materials().get(id))
+    {
+        let color = material.diffuse();
+        return [
+            channel(color.red()),
+            channel(color.green()),
+            channel(color.blue()),
+            material.opacity().clamp(0.0, 1.0),
+        ];
+    }
+    [0.72, 0.78, 0.86, 1.0]
+}
+
+fn staged_mapper(
+    pass: Option<&W3dMaterialPass>,
+    stage: usize,
+    vertex: usize,
+    table: &[[StagedMapper; 2]],
+) -> StagedMapper {
+    pass.and_then(W3dMaterialPass::vertex_material_ids)
+        .and_then(|ids| ids.for_vertex(vertex))
+        .and_then(|id| usize::try_from(id).ok())
+        .and_then(|id| table.get(id))
+        .and_then(|mappers| mappers.get(stage))
+        .copied()
+        .unwrap_or_default()
+}
+
+fn stage_mapper(mapper: &cic_formats::W3dMapper) -> StagedMapper {
+    // Provenance: formulas and argument defaults follow `MAPPERS.TXT` and `mapper.cpp` from
+    // GeneralsGameCode revision `9f7abb866f5afd446db14149979e744c7216baaf`; see
+    // `docs/provenance/w3d.md`. Evaluation is project-authored from an explicit caller time rather
+    // than legacy global sync time so diagnostic rendering remains deterministic.
+    let mode = mapper.mode().code();
+    let values = match mode {
+        4 | 18 => [
+            mapper_value(mapper, b"UScale", 1.0),
+            mapper_value(mapper, b"VScale", 1.0),
+            mapper_value(mapper, b"UPerSec", 0.0),
+            mapper_value(mapper, b"VPerSec", 0.0),
+            mapper_value(mapper, b"UOffset", 0.0),
+            mapper_value(mapper, b"VOffset", 0.0),
+            0.0,
+            0.0,
+        ],
+        6 => [
+            mapper_value(mapper, b"UScale", 1.0),
+            mapper_value(mapper, b"VScale", 1.0),
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ],
+        7 | 14 | 15 | 19 | 20 => [
+            mapper_value(mapper, b"FPS", 1.0),
+            mapper_value(mapper, b"Log2Width", 1.0).clamp(0.0, 15.0),
+            mapper_value(mapper, b"Last", 0.0).max(0.0),
+            mapper_value(mapper, b"Offset", 0.0).max(0.0),
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ],
+        8 => [
+            mapper_value(mapper, b"Speed", 0.1),
+            mapper_value(mapper, b"UCenter", 0.0),
+            mapper_value(mapper, b"VCenter", 0.0),
+            mapper_value(mapper, b"UScale", 1.0),
+            mapper_value(mapper, b"VScale", 1.0),
+            0.0,
+            0.0,
+            0.0,
+        ],
+        9 => [
+            mapper_value(mapper, b"UAmp", 1.0),
+            mapper_value(mapper, b"UFreq", 1.0),
+            mapper_value(mapper, b"UPhase", 0.0),
+            mapper_value(mapper, b"VAmp", 1.0),
+            mapper_value(mapper, b"VFreq", 1.0),
+            mapper_value(mapper, b"VPhase", 0.0),
+            mapper_value(mapper, b"UScale", 1.0),
+            mapper_value(mapper, b"VScale", 1.0),
+        ],
+        10 => [
+            mapper_value(mapper, b"UStep", 0.0),
+            mapper_value(mapper, b"VStep", 0.0),
+            mapper_value(mapper, b"SPS", 0.0),
+            mapper_value(mapper, b"UScale", 1.0),
+            mapper_value(mapper, b"VScale", 1.0),
+            0.0,
+            0.0,
+            0.0,
+        ],
+        11 => [
+            mapper_value(mapper, b"UPerSec", 0.0),
+            mapper_value(mapper, b"VPerSec", 0.0),
+            mapper_value(mapper, b"Period", 0.0).abs(),
+            mapper_value(mapper, b"UScale", 1.0),
+            mapper_value(mapper, b"VScale", 1.0),
+            0.0,
+            0.0,
+            0.0,
+        ],
+        16 => [
+            mapper_value(mapper, b"FPS", 0.0),
+            mapper_value(mapper, b"UPerSec", 0.0),
+            mapper_value(mapper, b"VPerSec", 0.0),
+            mapper_value(mapper, b"UScale", 1.0),
+            mapper_value(mapper, b"VScale", 1.0),
+            0.0,
+            0.0,
+            0.0,
+        ],
+        17 => [
+            mapper_value(mapper, b"VPerSec", 0.0),
+            mapper_value(mapper, b"VStart", 0.0),
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ],
+        _ => [0.0; 8],
+    };
+    StagedMapper { mode, values }
+}
+
+fn mapper_value(mapper: &cic_formats::W3dMapper, key: &[u8], default: f32) -> f32 {
+    let Some(arguments) = mapper.argument_bytes() else {
+        return default;
+    };
+    for assignment in arguments.split(|byte| matches!(byte, b';' | b'\n' | b'\r')) {
+        let Some(equals) = assignment.iter().position(|byte| *byte == b'=') else {
+            continue;
+        };
+        if !trim_ascii(&assignment[..equals]).eq_ignore_ascii_case(key) {
+            continue;
+        }
+        let raw = trim_ascii(&assignment[equals + 1..]);
+        let raw = raw
+            .strip_suffix(b"f")
+            .or_else(|| raw.strip_suffix(b"F"))
+            .unwrap_or(raw);
+        if let Ok(text) = std::str::from_utf8(raw)
+            && let Ok(value) = text.parse::<f32>()
+            && value.is_finite()
+        {
+            return value;
+        }
+    }
+    default
+}
+
+fn trim_ascii(mut value: &[u8]) -> &[u8] {
+    while value.first().is_some_and(u8::is_ascii_whitespace) {
+        value = &value[1..];
+    }
+    while value.last().is_some_and(u8::is_ascii_whitespace) {
+        value = &value[..value.len() - 1];
+    }
+    value
+}
+
 fn staged_material(
     mesh: &W3dStaticMesh,
+    pass_index: usize,
+    stage_index: usize,
     triangle: usize,
     resources: &TextureResourceManager,
 ) -> StagedMaterial {
     // Provenance: shader selectors, texture assignments, UV indices, and texture clamp bits come
     // from `w3d_file.h` at GeneralsGameCode revision
     // `9f7abb866f5afd446db14149979e744c7216baaf`; see `docs/provenance/w3d.md`. This is a
-    // project-authored pass-zero preview policy, not a translation of the legacy renderer.
-    let pass = mesh.materials().passes().first();
-    let stage = pass.and_then(|pass| pass.texture_stages().first());
+    // project-authored fixed-function preview policy, not a translation of the legacy renderer.
+    let pass = mesh.materials().passes().get(pass_index);
+    let stage = pass.and_then(|pass| pass.texture_stages().get(stage_index));
     let texture_entry = stage
         .and_then(|stage| stage.texture_ids())
         .and_then(|ids| ids.for_triangle(triangle))
@@ -738,16 +992,138 @@ fn staged_material(
             .and_then(|texture| resources.texture(texture.name_bytes()))
             .unwrap_or_else(|| resources.fallback_white())
     };
-    let blend = shader.map_or(BlendMode::Opaque, |shader| {
-        preview_blend(shader.source_blend(), shader.destination_blend())
-    });
+    let blend = if stage_index > 0 {
+        BlendMode::Multiply
+    } else {
+        shader.map_or(BlendMode::Opaque, |shader| {
+            preview_blend(shader.source_blend(), shader.destination_blend())
+        })
+    };
     StagedMaterial {
         texture,
         clamp_u: attributes & 0x8 != 0,
         clamp_v: attributes & 0x10 != 0,
         blend,
         alpha_test: shader.is_some_and(|shader| shader.alpha_test() != 0),
+        depth_write: pass_index == 0 && stage_index == 0 && blend == BlendMode::Opaque,
     }
+}
+
+#[allow(clippy::too_many_lines)]
+fn mapped_texcoord(texcoord: [f32; 2], mapper: StagedMapper, time: f32) -> [f32; 2] {
+    let value = mapper.values;
+    match mapper.mode {
+        4 | 18 => [
+            texcoord[0] * value[0] + (value[4] - value[2] * time).rem_euclid(1.0),
+            texcoord[1] * value[1] + (value[5] - value[3] * time).rem_euclid(1.0),
+        ],
+        6 => [texcoord[0] * value[0], texcoord[1] * value[1]],
+        7 | 14 | 15 | 19 | 20 => {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let log2_width = value[1] as u32;
+            let width = 1_u32 << log2_width;
+            let default_last = width.saturating_mul(width).max(1);
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let last = if value[2] < 1.0 {
+                default_last
+            } else {
+                (value[2] as u32).clamp(1, default_last)
+            };
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let offset = (value[3] as u32) % last;
+            #[allow(clippy::cast_possible_truncation)]
+            let elapsed = (time * value[0].abs()).floor() as i64;
+            let direction = if value[0] < 0.0 { -1_i64 } else { 1_i64 };
+            let frame = (i64::from(offset) + direction * elapsed).rem_euclid(i64::from(last));
+            let frame = u32::try_from(frame).expect("grid frame is nonnegative");
+            #[allow(clippy::cast_precision_loss)]
+            let reciprocal = 1.0 / width as f32;
+            #[allow(clippy::cast_precision_loss)]
+            let column = (frame % width) as f32;
+            #[allow(clippy::cast_precision_loss)]
+            let row = (frame / width) as f32;
+            [
+                texcoord[0] + column * reciprocal,
+                texcoord[1] + row * reciprocal,
+            ]
+        }
+        8 => {
+            let angle = std::f32::consts::TAU * value[0] * time;
+            let (sine, cosine) = angle.sin_cos();
+            let u = texcoord[0] - value[1];
+            let v = texcoord[1] - value[2];
+            [
+                value[3] * (cosine * u - sine * v + value[1]),
+                value[4] * (sine * u + cosine * v + value[2]),
+            ]
+        }
+        9 => [
+            texcoord[0] * value[6]
+                + value[0]
+                    * (std::f32::consts::TAU * value[1] * time + std::f32::consts::PI * value[2])
+                        .sin(),
+            texcoord[1] * value[7]
+                + value[3]
+                    * (std::f32::consts::TAU * value[4] * time + std::f32::consts::PI * value[5])
+                        .sin(),
+        ],
+        10 => {
+            let steps = (value[2] * time).trunc();
+            [
+                texcoord[0] * value[3] + (value[0] * steps).rem_euclid(1.0),
+                texcoord[1] * value[4] + (value[1] * steps).rem_euclid(1.0),
+            ]
+        }
+        11 => {
+            let offset_time = if value[2] > 0.0 {
+                let within = time.rem_euclid(value[2]);
+                within.min(value[2] - within)
+            } else {
+                0.0
+            };
+            [
+                texcoord[0] * value[3] + value[0] * offset_time,
+                texcoord[1] * value[4] + value[1] * offset_time,
+            ]
+        }
+        16 => {
+            let rate = value[0].abs();
+            let frame = (time * rate).floor();
+            let seed = frame.to_bits();
+            let angle = stable_random_unit(seed) * std::f32::consts::TAU;
+            let center_u = stable_random_unit(seed ^ 0x9E37_79B9);
+            let center_v = stable_random_unit(seed ^ 0x85EB_CA6B);
+            let remainder = if rate > 0.0 {
+                time.rem_euclid(rate.recip())
+            } else {
+                time
+            };
+            let (sine, cosine) = angle.sin_cos();
+            [
+                cosine * value[3] * texcoord[0] - sine * value[4] * texcoord[1]
+                    + (center_u + remainder * value[1]).rem_euclid(1.0),
+                sine * value[3] * texcoord[0]
+                    + cosine * value[4] * texcoord[1]
+                    + (center_v + remainder * value[2]).rem_euclid(1.0),
+            ]
+        }
+        17 => [
+            texcoord[0],
+            texcoord[1] + (value[1] + value[0] * time).rem_euclid(1.0),
+        ],
+        _ => texcoord,
+    }
+}
+
+fn stable_random_unit(mut state: u32) -> f32 {
+    state = state.wrapping_add(0xA511_E9B3);
+    state ^= state << 13;
+    state ^= state >> 17;
+    state ^= state << 5;
+    let mantissa = state >> 8;
+    #[allow(clippy::cast_precision_loss)]
+    let mantissa = mantissa as f32;
+    mantissa / 16_777_216.0
 }
 
 const fn preview_blend(source: u8, destination: u8) -> BlendMode {
@@ -920,7 +1296,9 @@ fn rotate(quaternion: [f32; 4], vector: [f32; 3]) -> [f32; 3] {
 
 #[cfg(test)]
 mod tests {
-    use super::{BlendMode, Transform, preview_blend, project_fixed_vertex};
+    use super::{
+        BlendMode, StagedMapper, Transform, mapped_texcoord, preview_blend, project_fixed_vertex,
+    };
 
     #[test]
     fn preview_blend_distinguishes_opaque_alpha_and_additive() {
@@ -956,5 +1334,51 @@ mod tests {
         let world = parent.compose(child);
         assert!((world.translation[0] - 10.004).abs() < 0.000_01);
         assert!((world.point([1.0, 0.0, 0.0])[0] - 10.005).abs() < 0.000_01);
+    }
+
+    #[test]
+    fn linear_mapper_uses_explicit_time_and_legacy_negative_rate() {
+        let mapper_config = StagedMapper {
+            mode: 4,
+            values: [1.0, 1.0, 0.5, -0.25, 0.0, 0.0, 0.0, 0.0],
+        };
+        let coordinates = mapped_texcoord([0.25, 0.25], mapper_config, 2.0);
+        assert!((coordinates[0] - 0.25).abs() < f32::EPSILON);
+        assert!((coordinates[1] - 0.75).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn rotate_mapper_is_sampled_from_explicit_seconds() {
+        let mapper_config = StagedMapper {
+            mode: 8,
+            values: [0.25, 0.5, 0.5, 1.0, 1.0, 0.0, 0.0, 0.0],
+        };
+        let coordinates = mapped_texcoord([1.0, 0.5], mapper_config, 1.0);
+        assert!((coordinates[0] - 0.5).abs() < 0.000_01);
+        assert!((coordinates[1] - 1.0).abs() < 0.000_01);
+    }
+
+    #[test]
+    fn grid_mapper_advances_in_stable_row_major_order() {
+        let mapper_config = StagedMapper {
+            mode: 7,
+            values: [2.0, 1.0, 4.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        };
+        let coordinates = mapped_texcoord([0.0, 0.0], mapper_config, 0.5);
+        assert!((coordinates[0] - 0.5).abs() < f32::EPSILON);
+        assert!(coordinates[1].abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn random_mapper_is_stable_for_an_explicit_frame() {
+        let mapper_config = StagedMapper {
+            mode: 16,
+            values: [2.0, 0.1, -0.2, 1.0, 1.0, 0.0, 0.0, 0.0],
+        };
+        let first = mapped_texcoord([0.25, 0.75], mapper_config, 0.5).map(f32::to_bits);
+        let repeated = mapped_texcoord([0.25, 0.75], mapper_config, 0.5).map(f32::to_bits);
+        let next = mapped_texcoord([0.25, 0.75], mapper_config, 1.0).map(f32::to_bits);
+        assert_eq!(first, repeated);
+        assert_ne!(first, next);
     }
 }

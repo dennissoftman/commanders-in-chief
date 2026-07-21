@@ -7,7 +7,8 @@ Deterministic diagnostic applications over VFS resources and immutable format va
 - `cic-inspect w3d <virtual-path> <mount>...` reports the complete nested chunk inventory.
 - `cic-inspect w3d-mesh <virtual-path> <top-level-index> <mount>...` reports decoded geometry.
 - `cic-inspect w3d-export [--gltf] <virtual-path> ...` exports a portable animated preview.
-- `cic-inspect w3d-render <virtual-path> ...` writes a deterministic bind-pose diagnostic capture.
+- `cic-inspect w3d-render [--animation <index>] [--frame <frame>] [--time <seconds>]
+  [--rotation <radians>] <virtual-path> ...` writes a deterministic textured diagnostic capture.
 - `cic-inspect w3d-view <virtual-path> ...` opens the textured, rotating animated viewer.
 
 Owns user-facing diagnostic programs. Tools compose public VFS and format APIs and may

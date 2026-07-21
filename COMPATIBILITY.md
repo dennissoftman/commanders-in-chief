@@ -40,10 +40,12 @@ observable behavior.
 | Renderer | Headless RGBA8 triangle/pose capture | verified | Checked-in SHA-256 + local RTX 4080 SUPER capture |
 | Renderer | BIG-backed composed bind-pose capture | verified | Synthetic CLI PPM + installed `abarfrccmd.w3d` capture |
 | Renderer | Pass-zero/stage-zero textured material submission | verified | Synthetic resource-manager/material tests + installed airstrip and infantry window smokes |
-| Renderer | Additional fixed-function passes/stages | unknown | Decoded values retained; GPU submission remains open |
+| Renderer | Stable additional pass/stage preview submission | verified | Synthetic two-pass/two-stage capture + installed airstrip smoke |
 | Renderer | Rigid/one-bone hierarchy bind pose | verified | Synthetic skinned fixture + installed rigid building capture |
 | Renderer | Interactive animated hierarchy pose | verified | Explicit integer-frame sampling + installed 39-clip infantry window smoke |
 | Renderer | Texture image and effective-material deduplication | verified | Alias/content unit tests + installed material/texture counts |
+| Renderer | Explicit-time animated mapper transforms | implemented | Pinned-formula unit tests + deterministic scrolling-mapper capture |
+| Renderer | Textured explicit-animation-frame capture | verified | Checked synthetic SHA-256 + installed infantry frame smoke |
 | Resources | Generals install profile and Steam discovery | verified | Installed Steam export + synthetic `--game-dir` test |
 | Resources | Zero Hour base/delta profile | verified | Installed layered `--zh` exports |
 | MAP | Chunk inventory | unknown | Not started |

@@ -223,12 +223,16 @@ color arrays, and exact float bits. This closes the interchange/inspection surfa
 visual blend equivalence.
 
 `cic-inspect w3d-view` consumes the same immutable values and resolves only referenced images
-through the VFS. Its current preview submits pass zero/stage zero, expands triangle corners for
-per-face UV seams, preserves source alpha, and selects opaque, source-alpha, or additive blending.
+through the VFS. Its preview submits every pass/stage in stable file order, expands triangle
+corners for per-face UV seams, preserves source alpha, selects opaque/source-alpha/additive
+pass blending, and multiplies later stages into the accumulated color.
 Bounded decoded RGBA images are deduplicated by dimensions and SHA-256 content, while normalized
 aliases and effective GPU materials reuse those retained images. Model center and scale are fixed
-when a clip is selected; animation ticks apply only the sampled pose and Z-up rotation. Additional
-passes/stages, animated mapper inputs, and deterministic textured animated-pose capture remain open.
+when a clip is selected; animation ticks apply only the sampled pose and Z-up rotation. Temporal
+mapper arguments are sampled from explicit seconds, and `w3d-render` accepts explicit animation
+index/frame, mapper time, and rotation for deterministic textured captures. Exact legacy stage
+combiner equations and spatial environment/screen coordinate generation remain outside this
+documented preview policy.
 
 ## Current safety limits
 

@@ -2,8 +2,8 @@
 
 ## Objective
 
-Continue R2 renderer ingestion after establishing BIG-backed bind-pose capture and the animated
-interactive viewer.
+R2 W3D inspection and renderer ingestion are complete. Prepare the bounded R3 MAP terrain
+inspection and viewer gate.
 
 ## Implemented foundation
 
@@ -97,11 +97,8 @@ interactive viewer.
 - A local RTX 4080 SUPER headless capture matched the checked-in 64x64 translated-triangle hash
   `7e1894e3ad60f3236f628efdef3e61f3d724e351a37bab9612273190fa8c1ee0`.
 - `cic-inspect w3d-render` now uses the same installed profile or explicit BIG overlay path as W3D
-  inspection, composes hierarchy/HLOD/skin companions, applies rigid and one-bone bind transforms,
-  and emits a 512x512 depth-tested PPM with explicit adapter, geometry-count, and RGBA-hash output.
-- The synthetic two-BIG model fixture renders through the CLI. A local installed
-  `abarfrccmd.w3d` capture staged 1,561 vertices and 2,535 indices on an RTX 4080 SUPER and produced
-  RGBA SHA-256 `f6c70e3ff1d8d8900cae066fc0ee5c9d163a806fd03104b9b1a41bf584789e2a` without retaining the image.
+  inspection, resolves textures, and accepts explicit animation index/frame, mapper seconds, and
+  Z-up rotation before emitting a 512x512 PPM plus stable resource/draw/hash diagnostics.
 - `cic-inspect w3d-view` uses the same installed profile or explicit BIG overlay path, opens a
   960x720 surface, auto-fits a fixed 45-degree elevated camera, and continuously rotates the model
   around W3D's Z-up axis. It samples hierarchy/one-bone clips at explicit integer frames; Left/Right
@@ -112,26 +109,40 @@ interactive viewer.
 - Viewer center and scale are now computed only when a clip is selected. Animation ticks preserve
   that fixed framing and apply only pose plus Z-up rotation, removing bounds-driven bobbing and
   scale jitter.
-- Pass-zero/stage-zero materials now expand per-face UV seams and render VFS-resolved sRGB textures
-  with source alpha, alpha testing, depth policy, and opaque, source-alpha, or additive blending.
+- The initial pass-zero/stage-zero material gate expanded per-face UV seams and rendered
+  VFS-resolved sRGB textures with source alpha, alpha testing, depth policy, and
+  opaque/source-alpha/additive blending.
 - The bounded texture resource manager reuses VFS decodes by resolved path, normalizes W3D aliases,
   deduplicates retained images by dimensions and RGBA SHA-256, and reuses effective GPU materials
   across stable file-order draw ranges.
 - Installed visual smokes rendered the airstrip with 15 effective materials and 13 unique textures,
   including black-background-free additive lights, and textured the 39-clip infantry with four
   materials and four textures.
+- Renderer staging now expands every decoded pass and stage in stable mesh/pass/stage/triangle
+  order. Stage zero uses the pass shader's opaque/alpha/additive preview blend; later stages use an
+  explicit multiplicative preview and only the first opaque pass/stage writes depth.
+- Linear, scale, grid, rotate, sine, step, zigzag, deterministic-random, edge, and bump-linear
+  mapper inputs are sampled from explicit seconds. The renderer owns no clock; the windowed viewer
+  supplies presentation time and headless callers provide a deterministic value.
+- The composed synthetic two-BIG fixture now captures two passes, two stages, animation frame 1,
+  and a scrolling mapper at 0.5 seconds. Its checked RGBA SHA-256 is
+  `b1f43b981348e99b89c5dcd15b64279cb1b9990df3996ae4b35e4939d8301672`.
+- Final installed RTX 4080 SUPER smokes rendered the airstrip as 27 stable draws/17 materials/14
+  textures with RGBA SHA-256 `6766e83c92df9746df08810a5ab074a51dd77ac9c2780c317046c580d8196c51`,
+  and infantry animation frame 1 as four draws/materials/textures with SHA-256
+  `a4634a811ba4b8af88ef33a8246d0ca99a70f2ba75c144b7a103d8dd339ac88f`. Captures remain local.
 
 ## Known blockers
 
 - `BIG4` remains implemented from corroborating source but unverified against retail data.
 - Core glTF cannot reproduce exact W3D fixed-function multi-pass blending or animated mapper
-  behavior; complete decoded metadata is available for the renderer gate.
+  behavior; complete decoded metadata remains available to the project renderer.
 - Adaptive-delta animation is synthetic-verified but has not yet been observed in an installed
   export.
-- The renderer does not yet reproduce additional fixed-function passes/stages, animated mapper
-  behavior, or a deterministic textured animated-pose capture.
+- Exact legacy fixed-function equations and spatial environment/screen coordinate generation remain
+  compatibility research beyond R2's documented preview policy.
 
 ## Next verified step
 
-Extend the stable material commands beyond pass zero/stage zero, implement animated mapper inputs,
-and add a deterministic textured capture at an explicit animation frame.
+Start R3 with a bounded, unknown-preserving MAP chunk inventory and original synthetic fixture;
+identify version headers and terrain-height records before adding renderer ingestion.

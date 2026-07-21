@@ -73,4 +73,11 @@ All notable user-visible changes are recorded here.
   sampling, alpha testing, and opaque, source-alpha, or `ONE + ONE` additive GPU pipelines.
 - Added a bounded texture resource manager with stable aliases, SHA-256 RGBA-content deduplication,
   resolved-VFS decode reuse, and effective GPU-material reuse across mesh draw ranges.
+- Added stable rendering for every decoded W3D pass and texture stage. Later stages use an explicit
+  multiplicative preview while each pass retains its decoded opaque, alpha, or additive blend.
+- Added explicit-time CPU sampling for temporal UV mapper arguments, including scrolling, atlas,
+  rotation, sine, step, zigzag, deterministic-random, edge, and bump-linear inputs.
+- Extended `cic-inspect w3d-render` to resolve deduplicated textures and capture a selected animation
+  frame, mapper time, and rotation without reading a clock. The synthetic two-pass/two-stage
+  textured animation capture has a checked RGBA SHA-256 completion hash.
 - Synthetic unit and integration tests plus CI quality gates.

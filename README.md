@@ -22,7 +22,7 @@ default resource profile and `--zh` layers Zero Hour over its required Generals 
 cargo run -p cic-tools -- config show
 cargo run -p cic-tools -- w3d-export art/w3d/model.w3d
 cargo run -p cic-tools -- w3d-view art/w3d/model.w3d
-cargo run -p cic-tools -- w3d-render art/w3d/model.w3d model-capture.ppm
+cargo run -p cic-tools -- w3d-render --animation 0 --frame 10 --time 0.5 art/w3d/model.w3d model-capture.ppm
 cargo run -p cic-tools -- --zh w3d-export art/w3d/model_skn.w3d custom-name.glb
 cargo run -p cic-tools -- w3d-export --gltf art/w3d/model.w3d preview.gltf
 ```
@@ -57,13 +57,15 @@ pose. It consumes validated `cic-formats` values and owns no parser, filesystem,
 resources. `cic-inspect w3d-view` opens a 960x720 depth-tested viewer, frames the model from a
 45-degree elevated camera, rotates it around W3D's Z-up axis, and plays the selected animation.
 Framing is computed once per selected clip, so animation frames do not recenter or rescale the
-model. Pass-zero/stage-zero textures, UVs, source alpha, alpha testing, and common alpha/additive
-blend modes are rendered directly. A bounded resource manager deduplicates decoded images by RGBA
-content and reuses effective GPU materials across meshes. Left/Right switch clips and Escape closes
-the window; the title shows the active clip.
+model. All decoded passes/stages are submitted in stable order: each pass uses its decoded preview
+blend and later texture stages multiply the accumulated color. Temporal UV mappers use explicit
+elapsed seconds. A bounded resource manager deduplicates decoded images by RGBA content and reuses
+effective GPU materials across meshes. Left/Right switch clips and Escape closes the window; the
+title shows the active clip.
 `cic-inspect w3d-render` connects that boundary to the existing installed-resource profiles or
-explicit BIG mounts and produces a depth-tested bind-pose geometry diagnostic. Textures and exact
-fixed-function material passes are not yet applied by the headless command.
+explicit BIG mounts and produces the same textured material preview without a window. Animation
+index/frame, mapper seconds, and rotation are explicit command arguments, so its RGBA hash is a
+deterministic diagnostic rather than a wall-clock snapshot.
 
 On Windows, Rust's MSVC target also requires Visual Studio Build Tools with the Desktop
 development with C++ workload. The same checks run on Linux in GitHub Actions.

@@ -64,8 +64,7 @@ verification remains open.
 
 ## R2: W3D inspection and viewer
 
-**Status:** In progress; format compatibility, external preview, and the base interactive textured
-viewer gates are complete.
+**Status:** Complete.
 
 **Scope:** Bounded recursive chunk inventory followed by separately gated static geometry,
 materials, hierarchies, animation, and an animated viewer.
@@ -113,7 +112,7 @@ verification without retaining retail data. Additive `ONE + ONE` light materials
 unchanged source RGBA images and use separate alpha-coverage preview images; installed airstrip
 lights verified that black sprite backgrounds no longer become opaque rectangles.
 
-### R2 renderer ingestion and animated viewer gate
+### R2 renderer ingestion and animated viewer gate (complete)
 
 **Scope:** Introduce a renderer crate that consumes immutable `cic-formats` model values, renders
 the selected HLOD with hierarchy/skinning/animation, and begins fixed-function pass/stage
@@ -156,14 +155,48 @@ smokes passed, including bounded legacy helper-bone hiding. Clip framing is now 
 time rather than recomputed per animation tick. Pass-zero/stage-zero materials resolve textures
 through the VFS, expand per-face UV seams, preserve source alpha, select opaque/alpha/additive GPU
 pipelines, and reuse content-deduplicated texture images and material bind groups. An installed
-airstrip used 15 effective materials and 13 unique textures without black sprite backgrounds; the
-39-clip infantry used four materials and four textures. Remaining multi-pass/stage equivalence,
-animated mappers, and a deterministic textured animated-pose capture remain open.
+airstrip initially used 15 effective materials and 13 unique textures without black sprite
+backgrounds; the 39-clip infantry used four materials and four textures. The completed renderer
+expands all passes/stages in stable order, uses a documented multiply policy for later stages,
+samples temporal mapper arguments from explicit seconds, and exposes the same path to headless
+capture. A synthetic two-pass/two-stage capture at animation frame 1 and mapper time 0.5 seconds
+matches checked RGBA SHA-256
+`b1f43b981348e99b89c5dcd15b64279cb1b9990df3996ae4b35e4939d8301672`. Final installed captures
+rendered the airstrip as 27 draws/17 materials/14 textures and infantry frame 1 as four
+draws/materials/textures without retaining retail content. Exact legacy fixed-function equivalence
+remains explicitly excluded until broader image comparisons exist.
 
 ## R3: MAP terrain inspection and viewer
 
-Implement versioned chunk inventory, terrain, objects, lighting, and diagnostics. Preserve
-unknown chunks and keep semantic decoders independently versioned.
+**Status:** Not started.
+
+**Scope:** Add a bounded, unknown-preserving MAP chunk inventory, then separately gate versioned
+terrain heights, blend/shore data, object placement, lighting, and a terrain viewer.
+
+**Exclusions:** Gameplay simulation, pathfinding, scripts, asset editing, retail fixtures, and
+claims that unobserved MAP versions share layouts.
+
+**Inputs:** Original synthetic MAP byte streams plus user-owned installed and custom maps through
+the existing VFS.
+
+**Outputs:** Stable chunk/semantic reports, immutable renderer-neutral terrain values, deterministic
+synthetic terrain captures, and an opt-in interactive viewer.
+
+**Owner:** `cic-formats` for bounded decoding, `cic-render` for terrain staging/presentation, and
+`cic-tools` for VFS-backed reports and viewer commands.
+
+**Acceptance tests:** Exact chunk closure, version dispatch, truncation/count/offset/allocation
+limits, unknown preservation, deterministic report ordering, original negative fixtures, headless
+capture hashes, and local installed/custom-map smokes that retain no retail data.
+
+**Determinism:** File/chunk/object order is explicit and stable; terrain diagnostics use explicit
+camera/time inputs and never depend on filesystem order, locale, randomized maps, or wall clock.
+
+**Documentation:** `docs/formats/map.md`, provenance records, compatibility matrix, renderer ADR
+updates where the existing boundary changes, and user-owned capture instructions.
+
+**Completion artifact:** Original versioned terrain fixture(s), checked stable reports and capture
+hashes, plus a local user-owned MAP verification record without copied game content.
 
 ## R4: Deterministic simulation kernel
 
