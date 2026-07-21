@@ -22,10 +22,16 @@ observable behavior.
 | W3D | Known identifier reporting | implemented | 73 identifiers from pinned GPL header |
 | W3D | Static mesh geometry | verified | Original fixture + version 4.2 Steam Generals mesh |
 | W3D | Deterministic static mesh report | verified | Synthetic BIG-backed CLI integration test |
-| W3D | Static Wavefront OBJ export | verified | Synthetic BIG-backed CLI test + installed mesh |
 | W3D | Vertex-material diffuse colors and pass IDs | verified | Colored fixture + installed version 4.2 meshes |
 | W3D | Per-vertex DCG diffuse colors | implemented | Synthetic override and negative tests |
-| W3D | Shaders, textures, and UV references | unknown | Next material gate |
+| W3D | Shaders, textures, and UV references | verified | Composed two-BIG fixture + Generals/Zero Hour exports |
+| W3D | Hierarchy and highest-detail HLOD composition | verified | Split synthetic fixture + installed composed models |
+| W3D | One-bone skin influences | verified | Synthetic glTF assertions + installed Zero Hour infantry |
+| W3D | Classic raw animation | verified | Synthetic clip + 23-action Blender import |
+| W3D | Compressed animation | unknown | Not implemented |
+| W3D | glTF 2.0 preview export | verified | Synthetic CLI test + Blender 3.3 headless import |
+| Resources | Generals install profile and Steam discovery | verified | Installed Steam export + synthetic `--game-dir` test |
+| Resources | Zero Hour base/delta profile | verified | Installed layered `--zh` exports |
 | MAP | Chunk inventory | unknown | Not started |
 | Simulation | Fixed 30 Hz tick kernel | unknown | Not started |
 | Profiles | `ZeroHourLegacy` policy set | unknown | Not started |

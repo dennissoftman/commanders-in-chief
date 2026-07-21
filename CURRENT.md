@@ -2,8 +2,8 @@
 
 ## Objective
 
-Continue evidence-backed W3D material decoding with shaders, textures, and UV references
-on top of verified static geometry and diffuse colors.
+Complete preview-grade W3D model composition and glTF export, including installed-resource
+profiles, split skeleton/skin resources, textures, skinning, and classic raw animation.
 
 ## Implemented foundation
 
@@ -24,7 +24,7 @@ on top of verified static geometry and diffuse colors.
   slash-separated tree paths, and 73 known chunk names.
 - Deterministic `cic-inspect w3d` reports through loose-directory or BIG mounts.
 - Original nested W3D fixture and synthetic BIG-to-W3D CLI completion artifact.
-- Local formatting, strict Clippy, and all 45 runtime tests pass.
+- Local formatting, strict Clippy, and the complete workspace test suite pass.
 - All 18 installed Steam Generals BIG archives have matching declared sizes and bounded
   verified directory trailers; `INI.big` resolves 92 deterministic manifest entries.
 - The installed Steam Generals CSF parses exactly to its 282,246-byte member boundary and
@@ -40,26 +40,37 @@ on top of verified static geometry and diffuse colors.
 - The original three-vertex/one-triangle fixture and BIG-backed `cic-inspect w3d-mesh`
   completion artifact pass; reports preserve floating-point values as exact bits.
 - One installed version 4.2 mesh verified at 24 vertices, 24 normals, and 12 triangles.
-- Deterministic geometry-only Wavefront OBJ export preserves coordinates, normals, triangle
-  order, and winding; the installed verification mesh exported as 24 vertices, 24 normals,
-  and 12 faces.
 - Material inventories, 32-byte vertex materials, singleton/per-vertex first-pass IDs, and
   explicit DCG arrays decode into immutable values with count, size, name, scalar, and index
   validation.
-- First-pass DCG colors override vertex-material diffuse colors; colored OBJ exports append
-  normalized RGB values to vertex records.
+- First-pass DCG colors override vertex-material diffuse colors and are emitted as normalized
+  glTF vertex colors.
 - Original colored-triangle and synthetic BIG-backed completion artifacts pass. Two
   installed static meshes decode their material inventories and assignments directly from
   the user-owned W3D archive.
+- Fixed 16-byte shader records, bounded texture names and 12-byte texture info records,
+  singleton/per-triangle shader and texture IDs, finite UV arrays, and optional checked
+  per-face UV indices decode into immutable renderer-neutral values.
+- Bounded hierarchy, pivot, last/highest-detail HLOD, one-bone skin influence, and classic
+  raw translation/quaternion animation decoding produce immutable model values.
+- Model composition spans sibling skin, hierarchy, and animation W3Ds through the VFS;
+  collision boxes referenced by HLOD are recognized and excluded from render meshes.
+- `cic-inspect w3d-gltf` emits glTF 2.0 JSON, an external binary buffer, hierarchy nodes,
+  rigid and skinned meshes, animation clips, first-pass materials, and converted PNG images.
+- Generals is the default installed-resource profile. `--zh` deterministically overlays
+  Zero Hour on its Generals base; `--game-dir`, saved configuration, environment roots, and
+  validated Steam discovery avoid repeated archive arguments.
+- The synthetic completion artifact splits model, hierarchy, animation, and texture data
+  across W3Ds and two BIGs. Retail Generals and Zero Hour exports succeeded; Blender 3.3
+  imported a 32-joint Zero Hour skin with 23 animation actions.
 
 ## Known blockers
 
 - `BIG4` remains implemented from corroborating source but unverified against retail data.
-- W3D shader records, texture names/info, per-pass shader/texture IDs, and texture-coordinate
-  references require the next evidence-backed semantic specification.
+- Compressed animation, secondary W3D passes/stages, mapper arguments, animated textures,
+  and exact fixed-function blend behavior are not yet represented by the preview policy.
 
 ## Next verified step
 
-Specify shaders, texture names/info, pass shader/texture IDs, and UV arrays with their
-index/count invariants; then emit OBJ texture coordinates and material references without
-introducing rendering dependencies.
+Decide whether to close the remaining W3D compatibility gaps (compressed animation and
+additional material stages) before advancing R2 toward renderer ingestion or R3 terrain.

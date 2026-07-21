@@ -123,18 +123,63 @@ optional DCG chunk contains exactly one four-byte RGBA value per vertex.
 
 For preview output, the first pass resolves explicit DCG colors first; otherwise it maps
 each vertex to its vertex material's diffuse RGB. The semantic defaults limit meshes to
-64 passes, 65,536 vertex materials, 65,536 shaders, 65,536 textures, and 255 name bytes.
+64 passes, 65,536 vertex materials, 65,536 shaders, 65,536 textures, eight texture stages
+per pass, 12,000,000 UVs per stage, and 255 name bytes.
 Names, counts, payload sizes, and IDs are checked before allocation or lookup.
 
 `cic-inspect w3d-mesh <virtual-path> <top-level-index> <mount>...` produces a stable
 geometry report. Floating-point values are rendered as exact hexadecimal bit patterns so
 host locale and formatting do not affect output.
 
-`cic-inspect w3d-obj <virtual-path> <top-level-index> <output.obj> <mount>...` writes a
-deterministic Wavefront OBJ sanity-check export. It preserves object-space coordinates,
-per-vertex normals, triangle order, and winding. Resolved first-pass diffuse colors use
-the `v x y z r g b` extension supported by Blender and other viewers. UVs and texture
-images remain deferred.
+## Shaders, textures, and preview materials
+
+The shader table is a packed array of 16-byte fixed-function records. Texture entries
+contain one required, bounded zero-terminated filename and an optional 12-byte record:
+16-bit attributes, 16-bit animation type, 32-bit frame count, and a finite 32-bit frame
+rate. Declared shader and texture counts must exactly match their decoded tables.
+
+Material-pass shader IDs and texture-stage texture IDs are either one 32-bit value or one
+value per triangle. Texture ID `0xFFFFFFFF` means no texture; every other shader or texture
+ID must be in range. Stage UVs are finite `(U, V)` float pairs. Without a per-face index
+array there must be one UV per vertex; an optional per-face array contains three checked
+UV indices per triangle.
+
+## Hierarchy, HLOD, skinning, and animation
+
+A hierarchy header is 36 bytes: version, a fixed 16-byte name, pivot count, and center.
+Each 60-byte pivot contains a fixed name, parent index, translation, Euler values, and an
+`(x, y, z, w)` quaternion. Pivot zero has no parent and its serialized base transform is
+ignored by the legacy runtime; every other parent must precede its child.
+
+The HLOD header selects a named hierarchy and declares ordered detail arrays. Each array
+declares its subobject count and screen size; each 36-byte subobject binds a named render
+object to one hierarchy pivot. The final array is the highest-detail representation used
+by preview export. Named box render objects are recognized and omitted from mesh output.
+
+Skin geometry carries one 16-bit bone index per vertex. The decoder requires the skin
+geometry flag, bone channel, and influence chunk to agree, and checks every influence
+against the composed hierarchy before export. Rigid HLOD meshes are attached to their
+selected pivot instead.
+
+Classic raw-animation headers contain fixed animation and hierarchy names, a 32-bit frame
+count, and frame rate. Translation and quaternion channels use checked 16-bit inclusive
+frame ranges and pivot indices. Quaternion channels contain four floats per sample; other
+supported channels contain one. Retail exporters can leave unused whole-float samples at
+the end of a channel, matching the original loader's bounded close-chunk behavior; partial
+float padding is rejected. Root-pivot animation is ignored as in the runtime.
+
+`cic-inspect w3d-gltf <virtual-path> <output.gltf> [<mount>...]` composes the final HLOD,
+referenced hierarchy, skinning, and matching raw animation clips. If the retail layout
+splits `_SKN`, `_SKL`, and animation W3Ds, sibling resources are discovered through the
+same VFS. The command writes glTF 2.0 JSON, an external `.bin`, and PNG images. A root
+quaternion converts W3D Z-up coordinates to glTF Y-up for Blender and standard viewers.
+
+All directory and BIG inputs share one VFS. Texture resolution tries the encoded name and
+`art/textures/<name>`; a `.tga` reference may resolve to the retail `.dds` replacement.
+Only referenced user-owned images are decoded and converted to PNG. Later mounts retain
+the normal override policy. Missing images produce a warned 1x1 magenta placeholder so a
+model remains inspectable. Additional W3D passes/stages remain decoded but are not mapped
+into the first-pass glTF preview material.
 
 ## Current safety limits
 
@@ -158,3 +203,9 @@ allocation-limit, and index failures.
 `crates/cic-formats/tests/fixtures/colored-mesh.w3d.hex` extends that original triangle
 with one red vertex material and one material pass. Tests also synthesize an explicit
 red/green/blue DCG array and cover precedence, count, ID, name, and allocation failures.
+
+The composed completion fixture adds an original two-pivot hierarchy, highest-detail HLOD,
+translation animation, fixed-function shader, texture, one stage, and three UV pairs. Its
+skin, hierarchy, and animation are split into separate W3Ds in a synthetic `W3D.big`; an
+independent synthetic `Textures.big` contains an original 2x2 TGA. The CLI integration
+test proves cross-resource composition and valid glTF JSON, external binary, and PNG output.

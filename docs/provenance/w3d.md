@@ -13,6 +13,11 @@
   - `GeneralsMD/Code/Libraries/Source/WWVegas/WW3D2/meshmdlio.cpp`
   - `GeneralsMD/Code/Libraries/Source/WWVegas/WW3D2/meshgeometry.cpp`
   - `GeneralsMD/Code/Libraries/Source/WWVegas/WW3D2/vertmaterial.cpp`
+- Hierarchy, HLOD, and animation readers:
+  - `GeneralsMD/Code/Libraries/Source/WWVegas/WW3D2/htree.cpp`
+  - `GeneralsMD/Code/Libraries/Source/WWVegas/WW3D2/hlod.cpp`
+  - `GeneralsMD/Code/Libraries/Source/WWVegas/WW3D2/hrawanim.cpp`
+  - `GeneralsMD/Code/Libraries/Source/WWVegas/WW3D2/motchan.cpp`
 - Permanent links:
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/Libraries/Source/WWVegas/WWLib/chunkio.h>
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/Libraries/Source/WWVegas/WWLib/chunkio.cpp>
@@ -20,6 +25,10 @@
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/GeneralsMD/Code/Libraries/Source/WWVegas/WW3D2/meshmdlio.cpp>
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/GeneralsMD/Code/Libraries/Source/WWVegas/WW3D2/meshgeometry.cpp>
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/GeneralsMD/Code/Libraries/Source/WWVegas/WW3D2/vertmaterial.cpp>
+  - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/GeneralsMD/Code/Libraries/Source/WWVegas/WW3D2/htree.cpp>
+  - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/GeneralsMD/Code/Libraries/Source/WWVegas/WW3D2/hlod.cpp>
+  - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/GeneralsMD/Code/Libraries/Source/WWVegas/WW3D2/hrawanim.cpp>
+  - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/GeneralsMD/Code/Libraries/Source/WWVegas/WW3D2/motchan.cpp>
 - Upstream notice: Command & Conquer Generals Zero Hour; Copyright 2025 Electronic Arts
   Inc.; historical notices identify Westwood Studios.
 - License: GNU GPL version 3 or later with the Electronic Arts Section 7 additional terms
@@ -30,6 +39,10 @@ the high-bit child-container flag, nested boundary accounting, W3D identifiers, 
 116-byte Header3 layout, 12-byte vectors, 32-byte triangles, header-driven record counts,
 the 16-byte material inventory, 32-byte vertex materials, material-pass ID cardinality,
 and four-byte DCG colors.
+
+The same revision establishes the hierarchy and pivot layouts, parent-before-child world
+transform composition, last-array HLOD selection, one-bone vertex influences, classic raw
+animation headers and channels, and post-multiplied translation/quaternion application.
 
 ## Runtime verification
 
@@ -51,8 +64,9 @@ are white, which is preserved accurately; no retail names or material values are
 
 ## Implementation record
 
-The Rust implementations in `crates/cic-formats/src/w3d.rs`, `w3d_mesh.rs`, and
-`w3d_material.rs` were authored for this project from the facts in `docs/formats/w3d.md`.
+The Rust implementations in `crates/cic-formats/src/w3d.rs`, `w3d_mesh.rs`,
+`w3d_material.rs`, and `w3d_scene.rs` were authored for this project from the facts in
+`docs/formats/w3d.md`.
 No C++ source code was copied, translated line by line, or imported. The immutable tree,
 mesh and material values, structured errors, limits, exact-size checks, index validation,
 color resolution, absolute offsets, and unknown-payload preservation policy are native to

@@ -19,6 +19,7 @@ const VERTICES_CHUNK: u32 = 0x0000_0002;
 const NORMALS_CHUNK: u32 = 0x0000_0003;
 const HEADER3_CHUNK: u32 = 0x0000_001F;
 const TRIANGLES_CHUNK: u32 = 0x0000_0020;
+const VERTEX_INFLUENCES_CHUNK: u32 = 0x0000_000E;
 
 const HEADER3_BYTES: usize = 116;
 const VECTOR_BYTES: usize = 12;
@@ -26,6 +27,7 @@ const TRIANGLE_BYTES: usize = 32;
 const MINIMUM_HEADER3_VERSION: u32 = 0x0003_0000;
 const MAXIMUM_VERIFIED_MESH_VERSION: u32 = 0x0004_0002;
 const GEOMETRY_TYPE_MASK: u32 = 0x00FF_0000;
+const GEOMETRY_TYPE_SKIN: u32 = 0x0002_0000;
 const VERTEX_CHANNEL_LOCATION: u32 = 0x0000_0001;
 const VERTEX_CHANNEL_BONE_ID: u32 = 0x0000_0010;
 const FACE_CHANNEL_FACE: u32 = 0x0000_0001;
@@ -47,6 +49,12 @@ pub struct W3dMeshLimits {
     pub maximum_textures: usize,
     /// Maximum vertex-material name length, excluding its terminator.
     pub maximum_material_name_bytes: usize,
+    /// Maximum texture name length, excluding its terminator.
+    pub maximum_texture_name_bytes: usize,
+    /// Maximum texture coordinates across one stage.
+    pub maximum_texture_coordinates: usize,
+    /// Maximum texture stages decoded for one material pass.
+    pub maximum_texture_stages_per_pass: usize,
 }
 
 impl Default for W3dMeshLimits {
@@ -59,6 +67,9 @@ impl Default for W3dMeshLimits {
             maximum_shaders: 65_536,
             maximum_textures: 65_536,
             maximum_material_name_bytes: 255,
+            maximum_texture_name_bytes: 255,
+            maximum_texture_coordinates: 12_000_000,
+            maximum_texture_stages_per_pass: 8,
         }
     }
 }
@@ -259,6 +270,7 @@ pub struct W3dStaticMesh {
     vertices: Vec<W3dVector3>,
     normals: Vec<W3dVector3>,
     triangles: Vec<W3dTriangle>,
+    vertex_bones: Option<Vec<u16>>,
     materials: W3dMaterialSet,
 }
 
@@ -285,6 +297,12 @@ impl W3dStaticMesh {
     #[must_use]
     pub fn triangles(&self) -> &[W3dTriangle] {
         &self.triangles
+    }
+
+    /// Returns one rigid bone index per vertex for skin geometry.
+    #[must_use]
+    pub fn vertex_bones(&self) -> Option<&[u16]> {
+        self.vertex_bones.as_deref()
     }
 
     /// Returns decoded material colors and first-pass assignments.
@@ -350,12 +368,17 @@ pub enum W3dMeshError {
         /// Actual packed version.
         actual: u32,
     },
-    /// Geometry type or bone channels identified a non-static mesh.
-    NonStaticMesh {
+    /// Geometry type and bone-channel declarations were unsupported or inconsistent.
+    UnsupportedGeometry {
         /// Raw mesh attributes.
         attributes: u32,
         /// Raw vertex channels.
         vertex_channels: u32,
+    },
+    /// A semantic chunk was present for a geometry type that does not permit it.
+    UnexpectedChunk {
+        /// Unexpected numeric chunk identifier.
+        id: u32,
     },
     /// A mandatory location or face channel was not declared.
     MissingRequiredChannel {
@@ -424,12 +447,16 @@ impl Display for W3dMeshError {
                 formatter,
                 "unsupported W3D mesh header3 version 0x{actual:08X}; supported range is 3.0 through 4.2"
             ),
-            Self::NonStaticMesh {
+            Self::UnsupportedGeometry {
                 attributes,
                 vertex_channels,
             } => write!(
                 formatter,
-                "W3D mesh is not static geometry (attributes 0x{attributes:08X}, vertex channels 0x{vertex_channels:08X})"
+                "unsupported or inconsistent W3D geometry (attributes 0x{attributes:08X}, vertex channels 0x{vertex_channels:08X})"
+            ),
+            Self::UnexpectedChunk { id } => write!(
+                formatter,
+                "W3D geometry contains unexpected semantic chunk 0x{id:08X}"
             ),
             Self::MissingRequiredChannel {
                 kind,
@@ -486,7 +513,7 @@ impl From<W3dMaterialError> for W3dMeshError {
 /// # Errors
 ///
 /// Returns [`W3dMeshError`] for the wrong chunk shape, missing/duplicate semantic chunks,
-/// unsupported versions or non-static geometry, count/length disagreements, configured
+/// unsupported versions or inconsistent geometry declarations, count/length disagreements, configured
 /// limit excess, truncation, or an out-of-range triangle index.
 pub fn decode_static_mesh(
     chunk: &W3dChunk,
@@ -536,13 +563,27 @@ pub fn decode_static_mesh(
     )?;
     let triangles = parse_triangles(required_data(children, TRIANGLES_CHUNK)?, triangle_count)?;
     validate_indices(&triangles, vertex_count)?;
-    let materials = decode_materials(children, vertex_count, limits)?;
+    let vertex_bones = if header.attributes & GEOMETRY_TYPE_MASK == GEOMETRY_TYPE_SKIN {
+        Some(parse_vertex_bones(
+            required_data(children, VERTEX_INFLUENCES_CHUNK)?,
+            vertex_count,
+        )?)
+    } else {
+        if optional_data(children, VERTEX_INFLUENCES_CHUNK)?.is_some() {
+            return Err(W3dMeshError::UnexpectedChunk {
+                id: VERTEX_INFLUENCES_CHUNK,
+            });
+        }
+        None
+    };
+    let materials = decode_materials(children, vertex_count, triangle_count, limits)?;
 
     Ok(W3dStaticMesh {
         header,
         vertices,
         normals,
         triangles,
+        vertex_bones,
         materials,
     })
 }
@@ -554,6 +595,35 @@ fn required_data(children: &[W3dChunk], id: u32) -> Result<&[u8], W3dMeshError> 
         return Err(W3dMeshError::DuplicateChunk { id });
     }
     chunk.data().ok_or(W3dMeshError::ChunkMustBeData { id })
+}
+
+fn optional_data(children: &[W3dChunk], id: u32) -> Result<Option<&[u8]>, W3dMeshError> {
+    let mut matching = children.iter().filter(|child| child.id() == id);
+    let first = matching.next();
+    if matching.next().is_some() {
+        return Err(W3dMeshError::DuplicateChunk { id });
+    }
+    first
+        .map(|chunk| chunk.data().ok_or(W3dMeshError::ChunkMustBeData { id }))
+        .transpose()
+}
+
+fn parse_vertex_bones(bytes: &[u8], vertex_count: usize) -> Result<Vec<u16>, W3dMeshError> {
+    let expected = payload_size(vertex_count, 8, "vertex influence")?;
+    if bytes.len() != expected {
+        return Err(W3dMeshError::InvalidChunkLength {
+            id: VERTEX_INFLUENCES_CHUNK,
+            actual: bytes.len(),
+            expected,
+        });
+    }
+    let mut reader = BinaryReader::new(bytes, "W3D vertex influences");
+    let mut bones = Vec::with_capacity(vertex_count);
+    for _ in 0..vertex_count {
+        bones.push(reader.read_u16_le()?);
+        reader.skip(6)?;
+    }
+    Ok(bones)
 }
 
 fn parse_header(bytes: &[u8]) -> Result<W3dMeshHeader3, BinaryError> {
@@ -585,10 +655,13 @@ fn validate_header(header: W3dMeshHeader3) -> Result<(), W3dMeshError> {
             actual: header.version,
         });
     }
-    if header.attributes & GEOMETRY_TYPE_MASK != 0
-        || header.vertex_channels & VERTEX_CHANNEL_BONE_ID != 0
+    let geometry_type = header.attributes & GEOMETRY_TYPE_MASK;
+    if !matches!(geometry_type, 0 | GEOMETRY_TYPE_SKIN)
+        || (geometry_type == 0 && header.vertex_channels & VERTEX_CHANNEL_BONE_ID != 0)
+        || (geometry_type == GEOMETRY_TYPE_SKIN
+            && header.vertex_channels & VERTEX_CHANNEL_BONE_ID == 0)
     {
-        return Err(W3dMeshError::NonStaticMesh {
+        return Err(W3dMeshError::UnsupportedGeometry {
             attributes: header.attributes,
             vertex_channels: header.vertex_channels,
         });
@@ -833,7 +906,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_static_versions_channels_and_geometry() {
+    fn rejects_unsupported_versions_channels_and_geometry() {
         let cases = [
             (0_usize, 0x0002_0000_u32, "version"),
             (4, 0x0002_0000, "geometry"),
@@ -851,7 +924,7 @@ mod tests {
             match expected {
                 "version" => assert!(matches!(error, W3dMeshError::UnsupportedVersion { .. })),
                 "geometry" | "bone channel" => {
-                    assert!(matches!(error, W3dMeshError::NonStaticMesh { .. }));
+                    assert!(matches!(error, W3dMeshError::UnsupportedGeometry { .. }));
                 }
                 _ => assert!(matches!(error, W3dMeshError::MissingRequiredChannel { .. })),
             }

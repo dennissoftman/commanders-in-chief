@@ -1,5 +1,10 @@
 //! Stable diagnostic report formatting.
 
+mod gltf;
+pub mod resource;
+
+pub use gltf::{GltfTextureRequest, W3dGltfBundle, render_w3d_gltf};
+
 use std::fmt::Write;
 
 use cic_formats::{CsfFile, W3dChunk, W3dFile, W3dStaticMesh, W3dVector3, w3d_chunk_name};
@@ -153,88 +158,6 @@ pub fn render_w3d_mesh(mesh: &W3dStaticMesh) -> String {
     output
 }
 
-/// Converts immutable static mesh geometry to deterministic Wavefront OBJ text.
-///
-/// Object-space coordinates, vertex normals, triangle order, and winding are preserved.
-/// Resolved first-pass diffuse colors use the widely supported `v x y z r g b` extension.
-/// Texture-coordinate records are intentionally omitted until their W3D semantics are
-/// implemented.
-#[must_use]
-pub fn render_w3d_obj(mesh: &W3dStaticMesh) -> String {
-    let header = mesh.header();
-    let mesh_name = obj_name(fixed_name(header.mesh_name_bytes()));
-    let container_name = obj_name(fixed_name(header.container_name_bytes()));
-    let object_name = if container_name.is_empty() {
-        mesh_name
-    } else if mesh_name.is_empty() {
-        container_name
-    } else {
-        format!("{container_name}.{mesh_name}")
-    };
-
-    let mut output = String::from(
-        "# Commanders in Chief W3D static geometry export\n\
-         # Object-space coordinates and winding are preserved; UVs are omitted.\n",
-    );
-    writeln!(
-        output,
-        "o {}",
-        if object_name.is_empty() {
-            "mesh"
-        } else {
-            &object_name
-        }
-    )
-    .expect("writing to a String cannot fail");
-
-    let colors = mesh.preview_vertex_colors();
-    for (index, vertex) in mesh.vertices().iter().enumerate() {
-        if let Some(color) = colors.as_ref().and_then(|colors| colors.get(index)) {
-            writeln!(
-                output,
-                "v {} {} {} {} {} {}",
-                vertex.x(),
-                vertex.y(),
-                vertex.z(),
-                normalized_color(color.red()),
-                normalized_color(color.green()),
-                normalized_color(color.blue())
-            )
-            .expect("writing to a String cannot fail");
-        } else {
-            writeln!(output, "v {} {} {}", vertex.x(), vertex.y(), vertex.z())
-                .expect("writing to a String cannot fail");
-        }
-    }
-    for normal in mesh.normals() {
-        writeln!(output, "vn {} {} {}", normal.x(), normal.y(), normal.z())
-            .expect("writing to a String cannot fail");
-    }
-    for triangle in mesh.triangles() {
-        let [v0, v1, v2] = triangle.vertex_indices().map(|index| u64::from(index) + 1);
-        writeln!(output, "f {v0}//{v0} {v1}//{v1} {v2}//{v2}")
-            .expect("writing to a String cannot fail");
-    }
-    output
-}
-
-fn normalized_color(value: u8) -> f32 {
-    f32::from(value) / f32::from(u8::MAX)
-}
-
-fn obj_name(bytes: &[u8]) -> String {
-    let mut name = String::new();
-    for byte in bytes {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-' | b'.' => {
-                name.push(char::from(*byte));
-            }
-            _ => write!(name, "_{byte:02X}").expect("writing to a String cannot fail"),
-        }
-    }
-    name
-}
-
 fn render_bound(output: &mut String, name: &str, value: W3dVector3, radius: Option<f32>) {
     let radius = radius.map_or_else(String::new, float_bits);
     writeln!(
@@ -336,7 +259,7 @@ mod tests {
     };
     use cic_vfs::{Vfs, VirtualPath};
 
-    use super::{render_csf, render_manifest, render_w3d, render_w3d_mesh, render_w3d_obj};
+    use super::{render_csf, render_manifest, render_w3d, render_w3d_mesh};
 
     #[test]
     fn manifest_is_sorted_and_reports_winning_provenance() {
@@ -455,60 +378,5 @@ mod tests {
             "triangle\tv0\tv1\tv2\tattributes\tnx\tny\tnz\tdistance\n\
              0\t0\t1\t2\t0x00000000\t0x00000000\t0x00000000\t0x3F800000\t0x00000000\n"
         ));
-    }
-
-    #[test]
-    fn static_mesh_obj_preserves_coordinates_normals_and_winding() {
-        let hex = include_str!("../../cic-formats/tests/fixtures/static-mesh.w3d.hex");
-        let digits = hex
-            .bytes()
-            .filter(u8::is_ascii_hexdigit)
-            .collect::<Vec<_>>();
-        let bytes = digits
-            .chunks_exact(2)
-            .map(|pair| {
-                let pair = std::str::from_utf8(pair).expect("ASCII fixture");
-                u8::from_str_radix(pair, 16).expect("valid hex fixture")
-            })
-            .collect::<Vec<_>>();
-        let w3d = parse_w3d(&bytes, "static-mesh.w3d", W3dLimits::default()).expect("valid W3D");
-        let mesh = decode_static_mesh(&w3d.chunks()[0], W3dMeshLimits::default())
-            .expect("valid static mesh");
-
-        assert_eq!(
-            render_w3d_obj(&mesh),
-            "# Commanders in Chief W3D static geometry export\n\
-             # Object-space coordinates and winding are preserved; UVs are omitted.\n\
-             o Test.Tri\n\
-             v 0 0 0\n\
-             v 1 0 0\n\
-             v 0 1 0\n\
-             vn 0 0 1\n\
-             vn 0 0 1\n\
-             vn 0 0 1\n\
-             f 1//1 2//2 3//3\n"
-        );
-    }
-
-    #[test]
-    fn static_mesh_obj_emits_resolved_diffuse_vertex_colors() {
-        let hex = include_str!("../../cic-formats/tests/fixtures/colored-mesh.w3d.hex");
-        let digits = hex
-            .bytes()
-            .filter(u8::is_ascii_hexdigit)
-            .collect::<Vec<_>>();
-        let bytes = digits
-            .chunks_exact(2)
-            .map(|pair| {
-                let pair = std::str::from_utf8(pair).expect("ASCII fixture");
-                u8::from_str_radix(pair, 16).expect("valid hex fixture")
-            })
-            .collect::<Vec<_>>();
-        let w3d = parse_w3d(&bytes, "colored-mesh.w3d", W3dLimits::default()).expect("valid W3D");
-        let mesh = decode_static_mesh(&w3d.chunks()[0], W3dMeshLimits::default())
-            .expect("valid colored mesh");
-        let obj = render_w3d_obj(&mesh);
-
-        assert!(obj.contains("v 0 0 0 1 0 0\nv 1 0 0 1 0 0\nv 0 1 0 1 0 0\n"));
     }
 }

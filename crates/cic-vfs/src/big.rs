@@ -245,7 +245,8 @@ fn parse_entries(
                 offset,
                 size,
             })?;
-        if offset < first_file_offset || end > archive_size {
+        let is_zero_length_marker = offset == 0 && size == 0;
+        if !is_zero_length_marker && (offset < first_file_offset || end > archive_size) {
             return Err(BigError::EntryOutsidePayload {
                 entry: entry_index,
                 offset,
@@ -484,5 +485,14 @@ mod tests {
             parse_big_archive(&archive, BigLimits::default()),
             Err(BigError::EntryOutsidePayload { entry: 0, .. })
         ));
+    }
+
+    #[test]
+    fn accepts_retail_zero_length_offset_zero_marker() {
+        let mut archive = fixture();
+        archive[16..20].copy_from_slice(&0_u32.to_be_bytes());
+        archive[20..24].copy_from_slice(&0_u32.to_be_bytes());
+        let index = parse_big_archive(&archive, BigLimits::default()).expect("valid marker");
+        assert_eq!(index.entries()[0].bytes(&archive), Some([].as_slice()));
     }
 }

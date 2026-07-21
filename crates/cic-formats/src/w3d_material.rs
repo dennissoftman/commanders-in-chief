@@ -1,7 +1,7 @@
-//! W3D vertex-material and first-pass diffuse-color decoding.
+//! W3D vertex-material, shader, texture, and texture-coordinate decoding.
 //!
 //! Provenance: this implementation was authored for Commanders in Chief from
-//! `w3d_file.h`, `meshmdlio.cpp`, and `vertmaterial.cpp` at `GeneralsGameCode`
+//! `w3d_file.h`, `meshmdlio.cpp`, `vertmaterial.cpp`, and `texture.cpp` at `GeneralsGameCode`
 //! revision `9f7abb866f5afd446db14149979e744c7216baaf`. Those sources are
 //! GPL-3.0-or-later with Electronic Arts Section 7 terms; no source code or retail
 //! content is copied.
@@ -15,17 +15,30 @@ use crate::w3d::W3dChunk;
 use crate::w3d_mesh::W3dMeshLimits;
 
 const MATERIAL_INFO_CHUNK: u32 = 0x0000_0028;
+const SHADERS_CHUNK: u32 = 0x0000_0029;
 const VERTEX_MATERIALS_CHUNK: u32 = 0x0000_002A;
 const VERTEX_MATERIAL_CHUNK: u32 = 0x0000_002B;
 const VERTEX_MATERIAL_NAME_CHUNK: u32 = 0x0000_002C;
 const VERTEX_MATERIAL_INFO_CHUNK: u32 = 0x0000_002D;
+const TEXTURES_CHUNK: u32 = 0x0000_0030;
+const TEXTURE_CHUNK: u32 = 0x0000_0031;
+const TEXTURE_NAME_CHUNK: u32 = 0x0000_0032;
+const TEXTURE_INFO_CHUNK: u32 = 0x0000_0033;
 const MATERIAL_PASS_CHUNK: u32 = 0x0000_0038;
 const VERTEX_MATERIAL_IDS_CHUNK: u32 = 0x0000_0039;
+const SHADER_IDS_CHUNK: u32 = 0x0000_003A;
 const DIFFUSE_COLORS_CHUNK: u32 = 0x0000_003B;
+const TEXTURE_STAGE_CHUNK: u32 = 0x0000_0048;
+const TEXTURE_IDS_CHUNK: u32 = 0x0000_0049;
+const STAGE_TEXCOORDS_CHUNK: u32 = 0x0000_004A;
+const PER_FACE_TEXCOORD_IDS_CHUNK: u32 = 0x0000_004B;
 
 const MATERIAL_INFO_BYTES: usize = 16;
 const VERTEX_MATERIAL_INFO_BYTES: usize = 32;
 const COLOR_BYTES: usize = 4;
+const SHADER_BYTES: usize = 16;
+const TEXTURE_INFO_BYTES: usize = 12;
+const TEXCOORD_BYTES: usize = 8;
 
 /// The four inventory counts in `W3dMaterialInfoStruct`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -215,11 +228,162 @@ impl W3dMaterialIds {
     }
 }
 
-/// Decoded color-relevant values for one material pass.
+/// One fixed 16-byte W3D fixed-function shader description.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct W3dShader {
+    bytes: [u8; SHADER_BYTES],
+}
+
+impl W3dShader {
+    /// Returns the exact on-disk shader bytes in field order.
+    #[must_use]
+    pub const fn bytes(self) -> [u8; SHADER_BYTES] {
+        self.bytes
+    }
+
+    /// Returns whether the shader declares texturing enabled.
+    #[must_use]
+    pub const fn texturing(self) -> u8 {
+        self.bytes[8]
+    }
+
+    /// Returns the source blend function selector.
+    #[must_use]
+    pub const fn source_blend(self) -> u8 {
+        self.bytes[7]
+    }
+
+    /// Returns the destination blend function selector.
+    #[must_use]
+    pub const fn destination_blend(self) -> u8 {
+        self.bytes[3]
+    }
+
+    /// Returns the alpha-test selector.
+    #[must_use]
+    pub const fn alpha_test(self) -> u8 {
+        self.bytes[12]
+    }
+}
+
+/// Optional animation and sampling flags for one texture.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct W3dTextureInfo {
+    attributes: u16,
+    animation_type: u16,
+    frame_count: u32,
+    frame_rate: f32,
+}
+
+impl W3dTextureInfo {
+    #[must_use]
+    pub const fn attributes(self) -> u16 {
+        self.attributes
+    }
+    #[must_use]
+    pub const fn animation_type(self) -> u16 {
+        self.animation_type
+    }
+    #[must_use]
+    pub const fn frame_count(self) -> u32 {
+        self.frame_count
+    }
+    #[must_use]
+    pub const fn frame_rate(self) -> f32 {
+        self.frame_rate
+    }
+}
+
+/// One texture table entry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct W3dTexture {
+    name: Vec<u8>,
+    info: Option<W3dTextureInfo>,
+}
+
+impl W3dTexture {
+    #[must_use]
+    pub fn name_bytes(&self) -> &[u8] {
+        &self.name
+    }
+    #[must_use]
+    pub const fn info(&self) -> Option<W3dTextureInfo> {
+        self.info
+    }
+}
+
+/// A per-triangle assignment encoded as one shared ID or one ID per triangle.
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum W3dFaceIds {
+    Single(u32),
+    PerTriangle(Vec<u32>),
+}
+
+impl W3dFaceIds {
+    #[must_use]
+    pub fn for_triangle(&self, triangle: usize) -> Option<u32> {
+        match self {
+            Self::Single(id) => Some(*id),
+            Self::PerTriangle(ids) => ids.get(triangle).copied(),
+        }
+    }
+}
+
+/// One W3D texture coordinate, before the runtime's V-axis inversion.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct W3dTexCoord {
+    u: f32,
+    v: f32,
+}
+
+impl W3dTexCoord {
+    #[must_use]
+    pub const fn u(self) -> f32 {
+        self.u
+    }
+    #[must_use]
+    pub const fn v(self) -> f32 {
+        self.v
+    }
+}
+
+/// Texture binding and UV data for one material-pass stage.
+#[derive(Debug, Clone, PartialEq)]
+pub struct W3dTextureStage {
+    texture_ids: Option<W3dFaceIds>,
+    texture_coordinates: Vec<W3dTexCoord>,
+    per_face_coordinate_ids: Option<Vec<[u32; 3]>>,
+}
+
+impl W3dTextureStage {
+    #[must_use]
+    pub const fn texture_ids(&self) -> Option<&W3dFaceIds> {
+        self.texture_ids.as_ref()
+    }
+    #[must_use]
+    pub fn texture_coordinates(&self) -> &[W3dTexCoord] {
+        &self.texture_coordinates
+    }
+    #[must_use]
+    pub fn per_face_coordinate_ids(&self) -> Option<&[[u32; 3]]> {
+        self.per_face_coordinate_ids.as_deref()
+    }
+    #[must_use]
+    pub fn coordinate_indices(&self, triangle: usize, vertices: [u32; 3]) -> Option<[u32; 3]> {
+        self.per_face_coordinate_ids
+            .as_ref()
+            .and_then(|ids| ids.get(triangle).copied())
+            .or(Some(vertices))
+    }
+}
+
+/// Decoded color-relevant values for one material pass.
+#[derive(Debug, Clone, PartialEq)]
 pub struct W3dMaterialPass {
     vertex_material_ids: Option<W3dMaterialIds>,
+    shader_ids: Option<W3dFaceIds>,
     diffuse_colors: Option<Vec<W3dRgba8>>,
+    texture_stages: Vec<W3dTextureStage>,
 }
 
 impl W3dMaterialPass {
@@ -234,6 +398,15 @@ impl W3dMaterialPass {
     pub fn diffuse_colors(&self) -> Option<&[W3dRgba8]> {
         self.diffuse_colors.as_deref()
     }
+
+    #[must_use]
+    pub const fn shader_ids(&self) -> Option<&W3dFaceIds> {
+        self.shader_ids.as_ref()
+    }
+    #[must_use]
+    pub fn texture_stages(&self) -> &[W3dTextureStage] {
+        &self.texture_stages
+    }
 }
 
 /// Material inventory, vertex materials, and color-relevant pass assignments.
@@ -241,6 +414,8 @@ impl W3dMaterialPass {
 pub struct W3dMaterialSet {
     info: Option<W3dMaterialInfo>,
     vertex_materials: Vec<W3dVertexMaterial>,
+    shaders: Vec<W3dShader>,
+    textures: Vec<W3dTexture>,
     passes: Vec<W3dMaterialPass>,
 }
 
@@ -261,6 +436,15 @@ impl W3dMaterialSet {
     #[must_use]
     pub fn passes(&self) -> &[W3dMaterialPass] {
         &self.passes
+    }
+
+    #[must_use]
+    pub fn shaders(&self) -> &[W3dShader] {
+        &self.shaders
+    }
+    #[must_use]
+    pub fn textures(&self) -> &[W3dTexture] {
+        &self.textures
     }
 
     /// Resolves first-pass preview colors for all vertices.
@@ -330,6 +514,15 @@ pub enum W3dMaterialError {
         /// Required per-vertex byte length.
         per_vertex: usize,
     },
+    /// A singleton-or-per-triangle assignment had another length.
+    InvalidFaceIdArrayLength {
+        /// Assignment kind.
+        what: &'static str,
+        /// Actual byte length.
+        actual: usize,
+        /// Required per-triangle byte length.
+        per_triangle: usize,
+    },
     /// Parsed children disagreed with material inventory metadata.
     CountMismatch {
         /// Counted resource kind.
@@ -355,6 +548,18 @@ pub enum W3dMaterialError {
         /// Zero-based vertex-material index.
         material: usize,
     },
+    /// A texture name did not contain a zero terminator.
+    UnterminatedTextureName { texture: usize },
+    /// A shader, texture, or UV index was outside its decoded table.
+    ResourceIndexOutOfRange {
+        what: &'static str,
+        pass: usize,
+        element: Option<usize>,
+        index: u32,
+        count: usize,
+    },
+    /// A texture scalar or coordinate was NaN or infinite.
+    NonFiniteTextureValue { what: &'static str, index: usize },
     /// A material scalar was NaN or infinite.
     NonFiniteScalar {
         /// Zero-based vertex-material index.
@@ -406,6 +611,14 @@ impl Display for W3dMaterialError {
                 formatter,
                 "W3D vertex-material IDs have {actual} bytes; expected 4 or {per_vertex}"
             ),
+            Self::InvalidFaceIdArrayLength {
+                what,
+                actual,
+                per_triangle,
+            } => write!(
+                formatter,
+                "W3D {what} IDs have {actual} bytes; expected 4 or {per_triangle}"
+            ),
             Self::CountMismatch {
                 what,
                 declared,
@@ -429,6 +642,23 @@ impl Display for W3dMaterialError {
                     formatter,
                     "W3D vertex material {material} name is not terminated"
                 )
+            }
+            Self::UnterminatedTextureName { texture } => {
+                write!(formatter, "W3D texture {texture} name is not terminated")
+            }
+            Self::ResourceIndexOutOfRange {
+                what,
+                pass,
+                element,
+                index,
+                count,
+            } => write!(
+                formatter,
+                "W3D material pass {pass}{} references {what} {index}, but only {count} exist",
+                element.map_or_else(String::new, |value| format!(" element {value}"))
+            ),
+            Self::NonFiniteTextureValue { what, index } => {
+                write!(formatter, "W3D {what} {index} is non-finite")
             }
             Self::NonFiniteScalar { material, field } => write!(
                 formatter,
@@ -457,12 +687,17 @@ impl From<BinaryError> for W3dMaterialError {
 pub(crate) fn decode_materials(
     children: &[W3dChunk],
     vertex_count: usize,
+    triangle_count: usize,
     limits: W3dMeshLimits,
 ) -> Result<W3dMaterialSet, W3dMaterialError> {
     let has_material_children = children.iter().any(|child| {
         matches!(
             child.id(),
-            MATERIAL_INFO_CHUNK | VERTEX_MATERIALS_CHUNK | MATERIAL_PASS_CHUNK
+            MATERIAL_INFO_CHUNK
+                | SHADERS_CHUNK
+                | VERTEX_MATERIALS_CHUNK
+                | TEXTURES_CHUNK
+                | MATERIAL_PASS_CHUNK
         )
     });
     if !has_material_children {
@@ -495,6 +730,26 @@ pub(crate) fn decode_materials(
         vertex_materials.len(),
     )?;
 
+    let shaders = unique_child(children, SHADERS_CHUNK)?
+        .map(|chunk| decode_shaders(chunk, limits.maximum_shaders))
+        .transpose()?
+        .unwrap_or_default();
+    require_count(
+        "shaders",
+        usize::try_from(info.shaders).unwrap_or(usize::MAX),
+        shaders.len(),
+    )?;
+
+    let textures = unique_child(children, TEXTURES_CHUNK)?
+        .map(|chunk| decode_textures(chunk, limits))
+        .transpose()?
+        .unwrap_or_default();
+    require_count(
+        "textures",
+        usize::try_from(info.textures).unwrap_or(usize::MAX),
+        textures.len(),
+    )?;
+
     let mut passes = Vec::new();
     for child in children
         .iter()
@@ -510,8 +765,14 @@ pub(crate) fn decode_materials(
         passes.push(decode_pass(
             child,
             passes.len(),
-            vertex_count,
-            vertex_materials.len(),
+            PassDecodeContext {
+                vertex_count,
+                triangle_count,
+                material_count: vertex_materials.len(),
+                shader_count: shaders.len(),
+                texture_count: textures.len(),
+                limits,
+            },
         )?);
     }
     require_count("material passes", expected_passes, passes.len())?;
@@ -519,6 +780,8 @@ pub(crate) fn decode_materials(
     Ok(W3dMaterialSet {
         info: Some(info),
         vertex_materials,
+        shaders,
+        textures,
         passes,
     })
 }
@@ -644,11 +907,126 @@ fn parse_vertex_material(
     })
 }
 
+fn decode_shaders(chunk: &W3dChunk, maximum: usize) -> Result<Vec<W3dShader>, W3dMaterialError> {
+    let bytes = require_data(chunk)?;
+    if !bytes.len().is_multiple_of(SHADER_BYTES) {
+        return Err(W3dMaterialError::InvalidChunkLength {
+            id: SHADERS_CHUNK,
+            actual: bytes.len(),
+            expected: bytes.len() / SHADER_BYTES * SHADER_BYTES,
+        });
+    }
+    let count = bytes.len() / SHADER_BYTES;
+    if count > maximum {
+        return Err(BinaryError::LimitExceeded {
+            what: "W3D shader count",
+            actual: count,
+            maximum,
+        }
+        .into());
+    }
+    Ok(bytes
+        .chunks_exact(SHADER_BYTES)
+        .map(|record| {
+            let mut bytes = [0; SHADER_BYTES];
+            bytes.copy_from_slice(record);
+            W3dShader { bytes }
+        })
+        .collect())
+}
+
+fn decode_textures(
+    wrapper: &W3dChunk,
+    limits: W3dMeshLimits,
+) -> Result<Vec<W3dTexture>, W3dMaterialError> {
+    let children = wrapper
+        .children()
+        .ok_or(W3dMaterialError::ChunkMustBeContainer { id: TEXTURES_CHUNK })?;
+    let mut textures = Vec::new();
+    for child in children.iter().filter(|child| child.id() == TEXTURE_CHUNK) {
+        if textures.len() >= limits.maximum_textures {
+            return Err(BinaryError::LimitExceeded {
+                what: "W3D texture count",
+                actual: textures.len().saturating_add(1),
+                maximum: limits.maximum_textures,
+            }
+            .into());
+        }
+        textures.push(decode_texture(child, textures.len(), limits)?);
+    }
+    Ok(textures)
+}
+
+fn decode_texture(
+    chunk: &W3dChunk,
+    texture_index: usize,
+    limits: W3dMeshLimits,
+) -> Result<W3dTexture, W3dMaterialError> {
+    let children = chunk
+        .children()
+        .ok_or(W3dMaterialError::ChunkMustBeContainer { id: TEXTURE_CHUNK })?;
+    let name_chunk =
+        unique_child(children, TEXTURE_NAME_CHUNK)?.ok_or(W3dMaterialError::MissingChunk {
+            id: TEXTURE_NAME_CHUNK,
+        })?;
+    let name_bytes = require_data(name_chunk)?;
+    let maximum = limits.maximum_texture_name_bytes.saturating_add(1);
+    if name_bytes.len() > maximum {
+        return Err(BinaryError::LimitExceeded {
+            what: "W3D texture name bytes",
+            actual: name_bytes.len(),
+            maximum,
+        }
+        .into());
+    }
+    let length = name_bytes.iter().position(|byte| *byte == 0).ok_or(
+        W3dMaterialError::UnterminatedTextureName {
+            texture: texture_index,
+        },
+    )?;
+    let info = unique_child(children, TEXTURE_INFO_CHUNK)?
+        .map(|chunk| {
+            let bytes = require_data(chunk)?;
+            require_length(TEXTURE_INFO_CHUNK, bytes.len(), TEXTURE_INFO_BYTES)?;
+            let mut reader = BinaryReader::new(bytes, "W3D texture info");
+            let attributes = reader.read_u16_le()?;
+            let animation_type = reader.read_u16_le()?;
+            let frame_count = reader.read_u32_le()?;
+            let frame_rate = f32::from_bits(reader.read_u32_le()?);
+            if !frame_rate.is_finite() {
+                return Err(W3dMaterialError::NonFiniteTextureValue {
+                    what: "texture frame rate",
+                    index: texture_index,
+                });
+            }
+            Ok(W3dTextureInfo {
+                attributes,
+                animation_type,
+                frame_count,
+                frame_rate,
+            })
+        })
+        .transpose()?;
+    Ok(W3dTexture {
+        name: name_bytes[..length].to_vec(),
+        info,
+    })
+}
+
+#[derive(Clone, Copy)]
+struct PassDecodeContext {
+    vertex_count: usize,
+    triangle_count: usize,
+    material_count: usize,
+    shader_count: usize,
+    texture_count: usize,
+    limits: W3dMeshLimits,
+}
+
 fn decode_pass(
     chunk: &W3dChunk,
     pass_index: usize,
-    vertex_count: usize,
-    material_count: usize,
+    context: PassDecodeContext,
 ) -> Result<W3dMaterialPass, W3dMaterialError> {
     let children = chunk
         .children()
@@ -660,18 +1038,218 @@ fn decode_pass(
             parse_material_ids(
                 require_data(chunk)?,
                 pass_index,
-                vertex_count,
-                material_count,
+                context.vertex_count,
+                context.material_count,
             )
         })
         .transpose()?;
     let diffuse_colors = unique_child(children, DIFFUSE_COLORS_CHUNK)?
-        .map(|chunk| parse_diffuse_colors(require_data(chunk)?, vertex_count))
+        .map(|chunk| parse_diffuse_colors(require_data(chunk)?, context.vertex_count))
         .transpose()?;
+    let shader_ids = unique_child(children, SHADER_IDS_CHUNK)?
+        .map(|chunk| {
+            parse_face_ids(
+                require_data(chunk)?,
+                "shader",
+                pass_index,
+                context.triangle_count,
+                context.shader_count,
+                false,
+            )
+        })
+        .transpose()?;
+    let mut texture_stages = Vec::new();
+    for child in children
+        .iter()
+        .filter(|child| child.id() == TEXTURE_STAGE_CHUNK)
+    {
+        if texture_stages.len() >= context.limits.maximum_texture_stages_per_pass {
+            return Err(BinaryError::LimitExceeded {
+                what: "W3D texture stage count per pass",
+                actual: texture_stages.len().saturating_add(1),
+                maximum: context.limits.maximum_texture_stages_per_pass,
+            }
+            .into());
+        }
+        texture_stages.push(decode_texture_stage(
+            child,
+            pass_index,
+            context.vertex_count,
+            context.triangle_count,
+            context.texture_count,
+            context.limits,
+        )?);
+    }
     Ok(W3dMaterialPass {
         vertex_material_ids,
+        shader_ids,
         diffuse_colors,
+        texture_stages,
     })
+}
+
+fn parse_face_ids(
+    bytes: &[u8],
+    what: &'static str,
+    pass: usize,
+    triangle_count: usize,
+    table_count: usize,
+    allow_none: bool,
+) -> Result<W3dFaceIds, W3dMaterialError> {
+    let per_triangle = payload_size(triangle_count, 4, "per-triangle ID array")?;
+    if bytes.len() != 4 && bytes.len() != per_triangle {
+        return Err(W3dMaterialError::InvalidFaceIdArrayLength {
+            what,
+            actual: bytes.len(),
+            per_triangle,
+        });
+    }
+    let mut reader = BinaryReader::new(bytes, "W3D per-face IDs");
+    let count = if bytes.len() == 4 { 1 } else { triangle_count };
+    let mut ids = Vec::with_capacity(count);
+    for element in 0..count {
+        let id = reader.read_u32_le()?;
+        if !(usize::try_from(id).is_ok_and(|id| id < table_count) || allow_none && id == u32::MAX) {
+            return Err(W3dMaterialError::ResourceIndexOutOfRange {
+                what,
+                pass,
+                element: (count != 1).then_some(element),
+                index: id,
+                count: table_count,
+            });
+        }
+        ids.push(id);
+    }
+    if count == 1 {
+        Ok(W3dFaceIds::Single(*ids.first().ok_or(
+            W3dMaterialError::SizeOverflow {
+                what: "singleton ID",
+            },
+        )?))
+    } else {
+        Ok(W3dFaceIds::PerTriangle(ids))
+    }
+}
+
+fn decode_texture_stage(
+    chunk: &W3dChunk,
+    pass: usize,
+    vertex_count: usize,
+    triangle_count: usize,
+    texture_count: usize,
+    limits: W3dMeshLimits,
+) -> Result<W3dTextureStage, W3dMaterialError> {
+    let children = chunk
+        .children()
+        .ok_or(W3dMaterialError::ChunkMustBeContainer {
+            id: TEXTURE_STAGE_CHUNK,
+        })?;
+    let texture_ids = unique_child(children, TEXTURE_IDS_CHUNK)?
+        .map(|chunk| {
+            parse_face_ids(
+                require_data(chunk)?,
+                "texture",
+                pass,
+                triangle_count,
+                texture_count,
+                true,
+            )
+        })
+        .transpose()?;
+    let texture_coordinates = unique_child(children, STAGE_TEXCOORDS_CHUNK)?
+        .map(|chunk| parse_texcoords(require_data(chunk)?, limits.maximum_texture_coordinates))
+        .transpose()?
+        .unwrap_or_default();
+    let per_face_coordinate_ids = unique_child(children, PER_FACE_TEXCOORD_IDS_CHUNK)?
+        .map(|chunk| {
+            parse_uv_indices(
+                require_data(chunk)?,
+                pass,
+                triangle_count,
+                texture_coordinates.len(),
+            )
+        })
+        .transpose()?;
+    if per_face_coordinate_ids.is_none()
+        && !texture_coordinates.is_empty()
+        && texture_coordinates.len() != vertex_count
+    {
+        return Err(W3dMaterialError::InvalidChunkLength {
+            id: STAGE_TEXCOORDS_CHUNK,
+            actual: texture_coordinates.len().saturating_mul(TEXCOORD_BYTES),
+            expected: vertex_count.saturating_mul(TEXCOORD_BYTES),
+        });
+    }
+    Ok(W3dTextureStage {
+        texture_ids,
+        texture_coordinates,
+        per_face_coordinate_ids,
+    })
+}
+
+fn parse_texcoords(bytes: &[u8], maximum: usize) -> Result<Vec<W3dTexCoord>, W3dMaterialError> {
+    if !bytes.len().is_multiple_of(TEXCOORD_BYTES) {
+        return Err(W3dMaterialError::InvalidChunkLength {
+            id: STAGE_TEXCOORDS_CHUNK,
+            actual: bytes.len(),
+            expected: bytes.len() / TEXCOORD_BYTES * TEXCOORD_BYTES,
+        });
+    }
+    let count = bytes.len() / TEXCOORD_BYTES;
+    if count > maximum {
+        return Err(BinaryError::LimitExceeded {
+            what: "W3D texture coordinate count",
+            actual: count,
+            maximum,
+        }
+        .into());
+    }
+    let mut reader = BinaryReader::new(bytes, "W3D texture coordinates");
+    let mut coordinates = Vec::with_capacity(count);
+    for index in 0..count {
+        let u = f32::from_bits(reader.read_u32_le()?);
+        let v = f32::from_bits(reader.read_u32_le()?);
+        if !u.is_finite() || !v.is_finite() {
+            return Err(W3dMaterialError::NonFiniteTextureValue {
+                what: "texture coordinate",
+                index,
+            });
+        }
+        coordinates.push(W3dTexCoord { u, v });
+    }
+    Ok(coordinates)
+}
+
+fn parse_uv_indices(
+    bytes: &[u8],
+    pass: usize,
+    triangles: usize,
+    coordinate_count: usize,
+) -> Result<Vec<[u32; 3]>, W3dMaterialError> {
+    let expected = payload_size(triangles, 12, "per-face texture-coordinate ID array")?;
+    require_length(PER_FACE_TEXCOORD_IDS_CHUNK, bytes.len(), expected)?;
+    let mut reader = BinaryReader::new(bytes, "W3D texture-coordinate IDs");
+    let mut result = Vec::with_capacity(triangles);
+    for triangle in 0..triangles {
+        let ids = [
+            reader.read_u32_le()?,
+            reader.read_u32_le()?,
+            reader.read_u32_le()?,
+        ];
+        for id in ids {
+            if !usize::try_from(id).is_ok_and(|id| id < coordinate_count) {
+                return Err(W3dMaterialError::ResourceIndexOutOfRange {
+                    what: "texture coordinate",
+                    pass,
+                    element: Some(triangle),
+                    index: id,
+                    count: coordinate_count,
+                });
+            }
+        }
+        result.push(ids);
+    }
+    Ok(result)
 }
 
 fn parse_material_ids(
@@ -836,8 +1414,10 @@ fn payload_size(
 #[cfg(test)]
 mod tests {
     use super::{
-        DIFFUSE_COLORS_CHUNK, MATERIAL_INFO_CHUNK, MATERIAL_PASS_CHUNK, VERTEX_MATERIAL_IDS_CHUNK,
-        VERTEX_MATERIAL_NAME_CHUNK, W3dMaterialError, W3dMaterialIds,
+        DIFFUSE_COLORS_CHUNK, MATERIAL_INFO_CHUNK, MATERIAL_PASS_CHUNK, SHADER_IDS_CHUNK,
+        SHADERS_CHUNK, STAGE_TEXCOORDS_CHUNK, TEXTURE_CHUNK, TEXTURE_IDS_CHUNK, TEXTURE_INFO_CHUNK,
+        TEXTURE_NAME_CHUNK, TEXTURE_STAGE_CHUNK, TEXTURES_CHUNK, VERTEX_MATERIAL_IDS_CHUNK,
+        VERTEX_MATERIAL_NAME_CHUNK, W3dFaceIds, W3dMaterialError, W3dMaterialIds,
     };
     use crate::{W3dChunk, W3dLimits, W3dMeshError, W3dMeshLimits, decode_static_mesh, parse_w3d};
 
@@ -860,6 +1440,50 @@ mod tests {
         let file = parse_w3d(bytes, "colored-mesh.w3d", W3dLimits::default())
             .expect("valid chunk framing");
         decode_static_mesh(&file.chunks()[0], W3dMeshLimits::default())
+    }
+
+    fn append_chunk(output: &mut Vec<u8>, id: u32, container: bool, payload: &[u8]) {
+        output.extend_from_slice(&id.to_le_bytes());
+        let size = u32::try_from(payload.len()).expect("fixture payload fits u32")
+            | if container { 0x8000_0000 } else { 0 };
+        output.extend_from_slice(&size.to_le_bytes());
+        output.extend_from_slice(payload);
+    }
+
+    fn textured_fixture() -> Vec<u8> {
+        let mut bytes = fixture();
+        let info = payload_offset(&bytes, MATERIAL_INFO_CHUNK);
+        bytes[info + 8..info + 12].copy_from_slice(&1_u32.to_le_bytes());
+        bytes[info + 12..info + 16].copy_from_slice(&1_u32.to_le_bytes());
+        let pass_header = payload_offset(&bytes, MATERIAL_PASS_CHUNK) - 8;
+
+        append_chunk(&mut bytes, SHADER_IDS_CHUNK, false, &0_u32.to_le_bytes());
+        let mut stage = Vec::new();
+        append_chunk(&mut stage, TEXTURE_IDS_CHUNK, false, &0_u32.to_le_bytes());
+        let mut coordinates = Vec::new();
+        for value in [0.0_f32, 0.0, 1.0, 0.0, 0.0, 1.0] {
+            coordinates.extend_from_slice(&value.to_le_bytes());
+        }
+        append_chunk(&mut stage, STAGE_TEXCOORDS_CHUNK, false, &coordinates);
+        append_chunk(&mut bytes, TEXTURE_STAGE_CHUNK, true, &stage);
+        bytes[pass_header + 4..pass_header + 8]
+            .copy_from_slice(&(76_u32 | 0x8000_0000).to_le_bytes());
+
+        let shader = [3, 1, 0, 0, 0, 1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0];
+        append_chunk(&mut bytes, SHADERS_CHUNK, false, &shader);
+        let mut texture = Vec::new();
+        append_chunk(&mut texture, TEXTURE_NAME_CHUNK, false, b"checker.tga\0");
+        let mut texture_info = Vec::new();
+        texture_info.extend_from_slice(&0_u16.to_le_bytes());
+        texture_info.extend_from_slice(&0_u16.to_le_bytes());
+        texture_info.extend_from_slice(&1_u32.to_le_bytes());
+        texture_info.extend_from_slice(&0_f32.to_le_bytes());
+        append_chunk(&mut texture, TEXTURE_INFO_CHUNK, false, &texture_info);
+        let mut texture_entry = Vec::new();
+        append_chunk(&mut texture_entry, TEXTURE_CHUNK, true, &texture);
+        append_chunk(&mut bytes, TEXTURES_CHUNK, true, &texture_entry);
+        bytes[4..8].copy_from_slice(&(508_u32 | 0x8000_0000).to_le_bytes());
+        bytes
     }
 
     fn find_chunk(chunks: &[W3dChunk], id: u32) -> Option<&W3dChunk> {
@@ -929,6 +1553,106 @@ mod tests {
         assert!(matches!(
             mesh.materials().passes()[0].vertex_material_ids(),
             Some(W3dMaterialIds::PerVertex(ids)) if ids == &[0, 0, 0]
+        ));
+    }
+
+    #[test]
+    fn decodes_shader_texture_binding_and_uvs() {
+        let mesh = decode(&textured_fixture()).expect("valid textured mesh");
+        let materials = mesh.materials();
+        assert_eq!(materials.shaders().len(), 1);
+        assert_eq!(materials.shaders()[0].texturing(), 1);
+        assert_eq!(materials.textures()[0].name_bytes(), b"checker.tga");
+        assert_eq!(
+            materials.textures()[0]
+                .info()
+                .expect("texture info")
+                .frame_count(),
+            1
+        );
+        let pass = &materials.passes()[0];
+        assert!(matches!(pass.shader_ids(), Some(W3dFaceIds::Single(0))));
+        let stage = &pass.texture_stages()[0];
+        assert!(matches!(stage.texture_ids(), Some(W3dFaceIds::Single(0))));
+        assert_eq!(stage.texture_coordinates().len(), 3);
+        assert_eq!(
+            stage.texture_coordinates()[2].v().to_bits(),
+            1.0_f32.to_bits()
+        );
+
+        let mut invalid = textured_fixture();
+        let id = payload_offset(&invalid, TEXTURE_IDS_CHUNK);
+        invalid[id..id + 4].copy_from_slice(&1_u32.to_le_bytes());
+        assert!(matches!(
+            decode(&invalid),
+            Err(W3dMeshError::Material(
+                W3dMaterialError::ResourceIndexOutOfRange {
+                    what: "texture",
+                    index: 1,
+                    count: 1,
+                    ..
+                }
+            ))
+        ));
+
+        let mut unterminated = textured_fixture();
+        let name = payload_offset(&unterminated, TEXTURE_NAME_CHUNK);
+        unterminated[name + b"checker.tga".len()] = b'!';
+        assert!(matches!(
+            decode(&unterminated),
+            Err(W3dMeshError::Material(
+                W3dMaterialError::UnterminatedTextureName { texture: 0 }
+            ))
+        ));
+
+        let mut non_finite_uv = textured_fixture();
+        let uv = payload_offset(&non_finite_uv, STAGE_TEXCOORDS_CHUNK);
+        non_finite_uv[uv..uv + 4].copy_from_slice(&f32::NAN.to_le_bytes());
+        assert!(matches!(
+            decode(&non_finite_uv),
+            Err(W3dMeshError::Material(
+                W3dMaterialError::NonFiniteTextureValue {
+                    what: "texture coordinate",
+                    index: 0
+                }
+            ))
+        ));
+
+        let bytes = textured_fixture();
+        let file = parse_w3d(&bytes, "texture-limit.w3d", W3dLimits::default())
+            .expect("valid chunk framing");
+        assert!(matches!(
+            decode_static_mesh(
+                &file.chunks()[0],
+                W3dMeshLimits {
+                    maximum_textures: 0,
+                    ..W3dMeshLimits::default()
+                }
+            ),
+            Err(W3dMeshError::Material(W3dMaterialError::Binary(
+                cic_core::BinaryError::LimitExceeded {
+                    what: "W3D texture count",
+                    actual: 1,
+                    maximum: 0
+                }
+            )))
+        ));
+
+        assert!(matches!(
+            decode_static_mesh(
+                &file.chunks()[0],
+                W3dMeshLimits {
+                    maximum_texture_stages_per_pass: 0,
+                    ..W3dMeshLimits::default()
+                }
+            ),
+            Err(W3dMeshError::Material(W3dMaterialError::Binary(
+                cic_core::BinaryError::LimitExceeded {
+                    what: "W3D texture stage count per pass",
+                    actual: 1,
+                    maximum: 0
+                }
+            )))
         ));
     }
 

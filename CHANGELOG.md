@@ -22,7 +22,17 @@ All notable user-visible changes are recorded here.
   exact record-size checks, static-channel validation, and range-checked triangle indices.
 - `cic-inspect w3d-mesh` exact-bit geometry reports through mounted directories and BIG
   archives.
-- `cic-inspect w3d-obj` deterministic Wavefront OBJ exports for external model viewers.
 - Bounded W3D material inventories, vertex-material colors, first-pass material IDs, and
-  explicit per-vertex diffuse color arrays with colored OBJ vertex output.
+  explicit per-vertex diffuse color arrays.
+- Bounded W3D fixed-function shader records, texture names/info, per-triangle shader and
+  texture assignments, and texture-coordinate arrays.
+- Bounded W3D hierarchy, highest-detail HLOD, rigid/skinned mesh composition, and classic
+  raw-animation channel decoding, including split skeleton/skin/animation resources.
+- `cic-inspect w3d-gltf` glTF 2.0 export with hierarchy transforms, skins, animation clips,
+  first-pass PBR preview materials, UV conversion, and TGA/DDS-to-PNG image conversion.
+- Generals and Zero Hour resource profiles with `--zh`, one-off `--game-dir`, persisted
+  installation roots, Steam library discovery, and deterministic base-then-expansion VFS
+  layering.
+- Missing referenced retail textures produce warned magenta placeholders so geometry and
+  animation remain inspectable.
 - Synthetic unit and integration tests plus CI quality gates.

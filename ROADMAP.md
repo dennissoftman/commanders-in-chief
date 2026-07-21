@@ -64,24 +64,25 @@ verification remains open.
 
 ## R2: W3D inspection and viewer
 
-**Status:** In progress; chunk-inventory and static-geometry gates complete.
+**Status:** In progress; external animated-model preview gates complete.
 
 **Scope:** Bounded recursive chunk inventory followed by separately gated static geometry,
 materials, hierarchies, animation, and an animated viewer.
 
-**Exclusions:** MAP terrain, gameplay simulation, editing/export, and retail asset
+**Exclusions:** MAP terrain, gameplay simulation, general asset editing, and retail asset
 distribution.
 
 **Inputs:** Original synthetic W3D streams and user-owned W3D resources through the VFS.
 
-**Outputs:** Stable unknown-preserving chunk reports, then immutable decoded asset values
-and viewer snapshots.
+**Outputs:** Stable unknown-preserving chunk reports, immutable decoded asset values, and
+portable glTF sanity-check artifacts before renderer integration.
 
 **Owner:** `cic-formats` for decoding and `cic-tools` for inspection; a renderer crate is
 introduced only when the viewer gate begins.
 
 **Acceptance tests:** Exact nested boundary closure, truncation and depth/count/size limits,
-unknown payload preservation, semantic count/index checks, and BIG-backed CLI integration.
+unknown payload preservation, semantic count/index checks, split-resource BIG-backed CLI
+integration, retail smoke verification, and external importer validation.
 
 **Determinism:** File-order chunk trees, slash-separated numeric paths, stable identifier
 names, and no renderer or host-order dependency in reports.
@@ -89,19 +90,20 @@ names, and no renderer or host-order dependency in reports.
 **Documentation:** `docs/formats/w3d.md`, provenance, compatibility matrix, and later ADRs
 for renderer boundaries.
 
-**Completion artifact:** Original nested and static-triangle fixtures, stable chunk and
-exact-bit geometry reports; later gates add a synthetic mesh screenshot and animation
-capture.
+**Completion artifact:** Original nested and composed textured/animated fixtures, stable
+chunk and exact-bit geometry reports, and a Blender-importable synthetic glTF; later
+renderer gates add screenshot and animation capture artifacts.
 
 **Progress:** The recursive inventory, 73-name identifier table, original nested fixture,
 and `cic-inspect w3d` report are complete. A 113,980-byte installed W3D closes exactly into
 525 records. Header3 versions 3.0 through 4.2, vertices, normals, and triangles now decode
 into immutable renderer-neutral values with exact count/size and vertex-index validation.
-The BIG-backed `cic-inspect w3d-mesh` report is deterministic, and one installed version
-4.2 mesh verified at 24 vertices and 12 triangles. The first material slice now decodes
-bounded material inventories, vertex-material diffuse colors, singleton/per-vertex pass
-IDs, and DCG color arrays; OBJ preview output includes resolved first-pass vertex colors.
-Shader, texture, and UV references are next.
+The BIG-backed `cic-inspect w3d-mesh` report is deterministic. Materials, shaders, textures,
+UVs, hierarchy/HLOD composition, rigid and skinned models, and classic raw-animation clips
+decode into immutable bounded values. `cic-inspect w3d-gltf` composes split retail W3Ds,
+resolves Generals or layered Zero Hour resources, converts TGA/DDS images to PNG, and emits
+Blender-importable glTF. Compressed animation and richer multi-pass material equivalence
+remain before the format surface is complete.
 
 ## R3: MAP terrain inspection and viewer
 

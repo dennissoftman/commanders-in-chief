@@ -13,17 +13,32 @@ cargo test --workspace
 cargo run -p cic-tools -- manifest path\to\base path\to\archive.big path\to\override
 ```
 
-Static W3D meshes can be exported to Wavefront OBJ for a quick geometry preview. First use
-the `w3d` report to find a top-level mesh index, then export that mesh:
+Complete W3D models can be exported to glTF 2.0 for Blender or a browser-based model
+viewer. On Windows, installed Steam locations are detected automatically; Generals is the
+default resource profile and `--zh` layers Zero Hour over its required Generals base:
 
 ```powershell
-cargo run -p cic-tools -- w3d art/w3d/model.w3d path\to\W3D.big
-cargo run -p cic-tools -- w3d-obj art/w3d/model.w3d 2 preview.obj path\to\W3D.big
+cargo run -p cic-tools -- config show
+cargo run -p cic-tools -- w3d-gltf art/w3d/model.w3d preview.gltf
+cargo run -p cic-tools -- --zh w3d-gltf art/w3d/model_skn.w3d preview.gltf
 ```
 
-The OBJ preserves object-space coordinates, vertex normals, triangle order, and winding.
-When a first-pass diffuse material or DCG color array is present, normalized vertex colors
-are appended to each `v` record. Texture coordinates and texture images remain deferred.
+The command writes `preview.gltf`, `preview.bin`, and PNG images beneath
+`preview_textures`. It composes HLOD meshes, hierarchy transforms, skins, and classic raw
+animation clips, including retail layouts that split `_SKN`, `_SKL`, and animation W3Ds.
+First-pass colors, shaders, textures, and UVs are preserved for preview; W3D `.tga`
+references may resolve to installed `.dds` replacements. A missing retail image produces
+a visible magenta placeholder and warning instead of preventing geometry inspection.
+
+Use `--game-dir <path>` for a one-off installation or persist roots explicitly:
+
+```powershell
+cargo run -p cic-tools -- config set generals-dir "D:\Games\Generals"
+cargo run -p cic-tools -- config set zero-hour-dir "D:\Games\Zero Hour"
+```
+
+Explicit directory or BIG mounts remain supported after the command arguments for
+synthetic fixtures and custom overlays.
 
 On Windows, Rust's MSVC target also requires Visual Studio Build Tools with the Desktop
 development with C++ workload. The same checks run on Linux in GitHub Actions.
