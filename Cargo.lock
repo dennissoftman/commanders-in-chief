@@ -7,9 +7,17 @@ name = "cic-core"
 version = "0.1.0"
 
 [[package]]
+name = "cic-formats"
+version = "0.1.0"
+dependencies = [
+ "cic-core",
+]
+
+[[package]]
 name = "cic-tools"
 version = "0.1.0"
 dependencies = [
+ "cic-formats",
  "cic-vfs",
 ]
 

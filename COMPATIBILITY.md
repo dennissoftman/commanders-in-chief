@@ -12,7 +12,11 @@ observable behavior.
 | BIG | Directory trailers | verified | None, `L225`+zero, and `L231`+zero across 18 archives |
 | BIG | `BIG4` index and mounting | implemented | Corroborating GPL evidence; runtime/Generals use unverified |
 | BIG | Duplicate entry resolution | implemented | Static tests: last table entry wins; history retained |
-| CSF | Labels, strings, and optional wave names | unknown | Not started |
+| CSF | Version 3 header and record boundaries | verified | Synthetic tests + installed Steam Generals CSF |
+| CSF | Complemented UTF-16 text | verified | Original fixture + installed Steam Generals CSF |
+| CSF | Optional wave names and zero-string labels | verified | Original fixture + installed Steam Generals CSF |
+| CSF | Duplicate-label preservation | implemented | Synthetic duplicate-label test; retail file has none |
+| CSF | Deterministic VFS-backed report | verified | Synthetic BIG-to-CSF CLI integration test |
 | W3D | Chunk inventory | unknown | Not started |
 | MAP | Chunk inventory | unknown | Not started |
 | Simulation | Fixed 30 Hz tick kernel | unknown | Not started |

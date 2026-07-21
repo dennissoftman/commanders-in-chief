@@ -56,8 +56,10 @@ manifest snapshot.
 
 **Progress:** BIGF indexing and mounting pass the complete local suite and all 18
 installed Steam Generals archives. Mixed-endian fields, slash-normalized paths, and
-none/`L225`/`L231` directory trailers are verified. BIG4 retail verification, fuzzing,
-and CSF remain open.
+none/`L225`/`L231` directory trailers are verified. The bounded CSF decoder, lossless
+record IR, original fixture, deterministic report, and synthetic BIG-to-CSF CLI artifact
+are implemented and verified against the installed Generals CSF. The CSF fuzz smoke gate
+and BIG4 retail verification remain open.
 
 ## R2: W3D inspection and viewer
 

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/cic-core",
+    "crates/cic-formats",
     "crates/cic-vfs",
     "crates/cic-tools",
 ]
@@ -18,4 +19,3 @@ unsafe_code = "forbid"
 [workspace.lints.clippy]
 all = "warn"
 pedantic = "warn"
-

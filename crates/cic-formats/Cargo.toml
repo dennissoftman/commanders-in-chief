@@ -1,0 +1,13 @@
+[package]
+name = "cic-formats"
+description = "Bounded game-format decoders for Commanders in Chief"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+cic-core = { path = "../cic-core" }
+
+[lints]
+workspace = true

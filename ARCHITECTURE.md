@@ -18,15 +18,15 @@ definition database          asset database
 commands -> deterministic simulation -> immutable render snapshot
 ```
 
-The current workspace deliberately starts with three crates:
+The current workspace has four deliberately narrow crates:
 
 - `cic-core`: dependency-free invariants and bounded binary input.
+- `cic-formats`: bounded decoders and immutable, renderer-neutral format values.
 - `cic-vfs`: normalized paths, providers, overlay order, and asset provenance.
 - `cic-tools`: diagnostic applications built on public lower-level APIs.
 
-Format decoding will initially live in a `cic-formats` crate when the first CSF decoder
-is introduced. Simulation, rendering, AI, networking, and scripting remain excluded
-until their milestones begin.
+Simulation, rendering, AI, networking, and scripting remain excluded until their
+milestones begin.
 
 ## Boundaries
 
@@ -34,4 +34,3 @@ until their milestones begin.
 - Parsers return immutable semantic values or structured errors.
 - Tools may format diagnostics but must not contain parsing rules.
 - Deterministic behavior is an API property and must be tested at each boundary.
-

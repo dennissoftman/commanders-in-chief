@@ -1,6 +1,7 @@
-/target/
+target/
+fuzz/artifacts/
+fuzz/corpus/
 *.profraw
 *.tmp
 .idea/
 .vscode/
-

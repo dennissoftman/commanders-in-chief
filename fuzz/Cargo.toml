@@ -1,0 +1,23 @@
+[package]
+name = "cic-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "GPL-3.0-only"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+cic-formats = { path = "../crates/cic-formats" }
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "csf"
+path = "fuzz_targets/csf.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]
