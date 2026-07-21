@@ -1,7 +1,6 @@
 use std::env;
 use std::error::Error;
 use std::fs;
-use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -13,7 +12,10 @@ use cic_tools::resource::{
     GameEdition, ResourceKind, StoredLocations, config_path, discover_steam_locations,
     resolve_archives, validate_installation,
 };
-use cic_tools::{render_csf, render_manifest, render_w3d, render_w3d_gltf, render_w3d_mesh};
+use cic_tools::{
+    GltfTextureRequest, pack_w3d_glb, render_csf, render_manifest, render_w3d, render_w3d_gltf,
+    render_w3d_mesh,
+};
 use cic_vfs::{BigLimits, Vfs, VirtualPath};
 
 const USAGE: &str = "Usage:\n\
@@ -24,13 +26,19 @@ const USAGE: &str = "Usage:\n\
   cic-inspect csf <virtual-path> <mount> [<mount> ...]\n\
   cic-inspect w3d <virtual-path> <mount> [<mount> ...]\n\
   cic-inspect w3d-mesh <virtual-path> <top-level-index> <mount> [<mount> ...]\n\
-  cic-inspect w3d-gltf <virtual-path> <output.gltf> [<mount> ...]\n\
+  cic-inspect w3d-export [--gltf] <virtual-path> [<output.glb|output.gltf>] [<mount> ...]\n\
 Each mount is a directory or BIG archive. Mounts are applied from left to right; later mounts override earlier mounts.";
 
 #[derive(Debug)]
 struct CliOptions {
     edition: GameEdition,
     game_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExportFormat {
+    Glb,
+    Gltf,
 }
 
 fn main() -> ExitCode {
@@ -119,27 +127,101 @@ fn run(arguments: impl IntoIterator<Item = String>) -> Result<String, Box<dyn Er
             let mesh = decode_static_mesh(chunk, W3dMeshLimits::default())?;
             Ok(render_w3d_mesh(&mesh))
         }
-        "w3d-gltf" => {
-            let resource_name = arguments.next().ok_or("w3d-gltf requires a virtual path")?;
-            let output_path = arguments.next().ok_or("w3d-gltf requires an output path")?;
-            let mounts = arguments.collect::<Vec<_>>();
-            let vfs = mount_all("w3d-gltf", &mounts, &options, ResourceKind::W3dWithTextures)?;
-            let resource_path = VirtualPath::new(&resource_name)?;
-            let entry = vfs
-                .resolve(&resource_path)
-                .ok_or_else(|| format!("resource not found: {resource_path}"))?;
-            let w3d = parse_w3d(entry.bytes(), resource_path.as_str(), W3dLimits::default())?;
-            let files = collect_model_files(&vfs, &resource_path, w3d)?;
-            let file_refs = files.iter().collect::<Vec<_>>();
-            let model = decode_w3d_model_set(
-                &file_refs,
-                W3dMeshLimits::default(),
-                W3dSceneLimits::default(),
-            )?;
-            write_gltf_bundle(&vfs, &model, Path::new(&output_path))?;
-            Ok(format!("wrote {output_path}\n"))
-        }
+        "w3d-export" => export_model(&mut arguments, &options),
         _ => Err(format!("unknown command {command:?}").into()),
+    }
+}
+
+fn export_model<I>(
+    arguments: &mut std::iter::Peekable<I>,
+    options: &CliOptions,
+) -> Result<String, Box<dyn Error>>
+where
+    I: Iterator<Item = String>,
+{
+    let format = if arguments
+        .peek()
+        .is_some_and(|argument| argument == "--gltf")
+    {
+        arguments.next();
+        ExportFormat::Gltf
+    } else {
+        ExportFormat::Glb
+    };
+    let resource_name = arguments
+        .next()
+        .ok_or("w3d-export requires a virtual path")?;
+    let resource_path = VirtualPath::new(&resource_name)?;
+    let remaining = arguments.collect::<Vec<_>>();
+    let (output_path, mounts) = if remaining
+        .first()
+        .is_some_and(|candidate| has_export_extension(Path::new(candidate)))
+    {
+        (PathBuf::from(&remaining[0]), remaining[1..].to_vec())
+    } else {
+        (default_export_path(&resource_path, format)?, remaining)
+    };
+    validate_export_extension(format, &output_path)?;
+    let vfs = mount_all(
+        "w3d-export",
+        &mounts,
+        options,
+        ResourceKind::W3dWithTextures,
+    )?;
+    let entry = vfs
+        .resolve(&resource_path)
+        .ok_or_else(|| format!("resource not found: {resource_path}"))?;
+    let w3d = parse_w3d(entry.bytes(), resource_path.as_str(), W3dLimits::default())?;
+    let files = collect_model_files(&vfs, &resource_path, w3d)?;
+    let file_refs = files.iter().collect::<Vec<_>>();
+    let model = decode_w3d_model_set(
+        &file_refs,
+        W3dMeshLimits::default(),
+        W3dSceneLimits::default(),
+    )?;
+    write_model_export(&vfs, &model, &output_path, format)?;
+    Ok(format!("wrote {}\n", output_path.display()))
+}
+
+fn has_export_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("glb") || extension.eq_ignore_ascii_case("gltf")
+        })
+}
+
+fn default_export_path(
+    resource_path: &VirtualPath,
+    format: ExportFormat,
+) -> Result<PathBuf, Box<dyn Error>> {
+    let stem = Path::new(resource_path.as_str())
+        .file_stem()
+        .ok_or("W3D resource path has no file name")?;
+    let extension = match format {
+        ExportFormat::Glb => "glb",
+        ExportFormat::Gltf => "gltf",
+    };
+    Ok(PathBuf::from(stem).with_extension(extension))
+}
+
+fn validate_export_extension(format: ExportFormat, path: &Path) -> Result<(), Box<dyn Error>> {
+    let expected = match format {
+        ExportFormat::Glb => "glb",
+        ExportFormat::Gltf => "gltf",
+    };
+    if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case(expected))
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} export requires a .{expected} output path",
+            expected.to_uppercase()
+        )
+        .into())
     }
 }
 
@@ -254,7 +336,37 @@ fn display_path(path: Option<&Path>) -> String {
     path.map_or_else(String::new, |path| path.display().to_string())
 }
 
-fn write_gltf_bundle(
+fn write_model_export(
+    vfs: &Vfs,
+    model: &cic_formats::W3dModel,
+    output_path: &Path,
+    format: ExportFormat,
+) -> Result<(), Box<dyn Error>> {
+    match format {
+        ExportFormat::Glb => write_glb(vfs, model, output_path),
+        ExportFormat::Gltf => write_gltf(vfs, model, output_path),
+    }
+}
+
+fn write_glb(
+    vfs: &Vfs,
+    model: &cic_formats::W3dModel,
+    output_path: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let bundle = render_w3d_gltf(model, "embedded.bin", "embedded_textures");
+    let images = encode_png_textures(vfs, &bundle.textures)?;
+    let png_images = images
+        .into_iter()
+        .map(|image| {
+            println!("texture {} -> embedded PNG", image.source_name);
+            image.bytes
+        })
+        .collect::<Vec<_>>();
+    fs::write(output_path, pack_w3d_glb(bundle, &png_images)?)?;
+    Ok(())
+}
+
+fn write_gltf(
     vfs: &Vfs,
     model: &cic_formats::W3dModel,
     output_path: &Path,
@@ -267,48 +379,74 @@ fn write_gltf_bundle(
     let binary_name = format!("{stem}.bin");
     let texture_directory_name = format!("{stem}_textures");
     let bundle = render_w3d_gltf(model, &binary_name, &texture_directory_name);
+    let images = encode_png_textures(vfs, &bundle.textures)?;
     fs::write(output_path, bundle.json)?;
     fs::write(parent.join(binary_name), bundle.binary)?;
     if !bundle.textures.is_empty() {
         let texture_directory = parent.join(&texture_directory_name);
         fs::create_dir_all(&texture_directory)?;
-        for texture in bundle.textures {
-            let resolved = resolve_texture(vfs, texture.source_name_bytes());
-            let (source_name, image) = match resolved {
-                Ok((source_path, bytes)) => {
-                    let format = image_format(&source_path)?;
-                    let image = image::load_from_memory_with_format(bytes, format)?;
-                    (source_path.to_string(), image)
-                }
-                Err(error) => {
-                    eprintln!(
-                        "warning: {error}; writing a magenta placeholder for {}",
-                        String::from_utf8_lossy(texture.source_name_bytes())
-                    );
-                    let image = image::RgbaImage::from_pixel(
-                        1,
-                        1,
-                        image::Rgba([u8::MAX, 0, u8::MAX, u8::MAX]),
-                    );
-                    (
-                        "missing texture".to_owned(),
-                        image::DynamicImage::ImageRgba8(image),
-                    )
-                }
-            };
-            let mut png = Cursor::new(Vec::new());
-            image.write_to(&mut png, image::ImageFormat::Png)?;
-            fs::write(
-                texture_directory.join(texture.output_name()),
-                png.into_inner(),
-            )?;
+        for (texture, image) in bundle.textures.into_iter().zip(images) {
+            fs::write(texture_directory.join(texture.output_name()), image.bytes)?;
             println!(
-                "texture {source_name} -> {texture_directory_name}/{}",
+                "texture {} -> {texture_directory_name}/{}",
+                image.source_name,
                 texture.output_name()
             );
         }
     }
     Ok(())
+}
+
+struct EncodedTexture {
+    source_name: String,
+    bytes: Vec<u8>,
+}
+
+fn encode_png_textures(
+    vfs: &Vfs,
+    requests: &[GltfTextureRequest],
+) -> Result<Vec<EncodedTexture>, Box<dyn Error>> {
+    requests
+        .iter()
+        .map(|texture| encode_png_texture(vfs, texture))
+        .collect()
+}
+
+fn encode_png_texture(
+    vfs: &Vfs,
+    texture: &GltfTextureRequest,
+) -> Result<EncodedTexture, Box<dyn Error>> {
+    let resolved = resolve_texture(vfs, texture.source_name_bytes());
+    let (source_name, image) = match resolved {
+        Ok((source_path, bytes)) => {
+            let format = image_format(&source_path)?;
+            let image = image::load_from_memory_with_format(bytes, format)?;
+            (source_path.to_string(), image)
+        }
+        Err(error) => {
+            eprintln!(
+                "warning: {error}; writing a magenta placeholder for {}",
+                String::from_utf8_lossy(texture.source_name_bytes())
+            );
+            let image =
+                image::RgbaImage::from_pixel(1, 1, image::Rgba([u8::MAX, 0, u8::MAX, u8::MAX]));
+            (
+                "missing texture".to_owned(),
+                image::DynamicImage::ImageRgba8(image),
+            )
+        }
+    };
+    let rgba = image.to_rgba8();
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut bytes, rgba.width(), rgba.height());
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
+        let mut writer = encoder.write_header()?;
+        writer.write_image_data(rgba.as_raw())?;
+    }
+    Ok(EncodedTexture { source_name, bytes })
 }
 
 fn image_format(path: &VirtualPath) -> Result<image::ImageFormat, Box<dyn Error>> {

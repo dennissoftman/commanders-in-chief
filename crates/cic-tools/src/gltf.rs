@@ -1,6 +1,8 @@
 //! Deterministic glTF 2.0 export for composed W3D models.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::error::Error;
+use std::fmt::{self, Display, Formatter};
 
 use cic_formats::{
     W3dAnimationChannel, W3dAnimationChannelKind, W3dMaterialIds, W3dModel, W3dStaticMesh,
@@ -31,6 +33,151 @@ pub struct W3dGltfBundle {
     pub json: String,
     pub binary: Vec<u8>,
     pub textures: Vec<GltfTextureRequest>,
+}
+
+/// A failure while packing a generated glTF bundle into the GLB container.
+#[derive(Debug)]
+pub enum W3dGlbError {
+    Json(serde_json::Error),
+    TextureCount { expected: usize, actual: usize },
+    GeneratedDocument(&'static str),
+    OutputTooLarge,
+}
+
+impl Display for W3dGlbError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Json(error) => Display::fmt(error, formatter),
+            Self::TextureCount { expected, actual } => write!(
+                formatter,
+                "glTF bundle requested {expected} textures, but {actual} PNG images were supplied"
+            ),
+            Self::GeneratedDocument(what) => {
+                write!(formatter, "generated glTF document has invalid {what}")
+            }
+            Self::OutputTooLarge => formatter.write_str("GLB output exceeds its 32-bit size limit"),
+        }
+    }
+}
+
+impl Error for W3dGlbError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Json(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<serde_json::Error> for W3dGlbError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Json(error)
+    }
+}
+
+/// Packs a generated glTF bundle and its resolved PNG images into one GLB 2.0 file.
+///
+/// # Errors
+///
+/// Returns an error if the generated document is inconsistent, the PNG count differs from
+/// its image requests, JSON serialization fails, or the output exceeds GLB's 32-bit size limit.
+pub fn pack_w3d_glb(
+    mut bundle: W3dGltfBundle,
+    png_images: &[Vec<u8>],
+) -> Result<Vec<u8>, W3dGlbError> {
+    if bundle.textures.len() != png_images.len() {
+        return Err(W3dGlbError::TextureCount {
+            expected: bundle.textures.len(),
+            actual: png_images.len(),
+        });
+    }
+    let mut document: Value = serde_json::from_str(&bundle.json)?;
+    let root = document
+        .as_object_mut()
+        .ok_or(W3dGlbError::GeneratedDocument("root object"))?;
+
+    let mut image_views = Vec::with_capacity(png_images.len());
+    {
+        let views = root
+            .get_mut("bufferViews")
+            .and_then(Value::as_array_mut)
+            .ok_or(W3dGlbError::GeneratedDocument("bufferViews array"))?;
+        for png in png_images {
+            align_bytes(&mut bundle.binary, 0);
+            let offset = bundle.binary.len();
+            let end = offset
+                .checked_add(png.len())
+                .ok_or(W3dGlbError::OutputTooLarge)?;
+            if end > u32::MAX as usize {
+                return Err(W3dGlbError::OutputTooLarge);
+            }
+            bundle.binary.extend_from_slice(png);
+            image_views.push(views.len());
+            views.push(json!({
+                "buffer": 0,
+                "byteOffset": offset,
+                "byteLength": png.len()
+            }));
+        }
+    }
+    if !image_views.is_empty() {
+        let images = root
+            .get_mut("images")
+            .and_then(Value::as_array_mut)
+            .ok_or(W3dGlbError::GeneratedDocument("images array"))?;
+        if images.len() != image_views.len() {
+            return Err(W3dGlbError::GeneratedDocument("images count"));
+        }
+        for (image, view) in images.iter_mut().zip(image_views) {
+            let object = image
+                .as_object_mut()
+                .ok_or(W3dGlbError::GeneratedDocument("image object"))?;
+            object.remove("uri");
+            object.insert("mimeType".into(), json!("image/png"));
+            object.insert("bufferView".into(), json!(view));
+        }
+    }
+    let buffer = root
+        .get_mut("buffers")
+        .and_then(Value::as_array_mut)
+        .and_then(|buffers| buffers.first_mut())
+        .and_then(Value::as_object_mut)
+        .ok_or(W3dGlbError::GeneratedDocument("primary buffer"))?;
+    buffer.remove("uri");
+    buffer.insert("byteLength".into(), json!(bundle.binary.len()));
+
+    let mut json_bytes = serde_json::to_vec(&document)?;
+    align_bytes(&mut json_bytes, b' ');
+    let binary_length = bundle.binary.len();
+    align_bytes(&mut bundle.binary, 0);
+    let total_length = 12_usize
+        .checked_add(8)
+        .and_then(|length| length.checked_add(json_bytes.len()))
+        .and_then(|length| length.checked_add(8))
+        .and_then(|length| length.checked_add(bundle.binary.len()))
+        .ok_or(W3dGlbError::OutputTooLarge)?;
+    let total_length = u32::try_from(total_length).map_err(|_| W3dGlbError::OutputTooLarge)?;
+    let json_length = u32::try_from(json_bytes.len()).map_err(|_| W3dGlbError::OutputTooLarge)?;
+    let binary_chunk_length =
+        u32::try_from(bundle.binary.len()).map_err(|_| W3dGlbError::OutputTooLarge)?;
+    let mut glb = Vec::with_capacity(total_length as usize);
+    glb.extend_from_slice(b"glTF");
+    glb.extend_from_slice(&2_u32.to_le_bytes());
+    glb.extend_from_slice(&total_length.to_le_bytes());
+    glb.extend_from_slice(&json_length.to_le_bytes());
+    glb.extend_from_slice(&0x4E4F_534A_u32.to_le_bytes());
+    glb.extend_from_slice(&json_bytes);
+    glb.extend_from_slice(&binary_chunk_length.to_le_bytes());
+    glb.extend_from_slice(&0x004E_4942_u32.to_le_bytes());
+    glb.extend_from_slice(&bundle.binary);
+    debug_assert!(binary_chunk_length as usize - binary_length < 4);
+    Ok(glb)
+}
+
+fn align_bytes(bytes: &mut Vec<u8>, padding: u8) {
+    while !bytes.len().is_multiple_of(4) {
+        bytes.push(padding);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

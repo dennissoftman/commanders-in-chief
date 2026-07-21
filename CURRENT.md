@@ -2,8 +2,9 @@
 
 ## Objective
 
-Complete preview-grade W3D model composition and glTF export, including installed-resource
-profiles, split skeleton/skin resources, textures, skinning, and classic raw animation.
+Complete preview-grade W3D model composition and GLB/glTF export, including
+installed-resource profiles, split skeleton/skin resources, textures, skinning, and
+classic raw animation.
 
 ## Implemented foundation
 
@@ -55,14 +56,18 @@ profiles, split skeleton/skin resources, textures, skinning, and classic raw ani
   raw translation/quaternion animation decoding produce immutable model values.
 - Model composition spans sibling skin, hierarchy, and animation W3Ds through the VFS;
   collision boxes referenced by HLOD are recognized and excluded from render meshes.
-- `cic-inspect w3d-gltf` emits glTF 2.0 JSON, an external binary buffer, hierarchy nodes,
-  rigid and skinned meshes, animation clips, first-pass materials, and converted PNG images.
+- `cic-inspect w3d-export` emits a self-contained GLB by default or, with `--gltf`, glTF
+  2.0 JSON, an external binary buffer, and PNG images. Both forms include hierarchy nodes,
+  rigid and skinned meshes, animation clips, and first-pass materials. The resource basename
+  determines the default output name, with an optional explicit output-path override.
+- Converted base-color PNGs preserve decoded RGBA texels, carry explicit sRGB metadata,
+  and remain straight-alpha images; the GLB form embeds them as image buffer views.
 - Generals is the default installed-resource profile. `--zh` deterministically overlays
   Zero Hour on its Generals base; `--game-dir`, saved configuration, environment roots, and
   validated Steam discovery avoid repeated archive arguments.
 - The synthetic completion artifact splits model, hierarchy, animation, and texture data
   across W3Ds and two BIGs. Retail Generals and Zero Hour exports succeeded; Blender 3.3
-  imported a 32-joint Zero Hour skin with 23 animation actions.
+  imported a self-contained GLB with a 32-joint Zero Hour skin and 23 animation actions.
 
 ## Known blockers
 

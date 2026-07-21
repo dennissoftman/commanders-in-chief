@@ -168,18 +168,23 @@ supported channels contain one. Retail exporters can leave unused whole-float sa
 the end of a channel, matching the original loader's bounded close-chunk behavior; partial
 float padding is rejected. Root-pivot animation is ignored as in the runtime.
 
-`cic-inspect w3d-gltf <virtual-path> <output.gltf> [<mount>...]` composes the final HLOD,
+`cic-inspect w3d-export <virtual-path> [<output.glb>] [<mount>...]` composes the final HLOD,
 referenced hierarchy, skinning, and matching raw animation clips. If the retail layout
 splits `_SKN`, `_SKL`, and animation W3Ds, sibling resources are discovered through the
-same VFS. The command writes glTF 2.0 JSON, an external `.bin`, and PNG images. A root
-quaternion converts W3D Z-up coordinates to glTF Y-up for Blender and standard viewers.
+same VFS. The default output is one self-contained GLB named after the resource basename;
+an explicit output path overrides it. Passing `--gltf` before the virtual path instead
+writes glTF 2.0 JSON, an external `.bin`, and PNG images, using `.gltf` for an inferred
+name. A root quaternion converts W3D Z-up coordinates to glTF Y-up for Blender and standard
+viewers.
 
 All directory and BIG inputs share one VFS. Texture resolution tries the encoded name and
 `art/textures/<name>`; a `.tga` reference may resolve to the retail `.dds` replacement.
-Only referenced user-owned images are decoded and converted to PNG. Later mounts retain
-the normal override policy. Missing images produce a warned 1x1 magenta placeholder so a
-model remains inspectable. Additional W3D passes/stages remain decoded but are not mapped
-into the first-pass glTF preview material.
+Only referenced user-owned images are decoded and converted to PNG. Decoded straight-alpha
+RGBA texels are preserved and tagged sRGB because they feed glTF base-color textures; no
+extra gamma transform is applied. Later mounts retain the normal override policy. Missing
+images produce a warned 1x1 magenta placeholder so a model remains inspectable. Additional
+W3D passes/stages remain decoded but are not mapped into the first-pass glTF preview
+material.
 
 ## Current safety limits
 
@@ -208,4 +213,5 @@ The composed completion fixture adds an original two-pivot hierarchy, highest-de
 translation animation, fixed-function shader, texture, one stage, and three UV pairs. Its
 skin, hierarchy, and animation are split into separate W3Ds in a synthetic `W3D.big`; an
 independent synthetic `Textures.big` contains an original 2x2 TGA. The CLI integration
-test proves cross-resource composition and valid glTF JSON, external binary, and PNG output.
+test proves cross-resource composition, a valid single-file GLB, optional external glTF,
+and exact decoded RGBA preservation in sRGB PNG output.

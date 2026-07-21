@@ -19,16 +19,21 @@ default resource profile and `--zh` layers Zero Hour over its required Generals 
 
 ```powershell
 cargo run -p cic-tools -- config show
-cargo run -p cic-tools -- w3d-gltf art/w3d/model.w3d preview.gltf
-cargo run -p cic-tools -- --zh w3d-gltf art/w3d/model_skn.w3d preview.gltf
+cargo run -p cic-tools -- w3d-export art/w3d/model.w3d
+cargo run -p cic-tools -- --zh w3d-export art/w3d/model_skn.w3d custom-name.glb
+cargo run -p cic-tools -- w3d-export --gltf art/w3d/model.w3d preview.gltf
 ```
 
-The command writes `preview.gltf`, `preview.bin`, and PNG images beneath
-`preview_textures`. It composes HLOD meshes, hierarchy transforms, skins, and classic raw
-animation clips, including retail layouts that split `_SKN`, `_SKL`, and animation W3Ds.
-First-pass colors, shaders, textures, and UVs are preserved for preview; W3D `.tga`
-references may resolve to installed `.dds` replacements. A missing retail image produces
-a visible magenta placeholder and warning instead of preventing geometry inspection.
+With no output argument, the resource basename determines the result: `model.w3d` becomes
+`model.glb`, or `model.gltf` with `--gltf`. An explicit output path overrides that name.
+GLB is one self-contained file; `--gltf` instead writes JSON, an external `.bin`, and PNG
+images beneath a sibling `_textures` directory. The exporter composes HLOD
+meshes, hierarchy transforms, skins, and classic raw animation clips, including retail
+layouts that split `_SKN`, `_SKL`, and animation W3Ds. First-pass colors, shaders,
+textures, and UVs are preserved for preview; W3D `.tga` references may resolve to installed
+`.dds` replacements. Base-color images preserve decoded RGBA texels and are explicitly
+tagged sRGB in PNG output. A missing retail image produces a visible magenta placeholder
+and warning instead of preventing geometry inspection.
 
 Use `--game-dir <path>` for a one-off installation or persist roots explicitly:
 

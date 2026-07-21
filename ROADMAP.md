@@ -91,7 +91,7 @@ names, and no renderer or host-order dependency in reports.
 for renderer boundaries.
 
 **Completion artifact:** Original nested and composed textured/animated fixtures, stable
-chunk and exact-bit geometry reports, and a Blender-importable synthetic glTF; later
+chunk and exact-bit geometry reports, and a Blender-importable synthetic GLB; later
 renderer gates add screenshot and animation capture artifacts.
 
 **Progress:** The recursive inventory, 73-name identifier table, original nested fixture,
@@ -100,10 +100,11 @@ and `cic-inspect w3d` report are complete. A 113,980-byte installed W3D closes e
 into immutable renderer-neutral values with exact count/size and vertex-index validation.
 The BIG-backed `cic-inspect w3d-mesh` report is deterministic. Materials, shaders, textures,
 UVs, hierarchy/HLOD composition, rigid and skinned models, and classic raw-animation clips
-decode into immutable bounded values. `cic-inspect w3d-gltf` composes split retail W3Ds,
-resolves Generals or layered Zero Hour resources, converts TGA/DDS images to PNG, and emits
-Blender-importable glTF. Compressed animation and richer multi-pass material equivalence
-remain before the format surface is complete.
+decode into immutable bounded values. `cic-inspect w3d-export` composes split retail W3Ds,
+resolves Generals or layered Zero Hour resources, converts TGA/DDS images to sRGB PNG, and
+emits a Blender-importable self-contained GLB by default or external glTF with `--gltf`.
+Compressed animation and richer multi-pass material equivalence remain before the format
+surface is complete.
 
 ## R3: MAP terrain inspection and viewer
 

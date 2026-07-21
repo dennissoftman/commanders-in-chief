@@ -3,7 +3,7 @@
 mod gltf;
 pub mod resource;
 
-pub use gltf::{GltfTextureRequest, W3dGltfBundle, render_w3d_gltf};
+pub use gltf::{GltfTextureRequest, W3dGlbError, W3dGltfBundle, pack_w3d_glb, render_w3d_gltf};
 
 use std::fmt::Write;
 

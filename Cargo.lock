@@ -56,6 +56,7 @@ dependencies = [
  "cic-formats",
  "cic-vfs",
  "image",
+ "png",
  "serde_json",
 ]
 

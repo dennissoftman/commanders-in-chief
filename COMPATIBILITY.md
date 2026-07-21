@@ -29,7 +29,7 @@ observable behavior.
 | W3D | One-bone skin influences | verified | Synthetic glTF assertions + installed Zero Hour infantry |
 | W3D | Classic raw animation | verified | Synthetic clip + 23-action Blender import |
 | W3D | Compressed animation | unknown | Not implemented |
-| W3D | glTF 2.0 preview export | verified | Synthetic CLI test + Blender 3.3 headless import |
+| W3D | GLB/glTF 2.0 preview export | verified | Synthetic CLI/PNG tests + Blender 3.3 GLB import |
 | Resources | Generals install profile and Steam discovery | verified | Installed Steam export + synthetic `--game-dir` test |
 | Resources | Zero Hour base/delta profile | verified | Installed layered `--zh` exports |
 | MAP | Chunk inventory | unknown | Not started |

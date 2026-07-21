@@ -12,11 +12,15 @@ Zero Hour resources are a delta over Generals rather than a standalone resource 
 
 ## Decision
 
-`cic-inspect w3d-gltf` is the sole model interchange command. The formats crate decodes
+`cic-inspect w3d-export` is the sole model interchange command. The formats crate decodes
 immutable hierarchy, highest-detail HLOD, mesh influence, and classic raw-animation values;
-the tools crate composes sibling resources and writes glTF 2.0 JSON plus an external binary
-buffer and PNG images. A root transform converts W3D Z-up coordinates to glTF Y-up. Preview
-materials select pass zero and stage zero while the decoder retains all supported records.
+the tools crate composes sibling resources and writes a self-contained glTF 2.0 binary
+(`.glb`) by default. `--gltf` selects JSON, an external binary buffer, and PNG images for
+inspection. The output basename defaults to the W3D resource basename, while an explicit
+output path remains available. A root transform converts W3D Z-up coordinates to glTF Y-up.
+Preview materials select pass zero and stage zero while the decoder retains all supported
+records. Converted base-color images preserve decoded straight-alpha RGBA texels and declare
+sRGB in their PNG metadata; no additional gamma transform is applied.
 
 Resource edition is an explicit tools-layer policy, separate from future simulation
 compatibility policies. Generals is the default. `--zh` mounts Generals resources first and
@@ -28,7 +32,8 @@ Explicit CLI mounts bypass automatic profiles and retain normal left-to-right VF
 
 - Blender and ordinary glTF viewers can inspect complete rigid or skinned models and raw
   animation clips without a project renderer.
-- User-owned TGA or DDS inputs are converted beside the output and never enter the repo.
+- User-owned TGA or DDS inputs are embedded in default GLB output or converted beside an
+  external glTF output and never enter the repo.
 - Missing texture images are visible magenta placeholders with warnings; malformed model
   structure remains a hard structured error.
 - Compressed animation, secondary material passes/stages, mapper behavior, and exact legacy

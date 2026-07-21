@@ -28,8 +28,12 @@ All notable user-visible changes are recorded here.
   texture assignments, and texture-coordinate arrays.
 - Bounded W3D hierarchy, highest-detail HLOD, rigid/skinned mesh composition, and classic
   raw-animation channel decoding, including split skeleton/skin/animation resources.
-- `cic-inspect w3d-gltf` glTF 2.0 export with hierarchy transforms, skins, animation clips,
-  first-pass PBR preview materials, UV conversion, and TGA/DDS-to-PNG image conversion.
+- `cic-inspect w3d-export` glTF 2.0 export with hierarchy transforms, skins, animation
+  clips, first-pass PBR preview materials, UV conversion, and TGA/DDS-to-PNG image
+  conversion. It emits one self-contained GLB by default and external glTF with `--gltf`,
+  inferring the output name from the W3D resource unless an override is supplied.
+- Base-color PNG output preserves decoded RGBA texels and declares the sRGB transfer
+  function without applying an additional gamma transform or premultiplying alpha.
 - Generals and Zero Hour resource profiles with `--zh`, one-off `--game-dir`, persisted
   installation roots, Steam library discovery, and deterministic base-then-expansion VFS
   layering.

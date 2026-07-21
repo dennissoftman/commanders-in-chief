@@ -428,7 +428,7 @@ fn split_textured_model_fixture() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
 }
 
 #[test]
-fn installed_profile_composes_split_w3d_and_texture_archives_into_animated_gltf() {
+fn installed_profile_exports_single_glb_by_default_and_optional_gltf() {
     let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("textured-w3d-cli");
     if root.exists() {
         fs::remove_dir_all(&root).expect("remove stale test tree");
@@ -452,16 +452,42 @@ fn installed_profile_composes_split_w3d_and_texture_archives_into_animated_gltf(
         big_with_entry(r"Art\Textures\checker.tga", &tga),
     )
     .expect("write texture archive");
-    let gltf_path = root.join("textured.gltf");
+    let glb_path = root.join("textured_skn.glb");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_cic-inspect"))
-        .arg("--game-dir")
-        .arg(&root)
-        .arg("w3d-gltf")
-        .arg("art/w3d/textured_skn.w3d")
-        .arg(&gltf_path)
-        .output()
-        .expect("run glTF export");
+    let output = run_model_export(&root, None, false);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!root.join("textured.bin").exists());
+    assert!(!root.join("textured_textures").exists());
+    let glb = fs::read(&glb_path).expect("read GLB");
+    let (document, binary) = parse_glb(&glb);
+    assert_eq!(document["asset"]["version"], "2.0");
+    assert!(document["buffers"][0].get("uri").is_none());
+    assert_eq!(document["meshes"].as_array().map(Vec::len), Some(1));
+    assert_eq!(document["animations"].as_array().map(Vec::len), Some(1));
+    assert_eq!(document["skins"].as_array().map(Vec::len), Some(1));
+    assert_eq!(document["images"][0]["mimeType"], "image/png");
+    assert!(document["images"][0].get("uri").is_none());
+    let image_view = document["images"][0]["bufferView"]
+        .as_u64()
+        .and_then(|value| usize::try_from(value).ok())
+        .expect("image buffer view index");
+    let offset = document["bufferViews"][image_view]["byteOffset"]
+        .as_u64()
+        .and_then(|value| usize::try_from(value).ok())
+        .expect("image byte offset");
+    let length = document["bufferViews"][image_view]["byteLength"]
+        .as_u64()
+        .and_then(|value| usize::try_from(value).ok())
+        .expect("image byte length");
+    let embedded_png = &binary[offset..offset + length];
+    assert_png_preserves_srgb_texels(&tga, embedded_png);
+
+    let gltf_path = root.join("textured.gltf");
+    let output = run_model_export(&root, Some(&gltf_path), true);
     assert!(
         output.status.success(),
         "{}",
@@ -489,6 +515,97 @@ fn installed_profile_composes_split_w3d_and_texture_archives_into_animated_gltf(
     );
     let png = fs::read(root.join("textured_textures/m000_t0000_checker.png"))
         .expect("read converted PNG");
-    assert_eq!(&png[..8], b"\x89PNG\r\n\x1A\n");
+    assert_png_preserves_srgb_texels(&tga, &png);
     fs::remove_dir_all(root).expect("remove test tree");
+}
+
+fn run_model_export(
+    root: &std::path::Path,
+    output: Option<&std::path::Path>,
+    gltf: bool,
+) -> std::process::Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_cic-inspect"));
+    command
+        .current_dir(root)
+        .arg("--game-dir")
+        .arg(root)
+        .arg("w3d-export");
+    if gltf {
+        command.arg("--gltf");
+    }
+    command.arg("art/w3d/textured_skn.w3d");
+    if let Some(output) = output {
+        command.arg(output);
+    }
+    command.output().expect("run model export")
+}
+
+fn parse_glb(bytes: &[u8]) -> (serde_json::Value, &[u8]) {
+    assert_eq!(&bytes[..4], b"glTF");
+    assert_eq!(
+        u32::from_le_bytes(bytes[4..8].try_into().expect("GLB version")),
+        2
+    );
+    assert_eq!(
+        usize::try_from(u32::from_le_bytes(
+            bytes[8..12].try_into().expect("GLB total length")
+        ))
+        .expect("GLB length fits usize"),
+        bytes.len()
+    );
+    let json_length = usize::try_from(u32::from_le_bytes(
+        bytes[12..16].try_into().expect("GLB JSON length"),
+    ))
+    .expect("JSON length fits usize");
+    assert_eq!(&bytes[16..20], b"JSON");
+    let json_end = 20 + json_length;
+    let json = bytes[20..json_end]
+        .strip_suffix(b" ")
+        .unwrap_or(&bytes[20..json_end]);
+    let document = serde_json::from_slice(json).expect("parse embedded glTF JSON");
+    let binary_length = usize::try_from(u32::from_le_bytes(
+        bytes[json_end..json_end + 4]
+            .try_into()
+            .expect("GLB BIN length"),
+    ))
+    .expect("BIN length fits usize");
+    assert_eq!(&bytes[json_end + 4..json_end + 8], b"BIN\0");
+    let binary_start = json_end + 8;
+    (document, &bytes[binary_start..binary_start + binary_length])
+}
+
+fn assert_png_preserves_srgb_texels(tga: &[u8], png: &[u8]) {
+    assert_eq!(&png[..8], b"\x89PNG\r\n\x1A\n");
+    assert!(png_has_chunk(png, *b"sRGB"));
+    let source = image::load_from_memory_with_format(tga, image::ImageFormat::Tga)
+        .expect("decode source TGA")
+        .to_rgba8();
+    let converted = image::load_from_memory_with_format(png, image::ImageFormat::Png)
+        .expect("decode converted PNG")
+        .to_rgba8();
+    assert_eq!(converted.dimensions(), source.dimensions());
+    assert_eq!(converted.as_raw(), source.as_raw());
+}
+
+fn png_has_chunk(bytes: &[u8], expected: [u8; 4]) -> bool {
+    let mut offset = 8;
+    while offset + 12 <= bytes.len() {
+        let length = usize::try_from(u32::from_be_bytes(
+            bytes[offset..offset + 4]
+                .try_into()
+                .expect("PNG chunk length"),
+        ))
+        .expect("PNG chunk length fits usize");
+        if bytes[offset + 4..offset + 8] == expected {
+            return true;
+        }
+        let Some(next) = offset
+            .checked_add(12)
+            .and_then(|value| value.checked_add(length))
+        else {
+            return false;
+        };
+        offset = next;
+    }
+    false
 }
