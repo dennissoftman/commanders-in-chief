@@ -2,7 +2,7 @@
 
 use std::fmt::Write;
 
-use cic_formats::CsfFile;
+use cic_formats::{CsfFile, W3dChunk, W3dFile, w3d_chunk_name};
 use cic_vfs::Vfs;
 
 /// Formats winning VFS entries as deterministic tab-separated records.
@@ -69,6 +69,48 @@ pub fn render_csf(csf: &CsfFile) -> String {
     output
 }
 
+/// Formats a W3D chunk tree as a stable, depth-first tab-separated inventory.
+#[must_use]
+pub fn render_w3d(w3d: &W3dFile) -> String {
+    let mut output = String::from("path\tdepth\toffset\tid\tkind\tpayload\tname\n");
+    let mut path = Vec::new();
+    render_w3d_level(&mut output, w3d.chunks(), &mut path);
+    output
+}
+
+fn render_w3d_level(output: &mut String, chunks: &[W3dChunk], path: &mut Vec<usize>) {
+    for (index, chunk) in chunks.iter().enumerate() {
+        path.push(index);
+        let path_text = path
+            .iter()
+            .map(usize::to_string)
+            .collect::<Vec<_>>()
+            .join("/");
+        let kind = if chunk.is_container() {
+            "container"
+        } else {
+            "data"
+        };
+        let name = w3d_chunk_name(chunk.id()).unwrap_or("unknown");
+        writeln!(
+            output,
+            "{}\t{}\t{}\t0x{:08X}\t{}\t{}\t{}",
+            path_text,
+            path.len() - 1,
+            chunk.offset(),
+            chunk.id(),
+            kind,
+            chunk.payload_length(),
+            name
+        )
+        .expect("writing to a String cannot fail");
+        if let Some(children) = chunk.children() {
+            render_w3d_level(output, children, path);
+        }
+        path.pop();
+    }
+}
+
 fn ascii_fold(bytes: &[u8]) -> Vec<u8> {
     bytes.iter().map(u8::to_ascii_lowercase).collect()
 }
@@ -106,10 +148,10 @@ fn escape_text(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use cic_formats::{CsfLimits, parse_csf};
+    use cic_formats::{CsfLimits, W3dLimits, parse_csf, parse_w3d};
     use cic_vfs::{Vfs, VirtualPath};
 
-    use super::{render_csf, render_manifest};
+    use super::{render_csf, render_manifest, render_w3d};
 
     #[test]
     fn manifest_is_sorted_and_reports_winning_provenance() {
@@ -167,6 +209,33 @@ mod tests {
              GUI:HELLO\t0\tHello\t\n\
              SPEECH:READY\t0\tReady\tready.wav\n\
              TOOLTIP:EMPTY\t-\t\t\n"
+        );
+    }
+
+    #[test]
+    fn w3d_report_uses_stable_slash_separated_tree_paths() {
+        let hex = include_str!("../../cic-formats/tests/fixtures/minimal.w3d.hex");
+        let digits = hex
+            .bytes()
+            .filter(u8::is_ascii_hexdigit)
+            .collect::<Vec<_>>();
+        let bytes = digits
+            .chunks_exact(2)
+            .map(|pair| {
+                let pair = std::str::from_utf8(pair).expect("ASCII fixture");
+                u8::from_str_radix(pair, 16).expect("valid hex fixture")
+            })
+            .collect::<Vec<_>>();
+        let w3d = parse_w3d(&bytes, "minimal.w3d", W3dLimits::default()).expect("valid W3D");
+
+        assert_eq!(
+            render_w3d(&w3d),
+            "path\tdepth\toffset\tid\tkind\tpayload\tname\n\
+             0\t0\t0\t0x00000000\tcontainer\t29\tW3D_CHUNK_MESH\n\
+             0/0\t1\t8\t0x11111111\tdata\t3\tunknown\n\
+             0/1\t1\t19\t0x22222222\tcontainer\t10\tunknown\n\
+             0/1/0\t2\t27\t0x33333333\tdata\t2\tunknown\n\
+             1\t0\t37\t0xDEADBEEF\tdata\t4\tunknown\n"
         );
     }
 }

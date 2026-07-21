@@ -2,6 +2,7 @@
 
 - `big.md`: BIGF/BIG4 archive directory and payload boundaries.
 - `csf.md`: CSF localization headers, labels, strings, and wave names.
+- `w3d.md`: recursive W3D chunk framing and preservation rules.
 
 Specifications distinguish source-established facts, retail observations, implemented
 policy, and open compatibility questions. Synthetic fixtures are original project data.

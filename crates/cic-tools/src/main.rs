@@ -3,13 +3,14 @@ use std::error::Error;
 use std::fs;
 use std::process::ExitCode;
 
-use cic_formats::{CsfLimits, parse_csf};
-use cic_tools::{render_csf, render_manifest};
+use cic_formats::{CsfLimits, W3dLimits, parse_csf, parse_w3d};
+use cic_tools::{render_csf, render_manifest, render_w3d};
 use cic_vfs::{BigLimits, Vfs, VirtualPath};
 
 const USAGE: &str = "Usage:\n\
   cic-inspect manifest <mount> [<mount> ...]\n\
   cic-inspect csf <virtual-path> <mount> [<mount> ...]\n\
+  cic-inspect w3d <virtual-path> <mount> [<mount> ...]\n\
 Each mount is a directory or BIG archive. Mounts are applied from left to right; later mounts override earlier mounts.";
 
 fn main() -> ExitCode {
@@ -44,6 +45,17 @@ fn run(arguments: impl IntoIterator<Item = String>) -> Result<String, Box<dyn Er
                 .ok_or_else(|| format!("resource not found: {resource_path}"))?;
             let csf = parse_csf(entry.bytes(), resource_path.as_str(), CsfLimits::default())?;
             Ok(render_csf(&csf))
+        }
+        "w3d" => {
+            let resource_name = arguments.next().ok_or("w3d requires a virtual path")?;
+            let mounts = arguments.collect::<Vec<_>>();
+            let vfs = mount_all("w3d", &mounts)?;
+            let resource_path = VirtualPath::new(&resource_name)?;
+            let entry = vfs
+                .resolve(&resource_path)
+                .ok_or_else(|| format!("resource not found: {resource_path}"))?;
+            let w3d = parse_w3d(entry.bytes(), resource_path.as_str(), W3dLimits::default())?;
+            Ok(render_w3d(&w3d))
         }
         _ => Err(format!("unknown command {command:?}").into()),
     }

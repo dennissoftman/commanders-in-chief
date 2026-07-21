@@ -17,7 +17,10 @@ observable behavior.
 | CSF | Optional wave names and zero-string labels | verified | Original fixture + installed Steam Generals CSF |
 | CSF | Duplicate-label preservation | implemented | Synthetic duplicate-label test; retail file has none |
 | CSF | Deterministic VFS-backed report | verified | Synthetic BIG-to-CSF CLI integration test |
-| W3D | Chunk inventory | unknown | Not started |
+| W3D | Nested chunk inventory | verified | Original fixture + 113,980-byte installed asset |
+| W3D | Unknown payload preservation | verified | Nested synthetic round-trip values and CLI report |
+| W3D | Known identifier reporting | implemented | 73 identifiers from pinned GPL header |
+| W3D | Static mesh geometry | unknown | Next gate |
 | MAP | Chunk inventory | unknown | Not started |
 | Simulation | Fixed 30 Hz tick kernel | unknown | Not started |
 | Profiles | `ZeroHourLegacy` policy set | unknown | Not started |

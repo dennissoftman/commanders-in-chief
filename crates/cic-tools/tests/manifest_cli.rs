@@ -127,3 +127,51 @@ fn big_with_entry(name: &str, bytes: &[u8]) -> Vec<u8> {
     archive.extend_from_slice(bytes);
     archive
 }
+
+#[test]
+fn w3d_inside_big_produces_a_stable_nested_inventory() {
+    let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("w3d-cli");
+    if root.exists() {
+        fs::remove_dir_all(&root).expect("remove stale test tree");
+    }
+    fs::create_dir_all(&root).expect("create test tree");
+    let archive_path = root.join("art.big");
+    let w3d = w3d_fixture();
+    fs::write(&archive_path, big_with_entry(r"Art\W3D\minimal.w3d", &w3d))
+        .expect("write synthetic archive");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cic-inspect"))
+        .arg("w3d")
+        .arg("ART/W3D/MINIMAL.W3D")
+        .arg(&archive_path)
+        .output()
+        .expect("run cic-inspect");
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("UTF-8 output"),
+        "path\tdepth\toffset\tid\tkind\tpayload\tname\n\
+         0\t0\t0\t0x00000000\tcontainer\t29\tW3D_CHUNK_MESH\n\
+         0/0\t1\t8\t0x11111111\tdata\t3\tunknown\n\
+         0/1\t1\t19\t0x22222222\tcontainer\t10\tunknown\n\
+         0/1/0\t2\t27\t0x33333333\tdata\t2\tunknown\n\
+         1\t0\t37\t0xDEADBEEF\tdata\t4\tunknown\n"
+    );
+
+    fs::remove_dir_all(root).expect("remove test tree");
+}
+
+fn w3d_fixture() -> Vec<u8> {
+    let hex = include_str!("../../cic-formats/tests/fixtures/minimal.w3d.hex");
+    let digits = hex
+        .bytes()
+        .filter(u8::is_ascii_hexdigit)
+        .collect::<Vec<_>>();
+    digits
+        .chunks_exact(2)
+        .map(|pair| {
+            let pair = std::str::from_utf8(pair).expect("ASCII hex");
+            u8::from_str_radix(pair, 16).expect("valid hex fixture")
+        })
+        .collect()
+}

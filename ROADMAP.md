@@ -63,9 +63,37 @@ and BIG4 retail verification remain open.
 
 ## R2: W3D inspection and viewer
 
-Gates are separately completed for chunk inventory, static geometry, materials,
-hierarchies, and animation. Rendering begins only after unknown chunks can be retained
-and reported without data loss.
+**Status:** In progress; chunk-inventory gate complete.
+
+**Scope:** Bounded recursive chunk inventory followed by separately gated static geometry,
+materials, hierarchies, animation, and an animated viewer.
+
+**Exclusions:** MAP terrain, gameplay simulation, editing/export, and retail asset
+distribution.
+
+**Inputs:** Original synthetic W3D streams and user-owned W3D resources through the VFS.
+
+**Outputs:** Stable unknown-preserving chunk reports, then immutable decoded asset values
+and viewer snapshots.
+
+**Owner:** `cic-formats` for decoding and `cic-tools` for inspection; a renderer crate is
+introduced only when the viewer gate begins.
+
+**Acceptance tests:** Exact nested boundary closure, truncation and depth/count/size limits,
+unknown payload preservation, semantic count/index checks, and BIG-backed CLI integration.
+
+**Determinism:** File-order chunk trees, slash-separated numeric paths, stable identifier
+names, and no renderer or host-order dependency in reports.
+
+**Documentation:** `docs/formats/w3d.md`, provenance, compatibility matrix, and later ADRs
+for renderer boundaries.
+
+**Completion artifact:** Original nested fixture and stable chunk report; later gates add a
+synthetic mesh screenshot and animation capture.
+
+**Progress:** The recursive inventory, 73-name identifier table, original nested fixture,
+and `cic-inspect w3d` report are complete. A 113,980-byte installed W3D closes exactly into
+525 records. Static mesh semantics are next.
 
 ## R3: MAP terrain inspection and viewer
 
