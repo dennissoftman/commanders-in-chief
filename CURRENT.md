@@ -2,8 +2,8 @@
 
 ## Objective
 
-Continue the R2 renderer-ingestion and animated-viewer gate after establishing BIG-backed
-composed-model bind-pose capture.
+Continue R2 renderer ingestion after establishing BIG-backed bind-pose capture and the animated
+interactive viewer.
 
 ## Implemented foundation
 
@@ -102,6 +102,13 @@ composed-model bind-pose capture.
 - The synthetic two-BIG model fixture renders through the CLI. A local installed
   `abarfrccmd.w3d` capture staged 1,561 vertices and 2,535 indices on an RTX 4080 SUPER and produced
   RGBA SHA-256 `f6c70e3ff1d8d8900cae066fc0ee5c9d163a806fd03104b9b1a41bf584789e2a` without retaining the image.
+- `cic-inspect w3d-view` uses the same installed profile or explicit BIG overlay path, opens a
+  960x720 surface, auto-fits a fixed 45-degree elevated camera, and continuously rotates the model
+  around W3D's Z-up axis. It samples hierarchy/one-bone clips at explicit integer frames; Left/Right
+  switch clips, Escape closes, and the active name is visible in the title.
+- Installed window smokes verified the complete `abarfrccmd.w3d` building remains framed throughout
+  rotation and `aihero_skn.w3d` visibly animates across 39 switchable clips. The established bounded
+  hidden-helper policy prevents legacy offscreen attachment translations from collapsing framing.
 
 ## Known blockers
 
@@ -110,8 +117,8 @@ composed-model bind-pose capture.
   behavior; complete decoded metadata is available for the renderer gate.
 - Adaptive-delta animation is synthetic-verified but has not yet been observed in an installed
   export.
-- The renderer does not yet submit decoded material passes/stages or textures, sample animation,
-  present an interactive surface, or capture an installed animated pose.
+- The renderer does not yet submit decoded material passes/stages or textures or produce a
+  deterministic explicit animated-pose capture.
 
 ## Next verified step
 

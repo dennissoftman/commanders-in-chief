@@ -62,4 +62,8 @@ All notable user-visible changes are recorded here.
 - Added `cic-inspect w3d-render` for installed profiles or explicit BIG overlays. It composes the
   selected HLOD and hierarchy, stages rigid/one-bone bind geometry, and writes a depth-tested PPM
   plus adapter, geometry-count, and RGBA-hash diagnostics.
+- Added `cic-inspect w3d-view` with a 960x720 presentation surface, automatic orthographic fit,
+  45-degree elevated camera, continuous Z-up rotation, explicit-frame hierarchy/one-bone animation
+  sampling, and Left/Right clip selection. The viewer applies the established bounded hidden-helper
+  policy so legacy offscreen attachment sentinels cannot collapse animated model framing.
 - Synthetic unit and integration tests plus CI quality gates.

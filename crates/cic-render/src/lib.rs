@@ -1,6 +1,7 @@
 //! Renderer boundary and deterministic headless capture support.
 
 mod model;
+mod viewer;
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -10,7 +11,8 @@ use std::time::Duration;
 use cic_formats::W3dStaticMesh;
 use sha2::{Digest, Sha256};
 
-pub use model::StagedModel;
+pub use model::{AnimatedModel, StagedModel};
+pub use viewer::{ViewerError, run_model_viewer};
 
 const CAPTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const BYTES_PER_PIXEL: u32 = 4;
@@ -614,6 +616,7 @@ pub enum RenderError {
     GeometryTooLarge,
     InvalidHierarchy,
     GeometryOutsideLimits,
+    InvalidAnimation,
 }
 
 impl Display for RenderError {
@@ -638,6 +641,7 @@ impl Display for RenderError {
             Self::GeometryOutsideLimits => {
                 formatter.write_str("transformed model geometry is non-finite or outside limits")
             }
+            Self::InvalidAnimation => formatter.write_str("animation clip index is invalid"),
         }
     }
 }

@@ -21,6 +21,7 @@ default resource profile and `--zh` layers Zero Hour over its required Generals 
 ```powershell
 cargo run -p cic-tools -- config show
 cargo run -p cic-tools -- w3d-export art/w3d/model.w3d
+cargo run -p cic-tools -- w3d-view art/w3d/model.w3d
 cargo run -p cic-tools -- w3d-render art/w3d/model.w3d model-capture.ppm
 cargo run -p cic-tools -- --zh w3d-export art/w3d/model_skn.w3d custom-name.glb
 cargo run -p cic-tools -- w3d-export --gltf art/w3d/model.w3d preview.gltf
@@ -52,8 +53,10 @@ Explicit directory or BIG mounts remain supported after the command arguments fo
 synthetic fixtures and custom overlays.
 
 The renderer boundary can produce a window-free synthetic PPM and RGBA SHA-256 with an explicit
-pose. It consumes validated `cic-formats` values and owns no parser, filesystem, clock, or
-simulation resources; interactive presentation is a later R2 gate.
+pose. It consumes validated `cic-formats` values and owns no parser, filesystem, or simulation
+resources. `cic-inspect w3d-view` opens a 960x720 depth-tested viewer, frames the model from a
+45-degree elevated camera, rotates it around W3D's Z-up axis, and plays the selected animation.
+Left/Right switch clips and Escape closes the window; the title shows the active clip.
 `cic-inspect w3d-render` connects that boundary to the existing installed-resource profiles or
 explicit BIG mounts and produces a depth-tested bind-pose geometry diagnostic. Textures and exact
 fixed-function material passes are not yet applied by this command.

@@ -43,11 +43,27 @@ Capture dimensions are bounded to 4,096 per axis and 64 MiB of padded readback. 
 index buffers are independently bounded to 512 MiB, and transformed positions/normals must remain
 finite with components no greater than 1,000,000,000 in magnitude before GPU allocation.
 
+The interactive gate adds `winit` 0.30 as a renderer presentation dependency. `cic-tools` retains
+VFS/profile/model-composition ownership and passes one already validated immutable model to
+`cic-render`; the renderer owns the window, event loop, surface, device, and queue only. Integer
+animation frame and Z-up model rotation remain explicit staging inputs. The viewer alone maps
+elapsed presentation time to those inputs, so deterministic captures and simulation remain free of
+wall-clock state. Surface acquisition handles timeout, occlusion, resize, and outdated states
+without mutating decoded data.
+
+The viewer uses a 960x720 window, orthographic auto-fit, and a fixed 45-degree elevated camera.
+Left/Right switch clips and reset presentation time. Translation and quaternion channels reuse the
+project's glTF preview semantics; scalar rotation channels compose X/Y/Z axis rotations. Legacy
+offscreen helper-bone translations use the same model-relative bounded near-zero-scale preview
+policy as glTF export. The decoded channels remain unchanged.
+
 ## Consequences
 
 - Core, formats, VFS, and simulation remain renderer-independent.
 - Headless validation and local visual captures do not require a window system.
-- Backend choice is explicit and versioned; a frontend can add a presentation surface later.
+- Backend choice is explicit and versioned; interactive presentation is an opt-in tools workflow.
+- The renderer now owns a `winit` presentation surface for the opt-in viewer while headless capture
+  remains window-free.
 - GPU output equality is currently asserted only for the deliberately simple RGBA8 diagnostic.
-  Fixed-function blending, textures, hierarchy skinning, and animated installed-model captures
-  remain subsequent renderer gates.
+  Fixed-function blending, textures, and deterministic animated-pose captures remain subsequent
+  renderer gates.

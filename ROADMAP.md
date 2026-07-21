@@ -148,8 +148,11 @@ animated installed-model capture report.
 64x64 RGBA8 triangle capture at an explicit pose. The checked-in SHA-256 matched a local RTX 4080
 SUPER run. `cic-inspect w3d-render` now composes models from synthetic or installed BIG overlays,
 applies rigid/one-bone bind transforms, and emits a depth-tested geometry capture. An installed
-building smoke capture succeeded. Stable material-pass/texture commands, explicit animation-frame
-sampling, an interactive surface, and the installed animated-pose capture remain open.
+building smoke capture succeeded. `cic-inspect w3d-view` now presents a 960x720 auto-fitted,
+45-degree elevated, Z-up rotating model, samples raw or compressed hierarchy animation at explicit
+integer frames, and switches clips with Left/Right. Installed building and 39-clip infantry window
+smokes passed, including bounded legacy helper-bone hiding. Stable material-pass/texture commands
+and a deterministic explicit animated-pose capture remain open.
 
 ## R3: MAP terrain inspection and viewer
 

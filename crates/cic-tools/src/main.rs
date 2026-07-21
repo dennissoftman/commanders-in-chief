@@ -8,7 +8,7 @@ use cic_formats::{
     CsfLimits, W3dFile, W3dLimits, W3dMeshLimits, W3dSceneLimits, decode_static_mesh,
     decode_w3d_model_set, parse_csf, parse_w3d, w3d_model_hierarchy_name,
 };
-use cic_render::{HeadlessRenderer, StagedModel};
+use cic_render::{AnimatedModel, HeadlessRenderer, StagedModel, run_model_viewer};
 use cic_tools::resource::{
     GameEdition, ResourceKind, StoredLocations, config_path, discover_steam_locations,
     resolve_archives, validate_installation,
@@ -27,6 +27,7 @@ const USAGE: &str = "Usage:\n\
   cic-inspect csf <virtual-path> <mount> [<mount> ...]\n\
   cic-inspect w3d <virtual-path> <mount> [<mount> ...]\n\
   cic-inspect w3d-mesh <virtual-path> <top-level-index> <mount> [<mount> ...]\n\
+  cic-inspect w3d-view <virtual-path> [<mount> ...]\n\
   cic-inspect w3d-render <virtual-path> [<output.ppm>] [<mount> ...]\n\
   cic-inspect w3d-export [--gltf] <virtual-path> [<output.glb|output.gltf>] [<mount> ...]\n\
 Each mount is a directory or BIG archive. Mounts are applied from left to right; later mounts override earlier mounts.";
@@ -130,9 +131,30 @@ fn run(arguments: impl IntoIterator<Item = String>) -> Result<String, Box<dyn Er
             Ok(render_w3d_mesh(&mesh))
         }
         "w3d-render" => render_model_capture(&mut arguments, &options),
+        "w3d-view" => view_model(&mut arguments, &options),
         "w3d-export" => export_model(&mut arguments, &options),
         _ => Err(format!("unknown command {command:?}").into()),
     }
+}
+
+fn view_model<I>(
+    arguments: &mut std::iter::Peekable<I>,
+    options: &CliOptions,
+) -> Result<String, Box<dyn Error>>
+where
+    I: Iterator<Item = String>,
+{
+    let resource_name = arguments.next().ok_or("w3d-view requires a virtual path")?;
+    let resource_path = VirtualPath::new(&resource_name)?;
+    let mounts = arguments.collect::<Vec<_>>();
+    let vfs = mount_all("w3d-view", &mounts, options, ResourceKind::W3d)?;
+    let model = load_composed_model(&vfs, &resource_path)?;
+    let staged = AnimatedModel::from_w3d(&model)?;
+    let animation_count = staged.animation_count();
+    run_model_viewer(staged, format!("Commanders in Chief — {resource_path}"))?;
+    Ok(format!(
+        "closed viewer for {resource_path} ({animation_count} animations)\n"
+    ))
 }
 
 fn export_model<I>(
