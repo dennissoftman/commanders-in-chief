@@ -470,7 +470,7 @@ pub fn decode_map_blend(
         &mut reader,
         "cliff info count",
         limits.maximum_cliff_records,
-        true,
+        false,
     )?;
     let texture_class_count = read_limited_count(
         &mut reader,
@@ -766,7 +766,9 @@ fn read_cliff_info(
     reader: &mut BinaryReader<'_>,
     declared_count: u32,
 ) -> Result<Vec<MapCliffInfo>, MapBlendError> {
-    let stored_count = declared_count - 1;
+    // The source reader iterates `1..declared_count` and therefore tolerates a historical zero
+    // count as an empty table. Runtime index repair then maps every unusable entry to sentinel zero.
+    let stored_count = declared_count.saturating_sub(1);
     let capacity = usize::try_from(stored_count)
         .map_err(|_| MapBlendError::SizeOverflow("cliff record count"))?;
     let mut records = Vec::with_capacity(capacity);
@@ -847,6 +849,8 @@ mod tests {
     const BLEND_PAYLOAD_OFFSET: usize = 108;
     const BLEND_PAYLOAD_LENGTH: usize = 255;
     const VERSION_SEVEN_CLIFF_OFFSET: usize = BLEND_PAYLOAD_OFFSET + 4 + 16 * 2 * 4;
+    const CLIFF_INFO_COUNT_OFFSET: usize = VERSION_SEVEN_CLIFF_OFFSET + 2 + 8;
+    const CLIFF_INFO_RECORD_BYTES: usize = 4 + 8 * 4 + 2;
 
     fn fixture() -> Vec<u8> {
         let hex = include_str!("../tests/fixtures/blend.map.hex");
@@ -989,6 +993,23 @@ mod tests {
             .expect("legacy zero-byte rows normalize");
         assert_eq!(stride, 1);
         assert_eq!(flags, [0, 0]);
+    }
+
+    #[test]
+    fn accepts_source_compatible_zero_cliff_info_count() {
+        let mut bytes = fixture();
+        bytes[CLIFF_INFO_COUNT_OFFSET..CLIFF_INFO_COUNT_OFFSET + 4]
+            .copy_from_slice(&0_i32.to_le_bytes());
+        bytes.truncate(bytes.len() - CLIFF_INFO_RECORD_BYTES);
+        bytes[BLEND_CHUNK_OFFSET + 6..BLEND_CHUNK_OFFSET + 10].copy_from_slice(
+            &i32::try_from(BLEND_PAYLOAD_LENGTH - CLIFF_INFO_RECORD_BYTES)
+                .expect("fixture length")
+                .to_le_bytes(),
+        );
+
+        let blend = decode(&bytes, MapLimits::default()).expect("zero cliff table");
+        assert_eq!(blend.cliff_info_count(), 0);
+        assert!(blend.cliff_info().is_empty());
     }
 
     #[test]

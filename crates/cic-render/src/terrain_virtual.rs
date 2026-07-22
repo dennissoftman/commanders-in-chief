@@ -10,7 +10,7 @@ use crate::terrain::TerrainDetailRequest;
 pub(crate) const VIRTUAL_PAGE_INTERIOR: u32 = 256;
 pub(crate) const VIRTUAL_PAGE_BORDER: u32 = 4;
 pub(crate) const VIRTUAL_PAGE_EXTENT: u32 = VIRTUAL_PAGE_INTERIOR + 2 * VIRTUAL_PAGE_BORDER;
-pub(crate) const VIRTUAL_PAGE_LAYERS: usize = 128;
+pub(crate) const VIRTUAL_PAGE_LAYERS: usize = 256;
 pub(crate) const VIRTUAL_PAGE_MIPS: u32 = 9;
 
 #[derive(Debug, Clone, Copy)]

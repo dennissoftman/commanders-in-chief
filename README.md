@@ -32,6 +32,21 @@ cargo run -p cic-tools -- --zh w3d-export art/w3d/model_skn.w3d custom-name.glb
 cargo run -p cic-tools -- w3d-export --gltf art/w3d/model.w3d preview.gltf
 ```
 
+### Zero Hour layering contract
+
+Zero Hour is treated as a delta over Generals, never as a standalone resource set. The built-in
+`--zh` profile enumerates and mounts the required Generals providers first, then the Zero Hour
+providers, followed by explicit mod layers. Consumers must distinguish two resource behaviors:
+
+- replacement resources such as a single MAP, image, or W3D resolve to the last mounted provider;
+- cumulative definition resources such as partial INI registries parse every provider version
+  from earliest to latest and apply their format-specific override semantics.
+
+Using only the winning INI would discard base definitions that Zero Hour expects to inherit. New
+definition consumers must therefore use VFS provider history explicitly and include a synthetic
+base-definition/partial-overlay test. The permanent decision is recorded in ADR 0003 and the VFS
+mechanics in ADR 0008.
+
 With no output argument, the resource basename determines the result: `model.w3d` becomes
 `model.glb`, or `model.gltf` with `--gltf`. An explicit output path overrides that name.
 GLB is one self-contained file; `--gltf` instead writes JSON, an external `.bin`, and PNG

@@ -7,15 +7,16 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use cic_formats::{
-    CsfLimits, MapLimits, MapWaterError, TerrainIniLimits, W3dFile, W3dLimits, W3dMeshLimits,
-    W3dSceneLimits, WaterIniLimits, decode_map_blend, decode_map_height, decode_map_water,
-    decode_static_mesh, decode_w3d_model_set, parse_csf, parse_map, parse_terrain_ini, parse_w3d,
-    parse_water_transparency_ini, w3d_model_hierarchy_name,
+    CsfLimits, MapLightingError, MapLimits, MapWaterError, TerrainIniLimits, W3dFile, W3dLimits,
+    W3dMeshLimits, W3dSceneLimits, WaterIniLimits, decode_map_blend, decode_map_height,
+    decode_map_lighting, decode_map_water, decode_static_mesh, decode_w3d_model_set, parse_csf,
+    parse_map, parse_terrain_ini, parse_w3d, parse_water_ini, w3d_model_hierarchy_name,
 };
 use cic_render::{
     AnimatedModel, HeadlessRenderer, ModelFrame, StagedTerrain, StagedWater,
-    TerrainCompatibilityPolicy, TerrainStagingOptions, TextureId, TextureResourceManager,
-    WaterAppearance, WaterCausticSequence, run_model_viewer, run_terrain_viewer,
+    TerrainCompatibilityPolicy, TerrainLighting, TerrainStagingOptions, TextureId,
+    TextureResourceManager, WaterAppearance, WaterCausticSequence, WaterPresentationPolicy,
+    WaterSurfaceTexture, run_model_viewer, run_terrain_viewer,
 };
 use cic_tools::resource::{
     GameEdition, MountProfile, MountProfileLimits, ResourceKind, StoredLocations, config_path,
@@ -23,8 +24,8 @@ use cic_tools::resource::{
 };
 use cic_tools::{
     GltfTextureRequest, encode_capture_png, encode_map_height_png, pack_w3d_glb, render_csf,
-    render_manifest, render_map, render_map_blend, render_map_height, render_map_water, render_w3d,
-    render_w3d_gltf, render_w3d_mesh,
+    render_manifest, render_map, render_map_blend, render_map_height, render_map_lighting,
+    render_map_water, render_w3d, render_w3d_gltf, render_w3d_mesh,
 };
 use cic_vfs::{BigLimits, Vfs, VirtualPath};
 
@@ -37,6 +38,7 @@ const USAGE: &str = "Usage:\n\
   cic-inspect map <virtual-path> <mount> [<mount> ...]\n\
   cic-inspect map-height [--report | --png <output.png>] <virtual-path> <mount> [<mount> ...]\n\
   cic-inspect map-blend <virtual-path> <mount> [<mount> ...]\n\
+  cic-inspect map-lighting <virtual-path> <mount> [<mount> ...]\n\
   cic-inspect map-water <virtual-path> <mount> [<mount> ...]\n\
   cic-inspect map-render [--size <pixels>] [--pixels-per-cell <pixels>] [--terrain-policy <legacy|modern>] <virtual-path> [<output.png>] [<mount> ...]\n\
   cic-inspect map-view [--pixels-per-cell <pixels>] [--terrain-policy <legacy|modern>] <virtual-path> [<mount> ...]\n\
@@ -48,6 +50,7 @@ const USAGE: &str = "Usage:\n\
 Each mount is a directory or BIG archive. Mounts are applied from left to right; later mounts override earlier mounts.";
 
 const MAX_ENCODED_IMAGE_BYTES: usize = 256 * 1_024 * 1_024;
+const DEFAULT_STANDING_WATER_TEXTURE: &[u8] = b"TWWater01.tga";
 
 #[derive(Debug)]
 struct CliOptions {
@@ -118,6 +121,7 @@ fn run(arguments: impl IntoIterator<Item = String>) -> Result<String, Box<dyn Er
         }
         "map-height" => report_map_height(&mut arguments, &options),
         "map-blend" => report_map_blend(arguments, &options),
+        "map-lighting" => report_map_lighting(arguments, &options),
         "map-water" => report_map_water(arguments, &options),
         "map-render" => render_terrain_capture(&mut arguments, &options),
         "map-view" => view_terrain(&mut arguments, &options),
@@ -323,6 +327,27 @@ where
     Ok(render_map_water(&water))
 }
 
+fn report_map_lighting<I>(arguments: I, options: &CliOptions) -> Result<String, Box<dyn Error>>
+where
+    I: Iterator<Item = String>,
+{
+    let mut arguments = arguments;
+    let resource_name = arguments
+        .next()
+        .ok_or("map-lighting requires a virtual path")?;
+    let mounts = arguments.collect::<Vec<_>>();
+    let vfs = mount_all("map-lighting", &mounts, options, ResourceKind::Map)?;
+    let resource_path = VirtualPath::new(&resource_name)?;
+    let entry = vfs
+        .resolve(&resource_path)
+        .ok_or_else(|| format!("resource not found: {resource_path}"))?;
+    let limits = MapLimits::default();
+    let bytes = entry.read(limits.maximum_file_bytes)?;
+    let map = parse_map(&bytes, resource_path.as_str(), limits)?;
+    let lighting = decode_map_lighting(&map)?;
+    Ok(render_map_lighting(&lighting))
+}
+
 fn render_terrain_capture<I>(
     arguments: &mut std::iter::Peekable<I>,
     options: &CliOptions,
@@ -425,7 +450,7 @@ where
     let resource_path = VirtualPath::new(&resource_name)?;
     let mounts = arguments.collect::<Vec<_>>();
     let vfs = mount_all("map-view", &mounts, options, ResourceKind::Terrain)?;
-    let (terrain, water, water_appearance) =
+    let (terrain, water, water_appearance, lighting) =
         load_staged_terrain_and_water(&vfs, &resource_path, pixels_per_cell, compatibility)?;
     let cells = terrain.cells().len();
     let vertices = terrain.vertices().len();
@@ -433,6 +458,7 @@ where
         terrain,
         water,
         water_appearance,
+        lighting,
         format!("Commanders in Chief - terrain - {resource_path}"),
     )?;
     Ok(format!(
@@ -445,13 +471,24 @@ fn load_staged_terrain_and_water(
     resource_path: &VirtualPath,
     pixels_per_cell: u32,
     compatibility: TerrainCompatibilityPolicy,
-) -> Result<(StagedTerrain, StagedWater, WaterAppearance), Box<dyn Error>> {
+) -> Result<(StagedTerrain, StagedWater, WaterAppearance, TerrainLighting), Box<dyn Error>> {
     let entry = vfs
         .resolve(resource_path)
         .ok_or_else(|| format!("resource not found: {resource_path}"))?;
     let limits = MapLimits::default();
     let bytes = entry.read(limits.maximum_file_bytes)?;
     let map = parse_map(&bytes, resource_path.as_str(), limits)?;
+    let (lighting, time_of_day) = match decode_map_lighting(&map) {
+        Ok(lighting) => (
+            TerrainLighting::from_map(&lighting),
+            lighting.selected_time(),
+        ),
+        Err(MapLightingError::MissingGlobalLighting) => (
+            TerrainLighting::preview(),
+            cic_formats::MapTimeOfDay::Morning,
+        ),
+        Err(error) => return Err(error.into()),
+    };
     let height = decode_map_height(&map, limits)?;
     let blend = decode_map_blend(&map, &height, limits)?;
     let water = match decode_map_water(&map, limits) {
@@ -464,11 +501,16 @@ fn load_staged_terrain_and_water(
     let textures = load_terrain_textures(vfs, &blend)?;
     let staging = TerrainStagingOptions::new(pixels_per_cell)?.with_compatibility(compatibility);
     let terrain = StagedTerrain::from_map(&height, &blend, &textures, staging)?;
-    let water_appearance = load_water_appearance(vfs)?;
-    Ok((terrain, water, water_appearance))
+    let water_appearance = load_water_appearance(vfs, resource_path, time_of_day, compatibility)?;
+    Ok((terrain, water, water_appearance, lighting))
 }
 
-fn load_water_appearance(vfs: &Vfs) -> Result<WaterAppearance, Box<dyn Error>> {
+fn load_water_appearance(
+    vfs: &Vfs,
+    map_path: &VirtualPath,
+    time_of_day: cic_formats::MapTimeOfDay,
+    compatibility: TerrainCompatibilityPolicy,
+) -> Result<WaterAppearance, Box<dyn Error>> {
     let first_path = VirtualPath::new("art/textures/caust00.tga")?;
     let mut appearance = WaterAppearance::without_caustics();
     if vfs.resolve(&first_path).is_some() {
@@ -492,20 +534,96 @@ fn load_water_appearance(vfs: &Vfs) -> Result<WaterAppearance, Box<dyn Error>> {
         appearance =
             WaterAppearance::with_caustics(WaterCausticSequence::new(width, height, 16, frames)?);
     }
-    let mut deep_opacity = appearance.deep_opacity();
+    let mut minimum_opacity = appearance.minimum_opacity();
     let mut opaque_depth = appearance.opaque_depth();
-    for raw_path in ["data/ini/default/water.ini", "data/ini/water.ini"] {
-        let path = VirtualPath::new(raw_path)?;
-        let Some(entry) = vfs.resolve(&path) else {
+    let mut source_surface_rgba = None;
+    let mut source_scroll_per_ms = [0.0; 2];
+    // Derived from Water.h at GeneralsGameCode revision
+    // 9f7abb866f5afd446db14149979e744c7216baaf (GPL-3.0-or-later upstream; see
+    // docs/provenance/map.md): WaterTransparencySetting's constructor establishes these values
+    // before ordered INI overlays. Generals relies on the constructor texture while Zero Hour
+    // repeats it in Water.ini.
+    let mut standing_water_color = Some([1.0; 3]);
+    let mut standing_water_texture = Some(DEFAULT_STANDING_WATER_TEXTURE.to_vec());
+    let mut additive_blending = false;
+    let ini_paths = [
+        VirtualPath::new("data/ini/default/water.ini")?,
+        VirtualPath::new("data/ini/water.ini")?,
+        sibling_map_ini_path(map_path)?,
+    ];
+    for path in ini_paths {
+        let Some(history) = vfs.history(&path) else {
             continue;
         };
-        let limits = WaterIniLimits::default();
-        let bytes = entry.read(limits.max_file_bytes)?;
-        let parsed = parse_water_transparency_ini(&bytes, limits)?;
-        deep_opacity = parsed.minimum_opacity().unwrap_or(deep_opacity);
-        opaque_depth = parsed.opaque_depth().unwrap_or(opaque_depth);
+        for entry in history {
+            let limits = WaterIniLimits::default();
+            let bytes = entry.read(limits.max_file_bytes)?;
+            let parsed = parse_water_ini(&bytes, limits)?;
+            minimum_opacity = parsed
+                .transparency()
+                .minimum_opacity()
+                .unwrap_or(minimum_opacity);
+            opaque_depth = parsed.transparency().opaque_depth().unwrap_or(opaque_depth);
+            standing_water_color = parsed
+                .transparency()
+                .standing_water_color()
+                .or(standing_water_color);
+            if let Some(name) = parsed.transparency().standing_water_texture_bytes() {
+                standing_water_texture = Some(name.to_vec());
+            }
+            additive_blending = parsed
+                .transparency()
+                .additive_blending()
+                .unwrap_or(additive_blending);
+            if let Some(set) = parsed.water_set(time_of_day) {
+                if let Some(color) = set.diffuse_color() {
+                    source_surface_rgba =
+                        Some(color.channels().map(|channel| f32::from(channel) / 255.0));
+                }
+                source_scroll_per_ms[0] = set.u_scroll_per_ms().unwrap_or(source_scroll_per_ms[0]);
+                source_scroll_per_ms[1] = set.v_scroll_per_ms().unwrap_or(source_scroll_per_ms[1]);
+            }
+        }
     }
-    Ok(appearance.with_transparency(deep_opacity, opaque_depth)?)
+    if let Some(color) = standing_water_color.filter(|color| {
+        let is_black = color.iter().all(|channel| channel.abs() <= f32::EPSILON);
+        let is_white = color
+            .iter()
+            .all(|channel| (*channel - 1.0).abs() <= f32::EPSILON);
+        !is_black && !is_white
+    }) {
+        let mut surface = source_surface_rgba.unwrap_or([1.0, 1.0, 1.0, 1.0]);
+        surface[..3].copy_from_slice(&color);
+        source_surface_rgba = Some(surface);
+    }
+    let surface_texture = standing_water_texture
+        .map(|name| -> Result<WaterSurfaceTexture, Box<dyn Error>> {
+            let (path, bytes) = resolve_image(vfs, &name, "art/textures")?;
+            let image = decode_viewer_texture(&bytes, image_format(&path)?)?;
+            Ok(WaterSurfaceTexture::new(
+                image.width(),
+                image.height(),
+                image.into_raw(),
+            )?)
+        })
+        .transpose()?;
+    let presentation = match compatibility {
+        TerrainCompatibilityPolicy::ZeroHourLegacy => WaterPresentationPolicy::ZeroHourLegacy,
+        TerrainCompatibilityPolicy::Modern => WaterPresentationPolicy::Modern,
+    };
+    Ok(appearance
+        .with_transparency(minimum_opacity, opaque_depth)?
+        .with_source_surface(source_surface_rgba, source_scroll_per_ms)?
+        .with_standing_surface(surface_texture, additive_blending)
+        .with_presentation(presentation))
+}
+
+fn sibling_map_ini_path(map_path: &VirtualPath) -> Result<VirtualPath, Box<dyn Error>> {
+    let map_ini = map_path.as_str().rsplit_once('/').map_or_else(
+        || "map.ini".to_owned(),
+        |(directory, _)| format!("{directory}/map.ini"),
+    );
+    Ok(VirtualPath::new(&map_ini)?)
 }
 
 fn load_staged_terrain(
@@ -581,20 +699,22 @@ fn load_terrain_texture_catalog(vfs: &Vfs) -> Result<BTreeMap<Vec<u8>, Vec<u8>>,
     let mut catalog = BTreeMap::new();
     for raw_path in ["data/ini/default/terrain.ini", "data/ini/terrain.ini"] {
         let path = VirtualPath::new(raw_path)?;
-        let Some(entry) = vfs.resolve(&path) else {
+        let Some(history) = vfs.history(&path) else {
             continue;
         };
-        let limits = TerrainIniLimits::default();
-        let bytes = entry.read(limits.max_file_bytes)?;
-        let ini = parse_terrain_ini(&bytes, limits)?;
-        for definition in ini.definitions() {
-            let key = ascii_fold(definition.name_bytes());
-            let inherited = catalog
-                .get(&key)
-                .cloned()
-                .or_else(|| catalog.get(b"defaultterrain".as_slice()).cloned());
-            if let Some(texture) = definition.texture_bytes().map(Vec::from).or(inherited) {
-                catalog.insert(key, texture);
+        for entry in history {
+            let limits = TerrainIniLimits::default();
+            let bytes = entry.read(limits.max_file_bytes)?;
+            let ini = parse_terrain_ini(&bytes, limits)?;
+            for definition in ini.definitions() {
+                let key = ascii_fold(definition.name_bytes());
+                let inherited = catalog
+                    .get(&key)
+                    .cloned()
+                    .or_else(|| catalog.get(b"defaultterrain".as_slice()).cloned());
+                if let Some(texture) = definition.texture_bytes().map(Vec::from).or(inherited) {
+                    catalog.insert(key, texture);
+                }
             }
         }
     }
@@ -1283,7 +1403,17 @@ fn mount_all(
 
 #[cfg(test)]
 mod tests {
-    use super::apply_additive_preview_alpha;
+    use cic_formats::MapTimeOfDay;
+    use cic_render::TerrainCompatibilityPolicy;
+    use cic_vfs::{Vfs, VirtualPath};
+
+    use super::{
+        apply_additive_preview_alpha, load_terrain_texture_catalog, load_water_appearance,
+    };
+
+    fn path(value: &str) -> VirtualPath {
+        VirtualPath::new(value).expect("valid virtual path")
+    }
 
     #[test]
     fn additive_preview_makes_black_transparent_and_unassociates_color() {
@@ -1296,6 +1426,97 @@ mod tests {
         assert_eq!(
             image.as_raw(),
             &[0, 0, 0, 0, 255, 128, 0, 64, 255, 128, 64, 255]
+        );
+    }
+
+    #[test]
+    fn terrain_catalog_accumulates_shadowed_ini_definitions() {
+        let mut vfs = Vfs::new();
+        vfs.mount_memory(
+            "generals",
+            [(
+                path("Data/INI/Terrain.ini"),
+                b"Terrain DefaultTerrain\n Texture = fallback.tga\nEnd\n\
+                  Terrain BaseOnly\n Texture = base.tga\nEnd\n"
+                    .to_vec(),
+            )],
+        )
+        .expect("base mount");
+        vfs.mount_memory(
+            "zero-hour",
+            [(
+                path("data/ini/terrain.ini"),
+                b"Terrain ExpansionOnly\n Texture = expansion.tga\nEnd\n".to_vec(),
+            )],
+        )
+        .expect("expansion mount");
+
+        let catalog = load_terrain_texture_catalog(&vfs).expect("terrain catalog");
+        assert_eq!(
+            catalog.get(b"baseonly".as_slice()),
+            Some(&b"base.tga".to_vec())
+        );
+        assert_eq!(
+            catalog.get(b"expansiononly".as_slice()),
+            Some(&b"expansion.tga".to_vec())
+        );
+    }
+
+    #[test]
+    fn water_uses_constructor_texture_and_ordered_ini_history() {
+        let mut vfs = Vfs::new();
+        vfs.mount_memory(
+            "generals",
+            [
+                (
+                    path("Data/INI/Water.ini"),
+                    b"WaterSet MORNING\n DiffuseColor = R:10 G:20 B:30\nEnd\n\
+                      WaterTransparency\n TransparentWaterDepth = 4\nEnd\n"
+                        .to_vec(),
+                ),
+                (
+                    path("Art/Textures/TWWater01.tga"),
+                    vec![
+                        0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 32, 40, 30, 20, 10, 40,
+                    ],
+                ),
+            ],
+        )
+        .expect("base mount");
+        vfs.mount_memory(
+            "zero-hour",
+            [
+                (
+                    path("data/ini/water.ini"),
+                    b"WaterTransparency\n TransparentWaterMinOpacity = 0.5\nEnd\n".to_vec(),
+                ),
+                (
+                    path("maps/test/map.ini"),
+                    b"WaterTransparency\n TransparentWaterMinOpacity = 0.25\nEnd\n".to_vec(),
+                ),
+            ],
+        )
+        .expect("expansion mount");
+
+        let appearance = load_water_appearance(
+            &vfs,
+            &path("maps/test/test.map"),
+            MapTimeOfDay::Morning,
+            TerrainCompatibilityPolicy::ZeroHourLegacy,
+        )
+        .expect("water appearance");
+        assert_eq!(appearance.minimum_opacity().to_bits(), 0.25_f32.to_bits());
+        assert_eq!(appearance.opaque_depth().to_bits(), 4.0_f32.to_bits());
+        assert_eq!(
+            appearance.source_surface_rgba(),
+            Some([10.0 / 255.0, 20.0 / 255.0, 30.0 / 255.0, 1.0])
+        );
+        assert_eq!(
+            appearance
+                .surface_texture()
+                .expect("default surface")
+                .rgba(),
+            [10, 20, 30, 40]
         );
     }
 }

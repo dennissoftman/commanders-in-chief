@@ -422,6 +422,10 @@ pub fn config_path() -> Result<PathBuf, ResourceError> {
 
 /// Resolves configured or discovered roots and returns a deterministic archive list.
 ///
+/// Zero Hour is a delta profile: its list always contains the required Generals archives first
+/// and the Zero Hour archives second. Consumers of cumulative definition files must parse
+/// [`cic_vfs::Vfs::history`] earliest-to-latest rather than reading only the winning entry.
+///
 /// # Errors
 ///
 /// Returns an error when configuration cannot be read, an installation cannot be located or

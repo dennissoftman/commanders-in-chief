@@ -19,8 +19,10 @@ filesystem, simulation, or wall-clock ownership.
 
 - `cic-formats` narrowly and boundedly decodes ordered `Terrain` declarations and optional
   `Texture` fields. It does not resolve resources or apply renderer policy.
-- `cic-tools` applies current-value and `DefaultTerrain` inheritance in the source load order,
-  resolves selected sheets beneath `Art/Terrain` through the VFS, and decodes bounded RGBA images.
+- `cic-tools` applies current-value and `DefaultTerrain` inheritance across every VFS provider
+  version in stable earliest-to-latest mount order, resolves selected sheets beneath `Art/Terrain`
+  through the VFS, and decodes bounded RGBA images. An expansion's partial Terrain INI therefore
+  overlays rather than replaces its base definitions.
 - Installed terrain profiles explicitly mount MAP, Terrain, texture, INI, and patch archives in
   stable base-then-expansion order.
 - `cic-render` consumes only decoded MAP values and caller-supplied texture resources. It stages
@@ -49,7 +51,7 @@ filesystem, simulation, or wall-clock ownership.
   results into a 32-pixel atlas, and uploads immutable per-cell material/UV/mask metadata once.
   Camera-frustum intersection produces camera-space-depth-capped 16/32-texel page demand rather
   than a horizon-sized atlas request.
-- Interactive detail uses a project-authored software virtual texture. One hundred twenty-eight physical
+- Interactive detail uses a project-authored software virtual texture. Two hundred fifty-six physical
   264-by-264 layers contain a 256-pixel interior plus a four-pixel filter border. Two stable page
   tables map 8-cell/32-texel and 16-cell/16-texel virtual pages into that shared cache. Deterministic
   LRU replacement retains revisitable pages; projected page bounds follow the actual camera angle,
@@ -59,10 +61,17 @@ filesystem, simulation, or wall-clock ownership.
   alpha-aware mip chains. Camera movement uploads only bounded job/page-table metadata and performs
   no CPU terrain texture composition. Trilinear sampling requests up to 16x anisotropy with backend
   fallback.
-- Viewer slope lighting derives a face normal from world-position derivatives and applies one
-  fixed directional light. This is an explicit project-authored presentation preview; it does not
-  enter headless captures and is not represented as MAP-authored lighting before `LightingData`
-  has its own bounded semantic gate.
+- Screen-density demand is intentionally overscanned beyond the nominal crossover. Fine-to-coarse
+  and coarse-to-background transitions use distance cross-fades, while the cache is large enough
+  that a frustum pointing into the long side of a map does not spend every layer on coarse coverage
+  before fine pages are ranked. Camera travel uses an explicit frame-rate-independent first-order
+  velocity response; it remains presentation-only and never affects authoritative state.
+- Viewer slope lighting derives smooth presentation normals from bounded central/one-sided
+  differences over neighboring source height samples. It does not subdivide, displace, or replace
+  the authoritative height geometry. The initial fixed directional light remains an explicit
+  project-authored fallback only for maps without `GlobalLighting`; the completed bounded semantic
+  gate otherwise supplies the selected ordered MAP terrain lights. Neither path changes the
+  established headless terrain captures.
 - Terrain staging guarantees counter-clockwise winding when viewed from above for both diagonal
   choices. Headless and interactive terrain, custom-edge, and detail pipelines therefore cull back
   faces. Water and general model materials keep their own explicit culling policies.

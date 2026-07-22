@@ -54,6 +54,21 @@ Zero Hour resources second. Resolution precedence is a selected-edition `--game-
 edition-specific environment variable, saved configuration, then validated Steam discovery.
 Explicit CLI mounts bypass automatic profiles and retain normal left-to-right VFS ordering.
 
+Zero Hour is a Generals delta at both archive and definition levels. The following ordering is a
+repository invariant for every built-in `--zh` consumer:
+
+1. enumerate and mount the required Generals providers in their stable profile order;
+2. enumerate and mount Zero Hour providers in their stable profile order;
+3. append explicit mod providers in command-line order.
+
+Consumers must then classify each input by its source semantics. An opaque/replacement resource
+uses the last-mounted winning entry. A cumulative definition resource whose later files may contain
+partial additions or overrides must parse `Vfs::history` from earliest to latest and apply the
+format's own merge rules. It is incorrect to resolve only the winning edition INI merely because
+the physical path is shadowed: doing so erases Generals definitions that Zero Hour intentionally
+inherits. Each new cumulative consumer requires a synthetic test where the base supplies a needed
+definition and the overlay shadows the file while omitting that definition.
+
 ## Consequences
 
 - Blender and ordinary glTF viewers can inspect complete rigid or skinned models and raw
@@ -71,3 +86,6 @@ Explicit CLI mounts bypass automatic profiles and retain normal left-to-right VF
   replacing or mutating the decoded source-RGBA interchange image.
 - Exact legacy fixed-function visual equivalence remains renderer work, while the interchange
   artifact retains the complete decoded input needed for that renderer gate.
+- Installed Zero Hour consumers cannot accidentally become expansion-only: archive discovery,
+  mount order, and cumulative-definition parsing preserve the Generals base before edition and mod
+  overlays.

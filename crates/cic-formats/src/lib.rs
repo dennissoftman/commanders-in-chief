@@ -3,6 +3,7 @@
 mod csf;
 mod map;
 mod map_blend;
+mod map_lighting;
 mod map_water;
 mod refpack;
 mod terrain_ini;
@@ -19,6 +20,10 @@ pub use map::{
 };
 pub use map_blend::{
     MapBlendData, MapBlendError, MapBlendTile, MapCliffInfo, MapTextureClass, decode_map_blend,
+};
+pub use map_lighting::{
+    MapLight, MapLightSet, MapLightingData, MapLightingError, MapLightingPeriod, MapTimeOfDay,
+    decode_map_lighting,
 };
 pub use map_water::{MapWaterArea, MapWaterData, MapWaterError, MapWaterPoint, decode_map_water};
 pub use refpack::RefPackError;
@@ -41,5 +46,6 @@ pub use w3d_scene::{
     W3dSceneLimits, W3dSubObject, decode_w3d_model, decode_w3d_model_set, w3d_model_hierarchy_name,
 };
 pub use water_ini::{
-    WaterIniError, WaterIniLimits, WaterTransparencyIni, parse_water_transparency_ini,
+    WaterIni, WaterIniError, WaterIniLimits, WaterRgba8, WaterSetIni, WaterTransparencyIni,
+    parse_water_ini, parse_water_transparency_ini,
 };

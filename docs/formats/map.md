@@ -89,9 +89,10 @@ and the declared sample count must equal `width * height` exactly.
 | 4 | border size, boundary count, then signed `(x, y)` pairs | 10 world units |
 
 Versions 1 through 3 expose one derived boundary of
-`(width - 2 * border, height - 2 * border)`. Version 4 preserves boundaries in file order.
-Dimensions must be positive, the doubled border must fit both dimensions, counts are checked before
-allocation, and no trailing payload bytes are accepted.
+`(width - 2 * border, height - 2 * border)`. Version 4 preserves signed boundary pairs in file
+order, including negative coordinates; they are metadata rather than allocation dimensions.
+Dimensions and borders remain nonnegative, dimensions must be positive, the doubled border must fit
+both dimensions, counts are checked before allocation, and no trailing payload bytes are accepted.
 
 The semantic value retains the stored version-1 grid exactly. The legacy engine contains a
 version-1 compatibility downsampling step in some loading paths; that transform is deliberately
@@ -125,7 +126,9 @@ The remaining fields are source-ordered tables:
 Counts and nonnegative tile ranges are checked before allocation, texture ranges must stay within
 their declared tile tables, UVs must be finite, blend sentinels must match, and trailing bytes are
 rejected. Selector and cliff flag bytes are preserved as raw source values. The semantic value
-remains immutable and renderer-neutral.
+remains immutable and renderer-neutral. A cliff-info count of zero is source-compatible: the raw
+zero is retained and the table has no explicit entries, matching the source reader's bounded
+`1..count` loop rather than inventing an implicit record.
 
 ## Default limits
 
@@ -158,20 +161,28 @@ floating-point UVs use exact hexadecimal bit patterns.
 `cic-inspect map-water` reports only water-flagged polygon records and their integer points in
 stable source order; non-water trigger semantics remain undecoded.
 
-`cic-inspect map-render` additionally decodes ordered `Terrain`/`Texture` declarations from the
-mounted default and edition Terrain INIs, applies `DefaultTerrain` inheritance, resolves sheets
-beneath `Art/Terrain`, stages source-scaled geometry and base/primary/extra layers, and writes an
-sRGB headless PNG. Size and power-of-two pixels per cell are explicit; diagnostics include stable
+Version-3 river points describe a perimeter rather than adjacent bank pairs. `river_start` marks
+the seam: staging starts on the two points around that seam, advances along one bank, retreats
+along the other with wraparound, and emits paired cross-sections. A negative seam or one at/past
+the final point is retained by the format model but safely produces no renderer geometry.
+
+`cic-inspect map-render` additionally decodes ordered `Terrain`/`Texture` declarations from every
+provider version of the mounted default and edition Terrain INIs in stable base-to-overlay order,
+applies `DefaultTerrain` inheritance, resolves sheets beneath `Art/Terrain`, stages source-scaled
+geometry and base/primary/extra layers, and writes an sRGB headless PNG. Size and power-of-two
+pixels per cell are explicit; diagnostics include stable
 geometry/layer counts and the captured RGBA SHA-256. `--terrain-policy legacy` is the default and
 applies stored cliff UVs plus the bounded steep-slope retile; `modern` retains stored mappings but
 skips the implicit steep-slope adjustment. Custom edges use a separate deterministic index/atlas
 pass. `cic-inspect map-view` launches the same staged terrain in a perspective free-flight viewer.
 The viewer overlays independent depth-capped 16- and 32-texel screen-space regions on the stable
 8-texel background. Oblique horizon coverage cannot lower the nested foreground tiers. It
-uses a hybrid-deferred terrain G-buffer and lighting resolve, followed by a modern depth-aware
-forward water pass. Complete caller-supplied caustic frame sequences are mipmapped and sampled as a
-world-projected texture array; global `WaterTransparency` values control deep opacity and the depth
-at which it is reached. Obsolete detail bakes are cancelled off-thread without request throttling;
+uses a hybrid-deferred terrain G-buffer and lighting resolve, followed by a depth-aware forward
+water pass. The default legacy policy resolves the selected standing texture, diffuse tint/alpha,
+blend choice, minimum opacity, and opaque depth; terrain depth feathers its shoreline. The explicit
+Modern policy retains the refractive presentation. Complete caller-supplied caustic frame sequences
+are mipmapped and sampled as a world-projected texture array. Obsolete detail bakes are cancelled
+off-thread without request throttling;
 only the newest complete linear-light mip chain reaches upload, resident replacements overlap in
 explicit presentation time, and patches are sampled trilinearly with supported
 anisotropy. `modern`
@@ -179,12 +190,19 @@ additionally applies deterministic world-anchored macro variation without rotati
 tiles. These are renderer-authored presentation policies, not decoded MAP lighting or
 translations of the legacy water renderer.
 
-The narrow Water INI boundary accepts ordered `WaterTransparency` blocks with
-`TransparentWaterMinOpacity` in the inclusive 0-to-1 range and
-`TransparentWaterDepth` in the finite, positive 0-to-10,000 range. Repeated fields use stable
-file-order last-value-wins behavior. Input bytes, line count, line length, nesting, numeric values,
-and exact block closure are bounded and produce structured errors. Other blocks, including
-`WaterSet`, are deliberately ignored until their appearance semantics have a separate gate.
+The Water INI boundary accepts all source-established `WaterSet MORNING|AFTERNOON|EVENING|NIGHT`
+fields: sky/water texture names, four vertex colors, diffuse and transparent diffuse colors,
+U/V scroll per millisecond, sky texel density, and water repeat count. It also accepts the complete
+`WaterTransparency` table: depth/minimum opacity, standing/radar colors, standing texture,
+additive policy, and five skybox textures. Input bytes, lines, line length, definition count, string
+length, scalar magnitude, texture repeat, color channels, block nesting, and exact closure have
+explicit limits. Repeated blocks accumulate stable last-field-wins values, matching partial
+definition overlays without consulting the VFS or renderer. Integer RGBA values require RGB in
+order, accept an optional alpha component, and default omitted alpha to 255 as the source parser
+does. Transparency standing/radar colors require ordered integer RGB channels from 0 through 255
+and are normalized once into immutable renderer-neutral values. Installed-profile tools seed the
+source constructor defaults, apply all shadowed global INI providers from earliest to latest, and
+then apply the sibling `Map.ini`; the parser itself remains VFS-independent.
 
 ## Planned R3 semantic gates
 
@@ -282,21 +300,29 @@ R3 reports this tree and may diagnose unresolved object, waypoint, side, team, o
 does not consult live opcode templates, apply implicit compatibility rewrites, evaluate a condition,
 schedule a delay, or execute either action branch. All dispatch and mutation belong to R5.
 
-### `GlobalLighting` and water appearance (WIP)
+### `GlobalLighting` and water appearance (WIP presentation)
 
-The WorldBuilder writer establishes `GlobalLighting` version 3. The associated source distinguishes
-terrain lighting from terrain-object lighting and provides ordered sun/accent inputs across
-time-of-day variants. The planned decoder retains finite ambient/diffuse colors and light vectors
-as immutable renderer-neutral values with exact version and source order. The renderer will replace
-its fixed preview light only after synthetic field/layout tests close this gate.
+The decoder accepts source-established `GlobalLighting` versions 1 through 3. Every version starts
+with a one-based selected time and four ordered morning/afternoon/evening/night records. Version 1
+stores one terrain sun and one object sun per time; version 2 adds two object accents; version 3
+adds two terrain accents. Each light is nine finite little-endian floats: ambient RGB, diffuse RGB,
+and a source direction vector. A final packed shadow color is optional, as established by the
+reader. Payloads close exactly, duplicate chunks fail, and invalid selected times, non-finite
+components, unsupported versions, truncation, and trailing bytes are structured errors.
 
-Water is not considered visually complete. Remaining work includes established `WaterSet` and
-map-specific appearance inputs, interaction with decoded time-of-day lighting, shadows received by
-water and cast onto its bed where appropriate, color/opacity/absorption, refraction, foam and
-shorelines, source caustics, specular response, anti-aliasing, and bounded reflection quality. Water
-stays outside the opaque G-buffer in an ordered forward pass. Completion requires repeatable
-explicit-time synthetic captures and user-owned visual comparisons; the current shader output is a
-WIP diagnostic, not the target look.
+`cic-inspect map-lighting` emits selected time, optional shadow color, and every light as exact
+float bits in stable time/set/source order. `map-view` copies the selected terrain sun/accents into
+renderer-owned values and evaluates all three; only maps with no lighting chunk use the documented
+project preview fallback. The selected `WaterSet` diffuse color/alpha and U/V scroll plus
+`WaterTransparency` standing texture/color/blend/opacity inputs cross the renderer boundary. The
+standing texture resolves through the VFS; WaterSet sky/environment names remain unresolved.
+
+Water is not considered visually complete. Remaining work includes WaterSet sky/environment and
+map-specific appearance inputs, shadows received by water and cast onto its bed where appropriate,
+anti-aliasing, and bounded reflection quality. Water stays outside the opaque G-buffer in an
+ordered forward pass. Completion requires repeatable explicit-time synthetic captures and
+user-owned visual comparisons; legacy compatibility and Modern presentation remain explicit
+separate policies.
 
 ### Object-definition and static-scene resolution
 
@@ -349,9 +375,9 @@ synthetic BIG-backed CLI test verifies stable semantic reporting.
 
 - Blend versions other than 6 and 7 remain opaque in the current implementation. The observed
   version 8 is an R3 completion gate; unobserved versions are never guessed.
-- Object placement, scripts, lighting, `WaterSet`/map-specific water appearance, and non-water
-  polygon-trigger semantics remain opaque in the current implementation; the planned R3 gates
-  above replace their former roadmap exclusion.
+- Object placement, scripts, map-embedded water overrides, and non-water polygon-trigger semantics
+  remain opaque in the current implementation. Global lighting and Water INI appearance are now
+  decoded; source water/sky texture presentation remains WIP.
 - Version-1 compatibility resampling is not applied.
 - No unobserved version or compression wrapper is assumed to share an established layout.
 - Exact legacy fixed-function custom-edge multipass equations remain outside the established

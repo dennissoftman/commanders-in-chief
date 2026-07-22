@@ -49,17 +49,17 @@ observable behavior.
 | Renderer | Explicit-time animated mapper transforms | implemented | Pinned-formula unit tests + deterministic scrolling-mapper capture |
 | Renderer | Textured explicit-animation-frame capture | verified | Checked synthetic SHA-256 + installed infantry frame smoke |
 | Resources | Generals install profile and Steam discovery | verified | Installed Steam export + synthetic `--game-dir` test |
-| Resources | Zero Hour base/delta profile | verified | Installed layered `--zh` exports |
+| Resources | Zero Hour Generals-base/delta profile | verified | Stable base-then-expansion mounts + installed layered exports + cumulative INI history tests |
 | MAP | `CkMp` chunk inventory and unknown payload preservation | verified | Original synthetic fixture + installed RefPack MAP closure |
 | MAP | `EAR\0` RefPack wrapper | verified | Synthetic back-reference/negative tests + installed MAP decompression |
-| MAP | `HeightMapData` versions 1 through 4 | verified | Original fixture/version tests + installed version-4 map |
-| MAP | `BlendTileData` versions 6 and 7 | verified | Original version-7 fixture + installed version-6/version-7 maps |
+| MAP | `HeightMapData` versions 1 through 4 | verified | Original fixture/signed-boundary tests + installed version-4 maps |
+| MAP | `BlendTileData` versions 6 and 7 | verified | Original version-7 fixture + installed version-6/version-7 maps, including empty cliff table |
 | MAP | `BlendTileData` version 8 | unknown | Observed in a user-owned Zero Hour map; layout not guessed |
-| MAP | Terrain INI resolution and layered terrain staging | verified | Synthetic capture hashes + installed 14-class terrain smoke |
-| MAP | Water/river `PolygonTriggers` versions 2 and 3 | verified | Synthetic truncation/triangulation tests + installed lake/empty-marker smokes |
-| MAP | Water transparency and source caustic inputs | verified | Synthetic limits + installed scalar/frame observations; final appearance remains WIP |
-| MAP | Final water appearance quality | unknown | Explicit R3 WIP: source `WaterSet`, lighting, shadows, reflections, and comparisons remain open |
-| MAP | `GlobalLighting` | unknown | Source-established design gate; decoder not started |
+| MAP | Terrain INI resolution and layered terrain staging | verified | Synthetic ordered-history test/capture hashes + installed Generals-under-ZH class smoke |
+| MAP | Water/river `PolygonTriggers` versions 2 and 3 | verified | Synthetic truncation/seam reconstruction tests + installed lake/long-river/empty-marker smokes |
+| MAP | Water transparency, standing texture, and source caustic inputs | verified | Synthetic constructor/history/map-overlay tests + installed texture/scalar/frame smokes; final appearance remains WIP |
+| MAP | Final water appearance quality | partial | Legacy standing-water texture/tint/alpha/depth feathering implemented; sky/environment, shadows, reflections, and comparisons remain open |
+| MAP | `GlobalLighting` versions 1 through 3 | verified | Synthetic exact-layout/truncation tests + installed selected-time smoke |
 | MAP | `WorldInfo` and `ObjectsList` placements | unknown | Source-established ADR-0009 gate; decoder not started |
 | MAP | Roads and bridges | unknown | Source-established object flags/INI definitions; staging not started |
 | MAP | Object draw-definition resolution and static scenery | unknown | Planned initial-presentation subset; no gameplay modules |

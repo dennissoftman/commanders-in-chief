@@ -21,25 +21,37 @@ background bake.
   and 3. It bounds every trigger, name, point array, and retained point total, skips allocation for
   non-water points, preserves degenerate water markers, and rejects truncation and trailing bytes.
 - General trigger semantics, script execution, and object loading remain outside this boundary.
-- `cic-render` stages lake polygons as stable triangle fans and paired river points as stable
-  strips. Degenerate areas are retained by the format value but safely produce no GPU geometry.
-- The interactive terrain path is hybrid deferred: opaque terrain, custom edges, and streamed
-  detail write albedo, normal/roughness, world position, and depth; a fullscreen directional-light
-  resolve writes linear `RGBA16F` scene color; a final surface pass tone maps that scene.
-- Water is a later forward, depth-tested, no-depth-write pass. Its project-authored WGSL reads the
-  resolved opaque scene and terrain world-position buffer to derive thickness-dependent
-  Beer-Lambert absorption, refractive screen offset, Fresnel sky reflection, directional specular,
-  shallow-water haze and crest effects, and depth-attenuated world-projected caustics sampled from
-  a caller-supplied texture array. Presentation time is explicit viewer input and never enters
-  simulation or deterministic headless capture.
-- `cic-formats` boundedly decodes only the global `WaterTransparency` opacity and opaque-depth
-  fields. `cic-render::WaterAppearance` owns validated, VFS-independent opacity values and an
-  optional consistent luminance-frame sequence. `cic-tools` resolves user-owned INI and image
-  resources and uploads complete mip chains; synthetic and engine callers may provide the same
-  public renderer input directly or omit the optional sequence.
-- The water shader and render graph are original project work. The pinned GPL source is used only
-  for input field order, water/river classification, and provenance; its Direct3D 8 state machine,
-  bump frames, framebuffer reflection path, and fixed-function equations are not translated.
+- `cic-render` stages lake polygons as stable triangle fans. River records retain perimeter order;
+  staging starts around `river_start`, advances one bank and retreats the other with bounded
+  wraparound, then emits stable paired strips. Degenerate areas and invalid seams are retained by
+  the format value but safely produce no GPU geometry.
+- The interactive terrain path is hybrid deferred: opaque terrain and streamed detail write
+  albedo, normal/roughness, world position, and depth. Coplanar custom-edge overlays alpha-composite
+  only albedo, retaining the base geometry targets. Virtual-page residency is represented
+  independently from sampled alpha so authored transparent edge coverage never triggers a
+  lower-resolution fallback. A fullscreen directional-light resolve writes linear `RGBA16F` scene
+  color; a final surface pass tone maps that scene.
+- Water is a later forward, depth-tested, no-depth-write pass under an explicit presentation
+  policy. `ZeroHourLegacy` resolves the source standing-water texture, selected diffuse tint/alpha,
+  additive choice, texture scale, minimum opacity, and opaque depth; it uses terrain depth to
+  feather shoreline coverage and alpha-composites over the resolved scene. `Modern` retains the
+  project-authored Beer-Lambert absorption, refraction, Fresnel sky response, directional specular,
+  shallow-water effects, and world-projected caustics. Presentation time is explicit viewer input
+  and never enters simulation or deterministic headless capture.
+- `cic-formats` boundedly decodes the complete source `WaterSet` and `WaterTransparency` tables.
+  `cic-render::WaterAppearance` owns validated, VFS-independent opacity, texture, tint, blend,
+  policy, and optional caustic-frame values. `cic-tools` resolves user-owned INI and image resources
+  and uploads complete mip chains; synthetic and engine callers may provide the same public inputs
+  directly or omit optional resources.
+- Installed-profile water resolution starts from the source `WaterTransparencySetting` constructor
+  values, applies every global INI provider in stable earliest-to-latest mount order, and finally
+  applies the MAP's sibling `Map.ini` when present. Degenerate water markers remain data but produce
+  no geometry. Mission scripts can describe dynamic water state; R3 preserves that data and never
+  executes it before the deterministic R5 simulation boundary.
+- Legacy standing-water resource selection, polygon dispatch, 150-world-unit texture scale,
+  diffuse alpha, source-over/additive choice, and depth-driven soft-edge intent are derived from
+  pinned GPL `W3DWater.cpp`. The project does not copy its Direct3D 8 state machine or shaders.
+  Modern shading and the shared `wgpu` render graph remain original project work.
 - `Modern` terrain policy applies subtle world-anchored, integer-interpolated macro color
   variation after authored base/primary/extra composition. It never rotates or mirrors tile
   content. `ZeroHourLegacy` output is unchanged. Global cell coordinates make independently baked
@@ -48,7 +60,7 @@ background bake.
 ## Acceptance and determinism
 
 - Synthetic version-2/version-3 water payloads cover exact closure, all truncated prefixes,
-  limits, degenerate markers, and stable lake/river triangulation.
+  limits, degenerate markers, nonzero seam wraparound, and stable lake/river triangulation.
 - Modern macro variation must reproduce byte-for-byte across repeated staging and between a full
   32-pixel bake and the equivalent streamed detail region.
 - An installed user-owned map with one nine-point lake must remain live through GPU upload and the
@@ -57,11 +69,10 @@ background bake.
 
 ## Consequences
 
-Water can evolve toward screen-space reflection, planar probes, clustered lights, and additional
-source appearance overrides without coupling format parsing to GPU resources or recreating the
-original engine. The current reflection is a bounded sky approximation and the whole water result
-is explicitly WIP; source `WaterSet` colors/textures, time-of-day and map-specific overrides,
-map-authored lighting, shadows, SSR, and planar reflection probes are required R3 design gates, not
-optional polish. Headless `map-render` remains the deterministic terrain-only completion artifact
-for now. ADR 0009 expands R3 to complete MAP ingestion and scene presentation while preserving this
-ADR's narrow water/render-graph boundary.
+Water can evolve toward source sky/environment textures, screen-space reflection, planar probes,
+clustered lights, and map-specific overrides without coupling format parsing to GPU resources or
+recreating the original engine. The legacy standing-water path is now source-driven but remains
+WIP pending repeatable visual comparisons; shadows, sky/environment resolution, SSR, and planar
+reflection probes remain R3 gates. Headless `map-render` remains the deterministic terrain-only
+completion artifact for now. ADR 0009 expands R3 to complete MAP ingestion and scene presentation
+while preserving this ADR's narrow water/render-graph boundary.

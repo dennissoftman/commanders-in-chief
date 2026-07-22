@@ -208,20 +208,20 @@ impl MapChunk {
 /// One playable-boundary coordinate from a version-4 height chunk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MapBoundary {
-    x: u32,
-    y: u32,
+    x: i32,
+    y: i32,
 }
 
 impl MapBoundary {
-    /// Returns the boundary's top-right X coordinate.
+    /// Returns the stored signed boundary X coordinate.
     #[must_use]
-    pub const fn x(self) -> u32 {
+    pub const fn x(self) -> i32 {
         self.x
     }
 
-    /// Returns the boundary's top-right Y coordinate.
+    /// Returns the stored signed boundary Y coordinate.
     #[must_use]
-    pub const fn y(self) -> u32 {
+    pub const fn y(self) -> i32 {
         self.y
     }
 }
@@ -376,7 +376,7 @@ pub enum MapHeightError {
     DuplicateHeightMap,
     /// The height chunk version is not established by the pinned source.
     UnsupportedVersion(u16),
-    /// A signed height field contained a negative value.
+    /// A height field required to be nonnegative contained a negative value.
     NegativeValue { field: &'static str, value: i32 },
     /// A width or height was zero.
     ZeroDimension { field: &'static str },
@@ -636,15 +636,15 @@ pub fn decode_map_height(
         let mut boundaries = Vec::with_capacity(count);
         for _ in 0..count {
             boundaries.push(MapBoundary {
-                x: read_height_u32(&mut reader, "boundary X")?,
-                y: read_height_u32(&mut reader, "boundary Y")?,
+                x: read_height_i32(&mut reader)?,
+                y: read_height_i32(&mut reader)?,
             });
         }
         boundaries
     } else {
         vec![MapBoundary {
-            x: width - doubled_border,
-            y: height - doubled_border,
+            x: i32::try_from(width - doubled_border).map_err(|_| height_integer_limit_error())?,
+            y: i32::try_from(height - doubled_border).map_err(|_| height_integer_limit_error())?,
         }]
     };
 
@@ -693,6 +693,18 @@ fn read_height_u32(
 ) -> Result<u32, MapHeightError> {
     let value = i32::from_le_bytes(reader.read_u32_le()?.to_le_bytes());
     u32::try_from(value).map_err(|_| MapHeightError::NegativeValue { field, value })
+}
+
+fn read_height_i32(reader: &mut BinaryReader<'_>) -> Result<i32, MapHeightError> {
+    Ok(i32::from_le_bytes(reader.read_u32_le()?.to_le_bytes()))
+}
+
+fn height_integer_limit_error() -> MapHeightError {
+    MapHeightError::Binary(BinaryError::LimitExceeded {
+        what: "MAP height integer",
+        actual: usize::MAX,
+        maximum: i32::MAX as usize,
+    })
 }
 
 fn read_height_usize(
@@ -793,6 +805,20 @@ mod tests {
         );
         assert_eq!(height.samples(), [0, 16, 32, 48, 64, 255]);
         assert_eq!(height.cell_size_world_units(), 10);
+    }
+
+    #[test]
+    fn preserves_signed_version_four_boundaries() {
+        let mut bytes = fixture();
+        bytes[64..68].copy_from_slice(&(-6_i32).to_le_bytes());
+        bytes[68..72].copy_from_slice(&(-9_i32).to_le_bytes());
+        let map = parse_map(&bytes, "signed-boundary.map", MapLimits::default())
+            .expect("valid inventory");
+        let height = decode_map_height(&map, MapLimits::default()).expect("signed boundary");
+        assert_eq!(
+            (height.boundaries()[0].x(), height.boundaries()[0].y()),
+            (-6, -9)
+        );
     }
 
     #[test]

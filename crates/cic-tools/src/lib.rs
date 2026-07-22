@@ -8,8 +8,8 @@ pub use gltf::{GltfTextureRequest, W3dGlbError, W3dGltfBundle, pack_w3d_glb, ren
 use std::fmt::Write;
 
 use cic_formats::{
-    CsfFile, MapBlendData, MapFile, MapHeightField, MapWaterData, W3dChunk, W3dFile, W3dStaticMesh,
-    W3dVector3, w3d_chunk_name,
+    CsfFile, MapBlendData, MapFile, MapHeightField, MapLightingData, MapWaterData, W3dChunk,
+    W3dFile, W3dStaticMesh, W3dVector3, w3d_chunk_name,
 };
 use cic_render::Capture;
 use cic_vfs::Vfs;
@@ -263,6 +263,58 @@ pub fn render_map_water(water: &MapWaterData) -> String {
             let [x, y, z] = point.coordinates();
             writeln!(output, "point\t{index}\t{point_index}\t{x}\t{y}\t{z}")
                 .expect("writing to a String cannot fail");
+        }
+    }
+    output
+}
+
+/// Formats separate terrain/object MAP lights in stable time and source-light order.
+#[must_use]
+pub fn render_map_lighting(lighting: &MapLightingData) -> String {
+    const NAMES: [&str; 4] = ["morning", "afternoon", "evening", "night"];
+    let shadow = lighting
+        .shadow_color()
+        .map_or_else(|| "none".to_owned(), |color| format!("0x{color:08X}"));
+    let mut output = String::from("version\tselected_time\tshadow_color\n");
+    writeln!(
+        output,
+        "{}\t{}\t{}",
+        lighting.version(),
+        lighting.selected_time().name(),
+        shadow
+    )
+    .expect("writing to a String cannot fail");
+    output.push_str(
+        "period\ttime\tset\tlight\tambient_r\tambient_g\tambient_b\tdiffuse_r\tdiffuse_g\tdiffuse_b\tdirection_x\tdirection_y\tdirection_z\n",
+    );
+    for (period_index, (period, name)) in lighting.periods().iter().zip(NAMES).enumerate() {
+        for (set_name, lights) in [
+            ("terrain", period.terrain_lights()),
+            ("objects", period.object_lights()),
+        ] {
+            for (light_index, light) in lights.iter().enumerate() {
+                let ambient = light.ambient().map(float_bits);
+                let diffuse = light.diffuse().map(float_bits);
+                let direction = light.direction().map(float_bits);
+                writeln!(
+                    output,
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    period_index,
+                    name,
+                    set_name,
+                    light_index,
+                    ambient[0],
+                    ambient[1],
+                    ambient[2],
+                    diffuse[0],
+                    diffuse[1],
+                    diffuse[2],
+                    direction[0],
+                    direction[1],
+                    direction[2]
+                )
+                .expect("writing to a String cannot fail");
+            }
         }
     }
     output

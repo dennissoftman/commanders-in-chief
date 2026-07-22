@@ -1009,8 +1009,12 @@ impl StagedTerrain {
         index_bytes(&self.edge_indices)
     }
 
-    pub(crate) fn world_vertex_bytes(&self) -> Vec<u8> {
-        terrain_vertex_bytes(&self.vertices)
+    pub(crate) fn viewer_vertex_bytes(&self) -> Result<Vec<u8>, TerrainError> {
+        terrain_viewer_vertex_bytes(
+            &self.vertices,
+            usize::try_from(self.width).map_err(|_| TerrainError::TerrainTooLarge)?,
+            usize::try_from(self.height).map_err(|_| TerrainError::TerrainTooLarge)?,
+        )
     }
 
     pub(crate) fn bounds(&self) -> ([f32; 3], [f32; 3]) {
@@ -1310,14 +1314,66 @@ fn pack_square_tiles(tiles: &[Vec<u8>], tile_size: usize) -> Result<(u32, Vec<u8
     ))
 }
 
-fn terrain_vertex_bytes(vertices: &[TerrainVertex]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(vertices.len() * 20);
-    for vertex in vertices {
-        for value in vertex.position.into_iter().chain(vertex.uv) {
-            bytes.extend_from_slice(&value.to_le_bytes());
+fn terrain_viewer_vertex_bytes(
+    vertices: &[TerrainVertex],
+    width: usize,
+    height: usize,
+) -> Result<Vec<u8>, TerrainError> {
+    let expected = width
+        .checked_mul(height)
+        .ok_or(TerrainError::TerrainTooLarge)?;
+    if width < 2 || height < 2 || vertices.len() != expected {
+        return Err(TerrainError::DimensionMismatch);
+    }
+    let byte_capacity = expected
+        .checked_mul(32)
+        .ok_or(TerrainError::TerrainTooLarge)?;
+    let mut bytes = Vec::with_capacity(byte_capacity);
+    for y in 0..height {
+        for x in 0..width {
+            let vertex_index = y
+                .checked_mul(width)
+                .and_then(|row| row.checked_add(x))
+                .ok_or(TerrainError::TerrainTooLarge)?;
+            let vertex = vertices
+                .get(vertex_index)
+                .ok_or(TerrainError::DimensionMismatch)?;
+            let left_x = x.saturating_sub(1);
+            let right_x = x.saturating_add(1).min(width - 1);
+            let down_y = y.saturating_sub(1);
+            let up_y = y.saturating_add(1).min(height - 1);
+            let position = |sample_x: usize, sample_y: usize| {
+                sample_y
+                    .checked_mul(width)
+                    .and_then(|row| row.checked_add(sample_x))
+                    .and_then(|index| vertices.get(index))
+                    .map(|sample| sample.position)
+                    .ok_or(TerrainError::DimensionMismatch)
+            };
+            let left = position(left_x, y)?;
+            let right = position(right_x, y)?;
+            let down = position(x, down_y)?;
+            let up = position(x, up_y)?;
+            let tangent_x = [right[0] - left[0], right[1] - left[1], right[2] - left[2]];
+            let tangent_y = [up[0] - down[0], up[1] - down[1], up[2] - down[2]];
+            let mut normal = [
+                tangent_x[1] * tangent_y[2] - tangent_x[2] * tangent_y[1],
+                tangent_x[2] * tangent_y[0] - tangent_x[0] * tangent_y[2],
+                tangent_x[0] * tangent_y[1] - tangent_x[1] * tangent_y[0],
+            ];
+            let length_squared = normal.iter().map(|value| value * value).sum::<f32>();
+            if length_squared.is_finite() && length_squared > f32::EPSILON {
+                let inverse_length = length_squared.sqrt().recip();
+                normal = normal.map(|value| value * inverse_length);
+            } else {
+                normal = [0.0, 0.0, 1.0];
+            }
+            for value in vertex.position.into_iter().chain(vertex.uv).chain(normal) {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
         }
     }
-    bytes
+    Ok(bytes)
 }
 
 fn index_bytes(indices: &[u32]) -> Vec<u8> {
@@ -2895,7 +2951,8 @@ impl Error for TerrainError {}
 mod tests {
     use super::{
         StagedTerrain, TerrainCompatibilityPolicy, TerrainDetailRequest, TerrainStagingOptions,
-        VIRTUAL_CELL_BYTES, generate_srgb_mips, legacy_adjust_uv, mip_rgba, select_detail_pixels,
+        TerrainVertex, VIRTUAL_CELL_BYTES, generate_srgb_mips, legacy_adjust_uv, mip_rgba,
+        select_detail_pixels, terrain_viewer_vertex_bytes,
     };
     use crate::TextureResourceManager;
     use cic_formats::{MapLimits, decode_map_blend, decode_map_height, parse_map};
@@ -2904,6 +2961,37 @@ mod tests {
     fn source_mip_rounding_is_stable() {
         let source = vec![0, 0, 0, 255, 1, 1, 1, 255, 2, 2, 2, 255, 3, 3, 3, 255];
         assert_eq!(mip_rgba(&source, 2).expect("mip"), [2, 2, 2, 255]);
+    }
+
+    #[test]
+    fn viewer_vertices_carry_smooth_height_field_normals() {
+        let mut vertices = Vec::new();
+        for y in [0.0_f32, 1.0, 2.0] {
+            for x in [0.0_f32, 1.0, 2.0] {
+                vertices.push(TerrainVertex {
+                    position: [x, y, 2.0 * x + 3.0 * y],
+                    uv: [x * 0.5, y * 0.5],
+                });
+            }
+        }
+
+        let bytes = terrain_viewer_vertex_bytes(&vertices, 3, 3).expect("viewer vertices");
+        assert_eq!(bytes.len(), 9 * 32);
+        let center = &bytes[4 * 32 + 20..4 * 32 + 32];
+        let component = |offset| {
+            f32::from_le_bytes(
+                center[offset..offset + 4]
+                    .try_into()
+                    .expect("normal component"),
+            )
+        };
+        let expected = [-2.0_f32, -3.0, 1.0].map(|value| value / 14.0_f32.sqrt());
+        for (actual, expected) in [component(0), component(4), component(8)]
+            .into_iter()
+            .zip(expected)
+        {
+            assert!((actual - expected).abs() < 1.0e-6);
+        }
     }
 
     #[test]
