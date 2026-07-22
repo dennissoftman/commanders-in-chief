@@ -44,20 +44,21 @@ filesystem, simulation, or wall-clock ownership.
 - The interactive viewer consumes the identical staged values and GPU edge pass. Its perspective
   camera is presentation-only: caller-supplied frame deltas drive WASD/vertical movement, boost,
   mouse look, wheel dolly, and reset without changing staged terrain or deterministic captures.
-- Large maps retain the deterministic 8-pixel-per-cell background. The staged value also owns a
-  bounded clone of the immutable decoded height/blend values and content-deduplicated texture
-  resources. `map-view` intersects the camera frustum with the bounded terrain height slab but does
-  not assign one density to its complete horizon-reaching rectangle. Projected cell size defines a
-  16-texel mid-field depth cap and a nested source-density 32-texel foreground cap. Each tier owns
-  an independent quantized request, predictive margins, cancellation generation, worker, GPU
-  texture, and fade uniform. Existing texture limits remain authoritative: margins are trimmed
-  before a tier's visible bounds. A resident or requested patch suppresses work whenever it already
-  covers those bounds at equal density. New generations immediately cancel obsolete
-  row/tile/composition work; the worker discards stale completions, and only the latest complete
-  linear-light, alpha-aware mip chain reaches GPU upload. The previous GPU patch remains resident
-  during a short caller-time-driven overlap, while spatial edge coverage joins each equal-depth,
-  no-depth-write tier to its coarser parent. Trilinear sampling requests up to 16x anisotropy with
-  backend fallback.
+- Large maps retain the deterministic 8-pixel-per-cell background. `map-view` additionally packs
+  source terrain sheets into a compact 64-pixel tile atlas, deduplicates source-defined custom-edge
+  results into a 32-pixel atlas, and uploads immutable per-cell material/UV/mask metadata once.
+  Camera-frustum intersection produces camera-space-depth-capped 16/32-texel page demand rather
+  than a horizon-sized atlas request.
+- Interactive detail uses a project-authored software virtual texture. One hundred twenty-eight physical
+  264-by-264 layers contain a 256-pixel interior plus a four-pixel filter border. Two stable page
+  tables map 8-cell/32-texel and 16-cell/16-texel virtual pages into that shared cache. Deterministic
+  LRU replacement retains revisitable pages; projected page bounds follow the actual camera angle,
+  and coarse visible coverage is ranked before fine upgrades. A missing mapping samples the stable background.
+  Compute shaders compose authored base/primary/extra layers, procedural masks, cliff UVs, custom
+  edges, and Modern macro variation. Separate compute passes generate complete linear-light,
+  alpha-aware mip chains. Camera movement uploads only bounded job/page-table metadata and performs
+  no CPU terrain texture composition. Trilinear sampling requests up to 16x anisotropy with backend
+  fallback.
 - Viewer slope lighting derives a face normal from world-position derivatives and applies one
   fixed directional light. This is an explicit project-authored presentation preview; it does not
   enter headless captures and is not represented as MAP-authored lighting before `LightingData`
@@ -66,12 +67,9 @@ filesystem, simulation, or wall-clock ownership.
   choices. Headless and interactive terrain, custom-edge, and detail pipelines therefore cull back
   faces. Water and general model materials keep their own explicit culling policies.
 - The classic monolithic MegaTexture model is not the canonical terrain representation. MAP tile,
-  blend, cliff, and edge semantics remain immutable inputs needed by compatibility, tools, and
-  future terrain mutation. If profiling justifies it, the renderer may replace rectangular baked
-  patches with a software virtual-texture cache: fixed-size atlas pages, a page table, border
-  texels, a guaranteed coarse mip, and deterministic keys over profile/region/mip/content. Page
-  composition must continue to use the shared staged terrain path, and requested pages must be
-  derived conservatively from the viewport rather than GPU feedback entering simulation state.
+  blend, cliff, and edge semantics remain immutable inputs needed by compatibility, tools, future
+  terrain mutation, and deterministic page regeneration. Residency demand is derived
+  conservatively from the viewport; GPU feedback never enters simulation or authoritative state.
 
 ## Consequences
 
@@ -80,9 +78,7 @@ longer guessed from class names. Layer construction can be tested independently 
 and the renderer boundary is shared by headless and interactive presentation. The baked base and
 edge atlases are intentionally bounded to 4,096 pixels per axis and 64 MiB each. Exact legacy
 fixed-function custom-edge blending remains a documented preview difference rather than a hidden
-claim of pixel equivalence. The near-field window restores foreground texel density without a
-full-map high-resolution allocation. CPU rebakes no longer block presentation, obsolete work is
-cancelled before it can become visible, and bounded GPU replacements overlap their previous
-residents instead of exposing a blurry-to-sharp snap. A software virtual-texture cache is therefore
-a compatible future optimization, not a replacement for renderer-neutral terrain semantics or an
-immediate requirement.
+claim of pixel equivalence. The page cache restores foreground texel density without a full-map
+high-resolution allocation, retains bounded memory, and reuses revisited regions. The CPU baker
+remains the deterministic headless/tooling reference; it is not in the interactive camera-update
+path. Renderer-neutral terrain semantics remain authoritative over either representation.

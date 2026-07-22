@@ -249,12 +249,13 @@ separately indexed custom-edge atlas pass. `map-render` exposes explicit legacy/
 emits an sRGB headless PNG with stable diagnostics. `map-view` shares that resource/staging path and
 adds perspective free-flight camera controls. Original synthetic tests cover cliff adjustment and
 custom-edge geometry/texturing; an installed 151,221-cell Generals visual and viewer smoke resolved
-all 14 classes and retained no retail capture. The viewer now streams independently cancellable,
-depth-capped 16/32-pixel screen-space tiers over the stable 8-pixel background, retains old GPU
-patches during replacement, and applies an explicit viewer-only directional slope light; synthetic
-region output matches a full-resolution bake byte-for-byte. Hybrid-deferred water and Modern
-de-tiling are active. Blend version 8, object placement, source-authored lighting, and custom-map
-verification remain open.
+all 14 classes and retained no retail capture. The viewer now uses a persistent bounded
+GPU-composed virtual-texture cache: semantic cell/source-tile inputs are uploaded once, stable
+two-level page tables select bordered 16/32-pixel pages, LRU residency reuses revisited regions,
+projected viewport ranking retains coarse visible coverage before fine upgrades, and
+compute-generated linear mip chains feed trilinear/anisotropic sampling over the guaranteed
+8-pixel fallback. Hybrid-deferred water and Modern de-tiling are active. Blend version 8, object
+placement, source-authored lighting, and custom-map verification remain open.
 
 ## R4: Deterministic simulation kernel
 
