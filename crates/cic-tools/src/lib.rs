@@ -24,7 +24,7 @@ pub fn render_manifest(vfs: &Vfs) -> String {
             output,
             "{}\t{}\t{}:{}",
             path,
-            entry.bytes().len(),
+            entry.len(),
             provider.kind(),
             provider.name()
         )

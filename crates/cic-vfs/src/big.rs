@@ -31,6 +31,8 @@ pub enum BigVersion {
 pub struct BigLimits {
     /// Maximum accepted complete archive size.
     pub maximum_archive_bytes: usize,
+    /// Maximum bytes read while indexing the header and directory table.
+    pub maximum_directory_bytes: usize,
     /// Maximum number of file-table entries.
     pub maximum_entries: usize,
     /// Maximum byte length of one zero-terminated entry name.
@@ -43,6 +45,7 @@ impl Default for BigLimits {
     fn default() -> Self {
         Self {
             maximum_archive_bytes: 2 * 1024 * 1024 * 1024,
+            maximum_directory_bytes: 64 * 1024 * 1024,
             maximum_entries: 1_000_000,
             maximum_name_bytes: 4096,
             maximum_directory_trailer_bytes: 64 * 1024,
@@ -78,6 +81,7 @@ impl BigEntry {
         self.size
     }
 
+    #[cfg(test)]
     pub(crate) fn bytes<'a>(&self, archive: &'a [u8]) -> Option<&'a [u8]> {
         archive.get(self.offset..self.end)
     }
@@ -133,15 +137,89 @@ impl BigArchiveIndex {
 /// invalid header bounds, invalid names, excessive directory trailer data, or member
 /// ranges outside the declared payload region.
 pub fn parse_big_archive(bytes: &[u8], limits: BigLimits) -> Result<BigArchiveIndex, BigError> {
-    if bytes.len() > limits.maximum_archive_bytes {
+    parse_big_archive_prefix(bytes, bytes.len(), limits)
+}
+
+pub(crate) fn big_directory_prefix_length(
+    header: &[u8],
+    archive_size: usize,
+    limits: BigLimits,
+) -> Result<usize, BigError> {
+    Ok(parse_header(header, archive_size, limits)?.first_file_offset)
+}
+
+pub(crate) fn parse_big_archive_prefix(
+    bytes: &[u8],
+    actual_archive_size: usize,
+    limits: BigLimits,
+) -> Result<BigArchiveIndex, BigError> {
+    let header = parse_header(bytes, actual_archive_size, limits)?;
+    let directory_length = header.first_file_offset - HEADER_LENGTH;
+    if directory_length > limits.maximum_directory_bytes {
+        return Err(BinaryError::LimitExceeded {
+            what: "BIG directory size",
+            actual: directory_length,
+            maximum: limits.maximum_directory_bytes,
+        }
+        .into());
+    }
+    let directory_bytes = bytes
+        .get(HEADER_LENGTH..header.first_file_offset)
+        .ok_or_else(|| BinaryError::UnexpectedEof {
+            source: "BIG archive".to_owned(),
+            offset: bytes.len(),
+            requested: header.first_file_offset.saturating_sub(bytes.len()),
+            remaining: 0,
+        })?;
+    let mut directory = BinaryReader::new(directory_bytes, "BIG directory");
+    let entries = parse_entries(
+        &mut directory,
+        header.entry_count,
+        header.first_file_offset,
+        header.archive_size,
+        limits.maximum_name_bytes,
+    )?;
+
+    let trailer_length = directory.remaining();
+    if trailer_length > limits.maximum_directory_trailer_bytes {
+        return Err(BinaryError::LimitExceeded {
+            what: "BIG directory trailer size",
+            actual: trailer_length,
+            maximum: limits.maximum_directory_trailer_bytes,
+        }
+        .into());
+    }
+    let directory_trailer = directory.read_exact(trailer_length)?.to_vec();
+
+    Ok(BigArchiveIndex {
+        version: header.version,
+        archive_size: header.archive_size,
+        first_file_offset: header.first_file_offset,
+        entries,
+        directory_trailer,
+    })
+}
+
+struct BigHeader {
+    version: BigVersion,
+    archive_size: usize,
+    entry_count: usize,
+    first_file_offset: usize,
+}
+
+fn parse_header(
+    bytes: &[u8],
+    actual_archive_size: usize,
+    limits: BigLimits,
+) -> Result<BigHeader, BigError> {
+    if actual_archive_size > limits.maximum_archive_bytes {
         return Err(BinaryError::LimitExceeded {
             what: "BIG archive size",
-            actual: bytes.len(),
+            actual: actual_archive_size,
             maximum: limits.maximum_archive_bytes,
         }
         .into());
     }
-
     let mut reader = BinaryReader::new(bytes, "BIG archive");
     let signature = match reader.read_exact(4)? {
         [first, second, third, fourth] => [*first, *second, *third, *fourth],
@@ -162,10 +240,10 @@ pub fn parse_big_archive(bytes: &[u8], limits: BigLimits) -> Result<BigArchiveIn
     };
 
     let archive_size = host_index(reader.read_u32_le()?, "archive size")?;
-    if archive_size != bytes.len() {
+    if archive_size != actual_archive_size {
         return Err(BigError::ArchiveSizeMismatch {
             declared: archive_size,
-            actual: bytes.len(),
+            actual: actual_archive_size,
         });
     }
 
@@ -188,32 +266,20 @@ pub fn parse_big_archive(bytes: &[u8], limits: BigLimits) -> Result<BigArchiveIn
     }
 
     let directory_length = first_file_offset - HEADER_LENGTH;
-    let mut directory = reader.read_region(directory_length)?;
-    let entries = parse_entries(
-        &mut directory,
-        entry_count,
-        first_file_offset,
-        archive_size,
-        limits.maximum_name_bytes,
-    )?;
-
-    let trailer_length = directory.remaining();
-    if trailer_length > limits.maximum_directory_trailer_bytes {
+    if directory_length > limits.maximum_directory_bytes {
         return Err(BinaryError::LimitExceeded {
-            what: "BIG directory trailer size",
-            actual: trailer_length,
-            maximum: limits.maximum_directory_trailer_bytes,
+            what: "BIG directory size",
+            actual: directory_length,
+            maximum: limits.maximum_directory_bytes,
         }
         .into());
     }
-    let directory_trailer = directory.read_exact(trailer_length)?.to_vec();
 
-    Ok(BigArchiveIndex {
+    Ok(BigHeader {
         version,
         archive_size,
+        entry_count,
         first_file_offset,
-        entries,
-        directory_trailer,
     })
 }
 

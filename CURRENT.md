@@ -17,6 +17,10 @@ modern reflection/shadow quality.
 - Bounded, cursor-based binary reads with structured errors.
 - Normalized, ASCII case-insensitive virtual paths.
 - Deterministic last-mounted-wins overlays with full provider history.
+- Disk-backed directory mounts retain file metadata and BIG mounts retain only bounded directory
+  indices; winning payloads are read lazily under parser-selected allocation limits.
+- Bounded declarative mount profiles support arbitrarily named custom bases, optional providers,
+  total conversions, and repeatable ordered mod layers without retail archive sentinels.
 - Loose-directory manifest CLI and synthetic tests.
 - Evidence-backed `BIGF`/`BIG4` indexing with explicit limits and synthetic fixture.
 - BIG duplicate-name history with deterministic last-entry-wins resolution.

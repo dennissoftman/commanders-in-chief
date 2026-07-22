@@ -36,6 +36,10 @@ Simulation, AI, networking, and scripting remain excluded until their milestones
 ## Boundaries
 
 - VFS providers expose bytes plus provenance; parsers do not inspect physical paths.
+- Disk VFS providers index paths, lengths, and archive ranges only. Callers lazily read one winning
+  resource under an explicit allocation bound; the VFS retains no implicit payload cache.
+- Built-in retail mount profiles are compatibility presets. Declarative custom profiles and ordered
+  mod providers use the same VFS and do not require retail archive names.
 - Parsers return immutable semantic values or structured errors.
 - Rendering owns GPU/window resources but never parsing, VFS, or simulation state.
 - Texture images are bounded and content-addressed; aliases and effective materials reuse

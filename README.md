@@ -57,6 +57,25 @@ cargo run -p cic-tools -- config set zero-hour-dir "D:\Games\Zero Hour"
 Explicit directory or BIG mounts remain supported after the command arguments for
 synthetic fixtures and custom overlays.
 
+Custom bases and total conversions can declare arbitrary ordered providers in a bounded profile:
+
+```text
+version=1
+mount=base.assets
+optional=loose-overrides
+```
+
+Paths are relative to the profile unless absolute. `mount` is required at launch; a missing
+`optional` provider is skipped. Repeatable mod layers are appended in command-line order:
+
+```text
+cargo run -p cic-tools -- --profile custom.cic-profile --mod mods/first --mod mods/second manifest
+```
+
+Built-in Generals/Zero Hour archive lists are convenience presets only; custom profiles do not
+require retail filenames or sentinels. Disk mounts retain directory/BIG indices rather than
+payloads. A resource is read only when selected, under the consuming parser's explicit size limit.
+
 The renderer boundary can produce a window-free synthetic PPM and RGBA SHA-256 with an explicit
 pose. It consumes validated `cic-formats` values and owns no parser, filesystem, or simulation
 resources. `cic-inspect w3d-view` opens a 960x720 depth-tested viewer, frames the model from a

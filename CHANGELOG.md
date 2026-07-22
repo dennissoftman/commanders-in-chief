@@ -4,8 +4,15 @@ All notable user-visible changes are recorded here.
 
 ## Unreleased
 
+### Fixed
+
+- Linux and macOS builds no longer retain the Windows-only Steam registry command import.
+
 ### Added
 
+- Bounded declarative mount profiles and repeatable ordered `--mod` layers for custom bases and
+  total conversions, plus lazy directory/BIG providers that index on mount and read only requested
+  resources under caller-selected limits.
 - Bounded water-only MAP decoding/reporting, stable lake/river staging, a modern hybrid-deferred
   terrain viewer with thickness-aware forward water, and deterministic Modern-profile de-tiling.
 - Horizon-safe terrain detail streaming with nested screen-space 16/32-pixel tiers over the stable

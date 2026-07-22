@@ -27,6 +27,38 @@ output.
 
 **Completion artifact:** Passing CLI integration test with two synthetic overlay trees.
 
+### Resource provider and mod-profile refinement (complete)
+
+**Scope:** Replace eager disk payload retention with lazy bounded resource reads and add ordered,
+declarative custom-base/mod mount plans without making built-in retail filenames engine
+requirements.
+
+**Exclusions:** Package/dependency management, Workshop integration, hot reload, mod authoring,
+signing, scripting, and automatic interpretation of third-party mod conventions.
+
+**Inputs:** Synthetic loose trees, arbitrarily named synthetic BIG files, bounded mount-profile
+text, explicit built-in profiles, and repeated mod paths.
+
+**Outputs:** Stable indexed manifests, caller-bounded owned resource reads, custom total-conversion
+plans, and deterministic base-then-mod provider provenance.
+
+**Owner:** `cic-vfs` for lazy providers and `cic-tools` for profile parsing and CLI composition.
+
+**Acceptance tests:** Disk providers remain indexable after payload deletion and fail only on lazy
+read; payload and directory-index limits reject before excess allocation; malformed/oversized
+profiles fail structurally; arbitrary archive names and a loose mod produce the expected winning
+manifest.
+
+**Determinism:** Mount order is explicit, optional providers retain declaration order, built-in
+host filenames resolve by ASCII case with ambiguity rejection, and no filesystem enumeration order
+selects a winner.
+
+**Documentation:** ADR 0008, architecture boundaries, README profile syntax, compatibility matrix,
+and changelog.
+
+**Completion artifact:** Synthetic custom profile plus repeatable mod CLI integration test and lazy
+directory/BIG provider unit tests.
+
 ## R1: BIG and CSF resource probe
 
 **Status:** In progress.

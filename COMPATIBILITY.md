@@ -8,6 +8,8 @@ observable behavior.
 |---|---|---|---|
 | VFS | ASCII case-insensitive virtual paths | verified | Unit tests + GitHub CI run 29840005186 |
 | VFS | Deterministic loose-directory overlays | verified | Unit/CLI tests + GitHub CI run 29840005186 |
+| VFS | Lazy disk-backed directory and BIG payload reads | implemented | Synthetic provider deletion + bounded-read tests |
+| VFS | Declarative custom base and ordered mod profiles | implemented | Bounded profile tests + arbitrary-name CLI overlay fixture |
 | BIG | `BIGF` index and mounting | verified | 16-test suite + 18 Steam Generals archives |
 | BIG | Directory trailers | verified | None, `L225`+zero, and `L231`+zero across 18 archives |
 | BIG | `BIG4` index and mounting | implemented | Corroborating GPL evidence; runtime/Generals use unverified |
