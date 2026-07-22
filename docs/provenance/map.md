@@ -156,11 +156,14 @@ shading were added. Its initial 32-pixel-per-cell detail window uploaded and ren
 stable background, and the process remained live for 12 seconds. No screenshot or retail-derived
 output was retained.
 
-Viewport-frustum intersection, projected screen-density depth caps, nested 16/32-texel residency,
-quantized safety margins, containment checks, independent generation cancellation, stale-result
-suppression, explicit-time resident overlap, linear-light alpha-aware mip generation, and
-anisotropic sampling are project-authored modern renderer work. They are not translations of the
-legacy terrain renderer.
+Viewport-frustum intersection, camera-space screen-density depth caps, projected page ranking with
+coarse-visible coverage priority, fixed bordered virtual pages, stable two-level page tables,
+deterministic LRU residency, GPU semantic composition, linear-light
+alpha-aware mip generation, and anisotropic sampling are project-authored modern renderer work.
+They are not translations of the legacy terrain renderer.
+
+The optimized USA06 viewer remained live for a controlled 15-second smoke after projected page
+ranking replaced the radial/world-axis approximation. No screenshot or retail data was retained.
 
 Back-face culling is project-authored render policy over the stable counter-clockwise height-field
 winding. No legacy culling state was copied. Both deterministic terrain captures retained their

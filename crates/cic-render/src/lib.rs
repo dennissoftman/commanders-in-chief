@@ -4,6 +4,7 @@ mod model;
 mod resource;
 mod terrain;
 mod terrain_viewer;
+mod terrain_virtual;
 mod viewer;
 mod water;
 

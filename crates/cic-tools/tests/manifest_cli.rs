@@ -33,6 +33,41 @@ fn directory_and_big_archive_produce_a_stable_overlay_manifest() {
     fs::remove_dir_all(root).expect("remove test tree");
 }
 
+#[test]
+fn custom_profile_and_mod_layer_do_not_require_retail_archive_names() {
+    let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("custom-profile-cli");
+    if root.exists() {
+        fs::remove_dir_all(&root).expect("remove stale custom-profile tree");
+    }
+    let archive_path = root.join("total-conversion.assets");
+    let mod_root = root.join("my-mod");
+    fs::create_dir_all(mod_root.join("data")).expect("create mod tree");
+    fs::write(&archive_path, big_fixture()).expect("write custom base archive");
+    fs::write(mod_root.join("data/a.txt"), b"modded").expect("write mod override");
+    let profile_path = root.join("custom.cic-profile");
+    fs::write(
+        &profile_path,
+        "version=1\nmount=total-conversion.assets\noptional=missing-extras\n",
+    )
+    .expect("write custom profile");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cic-inspect"))
+        .arg("--profile")
+        .arg(&profile_path)
+        .arg("--mod")
+        .arg(&mod_root)
+        .arg("manifest")
+        .output()
+        .expect("run custom profile manifest");
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("UTF-8 output"),
+        "path\tbytes\tprovider\ndata/a.txt\t6\tdirectory:mount-1\ndata/z.bin\t3\tbig:mount-0\n"
+    );
+    fs::remove_dir_all(root).expect("remove custom-profile tree");
+}
+
 fn big_fixture() -> Vec<u8> {
     let hex = include_str!("../../cic-vfs/tests/fixtures/minimal.big.hex");
     let digits = hex

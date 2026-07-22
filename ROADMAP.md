@@ -27,6 +27,38 @@ output.
 
 **Completion artifact:** Passing CLI integration test with two synthetic overlay trees.
 
+### Resource provider and mod-profile refinement (complete)
+
+**Scope:** Replace eager disk payload retention with lazy bounded resource reads and add ordered,
+declarative custom-base/mod mount plans without making built-in retail filenames engine
+requirements.
+
+**Exclusions:** Package/dependency management, Workshop integration, hot reload, mod authoring,
+signing, scripting, and automatic interpretation of third-party mod conventions.
+
+**Inputs:** Synthetic loose trees, arbitrarily named synthetic BIG files, bounded mount-profile
+text, explicit built-in profiles, and repeated mod paths.
+
+**Outputs:** Stable indexed manifests, caller-bounded owned resource reads, custom total-conversion
+plans, and deterministic base-then-mod provider provenance.
+
+**Owner:** `cic-vfs` for lazy providers and `cic-tools` for profile parsing and CLI composition.
+
+**Acceptance tests:** Disk providers remain indexable after payload deletion and fail only on lazy
+read; payload and directory-index limits reject before excess allocation; malformed/oversized
+profiles fail structurally; arbitrary archive names and a loose mod produce the expected winning
+manifest.
+
+**Determinism:** Mount order is explicit, optional providers retain declaration order, built-in
+host filenames resolve by ASCII case with ambiguity rejection, and no filesystem enumeration order
+selects a winner.
+
+**Documentation:** ADR 0008, architecture boundaries, README profile syntax, compatibility matrix,
+and changelog.
+
+**Completion artifact:** Synthetic custom profile plus repeatable mod CLI integration test and lazy
+directory/BIG provider unit tests.
+
 ## R1: BIG and CSF resource probe
 
 **Status:** In progress.
@@ -217,12 +249,13 @@ separately indexed custom-edge atlas pass. `map-render` exposes explicit legacy/
 emits an sRGB headless PNG with stable diagnostics. `map-view` shares that resource/staging path and
 adds perspective free-flight camera controls. Original synthetic tests cover cliff adjustment and
 custom-edge geometry/texturing; an installed 151,221-cell Generals visual and viewer smoke resolved
-all 14 classes and retained no retail capture. The viewer now streams independently cancellable,
-depth-capped 16/32-pixel screen-space tiers over the stable 8-pixel background, retains old GPU
-patches during replacement, and applies an explicit viewer-only directional slope light; synthetic
-region output matches a full-resolution bake byte-for-byte. Hybrid-deferred water and Modern
-de-tiling are active. Blend version 8, object placement, source-authored lighting, and custom-map
-verification remain open.
+all 14 classes and retained no retail capture. The viewer now uses a persistent bounded
+GPU-composed virtual-texture cache: semantic cell/source-tile inputs are uploaded once, stable
+two-level page tables select bordered 16/32-pixel pages, LRU residency reuses revisited regions,
+projected viewport ranking retains coarse visible coverage before fine upgrades, and
+compute-generated linear mip chains feed trilinear/anisotropic sampling over the guaranteed
+8-pixel fallback. Hybrid-deferred water and Modern de-tiling are active. Blend version 8, object
+placement, source-authored lighting, and custom-map verification remain open.
 
 ## R4: Deterministic simulation kernel
 

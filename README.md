@@ -57,6 +57,25 @@ cargo run -p cic-tools -- config set zero-hour-dir "D:\Games\Zero Hour"
 Explicit directory or BIG mounts remain supported after the command arguments for
 synthetic fixtures and custom overlays.
 
+Custom bases and total conversions can declare arbitrary ordered providers in a bounded profile:
+
+```text
+version=1
+mount=base.assets
+optional=loose-overrides
+```
+
+Paths are relative to the profile unless absolute. `mount` is required at launch; a missing
+`optional` provider is skipped. Repeatable mod layers are appended in command-line order:
+
+```text
+cargo run -p cic-tools -- --profile custom.cic-profile --mod mods/first --mod mods/second manifest
+```
+
+Built-in Generals/Zero Hour archive lists are convenience presets only; custom profiles do not
+require retail filenames or sentinels. Disk mounts retain directory/BIG indices rather than
+payloads. A resource is read only when selected, under the consuming parser's explicit size limit.
+
 The renderer boundary can produce a window-free synthetic PPM and RGBA SHA-256 with an explicit
 pose. It consumes validated `cic-formats` values and owns no parser, filesystem, or simulation
 resources. `cic-inspect w3d-view` opens a 960x720 depth-tested viewer, frames the model from a
@@ -100,10 +119,13 @@ forward/back, R resets, and Escape closes. Terrain rendering defaults to the sou
 retiling, and adds world-anchored macro variation. Custom edge classes render through a separately
 indexed overlay pass. The viewer resolves opaque terrain through a G-buffer, then draws decoded
 water polygons in a depth-aware forward pass. It keeps the deterministic 8-pixel background and
-streams depth-capped 16- and 32-texel screen-space tiers over the stable 8-texel background.
-Oblique horizon coverage therefore cannot lower foreground resolution. Obsolete CPU bakes cancel
-immediately, while old and new resident patches briefly overlap; linear-light mipmaps, trilinear
-filtering, and up to 16x anisotropy keep terrain stable across movement and pitch changes.
+uses a persistent GPU-composed virtual-texture cache for camera-space-depth-capped 16- and
+32-texel pages. Fixed-size bordered pages retain authored base/primary/extra blends, cliff UVs,
+custom edges, and Modern macro variation; projected viewport ranking preserves coarse visible
+coverage before fine upgrades, while an LRU page table reuses revisited regions without CPU
+texture rebakes.
+GPU-generated linear mip chains, trilinear filtering, and up to 16x anisotropy keep terrain stable
+across movement and pitch changes.
 Installed profiles resolve bounded source caustic frames and water-transparency
 depth into renderer-neutral appearance inputs. The shader projects the subtle animation onto the
 underwater bed and combines it with depth absorption and shallow shoreline effects.

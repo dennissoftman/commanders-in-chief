@@ -23,10 +23,12 @@ const SOURCE_TILE_PIXELS_U32: u32 = 64;
 const SOURCE_TERRAIN_ATLAS_WIDTH: f32 = 2_048.0;
 const MAX_BAKED_TEXTURE_DIMENSION: usize = 4_096;
 const MAX_BAKED_TEXTURE_BYTES: usize = 64 * 1_024 * 1_024;
+const MAX_VIRTUAL_SOURCE_TILES: usize = 4_096;
+const VIRTUAL_CELL_BYTES: usize = 160;
+const MAX_VIRTUAL_CELL_BUFFER_BYTES: usize = 64 * 1_024 * 1_024;
 const MAX_TERRAIN_VERTICES: usize = 4_000_000;
 const DETAIL_REGION_QUANTUM_CELLS: u32 = 8;
 const DETAIL_MIN_MARGIN_CELLS: u32 = 12;
-const DETAIL_FADE_CELLS: u32 = 4;
 const INVERTED_MASK: u8 = 0x01;
 const FORCED_FLIP_MASK: u8 = 0x02;
 
@@ -243,6 +245,18 @@ pub(crate) struct TerrainDetailRequest {
 }
 
 impl TerrainDetailRequest {
+    #[cfg(test)]
+    pub(crate) const fn for_test(min: [u32; 2], max: [u32; 2], density: u32) -> Self {
+        Self {
+            min,
+            max,
+            visible_min: min,
+            visible_max: max,
+            pixels_per_cell: density,
+        }
+    }
+
+    #[cfg(test)]
     const fn region(self) -> TerrainRegion {
         TerrainRegion {
             min_x: self.min[0] as usize,
@@ -252,24 +266,99 @@ impl TerrainDetailRequest {
         }
     }
 
+    #[cfg(test)]
     const fn width(self) -> u32 {
         self.max[0] - self.min[0]
     }
 
+    #[cfg(test)]
     const fn height(self) -> u32 {
         self.max[1] - self.min[1]
     }
 
+    #[cfg(test)]
     const fn pixels_per_cell(self) -> u32 {
         self.pixels_per_cell
     }
 
+    pub(crate) const fn minimum(self) -> [u32; 2] {
+        self.min
+    }
+
+    pub(crate) const fn maximum(self) -> [u32; 2] {
+        self.max
+    }
+
+    pub(crate) const fn visible_minimum(self) -> [u32; 2] {
+        self.visible_min
+    }
+
+    pub(crate) const fn visible_maximum(self) -> [u32; 2] {
+        self.visible_max
+    }
+
+    pub(crate) const fn density(self) -> u32 {
+        self.pixels_per_cell
+    }
+
+    #[cfg(test)]
     pub(crate) const fn covers(self, required: Self) -> bool {
         self.pixels_per_cell >= required.pixels_per_cell
             && self.min[0] <= required.visible_min[0]
             && self.min[1] <= required.visible_min[1]
             && self.max[0] >= required.visible_max[0]
             && self.max[1] >= required.visible_max[1]
+    }
+}
+
+/// Compact, immutable semantic inputs for GPU terrain-page composition.
+pub(crate) struct TerrainVirtualSource {
+    cell_size: [u32; 2],
+    source_tile_grid_width: u32,
+    source_tile_atlas_rgba: Vec<u8>,
+    edge_tile_grid_width: u32,
+    edge_tile_atlas_rgba: Vec<u8>,
+    macro_lattice_size: [u32; 2],
+    macro_lattice: Vec<u8>,
+    cell_bytes: Vec<u8>,
+    modern: bool,
+}
+
+impl TerrainVirtualSource {
+    pub(crate) const fn cell_size(&self) -> [u32; 2] {
+        self.cell_size
+    }
+
+    pub(crate) const fn source_tile_grid_width(&self) -> u32 {
+        self.source_tile_grid_width
+    }
+
+    pub(crate) fn source_tile_atlas_rgba(&self) -> &[u8] {
+        &self.source_tile_atlas_rgba
+    }
+
+    pub(crate) const fn edge_tile_grid_width(&self) -> u32 {
+        self.edge_tile_grid_width
+    }
+
+    pub(crate) fn edge_tile_atlas_rgba(&self) -> &[u8] {
+        &self.edge_tile_atlas_rgba
+    }
+
+    pub(crate) const fn macro_lattice_size(&self) -> [u32; 2] {
+        self.macro_lattice_size
+    }
+
+    pub(crate) fn macro_lattice(&self) -> &[u8] {
+        &self.macro_lattice
+    }
+
+    pub(crate) fn cell_bytes(&self) -> &[u8] {
+        &self.cell_bytes
+    }
+
+    pub(crate) const fn modern(&self) -> bool {
+        self.modern
     }
 }
 
@@ -287,6 +376,7 @@ const fn quantize_up(value: u32, quantum: u32) -> u32 {
     value.saturating_add(quantum - 1) / quantum * quantum
 }
 
+#[cfg(test)]
 fn detail_fits(size: [u32; 2], pixels_per_cell: u32) -> bool {
     let Some(width) = size[0].checked_mul(pixels_per_cell) else {
         return false;
@@ -334,17 +424,14 @@ fn select_detail_pixels(size: [u32; 2], visible_size: [u32; 2], viewport: [u32; 
         })
 }
 
+#[cfg(test)]
 pub(crate) struct TerrainDetailPatch {
-    vertices: Vec<TerrainVertex>,
     indices: Vec<u32>,
     edge_indices: Vec<u32>,
     texture_width: u32,
     texture_height: u32,
     texture_rgba: Vec<u8>,
     edge_texture_rgba: Vec<u8>,
-    texture_mips: Vec<TerrainMipLevel>,
-    edge_texture_mips: Vec<TerrainMipLevel>,
-    fade_uv: [f32; 2],
 }
 
 pub(crate) struct TerrainMipLevel {
@@ -353,6 +440,7 @@ pub(crate) struct TerrainMipLevel {
     pub(crate) rgba: Vec<u8>,
 }
 
+#[cfg(test)]
 impl TerrainDetailPatch {
     pub(crate) const fn texture_width(&self) -> u32 {
         self.texture_width
@@ -368,30 +456,6 @@ impl TerrainDetailPatch {
 
     pub(crate) fn edge_texture_rgba(&self) -> &[u8] {
         &self.edge_texture_rgba
-    }
-
-    pub(crate) fn texture_mips(&self) -> &[TerrainMipLevel] {
-        &self.texture_mips
-    }
-
-    pub(crate) fn edge_texture_mips(&self) -> &[TerrainMipLevel] {
-        &self.edge_texture_mips
-    }
-
-    pub(crate) const fn fade_uv(&self) -> [f32; 2] {
-        self.fade_uv
-    }
-
-    pub(crate) fn vertex_bytes(&self) -> Vec<u8> {
-        terrain_vertex_bytes(&self.vertices)
-    }
-
-    pub(crate) fn index_bytes(&self) -> Vec<u8> {
-        index_bytes(&self.indices)
-    }
-
-    pub(crate) fn edge_index_bytes(&self) -> Vec<u8> {
-        index_bytes(&self.edge_indices)
     }
 
     pub(crate) fn index_count(&self) -> Result<u32, TerrainError> {
@@ -524,6 +588,10 @@ impl StagedTerrain {
         self.custom_edge_cell_count
     }
 
+    pub(crate) fn virtual_source(&self) -> Result<TerrainVirtualSource, TerrainError> {
+        build_virtual_source(self)
+    }
+
     #[cfg(test)]
     pub(crate) fn detail_request(
         &self,
@@ -583,7 +651,56 @@ impl StagedTerrain {
         }
         let (visible_min, visible_max) =
             self.detail_visible_cells(minimum_world, maximum_world, cell_width, cell_height);
-        self.detail_request_for_visible(visible_min, visible_max, pixels_per_cell)
+        self.virtual_request_for_visible(visible_min, visible_max, pixels_per_cell)
+    }
+
+    fn virtual_request_for_visible(
+        &self,
+        visible_min: [u32; 2],
+        visible_max: [u32; 2],
+        pixels_per_cell: u32,
+    ) -> Result<TerrainDetailRequest, TerrainError> {
+        let cell_width = self
+            .width
+            .checked_sub(1)
+            .ok_or(TerrainError::EmptyTerrain)?;
+        let cell_height = self
+            .height
+            .checked_sub(1)
+            .ok_or(TerrainError::EmptyTerrain)?;
+        let visible_size = [
+            visible_max[0].saturating_sub(visible_min[0]).max(1),
+            visible_max[1].saturating_sub(visible_min[1]).max(1),
+        ];
+        let margin = [
+            (visible_size[0] / 2).max(DETAIL_MIN_MARGIN_CELLS),
+            (visible_size[1] / 2).max(DETAIL_MIN_MARGIN_CELLS),
+        ];
+        let min = [
+            visible_min[0].saturating_sub(margin[0]) / DETAIL_REGION_QUANTUM_CELLS
+                * DETAIL_REGION_QUANTUM_CELLS,
+            visible_min[1].saturating_sub(margin[1]) / DETAIL_REGION_QUANTUM_CELLS
+                * DETAIL_REGION_QUANTUM_CELLS,
+        ];
+        let max = [
+            quantize_up(
+                visible_max[0].saturating_add(margin[0]),
+                DETAIL_REGION_QUANTUM_CELLS,
+            )
+            .min(cell_width),
+            quantize_up(
+                visible_max[1].saturating_add(margin[1]),
+                DETAIL_REGION_QUANTUM_CELLS,
+            )
+            .min(cell_height),
+        ];
+        Ok(TerrainDetailRequest {
+            min,
+            max,
+            visible_min,
+            visible_max,
+            pixels_per_cell,
+        })
     }
 
     fn detail_visible_cells(
@@ -607,6 +724,7 @@ impl StagedTerrain {
         )
     }
 
+    #[cfg(test)]
     fn detail_request_for_visible(
         &self,
         visible_min: [u32; 2],
@@ -680,6 +798,7 @@ impl StagedTerrain {
     }
 
     #[allow(clippy::cast_precision_loss)]
+    #[cfg(test)]
     pub(crate) fn detail_patch(
         &self,
         request: TerrainDetailRequest,
@@ -689,6 +808,7 @@ impl StagedTerrain {
     }
 
     #[allow(clippy::cast_precision_loss)]
+    #[cfg(test)]
     pub(crate) fn detail_patch_controlled<F>(
         &self,
         request: TerrainDetailRequest,
@@ -739,30 +859,17 @@ impl StagedTerrain {
         if cancelled() {
             return Ok(None);
         }
-        let (vertices, indices, edge_indices) = self.detail_geometry(region)?;
-        let texture_mips = generate_srgb_mips(texture_width, texture_height, &texture_rgba)?;
-        if cancelled() {
-            return Ok(None);
-        }
-        let edge_texture_mips =
-            generate_srgb_mips(texture_width, texture_height, &edge_texture_rgba)?;
+        let (_, indices, edge_indices) = self.detail_geometry(region)?;
         if cancelled() {
             return Ok(None);
         }
         Ok(Some(TerrainDetailPatch {
-            vertices,
             indices,
             edge_indices,
             texture_width,
             texture_height,
             texture_rgba,
             edge_texture_rgba,
-            texture_mips,
-            edge_texture_mips,
-            fade_uv: [
-                (DETAIL_FADE_CELLS as f32 / request.width() as f32).min(0.25),
-                (DETAIL_FADE_CELLS as f32 / request.height() as f32).min(0.25),
-            ],
         }))
     }
 
@@ -782,6 +889,7 @@ impl StagedTerrain {
     }
 
     #[allow(clippy::type_complexity)]
+    #[cfg(test)]
     fn detail_geometry(
         &self,
         region: TerrainRegion,
@@ -916,6 +1024,290 @@ impl StagedTerrain {
         }
         (minimum, maximum)
     }
+}
+
+#[derive(Clone, Copy)]
+struct VirtualMaterial {
+    parameters: [u32; 4],
+    u: [f32; 4],
+    v: [f32; 4],
+}
+
+impl VirtualMaterial {
+    const INVALID: Self = Self {
+        parameters: [0; 4],
+        u: [0.0; 4],
+        v: [0.0; 4],
+    };
+
+    fn write_bytes(self, bytes: &mut Vec<u8>) {
+        for value in self.parameters {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in self.u.into_iter().chain(self.v) {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn build_virtual_source(terrain: &StagedTerrain) -> Result<TerrainVirtualSource, TerrainError> {
+    let blend = &terrain.detail_source.blend;
+    let textures = &terrain.detail_source.textures;
+    let mut class_starts = Vec::with_capacity(blend.texture_classes().len());
+    let mut source_tiles = Vec::new();
+    for class in blend.texture_classes() {
+        class_starts
+            .push(u32::try_from(source_tiles.len()).map_err(|_| TerrainError::TerrainTooLarge)?);
+        let width = usize::try_from(class.width()).map_err(|_| TerrainError::TerrainTooLarge)?;
+        let tile_count = width
+            .checked_mul(width)
+            .ok_or(TerrainError::TerrainTooLarge)?;
+        if source_tiles.len().saturating_add(tile_count) > MAX_VIRTUAL_SOURCE_TILES {
+            return Err(TerrainError::TerrainTooLarge);
+        }
+        let image = textures
+            .image(class.name_bytes())
+            .ok_or_else(|| TerrainError::MissingTexture(class.name_bytes().to_vec()))?;
+        let required = width
+            .checked_mul(SOURCE_TILE_PIXELS)
+            .ok_or(TerrainError::TerrainTooLarge)?;
+        let image_width =
+            usize::try_from(image.width()).map_err(|_| TerrainError::TerrainTooLarge)?;
+        let image_height =
+            usize::try_from(image.height()).map_err(|_| TerrainError::TerrainTooLarge)?;
+        if image_width < required || image_height < required {
+            return Err(TerrainError::InvalidTextureSheet(
+                class.name_bytes().to_vec(),
+            ));
+        }
+        for row_from_bottom in 0..width {
+            for x in 0..width {
+                source_tiles.push(copy_region(
+                    image.rgba(),
+                    image_width,
+                    x * SOURCE_TILE_PIXELS,
+                    image_height - (row_from_bottom + 1) * SOURCE_TILE_PIXELS,
+                    SOURCE_TILE_PIXELS,
+                )?);
+            }
+        }
+    }
+    if source_tiles.is_empty() {
+        return Err(TerrainError::TerrainTooLarge);
+    }
+    let (source_tile_grid_width, source_tile_atlas_rgba) =
+        pack_square_tiles(&source_tiles, SOURCE_TILE_PIXELS)?;
+
+    let pixels = 32_usize;
+    let mut needed_tiles = BTreeSet::new();
+    for cell in &terrain.cells {
+        needed_tiles.insert(i32::from(cell.base_tile));
+        for layer in [cell.primary, cell.extra].into_iter().flatten() {
+            needed_tiles.insert(layer.tile_index);
+        }
+    }
+    let mut tile_cache = BTreeMap::new();
+    for tile in needed_tiles {
+        tile_cache.insert(tile, extract_cell_tile(tile, pixels, blend, textures)?);
+    }
+    let transparent_edge = vec![0_u8; pixels * pixels * 4];
+    let mut edge_tiles = vec![transparent_edge.clone()];
+    let mut edge_lookup = BTreeMap::from([(transparent_edge, 0_u32)]);
+    let width = usize::try_from(terrain.width).map_err(|_| TerrainError::TerrainTooLarge)?;
+    let mut edge_indices = Vec::with_capacity(terrain.cells.len());
+    for cell in &terrain.cells {
+        let Some(layer) = cell.primary.filter(|layer| layer.custom_edge_class >= 0) else {
+            edge_indices.push(0);
+            continue;
+        };
+        let blend_tile = cell_tile(
+            layer.tile_index,
+            *cell,
+            &terrain.detail_source.height,
+            width,
+            pixels,
+            blend,
+            textures,
+            terrain.detail_source.compatibility,
+            &tile_cache,
+        )?;
+        let edge = extract_custom_edge(layer, *cell, pixels, blend, textures, &blend_tile)?;
+        let index = if let Some(index) = edge_lookup.get(&edge) {
+            *index
+        } else {
+            if edge_tiles.len() >= MAX_VIRTUAL_SOURCE_TILES {
+                return Err(TerrainError::TerrainTooLarge);
+            }
+            let index =
+                u32::try_from(edge_tiles.len()).map_err(|_| TerrainError::TerrainTooLarge)?;
+            edge_lookup.insert(edge.clone(), index);
+            edge_tiles.push(edge);
+            index
+        };
+        edge_indices.push(index);
+    }
+    let (edge_tile_grid_width, edge_tile_atlas_rgba) = pack_square_tiles(&edge_tiles, pixels)?;
+
+    let cell_byte_count = terrain
+        .cells
+        .len()
+        .checked_mul(VIRTUAL_CELL_BYTES)
+        .filter(|size| *size <= MAX_VIRTUAL_CELL_BUFFER_BYTES)
+        .ok_or(TerrainError::TerrainTooLarge)?;
+    let mut cell_bytes = Vec::with_capacity(cell_byte_count);
+    for (cell, edge_index) in terrain.cells.iter().zip(edge_indices) {
+        virtual_material(terrain, *cell, i32::from(cell.base_tile), &class_starts)?
+            .write_bytes(&mut cell_bytes);
+        let primary = cell
+            .primary
+            .filter(|layer| layer.custom_edge_class < 0)
+            .map_or(Ok(VirtualMaterial::INVALID), |layer| {
+                virtual_material(terrain, *cell, layer.tile_index, &class_starts)
+            })?;
+        primary.write_bytes(&mut cell_bytes);
+        let extra = cell.extra.map_or(Ok(VirtualMaterial::INVALID), |layer| {
+            virtual_material(terrain, *cell, layer.tile_index, &class_starts)
+        })?;
+        extra.write_bytes(&mut cell_bytes);
+        let primary_mask = cell
+            .primary
+            .filter(|layer| layer.custom_edge_class < 0)
+            .map_or(0, |layer| virtual_mask_code(layer, blend));
+        let extra_mask = cell
+            .extra
+            .map_or(0, |layer| virtual_mask_code(layer, blend));
+        for value in [primary_mask, extra_mask, edge_index, 0] {
+            cell_bytes.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    debug_assert_eq!(cell_bytes.len(), terrain.cells.len() * VIRTUAL_CELL_BYTES);
+    let cell_size = [terrain.width - 1, terrain.height - 1];
+    let macro_lattice_size = [cell_size[0].div_ceil(8) + 1, cell_size[1].div_ceil(8) + 1];
+    let mut macro_lattice = Vec::with_capacity(
+        usize::try_from(u64::from(macro_lattice_size[0]) * u64::from(macro_lattice_size[1]))
+            .map_err(|_| TerrainError::TerrainTooLarge)?,
+    );
+    for y in 0..macro_lattice_size[1] {
+        for x in 0..macro_lattice_size[0] {
+            macro_lattice.push(
+                u8::try_from(macro_hash(x as usize, y as usize))
+                    .map_err(|_| TerrainError::TerrainTooLarge)?,
+            );
+        }
+    }
+    Ok(TerrainVirtualSource {
+        cell_size,
+        source_tile_grid_width,
+        source_tile_atlas_rgba,
+        edge_tile_grid_width,
+        edge_tile_atlas_rgba,
+        macro_lattice_size,
+        macro_lattice,
+        cell_bytes,
+        modern: terrain.detail_source.compatibility == TerrainCompatibilityPolicy::Modern,
+    })
+}
+
+fn virtual_material(
+    terrain: &StagedTerrain,
+    cell: TerrainCell,
+    packed_index: i32,
+    class_starts: &[u32],
+) -> Result<VirtualMaterial, TerrainError> {
+    let (_, class) = terrain_class(packed_index, &terrain.detail_source.blend)?;
+    let class_index = terrain
+        .detail_source
+        .blend
+        .texture_classes()
+        .iter()
+        .position(|candidate| std::ptr::eq(candidate, class))
+        .ok_or(TerrainError::UnclassifiedTile(
+            u32::try_from(packed_index).unwrap_or_default() >> 2,
+        ))?;
+    let corners = adjusted_uv_corners(
+        packed_index,
+        cell,
+        &terrain.detail_source.height,
+        usize::try_from(terrain.width).map_err(|_| TerrainError::TerrainTooLarge)?,
+        &terrain.detail_source.blend,
+        terrain.detail_source.compatibility,
+    )?
+    .map_or_else(
+        || default_class_uv_corners(packed_index, &terrain.detail_source.blend),
+        Ok,
+    )?;
+    Ok(VirtualMaterial {
+        parameters: [class_starts[class_index], class.width(), 1, 0],
+        u: corners.map(|corner| corner[0]),
+        v: corners.map(|corner| corner[1]),
+    })
+}
+
+fn virtual_mask_code(layer: TerrainLayer, blend: &MapBlendData) -> u32 {
+    let Ok(offset) = usize::try_from(layer.table_index.saturating_sub(1)) else {
+        return 0;
+    };
+    let Some(record) = blend.blend_tiles().get(offset) else {
+        return 0;
+    };
+    let orientation = if record.horizontal() != 0 {
+        0
+    } else if record.vertical() != 0 {
+        1
+    } else if record.right_diagonal() != 0 {
+        2
+    } else if record.left_diagonal() != 0 {
+        3
+    } else {
+        return 0;
+    };
+    1 | (orientation << 1)
+        | (u32::from(record.inverted() & INVERTED_MASK != 0) << 3)
+        | (u32::from(record.long_diagonal() != 0) << 4)
+}
+
+fn pack_square_tiles(tiles: &[Vec<u8>], tile_size: usize) -> Result<(u32, Vec<u8>), TerrainError> {
+    let mut grid = 1_usize;
+    while grid
+        .checked_mul(grid)
+        .ok_or(TerrainError::TerrainTooLarge)?
+        < tiles.len()
+    {
+        grid += 1;
+    }
+    let extent = grid
+        .checked_mul(tile_size)
+        .ok_or(TerrainError::TerrainTooLarge)?;
+    if extent > MAX_BAKED_TEXTURE_DIMENSION {
+        return Err(TerrainError::TerrainTooLarge);
+    }
+    let byte_count = extent
+        .checked_mul(extent)
+        .and_then(|count| count.checked_mul(4))
+        .ok_or(TerrainError::TerrainTooLarge)?;
+    let mut atlas = vec![0_u8; byte_count];
+    let expected_tile_bytes = tile_size
+        .checked_mul(tile_size)
+        .and_then(|count| count.checked_mul(4))
+        .ok_or(TerrainError::TerrainTooLarge)?;
+    for (index, tile) in tiles.iter().enumerate() {
+        if tile.len() != expected_tile_bytes {
+            return Err(TerrainError::DimensionMismatch);
+        }
+        let origin_x = (index % grid) * tile_size;
+        let origin_y = (index / grid) * tile_size;
+        for row in 0..tile_size {
+            let source = row * tile_size * 4;
+            let target = ((origin_y + row) * extent + origin_x) * 4;
+            atlas[target..target + tile_size * 4]
+                .copy_from_slice(&tile[source..source + tile_size * 4]);
+        }
+    }
+    Ok((
+        u32::try_from(grid).map_err(|_| TerrainError::TerrainTooLarge)?,
+        atlas,
+    ))
 }
 
 fn terrain_vertex_bytes(vertices: &[TerrainVertex]) -> Vec<u8> {
@@ -2503,7 +2895,7 @@ impl Error for TerrainError {}
 mod tests {
     use super::{
         StagedTerrain, TerrainCompatibilityPolicy, TerrainDetailRequest, TerrainStagingOptions,
-        generate_srgb_mips, legacy_adjust_uv, mip_rgba, select_detail_pixels,
+        VIRTUAL_CELL_BYTES, generate_srgb_mips, legacy_adjust_uv, mip_rgba, select_detail_pixels,
     };
     use crate::TextureResourceManager;
     use cic_formats::{MapLimits, decode_map_blend, decode_map_height, parse_map};
@@ -2639,6 +3031,11 @@ mod tests {
         );
         assert!(texture.chunks_exact(4).any(|pixel| pixel[1] > pixel[2]));
         assert!(texture.chunks_exact(4).any(|pixel| pixel[2] > pixel[1]));
+        let virtual_source = terrain.virtual_source().expect("virtual terrain source");
+        assert_eq!(virtual_source.cell_size(), [7, 1]);
+        assert_eq!(virtual_source.cell_bytes().len(), 7 * VIRTUAL_CELL_BYTES);
+        assert_eq!(virtual_source.source_tile_grid_width(), 2);
+        assert_eq!(virtual_source.edge_tile_grid_width(), 1);
 
         let (minimum, maximum) = terrain.bounds();
         let request = terrain

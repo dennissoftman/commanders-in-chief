@@ -5,8 +5,9 @@ use std::env;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
 use std::process::Command;
 
 /// User-selectable retail resource edition.
@@ -33,6 +34,264 @@ pub enum ResourceKind {
     W3d,
     /// W3D model and texture archives.
     W3dWithTextures,
+}
+
+/// Explicit bounds for a declarative mount profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MountProfileLimits {
+    pub maximum_file_bytes: usize,
+    pub maximum_mounts: usize,
+    pub maximum_path_bytes: usize,
+}
+
+impl Default for MountProfileLimits {
+    fn default() -> Self {
+        Self {
+            maximum_file_bytes: 1024 * 1024,
+            maximum_mounts: 4096,
+            maximum_path_bytes: 4096,
+        }
+    }
+}
+
+/// One ordered directory or archive provider declared by a custom profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileMount {
+    path: PathBuf,
+    optional: bool,
+}
+
+impl ProfileMount {
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    #[must_use]
+    pub const fn optional(&self) -> bool {
+        self.optional
+    }
+}
+
+/// A bounded, ordered custom base or total-conversion mount profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MountProfile {
+    mounts: Vec<ProfileMount>,
+}
+
+impl MountProfile {
+    /// Loads `version=1` followed by ordered `mount=<path>` or `optional=<path>` records.
+    /// Relative paths are resolved against the profile's parent directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured error for I/O, invalid UTF-8 or records, unsupported versions, empty
+    /// profiles, and all configured byte/count/path limits.
+    pub fn load(path: &Path, limits: MountProfileLimits) -> Result<Self, MountProfileError> {
+        let mut file = fs::File::open(path).map_err(|error| MountProfileError::Io {
+            path: path.to_path_buf(),
+            error,
+        })?;
+        let metadata = file.metadata().map_err(|error| MountProfileError::Io {
+            path: path.to_path_buf(),
+            error,
+        })?;
+        let actual = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
+        if actual > limits.maximum_file_bytes {
+            return Err(MountProfileError::FileTooLarge {
+                actual,
+                maximum: limits.maximum_file_bytes,
+            });
+        }
+        let read_limit = u64::try_from(limits.maximum_file_bytes)
+            .unwrap_or(u64::MAX)
+            .saturating_add(1);
+        let mut bytes = Vec::new();
+        file.by_ref()
+            .take(read_limit)
+            .read_to_end(&mut bytes)
+            .map_err(|error| MountProfileError::Io {
+                path: path.to_path_buf(),
+                error,
+            })?;
+        if bytes.len() > limits.maximum_file_bytes {
+            return Err(MountProfileError::FileTooLarge {
+                actual: bytes.len(),
+                maximum: limits.maximum_file_bytes,
+            });
+        }
+        let text = std::str::from_utf8(&bytes).map_err(|_| MountProfileError::InvalidUtf8)?;
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let mut version = None;
+        let mut mounts = Vec::new();
+        for (line_index, raw_line) in text.lines().enumerate() {
+            let line_number = line_index + 1;
+            let line = raw_line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let (key, value) = line
+                .split_once('=')
+                .ok_or(MountProfileError::InvalidRecord { line: line_number })?;
+            let key = key.trim();
+            let value = value.trim();
+            if value.is_empty() {
+                return Err(MountProfileError::InvalidRecord { line: line_number });
+            }
+            if key == "version" {
+                if version.replace(value.to_owned()).is_some() {
+                    return Err(MountProfileError::DuplicateVersion { line: line_number });
+                }
+                if value != "1" {
+                    return Err(MountProfileError::UnsupportedVersion(value.to_owned()));
+                }
+                continue;
+            }
+            let optional = match key {
+                "mount" => false,
+                "optional" => true,
+                _ => return Err(MountProfileError::UnknownKey { line: line_number }),
+            };
+            if version.as_deref() != Some("1") {
+                return Err(MountProfileError::VersionMustComeFirst { line: line_number });
+            }
+            if value.len() > limits.maximum_path_bytes {
+                return Err(MountProfileError::PathTooLong {
+                    line: line_number,
+                    actual: value.len(),
+                    maximum: limits.maximum_path_bytes,
+                });
+            }
+            if mounts.len() >= limits.maximum_mounts {
+                return Err(MountProfileError::TooManyMounts {
+                    actual: mounts.len() + 1,
+                    maximum: limits.maximum_mounts,
+                });
+            }
+            let declared = PathBuf::from(value);
+            let resolved = if declared.is_absolute() {
+                declared
+            } else {
+                parent.join(declared)
+            };
+            mounts.push(ProfileMount {
+                path: resolved,
+                optional,
+            });
+        }
+        if version.is_none() {
+            return Err(MountProfileError::MissingVersion);
+        }
+        if mounts.is_empty() {
+            return Err(MountProfileError::Empty);
+        }
+        Ok(Self { mounts })
+    }
+
+    #[must_use]
+    pub fn mounts(&self) -> &[ProfileMount] {
+        &self.mounts
+    }
+}
+
+/// Failure while reading a bounded custom mount profile.
+#[derive(Debug)]
+pub enum MountProfileError {
+    Io {
+        path: PathBuf,
+        error: io::Error,
+    },
+    FileTooLarge {
+        actual: usize,
+        maximum: usize,
+    },
+    InvalidUtf8,
+    InvalidRecord {
+        line: usize,
+    },
+    DuplicateVersion {
+        line: usize,
+    },
+    UnknownKey {
+        line: usize,
+    },
+    VersionMustComeFirst {
+        line: usize,
+    },
+    PathTooLong {
+        line: usize,
+        actual: usize,
+        maximum: usize,
+    },
+    TooManyMounts {
+        actual: usize,
+        maximum: usize,
+    },
+    MissingVersion,
+    UnsupportedVersion(String),
+    Empty,
+}
+
+impl Display for MountProfileError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io { path, error } => write!(formatter, "{}: {error}", path.display()),
+            Self::FileTooLarge { actual, maximum } => write!(
+                formatter,
+                "mount profile size {actual} exceeds limit {maximum}"
+            ),
+            Self::InvalidUtf8 => formatter.write_str("mount profile is not valid UTF-8"),
+            Self::InvalidRecord { line } => {
+                write!(formatter, "invalid mount profile record at line {line}")
+            }
+            Self::DuplicateVersion { line } => {
+                write!(formatter, "duplicate mount profile version at line {line}")
+            }
+            Self::UnknownKey { line } => {
+                write!(formatter, "unknown mount profile key at line {line}")
+            }
+            Self::VersionMustComeFirst { line } => write!(
+                formatter,
+                "mount profile version must precede mounts at line {line}"
+            ),
+            Self::PathTooLong {
+                line,
+                actual,
+                maximum,
+            } => write!(
+                formatter,
+                "mount profile path at line {line} has {actual} bytes; limit is {maximum}"
+            ),
+            Self::TooManyMounts { actual, maximum } => write!(
+                formatter,
+                "mount profile contains {actual} mounts; limit is {maximum}"
+            ),
+            Self::MissingVersion => formatter.write_str("mount profile has no version record"),
+            Self::UnsupportedVersion(version) => {
+                write!(formatter, "unsupported mount profile version {version:?}")
+            }
+            Self::Empty => formatter.write_str("mount profile contains no providers"),
+        }
+    }
+}
+
+impl Error for MountProfileError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Io { error, .. } => Some(error),
+            Self::FileTooLarge { .. }
+            | Self::InvalidUtf8
+            | Self::InvalidRecord { .. }
+            | Self::DuplicateVersion { .. }
+            | Self::UnknownKey { .. }
+            | Self::VersionMustComeFirst { .. }
+            | Self::PathTooLong { .. }
+            | Self::TooManyMounts { .. }
+            | Self::MissingVersion
+            | Self::UnsupportedVersion(_)
+            | Self::Empty => None,
+        }
+    }
 }
 
 /// Persisted installation roots. Missing values remain eligible for auto-detection.
@@ -310,11 +569,13 @@ fn edition_archives(
             "PatchZH.big",
         ],
     };
-    Ok(names
-        .into_iter()
-        .map(|name| root.join(name))
-        .filter(|path| path.is_file())
-        .collect())
+    let mut paths = Vec::with_capacity(names.len());
+    for name in names {
+        if let Some(path) = resolve_named_file(root, name)? {
+            paths.push(path);
+        }
+    }
+    Ok(paths)
 }
 
 fn all_big_files(root: &Path) -> Result<Vec<PathBuf>, ResourceError> {
@@ -322,16 +583,34 @@ fn all_big_files(root: &Path) -> Result<Vec<PathBuf>, ResourceError> {
         path: root.to_path_buf(),
         error,
     })?;
-    let mut paths = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.extension()
+    let mut paths = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| ResourceError::Io {
+            path: root.to_path_buf(),
+            error,
+        })?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|error| ResourceError::Io {
+            path: path.clone(),
+            error,
+        })?;
+        if file_type.is_file()
+            && path
+                .extension()
                 .and_then(|extension| extension.to_str())
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("big"))
-        })
-        .collect::<Vec<_>>();
-    paths.sort_by_key(|path| path.file_name().map(std::ffi::OsStr::to_ascii_lowercase));
+        {
+            paths.push(path);
+        }
+    }
+    paths.sort_by(|left, right| {
+        let left_name = left.file_name().unwrap_or_default();
+        let right_name = right.file_name().unwrap_or_default();
+        left_name
+            .to_ascii_lowercase()
+            .cmp(&right_name.to_ascii_lowercase())
+            .then_with(|| left_name.cmp(right_name))
+    });
     Ok(paths)
 }
 
@@ -340,13 +619,54 @@ fn validate_root(edition: GameEdition, root: &Path) -> Result<(), ResourceError>
         GameEdition::Generals => ["W3D.big", "Textures.big"],
         GameEdition::ZeroHour => ["W3DZH.big", "TexturesZH.big"],
     };
-    if sentinels.iter().all(|name| root.join(name).is_file()) {
+    let mut complete = true;
+    for name in sentinels {
+        complete &= resolve_named_file(root, name)?.is_some();
+    }
+    if complete {
         Ok(())
     } else {
         Err(ResourceError::InvalidInstallation {
             edition,
             path: root.to_path_buf(),
         })
+    }
+}
+
+fn resolve_named_file(root: &Path, expected: &str) -> Result<Option<PathBuf>, ResourceError> {
+    let entries = fs::read_dir(root).map_err(|error| ResourceError::Io {
+        path: root.to_path_buf(),
+        error,
+    })?;
+    let mut matches = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| ResourceError::Io {
+            path: root.to_path_buf(),
+            error,
+        })?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|error| ResourceError::Io {
+            path: path.clone(),
+            error,
+        })?;
+        if file_type.is_file()
+            && entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.eq_ignore_ascii_case(expected))
+        {
+            matches.push(path);
+        }
+    }
+    matches.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(matches.pop()),
+        _ => Err(ResourceError::AmbiguousArchiveName {
+            root: root.to_path_buf(),
+            expected: expected.to_owned(),
+            matches,
+        }),
     }
 }
 
@@ -433,12 +753,25 @@ fn config_value(path: Option<&Path>) -> Result<String, ResourceError> {
 #[derive(Debug)]
 pub enum ResourceError {
     ConfigDirectoryUnavailable,
-    InvalidConfig { line: usize },
+    InvalidConfig {
+        line: usize,
+    },
     InvalidConfigPath(PathBuf),
     NonUtf8Path(PathBuf),
     InstallationNotFound(GameEdition),
-    InvalidInstallation { edition: GameEdition, path: PathBuf },
-    Io { path: PathBuf, error: io::Error },
+    InvalidInstallation {
+        edition: GameEdition,
+        path: PathBuf,
+    },
+    AmbiguousArchiveName {
+        root: PathBuf,
+        expected: String,
+        matches: Vec<PathBuf>,
+    },
+    Io {
+        path: PathBuf,
+        error: io::Error,
+    },
 }
 
 impl Display for ResourceError {
@@ -466,6 +799,16 @@ impl Display for ResourceError {
                 "{} installation is missing required archives: {}",
                 edition,
                 path.display()
+            ),
+            Self::AmbiguousArchiveName {
+                root,
+                expected,
+                matches,
+            } => write!(
+                formatter,
+                "installation {} contains {} files matching {expected:?} by ASCII case",
+                root.display(),
+                matches.len()
             ),
             Self::Io { path, error } => write!(formatter, "{}: {error}", path.display()),
         }
@@ -495,7 +838,12 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
-    use super::{GameEdition, ResourceKind, StoredLocations, edition_archives};
+    #[cfg(target_os = "linux")]
+    use super::ResourceError;
+    use super::{
+        GameEdition, MountProfile, MountProfileError, MountProfileLimits, ResourceKind,
+        StoredLocations, edition_archives,
+    };
 
     fn test_root(name: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -523,6 +871,60 @@ mod tests {
         second.save(&path).expect("replace config");
         assert_eq!(StoredLocations::load(&path).expect("reload config"), second);
         fs::remove_dir_all(root).expect("remove config test");
+    }
+
+    #[test]
+    fn mount_profiles_resolve_ordered_relative_and_optional_providers() {
+        let root = test_root("mount-profile");
+        if root.exists() {
+            fs::remove_dir_all(&root).expect("remove stale mount-profile test");
+        }
+        fs::create_dir_all(&root).expect("create mount-profile test");
+        let path = root.join("total-conversion.cic-profile");
+        fs::write(
+            &path,
+            "# ordered custom resources\nversion=1\nmount=base.assets\noptional=loose-overrides\n",
+        )
+        .expect("write mount profile");
+
+        let profile =
+            MountProfile::load(&path, MountProfileLimits::default()).expect("load mount profile");
+        assert_eq!(profile.mounts().len(), 2);
+        assert_eq!(profile.mounts()[0].path(), root.join("base.assets"));
+        assert!(!profile.mounts()[0].optional());
+        assert_eq!(profile.mounts()[1].path(), root.join("loose-overrides"));
+        assert!(profile.mounts()[1].optional());
+
+        let limits = MountProfileLimits {
+            maximum_mounts: 1,
+            ..MountProfileLimits::default()
+        };
+        assert!(matches!(
+            MountProfile::load(&path, limits),
+            Err(MountProfileError::TooManyMounts { .. })
+        ));
+        fs::remove_dir_all(root).expect("remove mount-profile test");
+    }
+
+    #[test]
+    fn mount_profiles_reject_unversioned_and_unknown_records() {
+        let root = test_root("invalid-mount-profiles");
+        if root.exists() {
+            fs::remove_dir_all(&root).expect("remove stale invalid-profile test");
+        }
+        fs::create_dir_all(&root).expect("create invalid-profile test");
+        let path = root.join("invalid.cic-profile");
+        fs::write(&path, "mount=base.big\n").expect("write unversioned profile");
+        assert!(matches!(
+            MountProfile::load(&path, MountProfileLimits::default()),
+            Err(MountProfileError::VersionMustComeFirst { line: 1 })
+        ));
+        fs::write(&path, "version=1\nsurprise=value\n").expect("write unknown profile");
+        assert!(matches!(
+            MountProfile::load(&path, MountProfileLimits::default()),
+            Err(MountProfileError::UnknownKey { line: 2 })
+        ));
+        fs::remove_dir_all(root).expect("remove invalid-profile test");
     }
 
     #[test]
@@ -598,5 +1000,42 @@ mod tests {
             ]
         );
         fs::remove_dir_all(root).expect("remove profile test");
+    }
+
+    #[test]
+    fn built_in_profiles_resolve_actual_archive_casing() {
+        let root = test_root("archive-case");
+        if root.exists() {
+            fs::remove_dir_all(&root).expect("remove stale archive-case test");
+        }
+        fs::create_dir_all(&root).expect("create archive-case test");
+        for name in ["w3d.BIG", "textures.BIG", "patch.BIG"] {
+            fs::write(root.join(name), []).expect("create mixed-case archive");
+        }
+        let names = edition_archives(GameEdition::Generals, ResourceKind::W3dWithTextures, &root)
+            .expect("resolve mixed-case archives")
+            .into_iter()
+            .map(|path| path.file_name().expect("file name").to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["w3d.BIG", "textures.BIG", "patch.BIG"]);
+        fs::remove_dir_all(root).expect("remove archive-case test");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn built_in_profiles_reject_ambiguous_archive_casing() {
+        let root = test_root("ambiguous-archive-case");
+        if root.exists() {
+            fs::remove_dir_all(&root).expect("remove stale ambiguous-case test");
+        }
+        fs::create_dir_all(&root).expect("create ambiguous-case test");
+        for name in ["W3D.big", "w3d.BIG", "Textures.big"] {
+            fs::write(root.join(name), []).expect("create archive candidate");
+        }
+        assert!(matches!(
+            edition_archives(GameEdition::Generals, ResourceKind::W3dWithTextures, &root),
+            Err(ResourceError::AmbiguousArchiveName { .. })
+        ));
+        fs::remove_dir_all(root).expect("remove ambiguous-case test");
     }
 }

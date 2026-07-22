@@ -5,8 +5,8 @@ mod big;
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
-use std::fs;
-use std::io;
+use std::fs::{self, File};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -102,6 +102,27 @@ pub enum ProviderKind {
     BigArchive,
 }
 
+/// Explicit bounds for indexing one loose-directory provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirectoryLimits {
+    /// Maximum number of regular files retained in one directory index.
+    pub maximum_files: usize,
+    /// Maximum number of nested directory components below the mount root.
+    pub maximum_depth: usize,
+    /// Maximum normalized UTF-8 byte length of one virtual path.
+    pub maximum_virtual_path_bytes: usize,
+}
+
+impl Default for DirectoryLimits {
+    fn default() -> Self {
+        Self {
+            maximum_files: 1_000_000,
+            maximum_depth: 256,
+            maximum_virtual_path_bytes: 4096,
+        }
+    }
+}
+
 impl Display for ProviderKind {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
@@ -143,21 +164,98 @@ impl Provider {
 /// One version of a virtual resource.
 #[derive(Debug, Clone)]
 pub struct ResourceEntry {
-    provider: Provider,
-    bytes: Arc<[u8]>,
+    provider: Arc<Provider>,
+    source: ResourceSource,
 }
 
 impl ResourceEntry {
     /// Returns the resource's provider metadata.
     #[must_use]
-    pub const fn provider(&self) -> &Provider {
+    pub fn provider(&self) -> &Provider {
         &self.provider
     }
 
-    /// Returns the immutable resource bytes.
+    /// Returns the indexed resource length without reading its payload.
     #[must_use]
-    pub fn bytes(&self) -> &[u8] {
-        &self.bytes
+    pub fn len(&self) -> usize {
+        self.source.len()
+    }
+
+    /// Returns whether the indexed resource is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Reads exactly one resource payload under a caller-selected allocation bound.
+    ///
+    /// Disk-backed directory and BIG entries are opened only when this method is called.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured error if the indexed size exceeds `maximum_bytes`, the backing file
+    /// changed after indexing, or an exact bounded read fails.
+    pub fn read(&self, maximum_bytes: usize) -> Result<Vec<u8>, ResourceReadError> {
+        let size = self.len();
+        if size > maximum_bytes {
+            return Err(ResourceReadError::LimitExceeded {
+                actual: size,
+                maximum: maximum_bytes,
+            });
+        }
+        match &self.source {
+            ResourceSource::Memory(bytes) => Ok(bytes.to_vec()),
+            ResourceSource::MemoryBig {
+                archive,
+                offset,
+                end,
+            } => archive
+                .get(*offset..*end)
+                .map(<[u8]>::to_vec)
+                .ok_or(ResourceReadError::MemoryRangeInvalid),
+            ResourceSource::LooseFile {
+                path,
+                indexed_file_size,
+                ..
+            } => read_file_range(path, *indexed_file_size, 0, size),
+            ResourceSource::BigFile {
+                path,
+                indexed_file_size,
+                offset,
+                size,
+            } => read_file_range(path, *indexed_file_size, *offset, *size),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum ResourceSource {
+    Memory(Arc<[u8]>),
+    MemoryBig {
+        archive: Arc<[u8]>,
+        offset: usize,
+        end: usize,
+    },
+    LooseFile {
+        path: PathBuf,
+        indexed_file_size: u64,
+        size: usize,
+    },
+    BigFile {
+        path: Arc<Path>,
+        indexed_file_size: u64,
+        offset: usize,
+        size: usize,
+    },
+}
+
+impl ResourceSource {
+    fn len(&self) -> usize {
+        match self {
+            Self::Memory(bytes) => bytes.len(),
+            Self::MemoryBig { offset, end, .. } => end - offset,
+            Self::LooseFile { size, .. } | Self::BigFile { size, .. } => *size,
+        }
     }
 }
 
@@ -195,7 +293,9 @@ impl Vfs {
         self.mount_entries(
             name.into(),
             ProviderKind::Memory,
-            entries,
+            entries
+                .into_iter()
+                .map(|(path, bytes)| (path, ResourceSource::Memory(Arc::from(bytes)))),
             DuplicatePolicy::Reject,
         )
     }
@@ -214,9 +314,24 @@ impl Vfs {
         name: impl Into<String>,
         root: impl AsRef<Path>,
     ) -> Result<MountId, MountError> {
+        self.mount_directory_with_limits(name, root, DirectoryLimits::default())
+    }
+
+    /// Recursively indexes regular files beneath a directory with explicit metadata limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same structured errors as [`Self::mount_directory`], including an error before
+    /// exceeding the configured file-count, recursion-depth, or virtual-path-length limit.
+    pub fn mount_directory_with_limits(
+        &mut self,
+        name: impl Into<String>,
+        root: impl AsRef<Path>,
+        limits: DirectoryLimits,
+    ) -> Result<MountId, MountError> {
         let root = root.as_ref();
         let mut files = Vec::new();
-        collect_directory(root, root, &mut files)?;
+        collect_directory(root, root, 0, limits, &mut files)?;
         self.mount_entries(
             name.into(),
             ProviderKind::LooseDirectory,
@@ -241,18 +356,24 @@ impl Vfs {
         limits: BigLimits,
     ) -> Result<MountId, MountError> {
         let index = parse_big_archive(bytes, limits).map_err(MountError::Big)?;
+        let archive: Arc<[u8]> = Arc::from(bytes);
         let mut entries = Vec::with_capacity(index.entries().len());
         for entry in index.entries() {
-            let payload = entry.bytes(bytes).ok_or_else(|| {
-                MountError::Big(BigError::EntryOutsidePayload {
+            let end = entry.offset().checked_add(entry.size()).ok_or_else(|| {
+                MountError::Big(BigError::EntryRangeOverflow {
                     entry: entries.len(),
                     offset: entry.offset(),
                     size: entry.size(),
-                    first_file_offset: index.first_file_offset(),
-                    archive_size: bytes.len(),
                 })
             })?;
-            entries.push((entry.path().clone(), payload.to_vec()));
+            entries.push((
+                entry.path().clone(),
+                ResourceSource::MemoryBig {
+                    archive: archive.clone(),
+                    offset: entry.offset(),
+                    end,
+                },
+            ));
         }
         self.mount_entries(
             name.into(),
@@ -275,26 +396,30 @@ impl Vfs {
         limits: BigLimits,
     ) -> Result<MountId, MountError> {
         let path = path.as_ref();
-        let metadata = fs::metadata(path).map_err(|error| MountError::Io {
-            path: path.to_path_buf(),
-            error,
-        })?;
-        let maximum = u64::try_from(limits.maximum_archive_bytes).unwrap_or(u64::MAX);
-        if metadata.len() > maximum {
-            return Err(MountError::Big(BigError::Binary(
-                cic_core::BinaryError::LimitExceeded {
-                    what: "BIG archive size",
-                    actual: usize::try_from(metadata.len()).unwrap_or(usize::MAX),
-                    maximum: limits.maximum_archive_bytes,
+        let index = index_big_file(path, limits)?;
+        let archive_path: Arc<Path> = Arc::from(path);
+        let indexed_file_size =
+            u64::try_from(index.archive_size()).map_err(|_| MountError::FileTooLarge {
+                path: path.to_path_buf(),
+                size: u64::MAX,
+            })?;
+        let entries = index.entries().iter().map(|entry| {
+            (
+                entry.path().clone(),
+                ResourceSource::BigFile {
+                    path: archive_path.clone(),
+                    indexed_file_size,
+                    offset: entry.offset(),
+                    size: entry.size(),
                 },
-            )));
-        }
-
-        let bytes = fs::read(path).map_err(|error| MountError::Io {
-            path: path.to_path_buf(),
-            error,
-        })?;
-        self.mount_big_bytes(name, &bytes, limits)
+            )
+        });
+        self.mount_entries(
+            name.into(),
+            ProviderKind::BigArchive,
+            entries,
+            DuplicatePolicy::Preserve,
+        )
     }
 
     /// Resolves the winning entry for a normalized path.
@@ -324,7 +449,7 @@ impl Vfs {
         duplicate_policy: DuplicatePolicy,
     ) -> Result<MountId, MountError>
     where
-        I: IntoIterator<Item = (VirtualPath, Vec<u8>)>,
+        I: IntoIterator<Item = (VirtualPath, ResourceSource)>,
     {
         let batch = entries.into_iter().collect::<Vec<_>>();
         if duplicate_policy == DuplicatePolicy::Reject {
@@ -341,16 +466,16 @@ impl Vfs {
             .checked_add(1)
             .ok_or(MountError::MountIdExhausted)?;
         let mount_id = MountId(self.next_mount_id);
-        let provider = Provider {
+        let provider = Arc::new(Provider {
             mount_id,
             name,
             kind,
-        };
+        });
 
-        for (path, bytes) in batch {
+        for (path, source) in batch {
             self.entries.entry(path).or_default().push(ResourceEntry {
                 provider: provider.clone(),
-                bytes: Arc::from(bytes),
+                source,
             });
         }
         self.next_mount_id = following;
@@ -367,8 +492,17 @@ enum DuplicatePolicy {
 fn collect_directory(
     root: &Path,
     directory: &Path,
-    output: &mut Vec<(VirtualPath, Vec<u8>)>,
+    depth: usize,
+    limits: DirectoryLimits,
+    output: &mut Vec<(VirtualPath, ResourceSource)>,
 ) -> Result<(), MountError> {
+    if depth > limits.maximum_depth {
+        return Err(MountError::DirectoryLimitExceeded {
+            what: "directory recursion depth",
+            actual: depth,
+            maximum: limits.maximum_depth,
+        });
+    }
     for entry in fs::read_dir(directory).map_err(|error| MountError::Io {
         path: directory.to_path_buf(),
         error,
@@ -387,8 +521,22 @@ fn collect_directory(
             return Err(MountError::SymbolicLink(path));
         }
         if file_type.is_dir() {
-            collect_directory(root, &path, output)?;
+            let child_depth = depth
+                .checked_add(1)
+                .ok_or(MountError::DirectoryLimitExceeded {
+                    what: "directory recursion depth",
+                    actual: usize::MAX,
+                    maximum: limits.maximum_depth,
+                })?;
+            collect_directory(root, &path, child_depth, limits, output)?;
         } else if file_type.is_file() {
+            if output.len() >= limits.maximum_files {
+                return Err(MountError::DirectoryLimitExceeded {
+                    what: "directory file count",
+                    actual: output.len() + 1,
+                    maximum: limits.maximum_files,
+                });
+            }
             let relative = path
                 .strip_prefix(root)
                 .map_err(|_| MountError::OutsideRoot {
@@ -400,15 +548,166 @@ fn collect_directory(
                 .map(|component| component.as_os_str().to_string_lossy())
                 .collect::<Vec<_>>()
                 .join("/");
+            if virtual_text.len() > limits.maximum_virtual_path_bytes {
+                return Err(MountError::DirectoryLimitExceeded {
+                    what: "virtual path length",
+                    actual: virtual_text.len(),
+                    maximum: limits.maximum_virtual_path_bytes,
+                });
+            }
             let virtual_path = VirtualPath::new(&virtual_text).map_err(MountError::Path)?;
-            let bytes = fs::read(&path).map_err(|error| MountError::Io {
+            let metadata = entry.metadata().map_err(|error| MountError::Io {
                 path: path.clone(),
                 error,
             })?;
-            output.push((virtual_path, bytes));
+            let size = usize::try_from(metadata.len()).map_err(|_| MountError::FileTooLarge {
+                path: path.clone(),
+                size: metadata.len(),
+            })?;
+            output.push((
+                virtual_path,
+                ResourceSource::LooseFile {
+                    path,
+                    indexed_file_size: metadata.len(),
+                    size,
+                },
+            ));
         }
     }
     Ok(())
+}
+
+fn index_big_file(path: &Path, limits: BigLimits) -> Result<BigArchiveIndex, MountError> {
+    let mut file = File::open(path).map_err(|error| MountError::Io {
+        path: path.to_path_buf(),
+        error,
+    })?;
+    let metadata = file.metadata().map_err(|error| MountError::Io {
+        path: path.to_path_buf(),
+        error,
+    })?;
+    let archive_size = usize::try_from(metadata.len()).map_err(|_| MountError::FileTooLarge {
+        path: path.to_path_buf(),
+        size: metadata.len(),
+    })?;
+    let mut header = Vec::with_capacity(16);
+    file.by_ref()
+        .take(16)
+        .read_to_end(&mut header)
+        .map_err(|error| MountError::Io {
+            path: path.to_path_buf(),
+            error,
+        })?;
+    let prefix_length =
+        big::big_directory_prefix_length(&header, archive_size, limits).map_err(MountError::Big)?;
+    let mut prefix = vec![0; prefix_length];
+    file.seek(SeekFrom::Start(0))
+        .and_then(|_| file.read_exact(&mut prefix))
+        .map_err(|error| MountError::Io {
+            path: path.to_path_buf(),
+            error,
+        })?;
+    big::parse_big_archive_prefix(&prefix, archive_size, limits).map_err(MountError::Big)
+}
+
+fn read_file_range(
+    path: &Path,
+    indexed_file_size: u64,
+    offset: usize,
+    size: usize,
+) -> Result<Vec<u8>, ResourceReadError> {
+    let mut file = File::open(path).map_err(|error| ResourceReadError::Io {
+        path: path.to_path_buf(),
+        error,
+    })?;
+    let actual_size = file
+        .metadata()
+        .map_err(|error| ResourceReadError::Io {
+            path: path.to_path_buf(),
+            error,
+        })?
+        .len();
+    if actual_size != indexed_file_size {
+        return Err(ResourceReadError::BackingFileSizeChanged {
+            path: path.to_path_buf(),
+            indexed: indexed_file_size,
+            actual: actual_size,
+        });
+    }
+    let offset = u64::try_from(offset).map_err(|_| ResourceReadError::OffsetTooLarge { offset })?;
+    file.seek(SeekFrom::Start(offset))
+        .map_err(|error| ResourceReadError::Io {
+            path: path.to_path_buf(),
+            error,
+        })?;
+    let mut bytes = vec![0; size];
+    file.read_exact(&mut bytes)
+        .map_err(|error| ResourceReadError::Io {
+            path: path.to_path_buf(),
+            error,
+        })?;
+    Ok(bytes)
+}
+
+/// A failure while lazily reading one indexed resource.
+#[derive(Debug)]
+pub enum ResourceReadError {
+    /// The indexed payload exceeds the caller's explicit allocation bound.
+    LimitExceeded { actual: usize, maximum: usize },
+    /// A backing file could not be opened, inspected, sought, or read exactly.
+    Io { path: PathBuf, error: io::Error },
+    /// The physical file length changed after its provider was indexed.
+    BackingFileSizeChanged {
+        path: PathBuf,
+        indexed: u64,
+        actual: u64,
+    },
+    /// A host offset could not be represented by the filesystem seek API.
+    OffsetTooLarge { offset: usize },
+    /// An in-memory archive range violated an already validated index invariant.
+    MemoryRangeInvalid,
+}
+
+impl Display for ResourceReadError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::LimitExceeded { actual, maximum } => write!(
+                formatter,
+                "indexed resource size {actual} exceeds read limit {maximum}"
+            ),
+            Self::Io { path, error } => write!(formatter, "{}: {error}", path.display()),
+            Self::BackingFileSizeChanged {
+                path,
+                indexed,
+                actual,
+            } => write!(
+                formatter,
+                "backing file size changed after indexing: {} was {indexed} bytes and is now {actual} bytes",
+                path.display()
+            ),
+            Self::OffsetTooLarge { offset } => {
+                write!(
+                    formatter,
+                    "resource offset {offset} does not fit the seek API"
+                )
+            }
+            Self::MemoryRangeInvalid => {
+                formatter.write_str("in-memory BIG member range is invalid")
+            }
+        }
+    }
+}
+
+impl Error for ResourceReadError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Io { error, .. } => Some(error),
+            Self::LimitExceeded { .. }
+            | Self::BackingFileSizeChanged { .. }
+            | Self::OffsetTooLarge { .. }
+            | Self::MemoryRangeInvalid => None,
+        }
+    }
 }
 
 /// A failure while constructing a VFS mount.
@@ -432,6 +731,14 @@ pub enum MountError {
     Path(PathError),
     /// A BIG archive was malformed or exceeded an explicit limit.
     Big(BigError),
+    /// A file is too large to index on this host.
+    FileTooLarge { path: PathBuf, size: u64 },
+    /// A loose-directory metadata index exceeded an explicit resource limit.
+    DirectoryLimitExceeded {
+        what: &'static str,
+        actual: usize,
+        maximum: usize,
+    },
     /// Two entries in one provider normalized to the same path.
     DuplicatePath(VirtualPath),
     /// Symbolic links are outside the loose-directory mount contract.
@@ -452,6 +759,16 @@ impl Display for MountError {
             ),
             Self::Path(error) => Display::fmt(error, formatter),
             Self::Big(error) => Display::fmt(error, formatter),
+            Self::FileTooLarge { path, size } => write!(
+                formatter,
+                "file is too large to index on this host: {} has {size} bytes",
+                path.display()
+            ),
+            Self::DirectoryLimitExceeded {
+                what,
+                actual,
+                maximum,
+            } => write!(formatter, "{what} value {actual} exceeds limit {maximum}"),
             Self::DuplicatePath(path) => {
                 write!(formatter, "provider contains duplicate virtual path {path}")
             }
@@ -472,6 +789,8 @@ impl Error for MountError {
             Self::Path(error) => Some(error),
             Self::Big(error) => Some(error),
             Self::OutsideRoot { .. }
+            | Self::FileTooLarge { .. }
+            | Self::DirectoryLimitExceeded { .. }
             | Self::DuplicatePath(_)
             | Self::SymbolicLink(_)
             | Self::MountIdExhausted => None,
@@ -481,10 +800,19 @@ impl Error for MountError {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
     use super::{MountError, Vfs, VirtualPath};
 
     fn path(value: &str) -> VirtualPath {
         VirtualPath::new(value).expect("valid test path")
+    }
+
+    fn test_root(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/vfs-tests")
+            .join(name)
     }
 
     #[test]
@@ -508,7 +836,7 @@ mod tests {
             .expect("mod mount");
 
         let resource = vfs.resolve(&path("DATA/a.txt")).expect("resolved entry");
-        assert_eq!(resource.bytes(), b"override");
+        assert_eq!(resource.read(8).expect("read override"), b"override");
         assert_eq!(resource.provider().name(), "mod");
 
         let history = vfs.history(&path("data/a.txt")).expect("entry history");
@@ -557,11 +885,108 @@ mod tests {
             .expect("BIG mount");
 
         let resource = vfs.resolve(&path("data/a.txt")).expect("resolved entry");
-        assert_eq!(resource.bytes(), b"new");
+        assert_eq!(resource.read(8).expect("read winner"), b"new");
         let history = vfs.history(&path("data/a.txt")).expect("entry history");
         assert_eq!(history.len(), 2);
-        assert_eq!(history[0].bytes(), b"old");
+        assert_eq!(history[0].read(8).expect("read history"), b"old");
         assert_eq!(history[1].provider().mount_id().get(), 0);
+    }
+
+    #[test]
+    fn disk_providers_index_without_retaining_payloads() {
+        let root = test_root("lazy-providers");
+        if root.exists() {
+            fs::remove_dir_all(&root).expect("remove stale lazy-provider test");
+        }
+        let loose_root = root.join("loose");
+        fs::create_dir_all(loose_root.join("data")).expect("create loose tree");
+        let loose_path = loose_root.join("data/value.bin");
+        fs::write(&loose_path, b"loose").expect("write loose fixture");
+        let archive_path = root.join("custom.assets");
+        fs::write(
+            &archive_path,
+            synthetic_big(&[("data/archive.bin", b"archive")]),
+        )
+        .expect("write BIG fixture");
+
+        let mut vfs = Vfs::new();
+        vfs.mount_directory("loose", &loose_root)
+            .expect("index loose directory");
+        vfs.mount_big_file("archive", &archive_path, super::BigLimits::default())
+            .expect("index BIG file");
+        assert_eq!(
+            vfs.resolve(&path("data/value.bin"))
+                .expect("loose entry")
+                .len(),
+            5
+        );
+        assert_eq!(
+            vfs.resolve(&path("data/archive.bin"))
+                .expect("archive entry")
+                .len(),
+            7
+        );
+
+        fs::remove_file(loose_path).expect("remove indexed loose payload");
+        fs::remove_file(archive_path).expect("remove indexed archive payload");
+        assert!(
+            vfs.resolve(&path("data/value.bin"))
+                .expect("indexed loose entry")
+                .read(16)
+                .is_err()
+        );
+        assert!(
+            vfs.resolve(&path("data/archive.bin"))
+                .expect("indexed archive entry")
+                .read(16)
+                .is_err()
+        );
+        fs::remove_dir_all(root).expect("remove lazy-provider test");
+    }
+
+    #[test]
+    fn lazy_reads_enforce_the_callers_allocation_limit() {
+        let mut vfs = Vfs::new();
+        vfs.mount_memory("memory", [(path("data/value.bin"), vec![0; 17])])
+            .expect("memory mount");
+        let error = vfs
+            .resolve(&path("data/value.bin"))
+            .expect("memory entry")
+            .read(16)
+            .expect_err("limit must reject read");
+        assert!(matches!(
+            error,
+            super::ResourceReadError::LimitExceeded {
+                actual: 17,
+                maximum: 16
+            }
+        ));
+    }
+
+    #[test]
+    fn directory_indices_enforce_metadata_limits() {
+        let root = test_root("directory-limits");
+        if root.exists() {
+            fs::remove_dir_all(&root).expect("remove stale directory-limit test");
+        }
+        fs::create_dir_all(&root).expect("create directory-limit test");
+        fs::write(root.join("a.bin"), []).expect("write first indexed file");
+        fs::write(root.join("b.bin"), []).expect("write second indexed file");
+        let limits = super::DirectoryLimits {
+            maximum_files: 1,
+            ..super::DirectoryLimits::default()
+        };
+        let mut vfs = Vfs::new();
+        assert!(matches!(
+            vfs.mount_directory_with_limits("limited", &root, limits),
+            Err(MountError::DirectoryLimitExceeded {
+                what: "directory file count",
+                actual: 2,
+                maximum: 1
+            })
+        ));
+        assert!(vfs.iter_resolved().next().is_none());
+        fs::remove_dir_all(root).expect("remove directory-limit test");
     }
 
     fn synthetic_big(entries: &[(&str, &[u8])]) -> Vec<u8> {

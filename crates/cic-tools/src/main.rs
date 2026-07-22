@@ -18,8 +18,8 @@ use cic_render::{
     WaterAppearance, WaterCausticSequence, run_model_viewer, run_terrain_viewer,
 };
 use cic_tools::resource::{
-    GameEdition, ResourceKind, StoredLocations, config_path, discover_steam_locations,
-    resolve_archives, validate_installation,
+    GameEdition, MountProfile, MountProfileLimits, ResourceKind, StoredLocations, config_path,
+    discover_steam_locations, resolve_archives, validate_installation,
 };
 use cic_tools::{
     GltfTextureRequest, encode_capture_png, encode_map_height_png, pack_w3d_glb, render_csf,
@@ -29,7 +29,7 @@ use cic_tools::{
 use cic_vfs::{BigLimits, Vfs, VirtualPath};
 
 const USAGE: &str = "Usage:\n\
-  cic-inspect [--zh] [--game-dir <path>] <command> ...\n\
+  cic-inspect [--zh] [--game-dir <path>] [--profile <profile>] [--mod <mount>]... <command> ...\n\
   cic-inspect config show\n\
   cic-inspect config set <generals-dir|zero-hour-dir> <path>\n\
   cic-inspect manifest <mount> [<mount> ...]\n\
@@ -47,10 +47,15 @@ const USAGE: &str = "Usage:\n\
   cic-inspect w3d-export [--gltf] <virtual-path> [<output.glb|output.gltf>] [<mount> ...]\n\
 Each mount is a directory or BIG archive. Mounts are applied from left to right; later mounts override earlier mounts.";
 
+const MAX_ENCODED_IMAGE_BYTES: usize = 256 * 1_024 * 1_024;
+
 #[derive(Debug)]
 struct CliOptions {
     edition: GameEdition,
+    edition_explicit: bool,
     game_dir: Option<PathBuf>,
+    profile: Option<PathBuf>,
+    mods: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,25 +79,7 @@ fn main() -> ExitCode {
 
 fn run(arguments: impl IntoIterator<Item = String>) -> Result<String, Box<dyn Error>> {
     let mut arguments = arguments.into_iter().peekable();
-    let mut options = CliOptions {
-        edition: GameEdition::Generals,
-        game_dir: None,
-    };
-    while let Some(argument) = arguments.peek() {
-        match argument.as_str() {
-            "--zh" => {
-                options.edition = GameEdition::ZeroHour;
-                arguments.next();
-            }
-            "--game-dir" => {
-                arguments.next();
-                options.game_dir = Some(PathBuf::from(
-                    arguments.next().ok_or("--game-dir requires a path")?,
-                ));
-            }
-            _ => break,
-        }
-    }
+    let options = parse_cli_options(&mut arguments)?;
     let command = arguments.next().ok_or("missing command")?;
     match command.as_str() {
         "config" => configure(arguments),
@@ -109,7 +96,9 @@ fn run(arguments: impl IntoIterator<Item = String>) -> Result<String, Box<dyn Er
             let entry = vfs
                 .resolve(&resource_path)
                 .ok_or_else(|| format!("resource not found: {resource_path}"))?;
-            let csf = parse_csf(entry.bytes(), resource_path.as_str(), CsfLimits::default())?;
+            let limits = CsfLimits::default();
+            let bytes = entry.read(limits.maximum_file_bytes)?;
+            let csf = parse_csf(&bytes, resource_path.as_str(), limits)?;
             Ok(render_csf(&csf))
         }
         "map" => {
@@ -122,7 +111,9 @@ fn run(arguments: impl IntoIterator<Item = String>) -> Result<String, Box<dyn Er
             let entry = vfs
                 .resolve(&resource_path)
                 .ok_or_else(|| format!("resource not found: {resource_path}"))?;
-            let map = parse_map(entry.bytes(), resource_path.as_str(), MapLimits::default())?;
+            let limits = MapLimits::default();
+            let bytes = entry.read(limits.maximum_file_bytes)?;
+            let map = parse_map(&bytes, resource_path.as_str(), limits)?;
             Ok(render_map(&map))
         }
         "map-height" => report_map_height(&mut arguments, &options),
@@ -138,7 +129,9 @@ fn run(arguments: impl IntoIterator<Item = String>) -> Result<String, Box<dyn Er
             let entry = vfs
                 .resolve(&resource_path)
                 .ok_or_else(|| format!("resource not found: {resource_path}"))?;
-            let w3d = parse_w3d(entry.bytes(), resource_path.as_str(), W3dLimits::default())?;
+            let limits = W3dLimits::default();
+            let bytes = entry.read(limits.maximum_file_bytes)?;
+            let w3d = parse_w3d(&bytes, resource_path.as_str(), limits)?;
             Ok(render_w3d(&w3d))
         }
         "w3d-mesh" => {
@@ -153,7 +146,9 @@ fn run(arguments: impl IntoIterator<Item = String>) -> Result<String, Box<dyn Er
             let entry = vfs
                 .resolve(&resource_path)
                 .ok_or_else(|| format!("resource not found: {resource_path}"))?;
-            let w3d = parse_w3d(entry.bytes(), resource_path.as_str(), W3dLimits::default())?;
+            let limits = W3dLimits::default();
+            let bytes = entry.read(limits.maximum_file_bytes)?;
+            let w3d = parse_w3d(&bytes, resource_path.as_str(), limits)?;
             let chunk = w3d.chunks().get(chunk_index).ok_or_else(|| {
                 format!(
                     "top-level chunk index {chunk_index} is out of range for {} chunks",
@@ -168,6 +163,56 @@ fn run(arguments: impl IntoIterator<Item = String>) -> Result<String, Box<dyn Er
         "w3d-export" => export_model(&mut arguments, &options),
         _ => Err(format!("unknown command {command:?}").into()),
     }
+}
+
+fn parse_cli_options<I>(
+    arguments: &mut std::iter::Peekable<I>,
+) -> Result<CliOptions, Box<dyn Error>>
+where
+    I: Iterator<Item = String>,
+{
+    let mut options = CliOptions {
+        edition: GameEdition::Generals,
+        edition_explicit: false,
+        game_dir: None,
+        profile: None,
+        mods: Vec::new(),
+    };
+    while let Some(argument) = arguments.peek() {
+        match argument.as_str() {
+            "--zh" => {
+                options.edition = GameEdition::ZeroHour;
+                options.edition_explicit = true;
+                arguments.next();
+            }
+            "--game-dir" => {
+                arguments.next();
+                options.game_dir = Some(PathBuf::from(
+                    arguments.next().ok_or("--game-dir requires a path")?,
+                ));
+            }
+            "--profile" => {
+                arguments.next();
+                if options.profile.is_some() {
+                    return Err("--profile may be supplied only once".into());
+                }
+                options.profile = Some(PathBuf::from(
+                    arguments.next().ok_or("--profile requires a path")?,
+                ));
+            }
+            "--mod" => {
+                arguments.next();
+                options.mods.push(PathBuf::from(
+                    arguments.next().ok_or("--mod requires a path")?,
+                ));
+            }
+            _ => break,
+        }
+    }
+    if options.profile.is_some() && (options.game_dir.is_some() || options.edition_explicit) {
+        return Err("--profile cannot be combined with --game-dir or --zh".into());
+    }
+    Ok(options)
 }
 
 fn report_map_height<I>(
@@ -205,8 +250,10 @@ where
     let entry = vfs
         .resolve(&resource_path)
         .ok_or_else(|| format!("resource not found: {resource_path}"))?;
-    let map = parse_map(entry.bytes(), resource_path.as_str(), MapLimits::default())?;
-    let height = decode_map_height(&map, MapLimits::default())?;
+    let limits = MapLimits::default();
+    let bytes = entry.read(limits.maximum_file_bytes)?;
+    let map = parse_map(&bytes, resource_path.as_str(), limits)?;
+    let height = decode_map_height(&map, limits)?;
     if report {
         Ok(render_map_height(&height))
     } else {
@@ -247,9 +294,11 @@ where
     let entry = vfs
         .resolve(&resource_path)
         .ok_or_else(|| format!("resource not found: {resource_path}"))?;
-    let map = parse_map(entry.bytes(), resource_path.as_str(), MapLimits::default())?;
-    let height = decode_map_height(&map, MapLimits::default())?;
-    let blend = decode_map_blend(&map, &height, MapLimits::default())?;
+    let limits = MapLimits::default();
+    let bytes = entry.read(limits.maximum_file_bytes)?;
+    let map = parse_map(&bytes, resource_path.as_str(), limits)?;
+    let height = decode_map_height(&map, limits)?;
+    let blend = decode_map_blend(&map, &height, limits)?;
     Ok(render_map_blend(&blend))
 }
 
@@ -267,8 +316,10 @@ where
     let entry = vfs
         .resolve(&resource_path)
         .ok_or_else(|| format!("resource not found: {resource_path}"))?;
-    let map = parse_map(entry.bytes(), resource_path.as_str(), MapLimits::default())?;
-    let water = decode_map_water(&map, MapLimits::default())?;
+    let limits = MapLimits::default();
+    let bytes = entry.read(limits.maximum_file_bytes)?;
+    let map = parse_map(&bytes, resource_path.as_str(), limits)?;
+    let water = decode_map_water(&map, limits)?;
     Ok(render_map_water(&water))
 }
 
@@ -399,7 +450,8 @@ fn load_staged_terrain_and_water(
         .resolve(resource_path)
         .ok_or_else(|| format!("resource not found: {resource_path}"))?;
     let limits = MapLimits::default();
-    let map = parse_map(entry.bytes(), resource_path.as_str(), limits)?;
+    let bytes = entry.read(limits.maximum_file_bytes)?;
+    let map = parse_map(&bytes, resource_path.as_str(), limits)?;
     let height = decode_map_height(&map, limits)?;
     let blend = decode_map_blend(&map, &height, limits)?;
     let water = match decode_map_water(&map, limits) {
@@ -427,7 +479,8 @@ fn load_water_appearance(vfs: &Vfs) -> Result<WaterAppearance, Box<dyn Error>> {
             let entry = vfs
                 .resolve(&path)
                 .ok_or_else(|| format!("incomplete caustic sequence: missing {path}"))?;
-            let image = decode_viewer_texture(entry.bytes(), image::ImageFormat::Tga)?;
+            let bytes = entry.read(MAX_ENCODED_IMAGE_BYTES)?;
+            let image = decode_viewer_texture(&bytes, image::ImageFormat::Tga)?;
             let current = (image.width(), image.height());
             if dimensions.is_some_and(|expected| expected != current) {
                 return Err(format!("caustic frame dimensions disagree at {path}").into());
@@ -446,7 +499,9 @@ fn load_water_appearance(vfs: &Vfs) -> Result<WaterAppearance, Box<dyn Error>> {
         let Some(entry) = vfs.resolve(&path) else {
             continue;
         };
-        let parsed = parse_water_transparency_ini(entry.bytes(), WaterIniLimits::default())?;
+        let limits = WaterIniLimits::default();
+        let bytes = entry.read(limits.max_file_bytes)?;
+        let parsed = parse_water_transparency_ini(&bytes, limits)?;
         deep_opacity = parsed.minimum_opacity().unwrap_or(deep_opacity);
         opaque_depth = parsed.opaque_depth().unwrap_or(opaque_depth);
     }
@@ -463,7 +518,8 @@ fn load_staged_terrain(
         .resolve(resource_path)
         .ok_or_else(|| format!("resource not found: {resource_path}"))?;
     let limits = MapLimits::default();
-    let map = parse_map(entry.bytes(), resource_path.as_str(), limits)?;
+    let bytes = entry.read(limits.maximum_file_bytes)?;
+    let map = parse_map(&bytes, resource_path.as_str(), limits)?;
     let height = decode_map_height(&map, limits)?;
     let blend = decode_map_blend(&map, &height, limits)?;
     let textures = load_terrain_textures(vfs, &blend)?;
@@ -510,7 +566,7 @@ fn load_terrain_textures(
             continue;
         }
         let (path, bytes) = resolve_terrain_texture(vfs, class.name_bytes(), &catalog)?;
-        let image = decode_viewer_texture(bytes, image_format(&path)?)?;
+        let image = decode_viewer_texture(&bytes, image_format(&path)?)?;
         textures.insert(
             class.name_bytes(),
             image.width(),
@@ -528,7 +584,9 @@ fn load_terrain_texture_catalog(vfs: &Vfs) -> Result<BTreeMap<Vec<u8>, Vec<u8>>,
         let Some(entry) = vfs.resolve(&path) else {
             continue;
         };
-        let ini = parse_terrain_ini(entry.bytes(), TerrainIniLimits::default())?;
+        let limits = TerrainIniLimits::default();
+        let bytes = entry.read(limits.max_file_bytes)?;
+        let ini = parse_terrain_ini(&bytes, limits)?;
         for definition in ini.definitions() {
             let key = ascii_fold(definition.name_bytes());
             let inherited = catalog
@@ -543,11 +601,11 @@ fn load_terrain_texture_catalog(vfs: &Vfs) -> Result<BTreeMap<Vec<u8>, Vec<u8>>,
     Ok(catalog)
 }
 
-fn resolve_terrain_texture<'a>(
-    vfs: &'a Vfs,
+fn resolve_terrain_texture(
+    vfs: &Vfs,
     class_name: &[u8],
     catalog: &BTreeMap<Vec<u8>, Vec<u8>>,
-) -> Result<(VirtualPath, &'a [u8]), Box<dyn Error>> {
+) -> Result<(VirtualPath, Vec<u8>), Box<dyn Error>> {
     if let Some(texture_name) = catalog.get(&ascii_fold(class_name)) {
         return resolve_image(vfs, texture_name, "art/terrain").map_err(|error| {
             format!(
@@ -631,7 +689,7 @@ fn load_renderer_textures(
                                 continue;
                             }
                             let format = image_format(&path)?;
-                            let image = decode_viewer_texture(bytes, format)?;
+                            let image = decode_viewer_texture(&bytes, format)?;
                             let id = resources.insert(
                                 texture.name_bytes(),
                                 image.width(),
@@ -800,7 +858,9 @@ fn load_composed_model(
     let entry = vfs
         .resolve(resource_path)
         .ok_or_else(|| format!("resource not found: {resource_path}"))?;
-    let w3d = parse_w3d(entry.bytes(), resource_path.as_str(), W3dLimits::default())?;
+    let limits = W3dLimits::default();
+    let bytes = entry.read(limits.maximum_file_bytes)?;
+    let w3d = parse_w3d(&bytes, resource_path.as_str(), limits)?;
     let files = collect_model_files(vfs, resource_path, w3d)?;
     let file_refs = files.iter().collect::<Vec<_>>();
     Ok(decode_w3d_model_set(
@@ -879,11 +939,9 @@ fn collect_model_files(
         let entry = vfs
             .resolve(&companion_path)
             .ok_or_else(|| format!("referenced W3D hierarchy not found: {companion_path}"))?;
-        files.push(parse_w3d(
-            entry.bytes(),
-            companion_path.as_str(),
-            W3dLimits::default(),
-        )?);
+        let limits = W3dLimits::default();
+        let bytes = entry.read(limits.maximum_file_bytes)?;
+        files.push(parse_w3d(&bytes, companion_path.as_str(), limits)?);
     }
 
     let animation_prefix = hierarchy_name
@@ -905,7 +963,9 @@ fn collect_model_files(
         {
             continue;
         }
-        let candidate = parse_w3d(entry.bytes(), name, W3dLimits::default())?;
+        let limits = W3dLimits::default();
+        let bytes = entry.read(limits.maximum_file_bytes)?;
+        let candidate = parse_w3d(&bytes, name, limits)?;
         if !candidate.chunks().is_empty()
             && candidate
                 .chunks()
@@ -1050,7 +1110,7 @@ fn encode_png_texture(
     let (source_name, image) = match resolved {
         Ok((source_path, bytes)) => {
             let format = image_format(&source_path)?;
-            let image = image::load_from_memory_with_format(bytes, format)?;
+            let image = image::load_from_memory_with_format(&bytes, format)?;
             (source_path.to_string(), image)
         }
         Err(error) => {
@@ -1119,18 +1179,15 @@ fn image_format(path: &VirtualPath) -> Result<image::ImageFormat, Box<dyn Error>
     }
 }
 
-fn resolve_texture<'a>(
-    vfs: &'a Vfs,
-    raw_name: &[u8],
-) -> Result<(VirtualPath, &'a [u8]), Box<dyn Error>> {
+fn resolve_texture(vfs: &Vfs, raw_name: &[u8]) -> Result<(VirtualPath, Vec<u8>), Box<dyn Error>> {
     resolve_image(vfs, raw_name, "art/textures")
 }
 
-fn resolve_image<'a>(
-    vfs: &'a Vfs,
+fn resolve_image(
+    vfs: &Vfs,
     raw_name: &[u8],
     resource_directory: &str,
-) -> Result<(VirtualPath, &'a [u8]), Box<dyn Error>> {
+) -> Result<(VirtualPath, Vec<u8>), Box<dyn Error>> {
     let name = std::str::from_utf8(raw_name)
         .map_err(|_| "texture name is not UTF-8 and cannot be mapped to the VFS")?;
     let normalized = name.replace('\\', "/");
@@ -1171,7 +1228,7 @@ fn resolve_image<'a>(
         checked.push(candidate.clone());
         let path = VirtualPath::new(&candidate)?;
         if let Some(entry) = vfs.resolve(&path) {
-            return Ok((path, entry.bytes()));
+            return Ok((path, entry.read(MAX_ENCODED_IMAGE_BYTES)?));
         }
     }
     Err(format!("referenced texture not found in mounted resources: {name}").into())
@@ -1183,16 +1240,30 @@ fn mount_all(
     options: &CliOptions,
     kind: ResourceKind,
 ) -> Result<Vfs, Box<dyn Error>> {
-    let mounts = if mounts.is_empty() {
+    let mut planned = if let Some(profile_path) = options.profile.as_deref() {
+        let profile = MountProfile::load(profile_path, MountProfileLimits::default())?;
+        let mut paths = Vec::with_capacity(profile.mounts().len());
+        for mount in profile.mounts() {
+            if mount.optional() && !mount.path().try_exists()? {
+                continue;
+            }
+            paths.push(mount.path().to_path_buf());
+        }
+        paths
+    } else if mounts.is_empty() {
         resolve_archives(options.edition, kind, options.game_dir.as_deref())?
     } else {
         mounts.iter().map(PathBuf::from).collect()
     };
-    if mounts.is_empty() {
+    if options.profile.is_some() {
+        planned.extend(mounts.iter().map(PathBuf::from));
+    }
+    planned.extend(options.mods.iter().cloned());
+    if planned.is_empty() {
         return Err(format!("{command} resolved no resource archives").into());
     }
     let mut vfs = Vfs::new();
-    for (index, mount) in mounts.iter().enumerate() {
+    for (index, mount) in planned.iter().enumerate() {
         let metadata = fs::metadata(mount)?;
         let provider_name = format!("mount-{index}");
         if metadata.is_dir() {

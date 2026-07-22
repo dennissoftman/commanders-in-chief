@@ -5,10 +5,10 @@
 The R3 terrain presentation gate now includes a bounded water-only MAP boundary, stable lake and
 river staging, a modern hybrid-deferred viewer with depth-aware forward water, bounded source
 caustic animation and transparency inputs, and deterministic Modern-profile macro variation. The
-terrain viewer has horizon-safe, predictive nested viewport residency with independently
-cancellable 16/32-texel detail bakes, complete mip chains, and anisotropic sampling. Keep scripts
-and object loading deferred while presentation work moves to bounded source lighting inputs and
-modern reflection/shadow quality.
+terrain viewer has horizon-safe 16/32-texel GPU page composition, persistent LRU residency,
+complete GPU-generated mip chains, and anisotropic sampling without camera-driven CPU texture
+bakes. Keep scripts and object loading deferred while presentation work moves to bounded source
+lighting inputs and modern reflection/shadow quality.
 
 ## Implemented foundation
 
@@ -17,6 +17,10 @@ modern reflection/shadow quality.
 - Bounded, cursor-based binary reads with structured errors.
 - Normalized, ASCII case-insensitive virtual paths.
 - Deterministic last-mounted-wins overlays with full provider history.
+- Disk-backed directory mounts retain file metadata and BIG mounts retain only bounded directory
+  indices; winning payloads are read lazily under parser-selected allocation limits.
+- Bounded declarative mount profiles support arbitrarily named custom bases, optional providers,
+  total conversions, and repeatable ordered mod layers without retail archive sentinels.
 - Loose-directory manifest CLI and synthetic tests.
 - Evidence-backed `BIGF`/`BIG4` indexing with explicit limits and synthetic fixture.
 - BIG duplicate-name history with deterministic last-entry-wins resolution.
@@ -170,12 +174,12 @@ modern reflection/shadow quality.
 - `map-view` shares the staged base/edge GPU path and provides perspective WASD/vertical flight,
   boost, right-mouse look, wheel dolly, and reset controls. The installed Generals viewer remained
   live through resource staging, GPU upload, surface creation, and camera rendering.
-- `map-view` retains the immutable terrain inputs and derives nested conservative detail regions
-  from projected screen demand rather than one complete ground-footprint rectangle. The stable
-  background remains 8 texels per cell; independently resident 16-texel mid-field and
-  source-established 32-texel foreground tiers stop at the depth where the next coarser tier has
-  sufficient screen density. Quantized margins cover upcoming movement under the existing
-  4096-pixel/64-MiB per-texture limits.
+- `map-view` uploads immutable semantic cells and compact 64/32-pixel source-tile atlases once, then
+  composes bordered 16/32-texel pages in compute shaders. A persistent 128-layer physical cache and
+  stable two-level page tables reuse revisited regions; the deterministic 8-texel background is the
+  guaranteed fallback when a page is absent. Angled views use camera-space depth and projected page
+  bounds, reserving coarse visible coverage before fine upgrades instead of selecting a world-axis
+  square around the footprint midpoint.
 - Viewer-only derivative normals and an explicit directional preview light improve slope
   readability without altering staged terrain or headless completion hashes. The installed
   Generals window remained live with the detail and lighting path active; no capture was retained.
@@ -203,11 +207,10 @@ modern reflection/shadow quality.
   or data was retained.
 - Near-horizontal camera frusta are intersected conservatively with the bounded terrain height
   slab rather than relying on one unstable focus ray. Horizon distance cannot dilute foreground
-  density: screen-space depth caps bound the 16/32 tiers independently. Resident containment
-  suppresses redundant work; new generations immediately cancel obsolete rows, tiles, and
-  composition without the previous 120-ms request throttle. Each tier keeps its previous GPU patch
-  during a short explicit-time overlap, avoiding visible blurry-to-sharp replacement. Trilinear
-  sampling uses up to 16x anisotropy, with backend fallback handled by `wgpu`.
+  density: screen-space depth caps request 16/32 tiers independently. Camera motion updates only
+  small page-table/job buffers; GPU composition preserves base/primary/extra masks, cliff UVs,
+  custom edges, and Modern macro variation. Every physical page has a GPU-generated linear,
+  alpha-aware mip chain and up to 16x anisotropic sampling.
 - A bounded Water INI decoder supplies global minimum opacity and opaque depth. The reusable,
   VFS-independent `WaterAppearance` accepts an optional consistent luminance-frame sequence;
   installed tools resolve `caust00` through `caust31` into a mipmapped texture array. The
@@ -233,17 +236,12 @@ modern reflection/shadow quality.
 - A local user-owned installed smoke resolved all 14 semantic terrain classes, staged 151,221 cells
   and 907,326 indices, and rendered a coherent 768-by-768 capture. The capture was inspected and
   removed; only aggregate diagnostics are retained.
-
-## Known refinements
-
-- The current nested 16/32-texel terrain detail path is a bounded presentation milestone, not the
-  final runtime texture architecture. Its frustum math is inexpensive, but CPU patch composition,
-  mip generation, uploads, overlap, and replacement can still waste work or expose latency during
-  camera movement, especially in debug builds. A later renderer refinement should retain the full
-  height-field geometry, move semantic terrain-layer composition to the GPU, and rely on mipmapping
-  and anisotropic filtering for screen-space detail. It must avoid a monolithic full-map
-  high-resolution atlas; software virtual-texture paging remains an option only if substantially
-  larger maps justify it.
+- The optimized USA05 viewer remained live for a controlled 12-second smoke with GPU page
+  composition, page-table fallback, custom-edge cache output, full mip generation, and deferred
+  terrain/water rendering active. The test process was terminated without retaining a capture.
+- The optimized USA06 viewer remained live for 15 seconds after angled LOD selection moved from a
+  radial/world-axis approximation to camera-space depth and projected page ranking. Regression
+  tests preserve the angled cutoff and coarse-visible-before-fine policy; no capture was retained.
 
 ## Known blockers
 

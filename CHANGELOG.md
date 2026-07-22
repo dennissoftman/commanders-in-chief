@@ -4,13 +4,25 @@ All notable user-visible changes are recorded here.
 
 ## Unreleased
 
+### Fixed
+
+- Linux and macOS builds no longer retain the Windows-only Steam registry command import.
+- Angled terrain views now select virtual-texture detail in camera-space depth and rank projected
+  page bounds instead of filling a world-axis square around the viewport footprint. Coarse visible
+  coverage is retained before fine upgrades, removing the misplaced rectangular LOD island.
+
 ### Added
 
+- Bounded declarative mount profiles and repeatable ordered `--mod` layers for custom bases and
+  total conversions, plus lazy directory/BIG providers that index on mount and read only requested
+  resources under caller-selected limits.
 - Bounded water-only MAP decoding/reporting, stable lake/river staging, a modern hybrid-deferred
   terrain viewer with thickness-aware forward water, and deterministic Modern-profile de-tiling.
-- Horizon-safe terrain detail streaming with nested screen-space 16/32-pixel tiers over the stable
-  8-pixel background, predictive margins, independently cancellable stale bakes, overlap
-  transitions, linear-light mipmaps, and anisotropic sampling. Water now uses bounded
+- Horizon-safe terrain detail streaming with a persistent 128-page GPU-composed virtual-texture
+  cache over the stable 8-pixel background. Bordered 16/32-pixel pages preserve authored layers,
+  cliff UVs, custom edges, and Modern macro variation; stable page tables, LRU reuse,
+  GPU-generated linear mipmaps, and anisotropic sampling remove runtime CPU terrain rebakes.
+  Water now uses bounded
   source-resolved caustic animation, source transparency depth,
   a more opaque body, and restored shallow shoreline haze and crest effects.
 - Initial GPL-3.0-only repository charter and provenance policy.

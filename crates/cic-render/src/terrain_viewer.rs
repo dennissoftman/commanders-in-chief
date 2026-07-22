@@ -4,15 +4,11 @@
 //! Interactive free-flight presentation for immutable staged terrain.
 //!
 //! The directional light is a project-authored, viewer-only preview until bounded MAP
-//! `LightingData` decoding supplies the source-authored terrain lights. Detail streaming derives
-//! nested, depth-capped 16/32-texel screen-space footprints over the stable 8-texel background.
-//! Each tier independently cancels stale bakes and overlaps resident replacements, so presentation
-//! never performs CPU texture composition synchronously or dilutes foreground detail at the horizon.
+//! `LightingData` decoding supplies the source-authored terrain lights. A persistent fixed-page
+//! cache composes nested 16/32-texel screen-space detail on the GPU over the stable 8-texel
+//! background. Camera motion changes only residency metadata; it never launches CPU texture bakes.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::thread;
 use std::time::Instant;
 
 use winit::application::ApplicationHandler;
@@ -22,8 +18,10 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, OwnedDisplayHan
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
-use crate::terrain::{
-    TerrainDetailPatch, TerrainDetailRequest, TerrainMipLevel, generate_srgb_mips,
+use crate::terrain::{TerrainDetailRequest, TerrainMipLevel, generate_srgb_mips};
+use crate::terrain_virtual::{
+    VIRTUAL_PAGE_BORDER, VIRTUAL_PAGE_EXTENT, VIRTUAL_PAGE_INTERIOR, VIRTUAL_PAGE_LAYERS,
+    VIRTUAL_PAGE_MIPS, VirtualPageCache, VirtualPageJob, VirtualPageView,
 };
 use crate::viewer::{ViewerError, create_depth, nonzero_size};
 use crate::{RenderError, StagedTerrain, StagedWater, WaterAppearance};
@@ -35,7 +33,6 @@ const MAX_FRAME_SECONDS: f32 = 0.1;
 const CAMERA_VERTICAL_FOV: f32 = std::f32::consts::PI / 3.0;
 const TERRAIN_CELL_WORLD_SIZE: f32 = 10.0;
 const DETAIL_SCREEN_OVERSAMPLE: f32 = 1.5;
-const DETAIL_TRANSITION_SECONDS: f32 = 0.12;
 
 /// Opens a perspective terrain viewer with keyboard flight and right-drag mouse look.
 ///
@@ -73,89 +70,12 @@ struct TerrainViewerApplication {
     camera: TerrainCamera,
     initial_camera: TerrainCamera,
     detail_requests: Vec<TerrainDetailRequest>,
-    detail_workers: Vec<DetailWorker>,
     input: TerrainInput,
     right_drag: bool,
     cursor: Option<PhysicalPosition<f64>>,
     previous_frame: Instant,
     presentation_seconds: f32,
     error: Option<ViewerError>,
-}
-
-type DetailResult = (
-    TerrainDetailRequest,
-    Result<TerrainDetailPatch, crate::TerrainError>,
-);
-
-struct DetailWorker {
-    requests: Sender<(u64, TerrainDetailRequest)>,
-    results: Receiver<DetailResult>,
-    requested: TerrainDetailRequest,
-    generation: Arc<AtomicU64>,
-}
-
-impl DetailWorker {
-    fn new(
-        terrain: Arc<StagedTerrain>,
-        initial_request: TerrainDetailRequest,
-    ) -> Result<Self, std::io::Error> {
-        let (request_sender, request_receiver) = mpsc::channel();
-        let (result_sender, result_receiver) = mpsc::channel();
-        let generation = Arc::new(AtomicU64::new(0));
-        let worker_generation = generation.clone();
-        thread::Builder::new()
-            .name("cic-terrain-detail".into())
-            .spawn(move || {
-                while let Ok((mut request_generation, mut request)) = request_receiver.recv() {
-                    while let Ok(newer) = request_receiver.try_recv() {
-                        (request_generation, request) = newer;
-                    }
-                    let result = terrain.detail_patch_controlled(request, || {
-                        worker_generation.load(Ordering::Acquire) != request_generation
-                    });
-                    match result {
-                        Ok(Some(patch)) => {
-                            if result_sender.send((request, Ok(patch))).is_err() {
-                                break;
-                            }
-                        }
-                        Ok(None) => {}
-                        Err(error) => {
-                            if result_sender.send((request, Err(error))).is_err() {
-                                break;
-                            }
-                        }
-                    }
-                }
-            })?;
-        Ok(Self {
-            requests: request_sender,
-            results: result_receiver,
-            requested: initial_request,
-            generation,
-        })
-    }
-
-    fn request(&mut self, request: TerrainDetailRequest) {
-        if self.requested.covers(request) {
-            return;
-        }
-        let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
-        if self.requests.send((generation, request)).is_ok() {
-            self.requested = request;
-        }
-    }
-
-    fn take_latest(&self) -> Option<DetailResult> {
-        let mut latest = None;
-        loop {
-            match self.results.try_recv() {
-                Ok(result) if result.0 == self.requested => latest = Some(result),
-                Ok(_) => {}
-                Err(TryRecvError::Empty | TryRecvError::Disconnected) => return latest,
-            }
-        }
-    }
 }
 
 impl TerrainViewerApplication {
@@ -169,11 +89,6 @@ impl TerrainViewerApplication {
         let terrain = Arc::new(terrain);
         let camera = TerrainCamera::for_terrain(&terrain);
         let detail_requests = camera.detail_requests(&terrain, [WINDOW_WIDTH, WINDOW_HEIGHT])?;
-        let detail_workers = detail_requests
-            .iter()
-            .copied()
-            .map(|request| DetailWorker::new(terrain.clone(), request))
-            .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             terrain,
             water,
@@ -185,7 +100,6 @@ impl TerrainViewerApplication {
             camera,
             initial_camera: camera,
             detail_requests,
-            detail_workers,
             input: TerrainInput::default(),
             right_drag: false,
             cursor: None,
@@ -208,17 +122,14 @@ impl TerrainViewerApplication {
                 .create_window(attributes)
                 .map_err(ViewerError::Window)?,
         );
-        let details = self
-            .detail_requests
-            .iter()
-            .copied()
-            .map(|request| self.terrain.detail_patch(request))
-            .collect::<Result<Vec<_>, _>>()?;
+        let size = nonzero_size(window.inner_size());
         let gpu = pollster::block_on(TerrainViewerGpu::new(
             window.clone(),
             self.display.clone(),
             &self.terrain,
-            &details,
+            &self.detail_requests,
+            self.camera
+                .virtual_page_view(&self.terrain, [size.width, size.height]),
             &self.water,
             &self.water_appearance,
         ))?;
@@ -229,23 +140,19 @@ impl TerrainViewerApplication {
     }
 
     fn refresh_detail(&mut self) -> Result<(), ViewerError> {
-        for (index, worker) in self.detail_workers.iter().enumerate() {
-            if let Some((request, detail)) = worker.take_latest() {
-                let detail = detail?;
-                if let Some(gpu) = &mut self.gpu {
-                    gpu.update_detail(index, &detail, self.presentation_seconds)?;
-                }
-                self.detail_requests[index] = request;
-            }
-        }
         if let Some(window) = &self.window {
             let size = nonzero_size(window.inner_size());
             let requests = self
                 .camera
                 .detail_requests(&self.terrain, [size.width, size.height])?;
-            for (worker, request) in self.detail_workers.iter_mut().zip(requests) {
-                worker.request(request);
+            if let Some(gpu) = &mut self.gpu {
+                gpu.update_virtual_residency(
+                    &requests,
+                    self.camera
+                        .virtual_page_view(&self.terrain, [size.width, size.height]),
+                );
             }
+            self.detail_requests = requests;
         }
         Ok(())
     }
@@ -523,6 +430,23 @@ impl TerrainCamera {
         Ok(requests)
     }
 
+    #[allow(clippy::cast_precision_loss)]
+    fn virtual_page_view(self, terrain: &StagedTerrain, viewport: [u32; 2]) -> VirtualPageView {
+        let forward = self.forward();
+        let right = normalize(cross(forward, [0.0, 0.0, 1.0]));
+        let up = cross(right, forward);
+        VirtualPageView::new(
+            self.position,
+            forward,
+            right,
+            up,
+            terrain.bounds(),
+            (CAMERA_VERTICAL_FOV * 0.5).tan(),
+            viewport[0] as f32 / viewport[1].max(1) as f32,
+            TERRAIN_CELL_WORLD_SIZE,
+        )
+    }
+
     fn viewport_ground_bounds(
         self,
         terrain_bounds: ([f32; 3], [f32; 3]),
@@ -551,7 +475,7 @@ impl TerrainCamera {
             add_scaled(&mut direction, camera_up, y * tangent);
             direction
         };
-        let maximum_distance = maximum_distance.min(self.far_plane);
+        let maximum_depth = maximum_distance.min(self.far_plane);
         for x in [-1.0, 0.0, 1.0] {
             let lower = direction_for(x, -1.0);
             let upper = direction_for(x, 1.0);
@@ -561,12 +485,17 @@ impl TerrainCamera {
                 if direction[2].abs() <= f32::EPSILON {
                     continue;
                 }
+                let Some(maximum_ray_distance) =
+                    ray_distance_for_view_depth(direction, forward, maximum_depth)
+                else {
+                    continue;
+                };
                 for height in [terrain_minimum[2], terrain_maximum[2]] {
                     let distance = (height - self.position[2]) / direction[2];
                     if !distance.is_finite() || distance <= 0.0 {
                         continue;
                     }
-                    let distance = distance.min(maximum_distance);
+                    let distance = distance.min(maximum_ray_distance);
                     for axis in 0..2 {
                         let coordinate = self.position[axis] + direction[axis] * distance;
                         footprint_minimum[axis] = footprint_minimum[axis].min(coordinate);
@@ -584,8 +513,13 @@ impl TerrainCamera {
                         lower[1] + (upper[1] - lower[1]) * horizon_ratio,
                         0.0,
                     ]);
+                    let horizon_forward_scale = dot(horizon, forward);
+                    if horizon_forward_scale <= f32::EPSILON {
+                        continue;
+                    }
                     for axis in 0..2 {
-                        let coordinate = self.position[axis] + horizon[axis] * maximum_distance;
+                        let coordinate = self.position[axis]
+                            + horizon[axis] * maximum_depth / horizon_forward_scale;
                         footprint_minimum[axis] = footprint_minimum[axis].min(coordinate);
                         footprint_maximum[axis] = footprint_maximum[axis].max(coordinate);
                     }
@@ -622,18 +556,14 @@ struct TerrainViewerGpu {
     queue: wgpu::Queue,
     pipeline: wgpu::RenderPipeline,
     edge_pipeline: wgpu::RenderPipeline,
-    detail_pipeline: wgpu::RenderPipeline,
-    detail_edge_pipeline: wgpu::RenderPipeline,
     lighting_pipeline: wgpu::RenderPipeline,
     composite_pipeline: wgpu::RenderPipeline,
     water_pipeline: wgpu::RenderPipeline,
-    layout: wgpu::BindGroupLayout,
     lighting_layout: wgpu::BindGroupLayout,
     composite_layout: wgpu::BindGroupLayout,
     water_layout: wgpu::BindGroupLayout,
     _texture: wgpu::Texture,
     _edge_texture: wgpu::Texture,
-    sampler: wgpu::Sampler,
     camera_uniform: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     edge_bind_group: wgpu::BindGroup,
@@ -642,7 +572,7 @@ struct TerrainViewerGpu {
     edge_index_buffer: Option<wgpu::Buffer>,
     index_count: u32,
     edge_index_count: u32,
-    details: Vec<TerrainDetailTierGpu>,
+    virtual_terrain: VirtualTerrainGpu,
     water: Option<WaterGpu>,
     water_appearance: WaterAppearanceGpu,
     deferred: DeferredTargets,
@@ -815,24 +745,25 @@ struct DeferredTargets {
     water_bind_group: wgpu::BindGroup,
 }
 
-struct TerrainDetailGpu {
-    _texture: wgpu::Texture,
-    _edge_texture: wgpu::Texture,
-    bind_group: wgpu::BindGroup,
-    edge_bind_group: wgpu::BindGroup,
-    vertex_buffer: wgpu::Buffer,
-    index_buffer: wgpu::Buffer,
-    edge_index_buffer: Option<wgpu::Buffer>,
-    index_count: u32,
-    edge_index_count: u32,
-    fade_uv: [f32; 2],
-    camera_uniform: wgpu::Buffer,
-}
-
-struct TerrainDetailTierGpu {
-    current: TerrainDetailGpu,
-    previous: Option<TerrainDetailGpu>,
-    transition_started: f32,
+struct VirtualTerrainGpu {
+    cache: VirtualPageCache,
+    pending_jobs: Vec<VirtualPageJob>,
+    compose_pipeline: wgpu::ComputePipeline,
+    compose_bind_group: wgpu::BindGroup,
+    mip_pipeline: wgpu::ComputePipeline,
+    mip_bind_groups: Vec<wgpu::BindGroup>,
+    job_buffer: wgpu::Buffer,
+    _source_tiles: wgpu::Texture,
+    _edge_tiles: wgpu::Texture,
+    _macro_lattice: wgpu::Texture,
+    _cell_buffer: wgpu::Buffer,
+    _color_cache: wgpu::Texture,
+    _edge_cache: wgpu::Texture,
+    color_view: wgpu::TextureView,
+    edge_view: wgpu::TextureView,
+    page_tables: [wgpu::Texture; 2],
+    page_table_views: [wgpu::TextureView; 2],
+    config_buffer: wgpu::Buffer,
 }
 
 fn upload_mipmapped_terrain_texture(
@@ -910,127 +841,403 @@ fn write_texture_mip(
     Ok(())
 }
 
-impl TerrainDetailGpu {
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+impl VirtualTerrainGpu {
+    #[allow(clippy::too_many_lines)]
     fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        layout: &wgpu::BindGroupLayout,
-        sampler: &wgpu::Sampler,
-        patch: &TerrainDetailPatch,
+        terrain: &StagedTerrain,
+        requests: &[TerrainDetailRequest],
+        view: VirtualPageView,
     ) -> Result<Self, ViewerError> {
-        let camera_uniform = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("cic-render terrain detail camera"),
-            size: CAMERA_UNIFORM_BYTES,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        let source = terrain.virtual_source()?;
+        let source_extent = source
+            .source_tile_grid_width()
+            .checked_mul(64)
+            .ok_or(RenderError::TextureTooLarge)?;
+        let source_tiles = upload_rgba_texture(
+            device,
+            queue,
+            "cic-render virtual terrain source tiles",
+            source_extent,
+            source_extent,
+            wgpu::TextureFormat::Rgba8Unorm,
+            source.source_tile_atlas_rgba(),
+        )?;
+        let edge_extent = source
+            .edge_tile_grid_width()
+            .checked_mul(32)
+            .ok_or(RenderError::TextureTooLarge)?;
+        let edge_tiles = upload_rgba_texture(
+            device,
+            queue,
+            "cic-render virtual terrain edge tiles",
+            edge_extent,
+            edge_extent,
+            wgpu::TextureFormat::Rgba8Unorm,
+            source.edge_tile_atlas_rgba(),
+        )?;
+        let macro_size = source.macro_lattice_size();
+        let macro_lattice = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("cic-render virtual terrain macro lattice"),
+            size: wgpu::Extent3d {
+                width: macro_size[0],
+                height: macro_size[1],
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Uint,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            macro_lattice.as_image_copy(),
+            source.macro_lattice(),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(macro_size[0]),
+                rows_per_image: Some(macro_size[1]),
+            },
+            wgpu::Extent3d {
+                width: macro_size[0],
+                height: macro_size[1],
+                depth_or_array_layers: 1,
+            },
+        );
+        let cell_buffer = upload_buffer(
+            device,
+            queue,
+            "cic-render virtual terrain cells",
+            source.cell_bytes(),
+            wgpu::BufferUsages::STORAGE,
+        )?;
+        let job_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cic-render virtual terrain page jobs"),
+            size: u64::try_from(VIRTUAL_PAGE_LAYERS * 32)
+                .map_err(|_| RenderError::TextureTooLarge)?,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let texture = upload_mipmapped_terrain_texture(
-            device,
-            queue,
-            "cic-render terrain detail texture",
-            patch.texture_width(),
-            patch.texture_height(),
-            patch.texture_rgba(),
-            patch.texture_mips(),
-        )?;
-        let edge_texture = upload_mipmapped_terrain_texture(
-            device,
-            queue,
-            "cic-render terrain detail edge texture",
-            patch.texture_width(),
-            patch.texture_height(),
-            patch.edge_texture_rgba(),
-            patch.edge_texture_mips(),
-        )?;
-        let bind_group = detail_bind_group(
-            device,
-            layout,
-            &texture,
-            sampler,
-            &camera_uniform,
-            "cic-render terrain detail bind group",
-        );
-        let edge_bind_group = detail_bind_group(
-            device,
-            layout,
-            &edge_texture,
-            sampler,
-            &camera_uniform,
-            "cic-render terrain detail edge bind group",
-        );
-        let vertices = patch.vertex_bytes();
-        let vertex_buffer = upload_buffer(
-            device,
-            queue,
-            "cic-render terrain detail vertices",
-            &vertices,
-            wgpu::BufferUsages::VERTEX,
-        )?;
-        let indices = patch.index_bytes();
-        let index_buffer = upload_buffer(
-            device,
-            queue,
-            "cic-render terrain detail indices",
-            &indices,
-            wgpu::BufferUsages::INDEX,
-        )?;
-        let edge_index_count = patch.edge_index_count()?;
-        let edge_index_buffer = if edge_index_count == 0 {
-            None
-        } else {
-            let bytes = patch.edge_index_bytes();
-            Some(upload_buffer(
-                device,
-                queue,
-                "cic-render terrain detail edge indices",
-                &bytes,
-                wgpu::BufferUsages::INDEX,
-            )?)
+        let page_texture = |label| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width: VIRTUAL_PAGE_EXTENT,
+                    height: VIRTUAL_PAGE_EXTENT,
+                    depth_or_array_layers: u32::try_from(VIRTUAL_PAGE_LAYERS).unwrap_or(64),
+                },
+                mip_level_count: VIRTUAL_PAGE_MIPS,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
+                view_formats: &[],
+            })
         };
-        Ok(Self {
-            _texture: texture,
-            _edge_texture: edge_texture,
-            bind_group,
-            edge_bind_group,
-            vertex_buffer,
-            index_buffer,
-            edge_index_buffer,
-            index_count: patch.index_count()?,
-            edge_index_count,
-            fade_uv: patch.fade_uv(),
-            camera_uniform,
-        })
+        let color_cache = page_texture("cic-render virtual terrain color pages");
+        let edge_cache = page_texture("cic-render virtual terrain edge pages");
+        let color_view = color_cache.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("cic-render virtual terrain color page view"),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        let edge_view = edge_cache.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("cic-render virtual terrain edge page view"),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        let config_values = [
+            source.cell_size()[0],
+            source.cell_size()[1],
+            source.source_tile_grid_width(),
+            source.edge_tile_grid_width(),
+            u32::from(source.modern()),
+            VIRTUAL_PAGE_EXTENT,
+            VIRTUAL_PAGE_BORDER,
+            VIRTUAL_PAGE_INTERIOR,
+        ];
+        let config_bytes = config_values
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect::<Vec<_>>();
+        let config_buffer = upload_buffer(
+            device,
+            queue,
+            "cic-render virtual terrain config",
+            &config_bytes,
+            wgpu::BufferUsages::UNIFORM,
+        )?;
+
+        let compose_layout = create_virtual_compose_layout(device);
+        let mip_layout = create_virtual_mip_layout(device);
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("cic-render virtual terrain compute shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("terrain_virtual.wgsl").into()),
+        });
+        let compose_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("cic-render virtual terrain compose pipeline layout"),
+                bind_group_layouts: &[Some(&compose_layout)],
+                immediate_size: 0,
+            });
+        let compose_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("cic-render virtual terrain compose pipeline"),
+            layout: Some(&compose_pipeline_layout),
+            module: &shader,
+            entry_point: Some("compose_page"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            cache: None,
+        });
+        let color_base_view = mip_view(&color_cache, 0, "virtual color compose target");
+        let edge_base_view = mip_view(&edge_cache, 0, "virtual edge compose target");
+        let source_view = source_tiles.create_view(&wgpu::TextureViewDescriptor::default());
+        let source_edge_view = edge_tiles.create_view(&wgpu::TextureViewDescriptor::default());
+        let macro_view = macro_lattice.create_view(&wgpu::TextureViewDescriptor::default());
+        let compose_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("cic-render virtual terrain compose bind group"),
+            layout: &compose_layout,
+            entries: &[
+                texture_binding(0, &source_view),
+                texture_binding(1, &source_edge_view),
+                texture_binding(2, &macro_view),
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: cell_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: job_buffer.as_entire_binding(),
+                },
+                texture_binding(5, &color_base_view),
+                texture_binding(6, &edge_base_view),
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: config_buffer.as_entire_binding(),
+                },
+            ],
+        });
+        let empty_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("cic-render virtual terrain empty group"),
+            entries: &[],
+        });
+        let mip_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("cic-render virtual terrain mip pipeline layout"),
+            bind_group_layouts: &[Some(&empty_layout), Some(&mip_layout)],
+            immediate_size: 0,
+        });
+        let mip_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("cic-render virtual terrain mip pipeline"),
+            layout: Some(&mip_pipeline_layout),
+            module: &shader,
+            entry_point: Some("downsample_page"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            cache: None,
+        });
+        let mut mip_bind_groups = Vec::new();
+        for mip in 1..VIRTUAL_PAGE_MIPS {
+            let previous_color = mip_view(&color_cache, mip - 1, "virtual color mip source");
+            let previous_edge = mip_view(&edge_cache, mip - 1, "virtual edge mip source");
+            let target_color = mip_view(&color_cache, mip, "virtual color mip target");
+            let target_edge = mip_view(&edge_cache, mip, "virtual edge mip target");
+            mip_bind_groups.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("cic-render virtual terrain mip bind group"),
+                layout: &mip_layout,
+                entries: &[
+                    texture_binding(0, &previous_color),
+                    texture_binding(1, &previous_edge),
+                    texture_binding(2, &target_color),
+                    texture_binding(3, &target_edge),
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: job_buffer.as_entire_binding(),
+                    },
+                ],
+            }));
+        }
+
+        let mut cache = VirtualPageCache::new(source.cell_size());
+        let page_table = |level: usize| {
+            let size = cache.table_size(level);
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("cic-render virtual terrain page table"),
+                size: wgpu::Extent3d {
+                    width: size[0],
+                    height: size[1],
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R32Uint,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            })
+        };
+        let page_tables = [page_table(0), page_table(1)];
+        let page_table_views = [
+            page_tables[0].create_view(&wgpu::TextureViewDescriptor::default()),
+            page_tables[1].create_view(&wgpu::TextureViewDescriptor::default()),
+        ];
+        let update = cache.update(requests, view);
+        write_page_tables(queue, &cache, &page_tables);
+        let mut virtual_terrain = Self {
+            cache,
+            pending_jobs: update.jobs,
+            compose_pipeline,
+            compose_bind_group,
+            mip_pipeline,
+            mip_bind_groups,
+            job_buffer,
+            _source_tiles: source_tiles,
+            _edge_tiles: edge_tiles,
+            _macro_lattice: macro_lattice,
+            _cell_buffer: cell_buffer,
+            _color_cache: color_cache,
+            _edge_cache: edge_cache,
+            color_view,
+            edge_view,
+            page_tables,
+            page_table_views,
+            config_buffer,
+        };
+        virtual_terrain.write_jobs(queue);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("cic-render initial virtual terrain pages"),
+        });
+        virtual_terrain.encode(&mut encoder);
+        queue.submit([encoder.finish()]);
+        Ok(virtual_terrain)
+    }
+
+    fn update_residency(
+        &mut self,
+        queue: &wgpu::Queue,
+        requests: &[TerrainDetailRequest],
+        view: VirtualPageView,
+    ) {
+        let update = self.cache.update(requests, view);
+        if update.tables_changed {
+            write_page_tables(queue, &self.cache, &self.page_tables);
+        }
+        if !update.jobs.is_empty() {
+            self.pending_jobs = update.jobs;
+            self.write_jobs(queue);
+        }
+    }
+
+    fn write_jobs(&self, queue: &wgpu::Queue) {
+        if self.pending_jobs.is_empty() {
+            return;
+        }
+        let mut bytes = Vec::with_capacity(self.pending_jobs.len() * 32);
+        for job in &self.pending_jobs {
+            job.write_bytes(&mut bytes);
+        }
+        queue.write_buffer(&self.job_buffer, 0, &bytes);
+    }
+
+    fn encode(&mut self, encoder: &mut wgpu::CommandEncoder) {
+        let Ok(job_count) = u32::try_from(self.pending_jobs.len()) else {
+            return;
+        };
+        if job_count == 0 {
+            return;
+        }
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("cic-render virtual terrain compose pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.compose_pipeline);
+            pass.set_bind_group(0, &self.compose_bind_group, &[]);
+            pass.dispatch_workgroups(
+                VIRTUAL_PAGE_EXTENT.div_ceil(8),
+                VIRTUAL_PAGE_EXTENT.div_ceil(8),
+                job_count,
+            );
+        }
+        for (index, bind_group) in self.mip_bind_groups.iter().enumerate() {
+            let mip = u32::try_from(index).unwrap_or(0) + 1;
+            let extent = (VIRTUAL_PAGE_EXTENT >> mip).max(1);
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("cic-render virtual terrain mip pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.mip_pipeline);
+            pass.set_bind_group(1, bind_group, &[]);
+            pass.dispatch_workgroups(extent.div_ceil(8), extent.div_ceil(8), job_count);
+        }
+        self.pending_jobs.clear();
     }
 }
 
-fn detail_bind_group(
+fn upload_rgba_texture(
     device: &wgpu::Device,
-    layout: &wgpu::BindGroupLayout,
-    texture: &wgpu::Texture,
-    sampler: &wgpu::Sampler,
-    camera_uniform: &wgpu::Buffer,
+    queue: &wgpu::Queue,
     label: &str,
-) -> wgpu::BindGroup {
-    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    device.create_bind_group(&wgpu::BindGroupDescriptor {
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+    rgba: &[u8],
+) -> Result<wgpu::Texture, RenderError> {
+    let expected = usize::try_from(u64::from(width) * u64::from(height) * 4)
+        .map_err(|_| RenderError::TextureTooLarge)?;
+    if rgba.len() != expected {
+        return Err(RenderError::InvalidTexture);
+    }
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
-        layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::Sampler(sampler),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: camera_uniform.as_entire_binding(),
-            },
-        ],
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    write_texture_mip(queue, &texture, 0, width, height, rgba)?;
+    Ok(texture)
+}
+
+fn mip_view(texture: &wgpu::Texture, mip: u32, label: &'static str) -> wgpu::TextureView {
+    texture.create_view(&wgpu::TextureViewDescriptor {
+        label: Some(label),
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        base_mip_level: mip,
+        mip_level_count: Some(1),
+        ..Default::default()
     })
+}
+
+fn write_page_tables(queue: &wgpu::Queue, cache: &VirtualPageCache, textures: &[wgpu::Texture; 2]) {
+    for (level, texture) in textures.iter().enumerate() {
+        let size = cache.table_size(level);
+        let bytes = cache
+            .table(level)
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>();
+        queue.write_texture(
+            texture.as_image_copy(),
+            &bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(size[0] * 4),
+                rows_per_image: Some(size[1]),
+            },
+            wgpu::Extent3d {
+                width: size[0],
+                height: size[1],
+                depth_or_array_layers: 1,
+            },
+        );
+    }
 }
 
 fn upload_buffer(
@@ -1056,7 +1263,8 @@ impl TerrainViewerGpu {
         window: Arc<Window>,
         display: OwnedDisplayHandle,
         terrain: &StagedTerrain,
-        details: &[TerrainDetailPatch],
+        requests: &[TerrainDetailRequest],
+        page_view: VirtualPageView,
         water: &StagedWater,
         water_appearance: &WaterAppearance,
     ) -> Result<Self, ViewerError> {
@@ -1119,24 +1327,6 @@ impl TerrainViewerGpu {
             Some(wgpu::BlendState::ALPHA_BLENDING),
             false,
         );
-        let detail_pipeline = create_terrain_pipeline(
-            &device,
-            &shader,
-            &pipeline_layout,
-            "cic-render terrain viewer detail pipeline",
-            "detail_fragment_main",
-            Some(wgpu::BlendState::ALPHA_BLENDING),
-            false,
-        );
-        let detail_edge_pipeline = create_terrain_pipeline(
-            &device,
-            &shader,
-            &pipeline_layout,
-            "cic-render terrain viewer detail edge pipeline",
-            "detail_fragment_main",
-            Some(wgpu::BlendState::ALPHA_BLENDING),
-            false,
-        );
         let deferred_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cic-render deferred resolve shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("terrain_deferred.wgsl").into()),
@@ -1195,6 +1385,8 @@ impl TerrainViewerGpu {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let virtual_terrain =
+            VirtualTerrainGpu::new(&device, &queue, terrain, requests, page_view)?;
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("cic-render terrain viewer bind group"),
             layout: &layout,
@@ -1210,6 +1402,13 @@ impl TerrainViewerGpu {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: camera_uniform.as_entire_binding(),
+                },
+                texture_binding(3, &virtual_terrain.color_view),
+                texture_binding(4, &virtual_terrain.page_table_views[0]),
+                texture_binding(5, &virtual_terrain.page_table_views[1]),
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: virtual_terrain.config_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -1243,6 +1442,13 @@ impl TerrainViewerGpu {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: camera_uniform.as_entire_binding(),
+                },
+                texture_binding(3, &virtual_terrain.edge_view),
+                texture_binding(4, &virtual_terrain.page_table_views[0]),
+                texture_binding(5, &virtual_terrain.page_table_views[1]),
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: virtual_terrain.config_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -1279,16 +1485,6 @@ impl TerrainViewerGpu {
             queue.write_buffer(&buffer, 0, &bytes);
             Some(buffer)
         };
-        let details = details
-            .iter()
-            .map(|detail| {
-                Ok(TerrainDetailTierGpu {
-                    current: TerrainDetailGpu::new(&device, &queue, &layout, &sampler, detail)?,
-                    previous: None,
-                    transition_started: 0.0,
-                })
-            })
-            .collect::<Result<Vec<_>, ViewerError>>()?;
         let water = if water.indices().is_empty() {
             None
         } else {
@@ -1328,18 +1524,14 @@ impl TerrainViewerGpu {
             queue,
             pipeline,
             edge_pipeline,
-            detail_pipeline,
-            detail_edge_pipeline,
             lighting_pipeline,
             composite_pipeline,
             water_pipeline,
-            layout,
             lighting_layout,
             composite_layout,
             water_layout,
             _texture: texture,
             _edge_texture: edge_texture,
-            sampler,
             camera_uniform,
             bind_group,
             edge_bind_group,
@@ -1348,7 +1540,7 @@ impl TerrainViewerGpu {
             edge_index_buffer,
             index_count,
             edge_index_count,
-            details,
+            virtual_terrain,
             water,
             water_appearance,
             deferred,
@@ -1357,26 +1549,13 @@ impl TerrainViewerGpu {
         })
     }
 
-    fn update_detail(
+    fn update_virtual_residency(
         &mut self,
-        index: usize,
-        detail: &TerrainDetailPatch,
-        presentation_seconds: f32,
-    ) -> Result<(), ViewerError> {
-        let replacement = TerrainDetailGpu::new(
-            &self.device,
-            &self.queue,
-            &self.layout,
-            &self.sampler,
-            detail,
-        )?;
-        let target = self
-            .details
-            .get_mut(index)
-            .ok_or(RenderError::InvalidTexture)?;
-        target.previous = Some(std::mem::replace(&mut target.current, replacement));
-        target.transition_started = presentation_seconds;
-        Ok(())
+        requests: &[TerrainDetailRequest],
+        view: VirtualPageView,
+    ) {
+        self.virtual_terrain
+            .update_residency(&self.queue, requests, view);
     }
 
     fn resize(&mut self, size: PhysicalSize<u32>) {
@@ -1447,43 +1626,6 @@ impl TerrainViewerGpu {
                 water_material,
             ),
         );
-        for tier in &mut self.details {
-            let transition = tier.previous.as_ref().map_or(1.0, |_| {
-                ((presentation_seconds - tier.transition_started) / DETAIL_TRANSITION_SECONDS)
-                    .clamp(0.0, 1.0)
-            });
-            if transition >= 1.0 {
-                tier.previous = None;
-            }
-            if let Some(previous) = &tier.previous {
-                self.queue.write_buffer(
-                    &previous.camera_uniform,
-                    0,
-                    &camera_bytes(
-                        matrix,
-                        camera.position,
-                        presentation_seconds,
-                        viewport,
-                        previous.fade_uv,
-                        [1.0, 0.0],
-                        water_material,
-                    ),
-                );
-            }
-            self.queue.write_buffer(
-                &tier.current.camera_uniform,
-                0,
-                &camera_bytes(
-                    matrix,
-                    camera.position,
-                    presentation_seconds,
-                    viewport,
-                    tier.current.fade_uv,
-                    [transition, 0.0],
-                    water_material,
-                ),
-            );
-        }
         let view = surface_texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -1496,6 +1638,7 @@ impl TerrainViewerGpu {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("cic-render terrain viewer encoder"),
             });
+        self.virtual_terrain.encode(&mut encoder);
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("cic-render terrain G-buffer pass"),
@@ -1535,24 +1678,6 @@ impl TerrainViewerGpu {
                 pass.set_bind_group(0, &self.edge_bind_group, &[]);
                 pass.set_index_buffer(edge_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..self.edge_index_count, 0, 0..1);
-            }
-            for tier in &self.details {
-                for detail in tier.previous.iter().chain(std::iter::once(&tier.current)) {
-                    pass.set_pipeline(&self.detail_pipeline);
-                    pass.set_bind_group(0, &detail.bind_group, &[]);
-                    pass.set_vertex_buffer(0, detail.vertex_buffer.slice(..));
-                    pass.set_index_buffer(detail.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..detail.index_count, 0, 0..1);
-                    if let Some(edge_index_buffer) = &detail.edge_index_buffer {
-                        pass.set_pipeline(&self.detail_edge_pipeline);
-                        pass.set_bind_group(0, &detail.edge_bind_group, &[]);
-                        pass.set_index_buffer(
-                            edge_index_buffer.slice(..),
-                            wgpu::IndexFormat::Uint32,
-                        );
-                        pass.draw_indexed(0..detail.edge_index_count, 0, 0..1);
-                    }
-                }
             }
         }
         {
@@ -1647,8 +1772,136 @@ fn create_terrain_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
                 },
                 count: None,
             },
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            integer_texture_layout_entry(4),
+            integer_texture_layout_entry(5),
+            wgpu::BindGroupLayoutEntry {
+                binding: 6,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(32),
+                },
+                count: None,
+            },
         ],
     })
+}
+
+fn create_virtual_compose_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("cic-render virtual terrain compose layout"),
+        entries: &[
+            compute_texture_layout_entry(0, wgpu::TextureSampleType::Float { filterable: false }),
+            compute_texture_layout_entry(1, wgpu::TextureSampleType::Float { filterable: false }),
+            compute_texture_layout_entry(2, wgpu::TextureSampleType::Uint),
+            storage_buffer_layout_entry(3),
+            storage_buffer_layout_entry(4),
+            storage_texture_layout_entry(5),
+            storage_texture_layout_entry(6),
+            wgpu::BindGroupLayoutEntry {
+                binding: 7,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(32),
+                },
+                count: None,
+            },
+        ],
+    })
+}
+
+fn create_virtual_mip_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("cic-render virtual terrain mip layout"),
+        entries: &[
+            compute_array_texture_layout_entry(0),
+            compute_array_texture_layout_entry(1),
+            storage_texture_layout_entry(2),
+            storage_texture_layout_entry(3),
+            storage_buffer_layout_entry(4),
+        ],
+    })
+}
+
+fn compute_texture_layout_entry(
+    binding: u32,
+    sample_type: wgpu::TextureSampleType,
+) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Texture {
+            sample_type,
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
+fn compute_array_texture_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+            view_dimension: wgpu::TextureViewDimension::D2Array,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
+fn storage_buffer_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only: true },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
+}
+
+fn storage_texture_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::StorageTexture {
+            access: wgpu::StorageTextureAccess::WriteOnly,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            view_dimension: wgpu::TextureViewDimension::D2Array,
+        },
+        count: None,
+    }
+}
+
+fn integer_texture_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Uint,
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    }
 }
 
 fn create_terrain_pipeline(
@@ -2146,9 +2399,21 @@ fn normalize(value: [f32; 3]) -> [f32; 3] {
     [value[0] / length, value[1] / length, value[2] / length]
 }
 
+fn ray_distance_for_view_depth(
+    direction: [f32; 3],
+    forward: [f32; 3],
+    maximum_depth: f32,
+) -> Option<f32> {
+    let forward_scale = dot(direction, forward);
+    (forward_scale > f32::EPSILON).then_some(maximum_depth / forward_scale)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{TerrainCamera, TerrainInput, gray_mip, look_to, multiply_matrix, perspective};
+    use super::{
+        TerrainCamera, TerrainInput, gray_mip, look_to, multiply_matrix, perspective,
+        ray_distance_for_view_depth,
+    };
 
     #[test]
     fn caustic_mips_average_odd_linear_frames_without_dropping_edges() {
@@ -2231,7 +2496,13 @@ mod tests {
             limited_minimum
                 .into_iter()
                 .chain(limited_maximum)
-                .all(|value| { value.is_finite() && (-650.001..=650.001).contains(&value) })
+                .all(|value| { value.is_finite() && (-2_000.0..=2_000.0).contains(&value) })
         );
+        assert!(limited_minimum[1] < -650.0 && limited_maximum[1] > 650.0);
+        let diagonal = super::normalize([1.0, 1.0, 0.0]);
+        let ray_distance = ray_distance_for_view_depth(diagonal, [1.0, 0.0, 0.0], 650.0)
+            .expect("forward-facing ray");
+        assert!(ray_distance > 650.0);
+        assert!((super::dot(diagonal, [1.0, 0.0, 0.0]) * ray_distance - 650.0).abs() < 0.001);
     }
 }
