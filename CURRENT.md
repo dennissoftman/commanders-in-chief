@@ -78,9 +78,12 @@ refresh-rate, and UI-scale controls with transactional confirmation/rollback.
   straight-alpha images; the GLB form embeds them as image buffer views. W3D `ONE + ONE`
   materials additionally receive a separate derived alpha-coverage image for the visible
   core-glTF preview because core glTF has no additive framebuffer blend equation.
-- Generals is the default installed-resource profile. `--zh` deterministically overlays
-  Zero Hour on its Generals base; `--game-dir`, saved configuration, environment roots, and
-  validated Steam discovery avoid repeated archive arguments.
+- Generals is the default installed-resource profile. `--zh` deterministically enumerates and
+  mounts Generals providers first, Zero Hour providers second, and explicit mods last. Opaque
+  replacement resources use the last-mounted winner; cumulative definition formats parse full VFS
+  history earliest-to-latest so partial Zero Hour files retain inherited Generals definitions.
+  `--game-dir`, saved configuration, environment roots, and validated Steam discovery avoid
+  repeated archive arguments.
 - The synthetic completion artifact splits model, hierarchy, animation, and texture data
   across W3Ds and two BIGs. Retail Generals and Zero Hour exports succeeded; Blender 3.3
   imported a self-contained GLB with a 32-joint Zero Hour skin and 23 animation actions.
@@ -153,13 +156,15 @@ refresh-rate, and UI-scale controls with transactional confirmation/rollback.
   the format has no generic child-container marker.
 - `HeightMapData` versions 1 through 4 decode into immutable stored dimensions, border, boundaries,
   cell spacing, and exact row-major byte samples under explicit dimension/allocation limits.
+  Version-4 boundary pairs remain signed source metadata; negative coordinates are preserved.
 - `cic-inspect map` and `map-height --report` produce stable VFS-backed reports; `map-height`
   writes exact row-major samples as a deterministic 8-bit grayscale PNG by default. The original
   synthetic MAP and BIG completion artifact pass, including version dispatch and negative tests.
 - `BlendTileData` versions 6 and 7 decode into bounded immutable signed tile-index planes, terrain
   and edge texture classes, blend selector records, and finite cliff UV records. Version 6 derives
   cliff flags from neighboring heights using the source threshold; version 7 normalizes its stored
-  short-stride bitmap. `cic-inspect map-blend` preserves stable source order and exact UV bits.
+  short-stride bitmap. Source-compatible zero cliff-info counts retain raw zero and produce an
+  empty table. `cic-inspect map-blend` preserves stable source order and exact UV bits.
 - One user-owned installed RefPack MAP closed at 1,781,076 decompressed bytes as 46 symbols and 8
   chunks; its version-4 380-by-400 height field validated 152,000 samples. Its version-7 blend
   payload validated the same 152,000 cells, 204 bitmap tiles, 7,772 blend table entries, 14 terrain
@@ -168,8 +173,8 @@ refresh-rate, and UI-scale controls with transactional confirmation/rollback.
 - `map-height` now writes an 8-bit grayscale PNG by default, deriving the filename from the MAP
   resource basename; `--report` retains the stable text report and `--png` overrides the path.
 - A bounded Terrain INI decoder preserves ordered declarations. `map-render` applies explicit
-  `DefaultTerrain` inheritance/override semantics and resolves semantic MAP texture classes through
-  the VFS-backed `Art/Terrain` sheets from the Terrain and INI archive profiles.
+  `DefaultTerrain` inheritance/override semantics across every provider in stable base-to-overlay
+  VFS history and resolves semantic MAP texture classes through VFS-backed `Art/Terrain` sheets.
 - `cic-render` stages source-scaled height geometry, per-cell base/primary/extra layers, blend- and
   cliff-selected triangle diagonals, packed 64-pixel tile quadrants, source-rounded mip reduction,
   and deterministic procedural alpha masks without owning parser, VFS, filesystem, or clock state.
@@ -181,14 +186,21 @@ refresh-rate, and UI-scale controls with transactional confirmation/rollback.
   boost, right-mouse look, wheel dolly, and reset controls. The installed Generals viewer remained
   live through resource staging, GPU upload, surface creation, and camera rendering.
 - `map-view` uploads immutable semantic cells and compact 64/32-pixel source-tile atlases once, then
-  composes bordered 16/32-texel pages in compute shaders. A persistent 128-layer physical cache and
+  composes bordered 16/32-texel pages in compute shaders. A persistent 256-layer physical cache and
   stable two-level page tables reuse revisited regions; the deterministic 8-texel background is the
   guaranteed fallback when a page is absent. Angled views use camera-space depth and projected page
   bounds, reserving coarse visible coverage before fine upgrades instead of selecting a world-axis
   square around the footprint midpoint.
-- Viewer-only derivative normals and an explicit directional preview light improve slope
-  readability without altering staged terrain or headless completion hashes. The installed
-  Generals window remained live with the detail and lighting path active; no capture was retained.
+- Detail demand extends slightly beyond the visible density crossover and the fragment path
+  distance-cross-fades fine, coarse, and fallback samples. The larger cache prevents a long
+  inward-facing frustum from exhausting residency before fine pages are considered, removing the
+  map-edge-dependent half-turn asymmetry. Keyboard and wheel movement integrate an explicit
+  first-order velocity response, so acceleration and deceleration are smooth and frame-rate
+  independent.
+- Viewer-only smooth normals are derived from bounded neighboring height samples, and an explicit
+  directional preview light improves slope readability without altering source geometry or
+  headless completion hashes. The installed Generals window remained live with the detail and
+  lighting path active; no capture was retained.
 - Terrain, custom-edge, and nested-detail pipelines cull clockwise back faces from the established
   counter-clockwise height-field winding. Synthetic headless capture hashes remain unchanged;
   water remains a separately ordered material rather than inheriting terrain culling policy.
@@ -196,14 +208,19 @@ refresh-rate, and UI-scale controls with transactional confirmation/rollback.
   water/river flags, identifiers, names, seam indices, and integer points while skipping general
   trigger semantics and allocations for non-water points. Degenerate markers are preserved and
   safely produce no renderer geometry.
+- River staging uses the stored seam index exactly as the source renderer does: one bank advances
+  through the perimeter while the other retreats with bounded wraparound, producing stable paired
+  cross-sections instead of pairing adjacent points on the same bank. Invalid seam metadata safely
+  produces no geometry.
 - `map-water` emits a stable water-only report. Synthetic tests cover every truncated prefix,
   explicit trigger/name/point limits, established version dispatch, degenerate markers, and stable
   lake-fan/river-strip triangulation.
-- `map-view` now writes opaque terrain, custom edges, and near detail into albedo,
-  normal/roughness, world-position, and depth targets, resolves directional lighting into linear
-  `RGBA16F`, tone maps to the surface, then renders water in a depth-tested/no-depth-write forward
-  pass. The original project shader applies thickness absorption, refraction, Fresnel sky response,
-  specular, and shallow foam; no legacy water-rendering algorithm was translated.
+- `map-view` writes opaque terrain and near detail into albedo, normal/roughness, world-position,
+  and depth targets. Custom edges alpha-composite only into albedo, leaving the base terrain's
+  geometry buffers intact. Directional lighting resolves into linear `RGBA16F`, tone maps to the
+  surface, then renders water in a depth-tested/no-depth-write forward pass. The original project
+  shader applies thickness absorption, refraction, Fresnel sky response, specular, and shallow
+  foam; no legacy water-rendering algorithm was translated.
 - `Modern` terrain policy applies deterministic world-anchored integer macro variation after
   authored layer composition without rotating or mirroring content. Repeated staging and full
   versus streamed 32-pixel bakes are byte-identical; legacy headless output remains unchanged.
@@ -223,6 +240,56 @@ refresh-rate, and UI-scale controls with transactional confirmation/rollback.
   project-authored water shader projects those subtle frames on the underwater bed, reaches source
   opacity 1.0 by depth 3.0 in the observed default profile, and restores shallow shoreline haze
   and an animated crest without translating legacy fixed-function equations.
+- `GlobalLighting` versions 1 through 3 decode into four ordered time variants with separate
+  terrain/object sun and versioned accent records, finite exact-bit scalars, a validated one-based
+  selected time, and optional packed shadow color. `map-lighting` produces a stable VFS-backed
+  report; its original synthetic BIG artifact and every-truncated-prefix tests pass.
+- A user-owned installed USA05 MAP closed as `GlobalLighting` version 3 with afternoon selected,
+  four time variants, three terrain and three object lights per variant, and a final shadow color.
+  Only these aggregate facts were retained; no MAP bytes or scalar values were copied.
+- The complete source-established `WaterSet` and `WaterTransparency` INI field tables now decode
+  under explicit file, line, definition, string, scalar, count, color, nesting, and closure limits.
+  `map-view` uses the MAP-selected terrain sun/accents for deferred terrain and forward-water
+  specular response. Default legacy water starts from the source constructor defaults, applies
+  every global provider in stable base-to-overlay order and then the sibling `Map.ini`, and resolves
+  the selected WaterSet diffuse color/alpha plus the WaterTransparency standing texture, color
+  override, additive policy, minimum opacity, opaque depth, and animation rate. Maps without a
+  lighting chunk retain the explicitly documented preview fallback.
+- Source integer RGBA syntax permits alpha to be omitted and defaults it to 255. The installed
+  Generals Water INI exercised this form on vertex colors; USA01 then cleared parsing and resource
+  staging and remained in the live viewer until the controlled smoke timeout. No capture or retail
+  values were retained.
+- `WaterTransparency` standing/radar colors use source byte-RGB syntax and normalize once into the
+  renderer-neutral model. The installed Zero Hour profile exercised this form while loading Bridge
+  Busters, which cleared configuration/resource staging and remained live for a controlled
+  12-second optimized viewer smoke. No retail configuration bytes or values were retained.
+- Virtual-page residency is now independent of sampled custom-edge alpha, preserving authored
+  transparent gaps rather than filling them from lower-resolution fallbacks. Edge draws no longer
+  blend normal/world-position targets, and viewer vertex normals smooth the source height grid.
+  The optimized USA01 viewer remained live for a controlled 12-second GPU smoke after these fixes;
+  no capture or retail data was retained.
+- USA01's version-7 blend data reports 23 terrain classes and 8,425 ordinary blend records but zero
+  custom-edge tiles/classes. Its isolated stair-step road transition is therefore map-authored
+  ordinary cell blending, not a custom-edge renderer artifact. Only these aggregate facts were
+  retained.
+- The default legacy water policy now samples the installed source standing-water texture with its
+  selected diffuse tint/alpha, source additive choice, and depth-derived shoreline coverage. It
+  alpha-composites over the scene instead of overwriting it with the Modern diagnostic material;
+  `--terrain-policy modern` explicitly retains the refractive branch. The optimized USA01 viewer
+  resolved those inputs and remained live for a controlled 12-second smoke. No capture or retail
+  asset was retained.
+- Optimized smokes verified that Generals USA01 resolves its constructor-default standing texture,
+  Zero Hour CHI01 inherits a terrain class from the shadowed Generals Terrain INI, and USA07 accepts
+  its source-compatible empty cliff-info table. Each viewer remained live until the controlled
+  timeout; no retail bytes or captures were retained.
+- USA06 contains one renderable static reservoir water polygon and two degenerate water markers.
+  Its downstream channel is traced by ambient water-loop objects and dam mission state rather than
+  a second static water polygon. The viewer now applies its map-local water override to the static
+  reservoir; R3 preserves but does not execute the downstream mission script state. Only aggregate
+  observations were retained.
+- Final Crusade's version-4 height data verified signed boundary preservation and Heartland Shield's
+  long river verified nonzero-seam bank reconstruction. Both optimized viewers remained live for
+  controlled smokes; no retail bytes, coordinate values, or captures were retained.
 - Controlled release-viewer flight and wheel-dolly probes each compared 47,838 screen samples
   immediately after motion and four seconds later. Both produced zero mean RGB delta and no pixels
   above a three-level RGB threshold, so detail no longer visibly rises after camera motion. No
@@ -268,12 +335,10 @@ refresh-rate, and UI-scale controls with transactional confirmation/rollback.
   bit-identical Direct3D 8 multipass blending.
 - The installed Zero Hour Alpine Assault overlay uses unsupported `BlendTileData` version 8; the
   installed Generals version-7 map remains the verified terrain presentation artifact.
-- MAP-authored terrain lighting is not decoded yet; `map-view` labels its fixed directional light
-  as a presentation preview rather than source-equivalent lighting.
-- Source `WaterSet` colors/textures, time-of-day appearance, and map-specific overrides are not
-  decoded yet; global/default `WaterTransparency` opacity and opaque depth are decoded. SSR, planar
-  reflection probes, and shadows remain later render-quality work. Current water is explicitly WIP
-  and is not accepted as the final R3 visual baseline.
+- Source standing-water texture/color/blend/opacity values now drive the default legacy path, but
+  WaterSet sky/environment textures, map-embedded overrides, shadow receiving/casting, SSR or
+  planar probes, and anti-aliasing remain open. Water is not accepted as the final R3 visual
+  baseline until explicit-time captures and repeatable user-owned comparisons pass.
 - `WorldInfo`, complete `ObjectsList`/`Object` records, road and bridge endpoints, object draw
   definitions, static scenery placement, waypoint/player-start metadata, `SidesList`, teams, build
   lists, non-water polygon semantics, and the nested player-script tree remain opaque. Their R3
@@ -282,9 +347,10 @@ refresh-rate, and UI-scale controls with transactional confirmation/rollback.
 
 ## Next verified step
 
-Decode bounded `GlobalLighting` and remaining source water-set appearance into renderer-neutral
-inputs and use them to improve the WIP forward-water result. Then open the immutable
-`WorldInfo`/`ObjectsList` gate that unlocks roads, bridges, buildings, trees, props, waypoints, and
-player-start inspection. Continue through the ordered R3 gates in `ROADMAP.md`; decode the complete
-map-script tree only as data, with all execution deferred to R5. R4 then consumes the completed R3
-map catalog and spawn previews for its main-menu, skirmish-options, and map-selection UI demo.
+Complete the source-lighting/water presentation gate with WaterSet sky/environment resolution,
+map-embedded water overrides, explicit-time synthetic captures, and repeatable user-owned visual
+comparisons. Then open the immutable `WorldInfo`/`ObjectsList` gate that unlocks roads, bridges,
+buildings, trees, props, waypoints, and player-start inspection. Continue through the ordered R3
+gates in `ROADMAP.md`; decode the complete map-script tree only as data, with all execution deferred
+to R5. R4 then consumes the completed R3 map catalog and spawn previews for its main-menu,
+skirmish-options, and map-selection UI demo.

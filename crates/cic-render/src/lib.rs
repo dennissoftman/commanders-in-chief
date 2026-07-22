@@ -1,5 +1,6 @@
 //! Renderer boundary and deterministic headless capture support.
 
+mod lighting;
 mod model;
 mod resource;
 mod terrain;
@@ -16,6 +17,7 @@ use std::time::Duration;
 use cic_formats::W3dStaticMesh;
 use sha2::{Digest, Sha256};
 
+pub use lighting::{TerrainDirectionalLight, TerrainLighting};
 pub use model::{AnimatedModel, StagedModel};
 pub use resource::{TextureId, TextureImage, TextureResourceManager};
 pub use terrain::{
@@ -25,7 +27,10 @@ pub use terrain::{
 pub use terrain_viewer::run_terrain_viewer;
 use viewer::{GpuResourceManager, MaterialPipelines, create_material_layout};
 pub use viewer::{ViewerError, run_model_viewer};
-pub use water::{StagedWater, WaterAppearance, WaterCausticSequence};
+pub use water::{
+    StagedWater, WaterAppearance, WaterCausticSequence, WaterPresentationPolicy,
+    WaterSurfaceTexture,
+};
 
 const CAPTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const BYTES_PER_PIXEL: u32 = 4;

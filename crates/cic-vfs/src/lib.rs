@@ -429,6 +429,9 @@ impl Vfs {
     }
 
     /// Returns every provider version from earliest to latest mount.
+    ///
+    /// Consumers use this for cumulative definition formats whose later providers partially
+    /// extend or override earlier files. Opaque replacement resources should use [`Self::resolve`].
     #[must_use]
     pub fn history(&self, path: &VirtualPath) -> Option<&[ResourceEntry]> {
         self.entries.get(path).map(Vec::as_slice)

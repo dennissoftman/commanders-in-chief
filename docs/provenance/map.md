@@ -33,6 +33,9 @@
   - `Generals/Code/GameEngine/Source/GameLogic/Map/PolygonTrigger.cpp`
   - `Core/GameEngine/Include/GameClient/Water.h`
   - `Core/GameEngine/Source/GameClient/Water.cpp`
+  - `Core/GameEngine/Source/Common/INI/INIWater.cpp`
+  - `Core/GameEngine/Source/Common/INI/INI.cpp`
+  - `Core/GameEngineDevice/Source/W3DDevice/GameClient/Water/W3DWater.cpp`
 - Planned object, waypoint, road, bridge, and world-metadata boundaries:
   - `Core/GameEngine/Include/Common/MapObject.h`
   - `Core/GameEngine/Source/GameClient/MapUtil.cpp`
@@ -79,6 +82,9 @@
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Generals/Code/GameEngine/Source/GameLogic/Map/PolygonTrigger.cpp>
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/GameEngine/Include/GameClient/Water.h>
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/GameEngine/Source/GameClient/Water.cpp>
+  - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/GameEngine/Source/Common/INI/INIWater.cpp>
+  - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/GameEngine/Source/Common/INI/INI.cpp>
+  - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/GameEngineDevice/Source/W3DDevice/GameClient/Water/W3DWater.cpp>
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/GameEngine/Include/Common/MapObject.h>
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/GameEngine/Source/GameClient/MapUtil.cpp>
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/GameEngine/Include/GameClient/TerrainRoads.h>
@@ -102,7 +108,9 @@ The source establishes the `CkMp` tag, signed symbol count, one-byte symbol-name
 identifier, 10-byte chunk header, signed payload size, last-table-entry-wins lookup behavior, and
 parser-selected nested interpretation. It also establishes height versions 1 through 4, stored
 width and height, version-3 border, version-4 boundary pairs, exact width-times-height sample count,
-row-major byte samples, and the 5/10-unit versioned grid spacing.
+row-major byte samples, and the 5/10-unit versioned grid spacing. Version-4 boundary X/Y values are
+read as signed integers without a nonnegative check; the project therefore preserves them as
+signed metadata while continuing to require nonnegative allocation dimensions and counts.
 
 The pinned blend reader and declarations establish versions 6 and 7's four signed 16-bit cell
 planes, tile/table counts, terrain and edge texture-class records, blend selectors and
@@ -145,10 +153,43 @@ nesting, OR/AND condition records, true/false action lists, typed parameters, so
 and versioned evaluation delay. ADR 0009 requires the project to preserve these records as bounded
 data in R3 without calling the upstream runtime validation/repair or opcode-dispatch behavior.
 
-The WorldBuilder lighting writer establishes `GlobalLighting` version 3; related global-light
-editor data distinguishes terrain from terrain-object ambient/diffuse/vector inputs and ordered
-sun/accent lights across time-of-day variants. Exact field layout still requires its own bounded
-semantic gate and synthetic fixture before implementation claims are added to this document.
+The WorldBuilder writer and runtime reader establish `GlobalLighting` versions 1 through 3. The
+payload begins with the one-based selected time and then four ordered time variants. Version 1 has
+terrain sun followed by object sun; version 2 adds two object accents; version 3 adds two terrain
+accents. Every light writes ambient RGB, diffuse RGB, and XYZ source direction as nine reals. The
+reader consumes one optional final packed shadow color when bytes remain. The project preserves
+these distinctions and exact source order without importing editor defaults.
+
+`Water.cpp` establishes every `WaterSet` field and the complete `WaterTransparency` table;
+`INIWater.cpp` establishes time-name selection, direct `WaterSet` accumulation, and partial
+transparency override behavior. The generic `INI::parseRGBAColorInt` establishes ordered RGB,
+optional alpha defaulting to 255, and inclusive 0-through-255 channels. The project decoder retains
+all fields under explicit resource and value limits. The generic `INI::parseRGBColor` establishes
+that standing/radar colors are also ordered integer 0-through-255 channels and are divided by 255
+when stored as renderer-neutral real RGB values.
+
+`Water.h` establishes the `WaterTransparencySetting` constructor values used before any INI is
+loaded: full minimum opacity, a three-world-unit opaque depth, white standing color, the default
+standing-water texture, and non-additive blending. The installed Generals profile relies on that
+constructor texture because its Water INI does not repeat the field. Resource loading applies all
+mounted provider versions in base-to-overlay order, followed by a sibling map INI, so partial
+edition and map definitions accumulate without mutating the immutable parser output.
+
+`W3DWater.cpp` establishes that standing lakes use `WaterTransparency`'s standing texture and
+optional standing-color override, otherwise modulate the selected `WaterSet` diffuse color/alpha,
+honor the additive flag, repeat the texture at a 150-world-unit scale, draw after opaque terrain
+without writing depth, and use terrain-produced destination alpha for the soft shoreline when
+available. It dispatches non-river water polygons as ordered trapezoid spans and subdivides each
+span at eight terrain cells, while rivers remain paired strips. The project's legacy policy derives
+those resource, blend, scale, and depth-feather semantics but implements them in original bounded
+`wgpu` staging/WGSL rather than copying the Direct3D 8 state machine or shader assembly. Modern
+refraction, absorption, foam, and Fresnel behavior remains separate project-authored policy.
+
+`W3DWater.cpp::drawRiverWater` establishes that a river's stored points are one perimeter and that
+`river_start` is the seam between its banks. It initializes indices on either side of that seam,
+increments one with wraparound, decrements the other with wraparound, emits the resulting pairs,
+and then connects consecutive pairs as quads. The project stages the same bounded point ordering
+without copying the fixed-function river material or shader implementation.
 
 The pinned renderer also establishes that file-stored cliff mappings apply only within one terrain
 texture class, that the legacy fallback stretches UVs only beyond explicit 1.5/2.0/2.4 thresholds
@@ -158,6 +199,11 @@ depend on direction, inversion, diagonal length, and row/column parity. Edge tex
 black mask, white material, and colored decorative regions. The project stages those source facts
 as a bounded deterministic RGBA preview rather than reproducing the complete Direct3D 8 texture
 stage state machine.
+
+`WorldHeightMap.cpp` reads the stored cliff-info count without requiring it to be positive, then
+reads explicit entries only for indices one through count minus one. Runtime index repair falls
+back to the implicit zero entry. The project therefore retains a raw zero count as an empty table
+instead of rejecting the payload or allocating a fabricated record.
 
 The cached input path detects `EAR\0`, reads a signed decompressed length, and dispatches RefPack.
 The pinned decoder establishes the accepted type words, three- or four-byte big-endian inner size,
@@ -230,6 +276,36 @@ the frames, INI text, temporary contact sheet, and viewer capture were not copie
 The implementation loads the resources through the user's VFS at runtime and stores only bounded
 decoded luminance frames in `WaterAppearance`.
 
+On 2026-07-22, USA01's installed version-7 blend data reported 23 terrain classes, 8,425 ordinary
+blend records, and zero custom-edge tiles/classes. This establishes that the isolated stair-step
+road transition observed in the viewer comes from map-authored ordinary cell blends, not the custom
+edge renderer. After the legacy water policy began resolving the installed standing-water texture,
+diffuse alpha, additive flag, and depth opacity, the optimized viewer remained live for a controlled
+12-second smoke. No texture, MAP bytes, or capture were retained.
+
+On 2026-07-22, original synthetic version-1 through version-3 `GlobalLighting` payloads verified
+the exact version additions, four time variants, separate terrain/object source order, optional
+shadow color, every truncated prefix, invalid time, non-finite scalar, and trailing-byte failures.
+A synthetic BIG-backed `map-lighting` artifact checks exact float-bit reporting. Original Water INI
+tests cover every source field, partial repeated definitions, bounded strings/scalars/counts,
+malformed colors/times, nesting, and exact block closure. GPU tests validate the expanded uniform
+layout while existing deterministic terrain capture hashes remain unchanged.
+
+The user-owned installed USA05 MAP then decoded in place as `GlobalLighting` version 3 with
+afternoon selected, four ordered time variants, three terrain and three object lights per variant,
+and a final packed shadow color. The report exited zero and closed exactly. Only these aggregate
+facts were retained; no MAP bytes, scalar values, or report output were copied into the project.
+
+The installed Generals Water INI then exercised three-channel integer vertex colors with omitted
+alpha. After matching the source default-alpha rule, USA01 cleared Water INI parsing, MAP/resource
+staging, GPU upload, and viewer launch, and remained live until the controlled smoke timeout. The
+process was stopped without retaining a capture, INI text, or source color values.
+
+The installed Zero Hour Water INI then exercised byte-RGB standing/radar transparency colors.
+After normalizing those bounded channels at the immutable format boundary, Bridge Busters cleared
+configuration and resource staging and remained live for a controlled 12-second optimized viewer
+smoke. No retail INI bytes, color values, MAP data, or capture were retained.
+
 Controlled release-viewer probes compared screen pixels immediately and four seconds after a
 forward-camera move and, separately, a four-notch wheel dolly. Both 47,838-sample comparisons had
 zero changed pixels above a three-level RGB threshold and zero mean RGB delta, demonstrating that
@@ -255,6 +331,25 @@ temporary captures were deleted.
 
 A 2026-07-22 release smoke of the user-owned Bridge Busters map exited normally after 23 seconds
 with that viewport LOD and filtering path active. No capture or retail-derived data was retained.
+
+Controlled optimized viewer smokes then verified the constructor-default standing-water resource
+on a Generals map, inheritance of a Generals terrain definition beneath a Zero Hour overlay, and a
+version-7 map whose stored cliff-info count is zero. Each remained live until its timeout. Synthetic
+tests reproduce constructor/global/map water precedence, shadowed Terrain INI accumulation, and the
+empty cliff table without retaining retail bytes or values.
+
+The installed USA06 map exposed one renderable static reservoir polygon and two degenerate water
+markers. Ambient water-loop objects trace the downstream channel, while dam mission state governs
+its dynamic presentation. The map-local INI is now part of static water resolution, but R3 does not
+execute mission scripts or fabricate absent water geometry. Only these aggregate observations were
+retained.
+
+A user-owned version-4 map with multiple boundaries then exercised a negative stored boundary
+coordinate and decoded successfully after the signed metadata correction. Another installed map
+supplied one long river perimeter with a nonzero midpoint seam; the source-established bank walk
+reconstructed its paired strip, and both optimized viewers remained live for controlled smokes.
+Only aggregate facts were retained; no retail points, boundary values, MAP bytes, or captures were
+copied into the repository.
 
 ## Implementation record
 

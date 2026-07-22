@@ -3,8 +3,8 @@
 
 //! Interactive free-flight presentation for immutable staged terrain.
 //!
-//! The directional light is a project-authored, viewer-only preview until bounded MAP
-//! `LightingData` decoding supplies the source-authored terrain lights. A persistent fixed-page
+//! Bounded MAP `GlobalLighting` supplies selected source-authored terrain lights; the original
+//! project preview remains only as an explicit fallback for maps without that chunk. A fixed-page
 //! cache composes nested 16/32-texel screen-space detail on the GPU over the stable 8-texel
 //! background. Camera motion changes only residency metadata; it never launches CPU texture bakes.
 
@@ -24,15 +24,20 @@ use crate::terrain_virtual::{
     VIRTUAL_PAGE_MIPS, VirtualPageCache, VirtualPageJob, VirtualPageView,
 };
 use crate::viewer::{ViewerError, create_depth, nonzero_size};
-use crate::{RenderError, StagedTerrain, StagedWater, WaterAppearance};
+use crate::{
+    RenderError, StagedTerrain, StagedWater, TerrainLighting, WaterAppearance,
+    WaterPresentationPolicy,
+};
 
 const WINDOW_WIDTH: u32 = 1_280;
 const WINDOW_HEIGHT: u32 = 800;
-const CAMERA_UNIFORM_BYTES: u64 = 128;
+const CAMERA_UNIFORM_BYTES: u64 = 304;
 const MAX_FRAME_SECONDS: f32 = 0.1;
 const CAMERA_VERTICAL_FOV: f32 = std::f32::consts::PI / 3.0;
 const TERRAIN_CELL_WORLD_SIZE: f32 = 10.0;
-const DETAIL_SCREEN_OVERSAMPLE: f32 = 1.5;
+const DETAIL_SCREEN_OVERSAMPLE: f32 = 1.75;
+const DETAIL_FADE_START_RATIO: f32 = 0.78;
+const CAMERA_VELOCITY_RESPONSE: f32 = 8.0;
 
 /// Opens a perspective terrain viewer with keyboard flight and right-drag mouse look.
 ///
@@ -46,13 +51,14 @@ pub fn run_terrain_viewer(
     terrain: StagedTerrain,
     water: StagedWater,
     water_appearance: WaterAppearance,
+    lighting: TerrainLighting,
     title: String,
 ) -> Result<(), ViewerError> {
     let event_loop = EventLoop::new().map_err(ViewerError::EventLoop)?;
     event_loop.set_control_flow(ControlFlow::Poll);
     let display = event_loop.owned_display_handle();
     let mut application =
-        TerrainViewerApplication::new(terrain, water, water_appearance, title, display)?;
+        TerrainViewerApplication::new(terrain, water, water_appearance, lighting, title, display)?;
     event_loop
         .run_app(&mut application)
         .map_err(ViewerError::EventLoop)?;
@@ -63,6 +69,7 @@ struct TerrainViewerApplication {
     terrain: Arc<StagedTerrain>,
     water: StagedWater,
     water_appearance: WaterAppearance,
+    lighting: TerrainLighting,
     title: String,
     display: OwnedDisplayHandle,
     window: Option<Arc<Window>>,
@@ -83,6 +90,7 @@ impl TerrainViewerApplication {
         terrain: StagedTerrain,
         water: StagedWater,
         water_appearance: WaterAppearance,
+        lighting: TerrainLighting,
         title: String,
         display: OwnedDisplayHandle,
     ) -> Result<Self, ViewerError> {
@@ -93,6 +101,7 @@ impl TerrainViewerApplication {
             terrain,
             water,
             water_appearance,
+            lighting,
             title,
             display,
             window: None,
@@ -126,12 +135,16 @@ impl TerrainViewerApplication {
         let gpu = pollster::block_on(TerrainViewerGpu::new(
             window.clone(),
             self.display.clone(),
-            &self.terrain,
-            &self.detail_requests,
-            self.camera
-                .virtual_page_view(&self.terrain, [size.width, size.height]),
-            &self.water,
-            &self.water_appearance,
+            TerrainViewerScene {
+                terrain: &self.terrain,
+                requests: &self.detail_requests,
+                page_view: self
+                    .camera
+                    .virtual_page_view(&self.terrain, [size.width, size.height]),
+                water: &self.water,
+                water_appearance: &self.water_appearance,
+                lighting: self.lighting,
+            },
         ))?;
         self.window = Some(window);
         self.gpu = Some(gpu);
@@ -309,6 +322,7 @@ impl TerrainInput {
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct TerrainCamera {
     position: [f32; 3],
+    velocity: [f32; 3],
     yaw: f32,
     pitch: f32,
     move_speed: f32,
@@ -336,6 +350,7 @@ impl TerrainCamera {
         let horizontal = direction[0].hypot(direction[1]);
         Self {
             position,
+            velocity: [0.0; 3],
             yaw: direction[1].atan2(direction[0]),
             pitch: direction[2].atan2(horizontal),
             move_speed: (horizontal_span * 0.35).max(50.0),
@@ -374,6 +389,7 @@ impl TerrainCamera {
         if input.active(TerrainInput::DOWN) {
             movement[2] -= 1.0;
         }
+        let mut target_velocity = [0.0; 3];
         let length = dot(movement, movement).sqrt();
         if length > f32::EPSILON {
             let multiplier = if input.active(TerrainInput::BOOST) {
@@ -382,10 +398,21 @@ impl TerrainCamera {
                 1.0
             };
             add_scaled(
-                &mut self.position,
+                &mut target_velocity,
                 movement,
-                self.move_speed * multiplier * seconds / length,
+                self.move_speed * multiplier / length,
             );
+        }
+        let decay = (-CAMERA_VELOCITY_RESPONSE * seconds).exp();
+        for ((position, velocity), target) in self
+            .position
+            .iter_mut()
+            .zip(&mut self.velocity)
+            .zip(target_velocity)
+        {
+            let difference = *velocity - target;
+            *position += target * seconds + difference * (1.0 - decay) / CAMERA_VELOCITY_RESPONSE;
+            *velocity = target + difference * decay;
         }
     }
 
@@ -396,7 +423,11 @@ impl TerrainCamera {
 
     fn dolly(&mut self, amount: f32) {
         let forward = self.forward();
-        add_scaled(&mut self.position, forward, amount * self.move_speed * 0.2);
+        add_scaled(
+            &mut self.velocity,
+            forward,
+            amount * self.move_speed * 0.2 * CAMERA_VELOCITY_RESPONSE,
+        );
     }
 
     #[allow(clippy::cast_precision_loss)]
@@ -416,9 +447,7 @@ impl TerrainCamera {
             (full_minimum[0] + full_maximum[0]) * 0.5,
             (full_minimum[1] + full_maximum[1]) * 0.5,
         ];
-        let projection_scale =
-            viewport[1].max(1) as f32 * TERRAIN_CELL_WORLD_SIZE * DETAIL_SCREEN_OVERSAMPLE
-                / (2.0 * (CAMERA_VERTICAL_FOV * 0.5).tan());
+        let projection_scale = detail_projection_scale(viewport[1].max(1) as f32);
         let mut requests = Vec::with_capacity(2);
         for (pixels_per_cell, outer_screen_pixels) in [(16, 8.0_f32), (32, 16.0)] {
             let maximum_distance = projection_scale / outer_screen_pixels;
@@ -575,9 +604,19 @@ struct TerrainViewerGpu {
     virtual_terrain: VirtualTerrainGpu,
     water: Option<WaterGpu>,
     water_appearance: WaterAppearanceGpu,
+    lighting: TerrainLighting,
     deferred: DeferredTargets,
     config: wgpu::SurfaceConfiguration,
     window: Arc<Window>,
+}
+
+struct TerrainViewerScene<'a> {
+    terrain: &'a StagedTerrain,
+    requests: &'a [TerrainDetailRequest],
+    page_view: VirtualPageView,
+    water: &'a StagedWater,
+    water_appearance: &'a WaterAppearance,
+    lighting: TerrainLighting,
 }
 
 struct WaterGpu {
@@ -590,10 +629,16 @@ struct WaterAppearanceGpu {
     _caustics: wgpu::Texture,
     caustic_view: wgpu::TextureView,
     caustic_sampler: wgpu::Sampler,
+    _surface: wgpu::Texture,
+    surface_view: wgpu::TextureView,
+    surface_sampler: wgpu::Sampler,
     frame_count: u32,
     frames_per_second: u32,
-    deep_opacity: f32,
+    minimum_opacity: f32,
     opaque_depth: f32,
+    source_surface_rgba: Option<[f32; 4]>,
+    source_scroll_per_ms: [f32; 2],
+    presentation: WaterPresentationPolicy,
 }
 
 impl WaterAppearanceGpu {
@@ -683,16 +728,59 @@ impl WaterAppearanceGpu {
             anisotropy_clamp: 4,
             ..Default::default()
         });
+        let (surface, surface_view, surface_sampler) =
+            upload_standing_water_texture(device, queue, appearance)?;
         Ok(Self {
             _caustics: texture,
             caustic_view,
             caustic_sampler,
+            _surface: surface,
+            surface_view,
+            surface_sampler,
             frame_count,
             frames_per_second,
-            deep_opacity: appearance.deep_opacity(),
+            minimum_opacity: appearance.minimum_opacity(),
             opaque_depth: appearance.opaque_depth(),
+            source_surface_rgba: appearance.source_surface_rgba(),
+            source_scroll_per_ms: appearance.source_scroll_per_ms(),
+            presentation: appearance.presentation(),
         })
     }
+}
+
+fn upload_standing_water_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    appearance: &WaterAppearance,
+) -> Result<(wgpu::Texture, wgpu::TextureView, wgpu::Sampler), ViewerError> {
+    let fallback = [255_u8; 4];
+    let (width, height, rgba) = appearance
+        .surface_texture()
+        .map_or((1, 1, fallback.as_slice()), |texture| {
+            (texture.width(), texture.height(), texture.rgba())
+        });
+    let mips = generate_srgb_mips(width, height, rgba)?;
+    let texture = upload_mipmapped_terrain_texture(
+        device,
+        queue,
+        "cic-render standing water texture",
+        width,
+        height,
+        rgba,
+        &mips,
+    )?;
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("cic-render standing water sampler"),
+        address_mode_u: wgpu::AddressMode::Repeat,
+        address_mode_v: wgpu::AddressMode::Repeat,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::MipmapFilterMode::Linear,
+        anisotropy_clamp: 8,
+        ..Default::default()
+    });
+    Ok((texture, view, sampler))
 }
 
 fn gray_mip(width: u32, height: u32, source: &[u8]) -> Result<(u32, u32, Vec<u8>), RenderError> {
@@ -1262,12 +1350,16 @@ impl TerrainViewerGpu {
     async fn new(
         window: Arc<Window>,
         display: OwnedDisplayHandle,
-        terrain: &StagedTerrain,
-        requests: &[TerrainDetailRequest],
-        page_view: VirtualPageView,
-        water: &StagedWater,
-        water_appearance: &WaterAppearance,
+        scene: TerrainViewerScene<'_>,
     ) -> Result<Self, ViewerError> {
+        let TerrainViewerScene {
+            terrain,
+            requests,
+            page_view,
+            water,
+            water_appearance,
+            lighting,
+        } = scene;
         let descriptor = wgpu::InstanceDescriptor::new_with_display_handle(Box::new(display));
         let instance = wgpu::Instance::new(descriptor);
         let surface = instance
@@ -1314,8 +1406,8 @@ impl TerrainViewerGpu {
             &shader,
             &pipeline_layout,
             "cic-render terrain viewer pipeline",
-            "fragment_main",
             None,
+            true,
             true,
         );
         let edge_pipeline = create_terrain_pipeline(
@@ -1323,8 +1415,8 @@ impl TerrainViewerGpu {
             &shader,
             &pipeline_layout,
             "cic-render terrain viewer edge pipeline",
-            "fragment_main",
             Some(wgpu::BlendState::ALPHA_BLENDING),
+            false,
             false,
         );
         let deferred_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -1351,8 +1443,13 @@ impl TerrainViewerGpu {
             label: Some("cic-render modern water shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("water_viewer.wgsl").into()),
         });
-        let water_pipeline =
-            create_water_pipeline(&device, &water_shader, &water_layout, config.format);
+        let water_pipeline = create_water_pipeline(
+            &device,
+            &water_shader,
+            &water_layout,
+            config.format,
+            scene.water_appearance.additive_blending(),
+        );
 
         let texture_mips = generate_srgb_mips(
             terrain.texture_width(),
@@ -1452,7 +1549,7 @@ impl TerrainViewerGpu {
                 },
             ],
         });
-        let vertices = terrain.world_vertex_bytes();
+        let vertices = terrain.viewer_vertex_bytes()?;
         let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("cic-render terrain viewer vertices"),
             size: u64::try_from(vertices.len()).map_err(|_| RenderError::GeometryTooLarge)?,
@@ -1543,6 +1640,7 @@ impl TerrainViewerGpu {
             virtual_terrain,
             water,
             water_appearance,
+            lighting,
             deferred,
             config,
             window,
@@ -1608,23 +1706,36 @@ impl TerrainViewerGpu {
             self.water_appearance.frames_per_second as f32,
         ];
         let water_material = [
-            self.water_appearance.deep_opacity,
+            self.water_appearance.minimum_opacity,
             self.water_appearance.opaque_depth,
             0.58,
             0.06,
         ];
+        let water_surface = self
+            .water_appearance
+            .source_surface_rgba
+            .unwrap_or([0.0; 4]);
+        let water_motion = [
+            self.water_appearance.source_scroll_per_ms[0],
+            self.water_appearance.source_scroll_per_ms[1],
+            f32::from(self.water_appearance.source_surface_rgba.is_some()),
+            f32::from(self.water_appearance.presentation == WaterPresentationPolicy::Modern),
+        ];
         self.queue.write_buffer(
             &self.camera_uniform,
             0,
-            &camera_bytes(
+            &camera_bytes(&CameraUniformInput {
                 matrix,
-                camera.position,
-                presentation_seconds,
+                position: camera.position,
+                time: presentation_seconds,
                 viewport,
-                [0.0; 2],
+                detail_fade_uv: detail_fade_distances(viewport[1]),
                 caustic_animation,
                 water_material,
-            ),
+                water_surface,
+                water_motion,
+                lighting: self.lighting,
+            }),
         );
         let view = surface_texture
             .texture
@@ -1909,10 +2020,11 @@ fn create_terrain_pipeline(
     shader: &wgpu::ShaderModule,
     layout: &wgpu::PipelineLayout,
     label: &str,
-    fragment_entry: &str,
     blend: Option<wgpu::BlendState>,
     depth_write: bool,
+    write_geometry: bool,
 ) -> wgpu::RenderPipeline {
+    let targets = terrain_color_targets(blend, write_geometry);
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(label),
         layout: Some(layout),
@@ -1921,7 +2033,7 @@ fn create_terrain_pipeline(
             entry_point: Some("vertex_main"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             buffers: &[Some(wgpu::VertexBufferLayout {
-                array_stride: 20,
+                array_stride: 32,
                 step_mode: wgpu::VertexStepMode::Vertex,
                 attributes: &[
                     wgpu::VertexAttribute {
@@ -1934,30 +2046,19 @@ fn create_terrain_pipeline(
                         offset: 12,
                         shader_location: 1,
                     },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x3,
+                        offset: 20,
+                        shader_location: 2,
+                    },
                 ],
             })],
         },
         fragment: Some(wgpu::FragmentState {
             module: shader,
-            entry_point: Some(fragment_entry),
+            entry_point: Some("fragment_main"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
-            targets: &[
-                Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                    blend,
-                    write_mask: wgpu::ColorWrites::ALL,
-                }),
-                Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba16Float,
-                    blend,
-                    write_mask: wgpu::ColorWrites::ALL,
-                }),
-                Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba16Float,
-                    blend,
-                    write_mask: wgpu::ColorWrites::ALL,
-                }),
-            ],
+            targets: &targets,
         }),
         primitive: wgpu::PrimitiveState {
             front_face: wgpu::FrontFace::Ccw,
@@ -1975,6 +2076,34 @@ fn create_terrain_pipeline(
         multiview_mask: None,
         cache: None,
     })
+}
+
+fn terrain_color_targets(
+    albedo_blend: Option<wgpu::BlendState>,
+    write_geometry: bool,
+) -> [Option<wgpu::ColorTargetState>; 3] {
+    let geometry_write_mask = if write_geometry {
+        wgpu::ColorWrites::ALL
+    } else {
+        wgpu::ColorWrites::empty()
+    };
+    [
+        Some(wgpu::ColorTargetState {
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            blend: albedo_blend,
+            write_mask: wgpu::ColorWrites::ALL,
+        }),
+        Some(wgpu::ColorTargetState {
+            format: wgpu::TextureFormat::Rgba16Float,
+            blend: None,
+            write_mask: geometry_write_mask,
+        }),
+        Some(wgpu::ColorTargetState {
+            format: wgpu::TextureFormat::Rgba16Float,
+            blend: None,
+            write_mask: geometry_write_mask,
+        }),
+    ]
 }
 
 fn create_lighting_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
@@ -2033,6 +2162,13 @@ fn create_water_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
             },
             wgpu::BindGroupLayoutEntry {
                 binding: 4,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            texture_layout_entry(5, true),
+            wgpu::BindGroupLayoutEntry {
+                binding: 6,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 count: None,
@@ -2100,6 +2236,7 @@ fn create_water_pipeline(
     shader: &wgpu::ShaderModule,
     water_layout: &wgpu::BindGroupLayout,
     format: wgpu::TextureFormat,
+    additive_blending: bool,
 ) -> wgpu::RenderPipeline {
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("cic-render forward water pipeline layout"),
@@ -2129,7 +2266,18 @@ fn create_water_pipeline(
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             targets: &[Some(wgpu::ColorTargetState {
                 format,
-                blend: None,
+                blend: Some(if additive_blending {
+                    wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::SrcAlpha,
+                            dst_factor: wgpu::BlendFactor::One,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent::OVER,
+                    }
+                } else {
+                    wgpu::BlendState::ALPHA_BLENDING
+                }),
                 write_mask: wgpu::ColorWrites::ALL,
             })],
         }),
@@ -2224,6 +2372,11 @@ impl DeferredTargets {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: wgpu::BindingResource::Sampler(&water_appearance.caustic_sampler),
+                },
+                texture_binding(5, &water_appearance.surface_view),
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::Sampler(&water_appearance.surface_sampler),
                 },
             ],
         });
@@ -2339,7 +2492,8 @@ fn multiply_matrix(left: [[f32; 4]; 4], right: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
     result
 }
 
-fn camera_bytes(
+#[derive(Clone, Copy)]
+struct CameraUniformInput {
     matrix: [[f32; 4]; 4],
     position: [f32; 3],
     time: f32,
@@ -2347,8 +2501,25 @@ fn camera_bytes(
     detail_fade_uv: [f32; 2],
     caustic_animation: [f32; 2],
     water_material: [f32; 4],
-) -> [u8; 128] {
-    let mut bytes = [0; 128];
+    water_surface: [f32; 4],
+    water_motion: [f32; 4],
+    lighting: TerrainLighting,
+}
+
+fn camera_bytes(input: &CameraUniformInput) -> [u8; 304] {
+    let CameraUniformInput {
+        matrix,
+        position,
+        time,
+        viewport,
+        detail_fade_uv,
+        caustic_animation,
+        water_material,
+        water_surface,
+        water_motion,
+        lighting,
+    } = *input;
+    let mut bytes = [0; 304];
     let values = matrix
         .into_iter()
         .flatten()
@@ -2365,7 +2536,28 @@ fn camera_bytes(
             caustic_animation[0],
             caustic_animation[1],
         ])
-        .chain(water_material);
+        .chain(water_material)
+        .chain(water_surface)
+        .chain(water_motion)
+        .chain(lighting.lights().into_iter().flat_map(|light| {
+            let ambient = light.ambient();
+            let diffuse = light.diffuse();
+            let direction = light.source_direction();
+            [
+                ambient[0],
+                ambient[1],
+                ambient[2],
+                0.0,
+                diffuse[0],
+                diffuse[1],
+                diffuse[2],
+                0.0,
+                direction[0],
+                direction[1],
+                direction[2],
+                0.0,
+            ]
+        }));
     for (index, value) in values.enumerate() {
         bytes[index * 4..index * 4 + 4].copy_from_slice(&value.to_le_bytes());
     }
@@ -2399,6 +2591,16 @@ fn normalize(value: [f32; 3]) -> [f32; 3] {
     [value[0] / length, value[1] / length, value[2] / length]
 }
 
+fn detail_projection_scale(viewport_height: f32) -> f32 {
+    viewport_height * TERRAIN_CELL_WORLD_SIZE * DETAIL_SCREEN_OVERSAMPLE
+        / (2.0 * (CAMERA_VERTICAL_FOV * 0.5).tan())
+}
+
+fn detail_fade_distances(viewport_height: f32) -> [f32; 2] {
+    let fine_end = detail_projection_scale(viewport_height.max(1.0)) / 16.0;
+    [fine_end * DETAIL_FADE_START_RATIO, fine_end]
+}
+
 fn ray_distance_for_view_depth(
     direction: [f32; 3],
     forward: [f32; 3],
@@ -2412,8 +2614,21 @@ fn ray_distance_for_view_depth(
 mod tests {
     use super::{
         TerrainCamera, TerrainInput, gray_mip, look_to, multiply_matrix, perspective,
-        ray_distance_for_view_depth,
+        ray_distance_for_view_depth, terrain_color_targets,
     };
+
+    #[test]
+    fn edge_blending_writes_only_albedo() {
+        let targets = terrain_color_targets(Some(wgpu::BlendState::ALPHA_BLENDING), false);
+        let albedo = targets[0].as_ref().expect("albedo target");
+        assert!(albedo.blend.is_some());
+        assert_eq!(albedo.write_mask, wgpu::ColorWrites::ALL);
+        for geometry in &targets[1..] {
+            let geometry = geometry.as_ref().expect("geometry target");
+            assert!(geometry.blend.is_none());
+            assert!(geometry.write_mask.is_empty());
+        }
+    }
 
     #[test]
     fn caustic_mips_average_odd_linear_frames_without_dropping_edges() {
@@ -2426,6 +2641,7 @@ mod tests {
     fn perspective_view_matrix_is_finite_and_movement_uses_explicit_delta() {
         let mut camera = TerrainCamera {
             position: [10.0, 20.0, 30.0],
+            velocity: [0.0; 3],
             yaw: 0.25,
             pitch: -0.5,
             move_speed: 100.0,
@@ -2436,21 +2652,20 @@ mod tests {
             look_to(camera.position, camera.forward(), [0.0, 0.0, 1.0]),
         );
         assert!(matrix.into_iter().flatten().all(f32::is_finite));
-        let before = camera.position;
+        let mut stepped_camera = camera;
         let mut input = TerrainInput::default();
         input.set(winit::keyboard::KeyCode::KeyW, true);
         camera.update(input, 0.5);
-        let distance = camera
-            .position
-            .into_iter()
-            .zip(before)
-            .map(|(left, right)| (left - right).powi(2))
-            .sum::<f32>()
-            .sqrt();
-        assert!((distance - 50.0).abs() < 0.001);
+        for _ in 0..50 {
+            stepped_camera.update(input, 0.01);
+        }
+        for (single, stepped) in camera.position.into_iter().zip(stepped_camera.position) {
+            assert!((single - stepped).abs() < 0.001);
+        }
 
         let focus_camera = TerrainCamera {
             position: [10.0, 20.0, 30.0],
+            velocity: [0.0; 3],
             yaw: 0.0,
             pitch: -std::f32::consts::FRAC_PI_4,
             move_speed: 100.0,
@@ -2478,6 +2693,7 @@ mod tests {
     fn shallow_view_detail_footprint_is_capped_before_the_horizon() {
         let camera = TerrainCamera {
             position: [0.0, 0.0, 200.0],
+            velocity: [0.0; 3],
             yaw: 0.0,
             pitch: -0.1,
             move_speed: 100.0,
@@ -2504,5 +2720,32 @@ mod tests {
             .expect("forward-facing ray");
         assert!(ray_distance > 650.0);
         assert!((super::dot(diagonal, [1.0, 0.0, 0.0]) * ray_distance - 650.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn limited_viewport_bounds_are_symmetric_after_half_turn() {
+        let camera = TerrainCamera {
+            position: [0.0, 0.0, 300.0],
+            velocity: [0.0; 3],
+            yaw: 0.37,
+            pitch: -0.35,
+            move_speed: 100.0,
+            far_plane: 10_000.0,
+        };
+        let reverse = TerrainCamera {
+            yaw: camera.yaw + std::f32::consts::PI,
+            ..camera
+        };
+        let terrain = ([-4_000.0, -4_000.0, 0.0], [4_000.0, 4_000.0, 100.0]);
+        let (forward_minimum, forward_maximum) = camera
+            .viewport_ground_bounds_limited(terrain, 16.0 / 9.0, 1_200.0)
+            .expect("forward footprint");
+        let (reverse_minimum, reverse_maximum) = reverse
+            .viewport_ground_bounds_limited(terrain, 16.0 / 9.0, 1_200.0)
+            .expect("reverse footprint");
+        for axis in 0..2 {
+            assert!((forward_minimum[axis] + reverse_maximum[axis]).abs() < 0.01);
+            assert!((forward_maximum[axis] + reverse_minimum[axis]).abs() < 0.01);
+        }
     }
 }

@@ -6,6 +6,9 @@ All notable user-visible changes are recorded here.
 
 ### Changed
 
+- Documented the repository-wide Zero Hour layering invariant: enumerate and mount Generals first,
+  apply Zero Hour second and mods last; replacement resources use the winner while cumulative
+  definition formats parse the complete provider history in order.
 - Expanded the R3 design from terrain-only presentation to complete bounded MAP ingestion and a
   non-simulating terrain scene: source lighting and WIP water, object/world records, roads and
   bridges, static scenery and ambient animation, waypoints/player starts, sides/teams/build lists,
@@ -19,6 +22,34 @@ All notable user-visible changes are recorded here.
 
 ### Fixed
 
+- Version-4 height maps now preserve signed playable-boundary coordinates instead of rejecting
+  negative values accepted by the source reader. River staging now honors the stored seam index
+  and walks the two perimeter banks in opposite directions, eliminating crossing or bank-only
+  ribbons on long rivers.
+- Terrain detail now uses a 256-page cache, a slightly farther screen-density threshold, and
+  distance cross-fades between 32-, 16-, and 8-texel tiers. Large inward-facing frusta no longer
+  consume the complete cache with coarse pages and expose direction-dependent blurry boundaries.
+  Keyboard and wheel flight also use frame-rate-independent acceleration and deceleration.
+- Generals standing water now starts from the source constructor defaults before ordered base,
+  expansion, mod, and map-local INI overrides. This restores its default standing texture instead
+  of falling back to a flat diagnostic surface and honors companion `Map.ini` water settings.
+- Terrain and water definitions now accumulate every shadowed VFS provider in stable mount order.
+  Zero Hour therefore retains inherited Generals terrain classes such as those used by CHI01.
+- Source-compatible zero-entry cliff-info tables are accepted as empty instead of rejected,
+  allowing affected version-7 maps such as USA07 to load.
+- Zero Hour `WaterTransparency` standing and radar colors now accept the source byte-RGB syntax
+  and normalize it at the immutable format boundary, allowing maps using the installed profile to
+  pass water configuration loading.
+- Default legacy water no longer replaces the scene with an opaque procedural gray surface. It
+  resolves the source standing-water texture, selected diffuse tint/alpha, additive policy, and
+  depth opacity, then alpha-composites with terrain-depth shoreline feathering. The existing
+  refractive presentation remains available only under the explicit Modern policy.
+- Streamed custom-edge transparency now remains authored coverage instead of being mistaken for a
+  missing virtual page. The edge pass composites only albedo and no longer overwrites deferred
+  normals or world positions; smooth height-field vertex normals also remove exaggerated
+  per-triangle terrain faceting in the interactive viewer.
+- Water INI integer RGBA fields now accept the source-established optional alpha channel and
+  default omitted alpha to 255, allowing installed vertex-color definitions to load correctly.
 - Headless terrain and map-render capture tests now skip when the host exposes no graphics adapter,
   matching the existing synthetic capture policy while preserving real renderer and hash failures.
 - Linux and macOS builds no longer retain the Windows-only Steam registry command import.
@@ -28,6 +59,12 @@ All notable user-visible changes are recorded here.
 
 ### Added
 
+- Bounded `GlobalLighting` versions 1 through 3 with separate ordered terrain/object lights for
+  morning through night, optional packed shadow color, exact-bit `map-lighting` reports, and
+  selected-time viewer shading. The complete source-established `WaterSet` and
+  `WaterTransparency` field tables are retained under explicit limits; selected diffuse color,
+  standing-water texture/blend policy, opacity, and scroll inputs now feed the forward-water
+  presentation.
 - Bounded declarative mount profiles and repeatable ordered `--mod` layers for custom bases and
   total conversions, plus lazy directory/BIG providers that index on mount and read only requested
   resources under caller-selected limits.

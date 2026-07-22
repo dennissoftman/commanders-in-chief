@@ -365,6 +365,42 @@ fn map_blend_inside_big_produces_stable_semantic_report() {
 }
 
 #[test]
+fn map_lighting_inside_big_produces_stable_semantic_report() {
+    let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("map-lighting-cli");
+    if root.exists() {
+        fs::remove_dir_all(&root).expect("remove stale test tree");
+    }
+    fs::create_dir_all(&root).expect("create test tree");
+    let archive_path = root.join("maps.big");
+    fs::write(
+        &archive_path,
+        big_with_entry(r"Maps\Synthetic\lighting.map", &map_lighting_fixture()),
+    )
+    .expect("write synthetic archive");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cic-inspect"))
+        .arg("map-lighting")
+        .arg("maps/synthetic/lighting.map")
+        .arg(&archive_path)
+        .output()
+        .expect("run MAP lighting report");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 lighting report");
+    assert!(stdout.starts_with(
+        "version\tselected_time\tshadow_color\n\
+         3\tevening\t0x80402010\n\
+         period\ttime\tset\tlight\tambient_r\tambient_g\tambient_b\tdiffuse_r\tdiffuse_g\tdiffuse_b\tdirection_x\tdirection_y\tdirection_z\n\
+         0\tmorning\tterrain\t0\t0x00000000\t0x00000000\t0x00000000\t0x00000000\t0x00000000\t0x00000000\t0x00000000\t0x00000000\t0x00000000\n"
+    ));
+    assert_eq!(stdout.lines().count(), 27);
+    assert!(stdout.ends_with(
+        "3\tnight\tobjects\t2\t0x42040000\t0x42040000\t0x42040000\t0x42040000\t0x42040000\t0x42040000\t0x42040000\t0x42040000\t0x42040000\n"
+    ));
+
+    fs::remove_dir_all(root).expect("remove test tree");
+}
+
+#[test]
 fn map_render_inside_big_writes_a_textured_png() {
     let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("map-render-cli");
     if root.exists() {
@@ -466,6 +502,35 @@ fn map_blend_fixture() -> Vec<u8> {
             u8::from_str_radix(pair, 16).expect("valid hex fixture")
         })
         .collect()
+}
+
+fn map_lighting_fixture() -> Vec<u8> {
+    let mut payload = 3_i32.to_le_bytes().to_vec();
+    for period in 0..4 {
+        for source_light in 0..6 {
+            let scalar = u16::try_from(period * 10 + source_light).expect("test scalar fits u16");
+            let value = f32::from(scalar);
+            for _ in 0..9 {
+                payload.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+    }
+    payload.extend_from_slice(&0x8040_2010_u32.to_le_bytes());
+
+    let mut bytes = b"CkMp".to_vec();
+    bytes.extend_from_slice(&1_i32.to_le_bytes());
+    bytes.push(14);
+    bytes.extend_from_slice(b"GlobalLighting");
+    bytes.extend_from_slice(&1_u32.to_le_bytes());
+    bytes.extend_from_slice(&1_u32.to_le_bytes());
+    bytes.extend_from_slice(&3_u16.to_le_bytes());
+    bytes.extend_from_slice(
+        &i32::try_from(payload.len())
+            .expect("lighting payload fits i32")
+            .to_le_bytes(),
+    );
+    bytes.extend_from_slice(&payload);
+    bytes
 }
 
 fn w3d_fixture() -> Vec<u8> {

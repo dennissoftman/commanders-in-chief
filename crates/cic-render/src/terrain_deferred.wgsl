@@ -1,9 +1,18 @@
+struct DirectionalLight {
+    ambient: vec4<f32>,
+    diffuse: vec4<f32>,
+    source_direction: vec4<f32>,
+}
+
 struct Camera {
     view_projection: mat4x4<f32>,
     camera_position_time: vec4<f32>,
     viewport: vec4<f32>,
     detail_fade_caustics: vec4<f32>,
     water_material: vec4<f32>,
+    water_surface: vec4<f32>,
+    water_motion: vec4<f32>,
+    terrain_lights: array<DirectionalLight, 3>,
 }
 
 struct FullscreenOutput {
@@ -35,12 +44,24 @@ fn lighting_fragment(input: FullscreenOutput) -> @location(0) vec4<f32> {
     let albedo = textureLoad(g_albedo, pixel, 0).rgb;
     let normal_roughness = textureLoad(g_normal, pixel, 0);
     let normal = normalize(normal_roughness.xyz);
-    let light_direction = normalize(vec3<f32>(-0.45, -0.35, 0.82));
-    let diffuse = max(dot(normal, light_direction), 0.0);
     let view_direction = normalize(light_camera.camera_position_time.xyz - world.xyz);
-    let half_vector = normalize(light_direction + view_direction);
-    let specular = pow(max(dot(normal, half_vector), 0.0), mix(64.0, 8.0, normal_roughness.w)) * 0.06;
-    let color = albedo * (0.38 + 0.62 * diffuse) + vec3<f32>(specular);
+    var color = vec3<f32>(0.0);
+    for (var index = 0; index < 3; index += 1) {
+        let light = light_camera.terrain_lights[index];
+        color += albedo * light.ambient.rgb;
+        let direction_length = length(light.source_direction.xyz);
+        if (direction_length > 0.00001) {
+            let light_direction = -light.source_direction.xyz / direction_length;
+            let diffuse_factor = max(dot(normal, light_direction), 0.0);
+            color += albedo * light.diffuse.rgb * diffuse_factor;
+            let half_vector = normalize(light_direction + view_direction);
+            let specular = pow(
+                max(dot(normal, half_vector), 0.0),
+                mix(64.0, 8.0, normal_roughness.w)
+            );
+            color += light.diffuse.rgb * specular * 0.06;
+        }
+    }
     return vec4<f32>(color, 1.0);
 }
 

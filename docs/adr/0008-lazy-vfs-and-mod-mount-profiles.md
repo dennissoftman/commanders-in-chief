@@ -37,6 +37,14 @@ matched by ASCII case while retaining the actual physical path; ambiguous case v
 error. Virtual game paths continue to use ASCII case folding, while physical user paths are never
 lowercased.
 
+The VFS deliberately exposes two views of a normalized path. `resolve` and `iter_resolved` return
+the last-mounted winner for opaque replacement resources. `history` returns all provider entries
+from earliest to latest mount for cumulative definition formats. The VFS does not guess which
+behavior a format needs; the bounded tools/format consumer must choose explicitly from established
+source semantics. Built-in Zero Hour profiles always populate that history as Generals first, Zero
+Hour second, then mods. Partial INI-style overlays must parse the history in that order instead of
+parsing only the winning entry.
+
 Profile input is bounded to 1 MiB, 4,096 providers, and 4,096 UTF-8 bytes per declared path by
 default. Loose-directory indices are bounded to 1,000,000 files, 256 nested directories, and
 4,096 bytes per virtual path. BIG directory indexing is independently bounded to 64 MiB in
@@ -51,3 +59,5 @@ addition to existing archive, entry-count, name, and trailer limits.
 - Resource bytes are reread on repeated requests unless a higher layer deliberately owns a cache.
 - Mod dependency solving, package management, hot reload, signing, and authoring tools remain later
   product work.
+- New cumulative-definition consumers require an ordered-history regression test; replacement
+  consumers retain deterministic last-mounted-wins lookup.

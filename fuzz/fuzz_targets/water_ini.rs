@@ -8,6 +8,7 @@ fuzz_target!(|bytes: &[u8]| {
         max_file_bytes: 1024 * 1024,
         max_lines: 16_384,
         max_line_bytes: 4_096,
+        ..WaterIniLimits::default()
     };
     let _ = parse_water_transparency_ini(bytes, limits);
 });

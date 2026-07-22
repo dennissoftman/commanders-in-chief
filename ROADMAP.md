@@ -259,12 +259,12 @@ and custom-map verification records with no copied game content.
 
 ### Remaining R3 gates
 
-1. **Source lighting and water convergence (WIP).** Decode `GlobalLighting` into separate,
-   renderer-neutral terrain and object light sets, including established time-of-day variants and
-   source light order. Decode the remaining `WaterSet` and map-specific appearance inputs. Replace
-   the fixed preview light, then iterate on water color, opacity, absorption, refraction, foam,
-   shoreline behavior, caustics, specular response, reflections, receiving shadows, and
-   anti-aliasing. Water remains a depth-tested forward pass over the resolved opaque scene. Its
+1. **Source lighting and water convergence (WIP).** Retain the established bounded
+   `GlobalLighting` terrain/object time variants and source light order. Complete WaterSet
+   sky/environment and map-specific appearance inputs. The default legacy path now resolves the
+   standing texture, diffuse tint/alpha, blend choice, opacity, and terrain-depth shoreline;
+   continue water reflections, receiving shadows, and anti-aliasing while keeping the Modern
+   refractive branch explicit. Water remains a depth-tested forward pass over the resolved opaque scene. Its
    completion gate requires synthetic scalar/layout tests, explicit-time captures, and repeatable
    visual comparisons against user-owned maps; the current water appearance is not a completion
    baseline.
@@ -321,9 +321,14 @@ The viewer uses a persistent bounded GPU-composed virtual-texture cache with sta
 LRU residency, bordered 16/32-pixel pages, compute-generated mip chains, trilinear filtering, and
 anisotropy over the guaranteed 8-pixel fallback. Water-only `PolygonTriggers`, lake/river staging,
 global transparency scalars, optional source caustic frames, hybrid-deferred composition, and
-Modern de-tiling are implemented, but water remains WIP. Blend version 8, full lighting, objects,
-roads, definitions, static scenery, sides/teams/spawns, complete triggers/scripts, and custom-map
-closure remain open.
+Modern de-tiling are implemented. `GlobalLighting` versions 1 through 3 now retain four ordered
+time variants, separate terrain/object sun and accent records, and optional shadow color;
+`map-lighting` reports exact scalar bits and `map-view` shades terrain and water from the selected
+terrain lights. The complete source `WaterSet` and `WaterTransparency` field tables are bounded and
+retained, with selected transparent color and scroll driving the current forward-water pass.
+Water remains WIP pending source texture/sky integration, shadows/reflections, explicit-time
+captures, and repeatable user-owned comparisons. Blend version 8, objects, roads, definitions,
+static scenery, sides/teams/spawns, complete triggers/scripts, and custom-map closure remain open.
 
 ## R4: WND user interface and navigable shell
 
