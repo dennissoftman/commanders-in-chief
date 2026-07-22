@@ -7,7 +7,11 @@ pub use gltf::{GltfTextureRequest, W3dGlbError, W3dGltfBundle, pack_w3d_glb, ren
 
 use std::fmt::Write;
 
-use cic_formats::{CsfFile, W3dChunk, W3dFile, W3dStaticMesh, W3dVector3, w3d_chunk_name};
+use cic_formats::{
+    CsfFile, MapBlendData, MapFile, MapHeightField, MapWaterData, W3dChunk, W3dFile, W3dStaticMesh,
+    W3dVector3, w3d_chunk_name,
+};
+use cic_render::Capture;
 use cic_vfs::Vfs;
 
 /// Formats winning VFS entries as deterministic tab-separated records.
@@ -72,6 +76,296 @@ pub fn render_csf(csf: &CsfFile) -> String {
         }
     }
     output
+}
+
+/// Formats a MAP symbol table and top-level chunk stream as a stable inventory.
+#[must_use]
+pub fn render_map(map: &MapFile) -> String {
+    let mut output = format!("compression\t{}\n", map.compression());
+    output.push_str("symbol\toffset\tid\tname\n");
+    for (index, symbol) in map.symbols().iter().enumerate() {
+        writeln!(
+            output,
+            "{}\t{}\t0x{:08X}\t{}",
+            index,
+            symbol.offset(),
+            symbol.id(),
+            escape_bytes(symbol.name_bytes())
+        )
+        .expect("writing to a String cannot fail");
+    }
+    output.push_str("chunk\toffset\tid\tversion\tpayload\tname\n");
+    for (index, chunk) in map.chunks().iter().enumerate() {
+        let name = map
+            .symbol_name(chunk.id())
+            .map_or_else(|| "unknown".to_owned(), escape_bytes);
+        writeln!(
+            output,
+            "{}\t{}\t0x{:08X}\t{}\t{}\t{}",
+            index,
+            chunk.offset(),
+            chunk.id(),
+            chunk.version(),
+            chunk.data().len(),
+            name
+        )
+        .expect("writing to a String cannot fail");
+    }
+    output
+}
+
+/// Formats decoded MAP terrain heights in stable row-major order.
+///
+/// # Panics
+///
+/// Panics only if a validated MAP width cannot fit the current platform's address size.
+#[must_use]
+pub fn render_map_height(height: &MapHeightField) -> String {
+    let mut output =
+        String::from("version\twidth\theight\tborder\tcell_size\tboundaries\tsamples\n");
+    writeln!(
+        output,
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        height.version(),
+        height.width(),
+        height.height(),
+        height.border_size(),
+        height.cell_size_world_units(),
+        height.boundaries().len(),
+        height.samples().len()
+    )
+    .expect("writing to a String cannot fail");
+    output.push_str("boundary\tx\ty\n");
+    for (index, boundary) in height.boundaries().iter().enumerate() {
+        writeln!(output, "{}\t{}\t{}", index, boundary.x(), boundary.y())
+            .expect("writing to a String cannot fail");
+    }
+    output.push_str("sample\tx\ty\tvalue\n");
+    let width = usize::try_from(height.width()).expect("validated MAP width fits usize");
+    for (index, sample) in height.samples().iter().enumerate() {
+        writeln!(
+            output,
+            "{}\t{}\t{}\t{}",
+            index,
+            index % width,
+            index / width,
+            sample
+        )
+        .expect("writing to a String cannot fail");
+    }
+    output
+}
+
+/// Encodes MAP height samples as a deterministic 8-bit grayscale PNG in stored row order.
+///
+/// Height samples are scalar data, so the PNG carries no sRGB or gamma declaration.
+///
+/// # Errors
+///
+/// Returns a PNG encoding error if the validated dimensions or sample stream cannot be encoded.
+pub fn encode_map_height_png(height: &MapHeightField) -> Result<Vec<u8>, png::EncodingError> {
+    let mut output = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut output, height.width(), height.height());
+        encoder.set_color(png::ColorType::Grayscale);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header()?;
+        writer.write_image_data(height.samples())?;
+    }
+    Ok(output)
+}
+
+/// Encodes a headless renderer capture as an sRGB RGBA8 PNG.
+///
+/// # Errors
+///
+/// Returns a PNG encoding error if the validated capture cannot be encoded.
+pub fn encode_capture_png(capture: &Capture) -> Result<Vec<u8>, png::EncodingError> {
+    let mut output = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut output, capture.width(), capture.height());
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
+        let mut writer = encoder.write_header()?;
+        writer.write_image_data(capture.rgba())?;
+    }
+    Ok(output)
+}
+
+/// Formats decoded MAP blend, edge, and cliff values in stable source order.
+///
+/// # Panics
+///
+/// Panics only if validated MAP dimensions cannot fit the current platform's address size.
+#[must_use]
+pub fn render_map_blend(blend: &MapBlendData) -> String {
+    let mut output = String::from(
+        "version\twidth\theight\tcells\tbitmap_tiles\tblended_tiles\tcliff_info\ttexture_classes\tedge_tiles\tedge_texture_classes\tcliff_stride\n",
+    );
+    writeln!(
+        output,
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        blend.version(),
+        blend.width(),
+        blend.height(),
+        blend.tile_indices().len(),
+        blend.bitmap_tile_count(),
+        blend.blended_tile_count(),
+        blend.cliff_info_count(),
+        blend.texture_classes().len(),
+        blend.edge_tile_count(),
+        blend.edge_texture_classes().len(),
+        blend.cliff_flag_stride()
+    )
+    .expect("writing to a String cannot fail");
+
+    render_map_blend_cells(&mut output, blend);
+    render_map_texture_classes(&mut output, blend);
+    render_map_blend_tiles(&mut output, blend);
+    render_map_cliff_info(&mut output, blend);
+    output
+}
+
+/// Formats water-only polygon data in stable source order.
+#[must_use]
+pub fn render_map_water(water: &MapWaterData) -> String {
+    let point_count = water
+        .areas()
+        .iter()
+        .map(|area| area.points().len())
+        .sum::<usize>();
+    let mut output = String::from("version\tsource_triggers\twater_areas\twater_points\n");
+    writeln!(
+        output,
+        "{}\t{}\t{}\t{}",
+        water.version(),
+        water.source_trigger_count(),
+        water.areas().len(),
+        point_count
+    )
+    .expect("writing to a String cannot fail");
+    output.push_str("area\tsource_index\tid\triver\triver_start\tpoints\tname\n");
+    for (index, area) in water.areas().iter().enumerate() {
+        writeln!(
+            output,
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            index,
+            area.source_index(),
+            area.trigger_id(),
+            u8::from(area.is_river()),
+            area.river_start(),
+            area.points().len(),
+            escape_bytes(area.name_bytes())
+        )
+        .expect("writing to a String cannot fail");
+        for (point_index, point) in area.points().iter().enumerate() {
+            let [x, y, z] = point.coordinates();
+            writeln!(output, "point\t{index}\t{point_index}\t{x}\t{y}\t{z}")
+                .expect("writing to a String cannot fail");
+        }
+    }
+    output
+}
+
+fn render_map_blend_cells(output: &mut String, blend: &MapBlendData) {
+    output.push_str("cell\tx\ty\ttile\tblend\textra_blend\tcliff_info\tcliff_flag\n");
+    let width = usize::try_from(blend.width()).expect("validated MAP width fits usize");
+    for index in 0..blend.tile_indices().len() {
+        let x = index % width;
+        let y = index / width;
+        let cliff = blend
+            .is_cliff(
+                u32::try_from(x).expect("validated X fits u32"),
+                u32::try_from(y).expect("validated Y fits u32"),
+            )
+            .expect("row-major cell is in range");
+        writeln!(
+            output,
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            index,
+            x,
+            y,
+            blend.tile_indices()[index],
+            blend.blend_indices()[index],
+            blend.extra_blend_indices()[index],
+            blend.cliff_info_indices()[index],
+            u8::from(cliff)
+        )
+        .expect("writing to a String cannot fail");
+    }
+}
+
+fn render_map_texture_classes(output: &mut String, blend: &MapBlendData) {
+    output.push_str("texture\tkind\tfirst\tcount\twidth\tlegacy\tname\n");
+    for (kind, classes) in [
+        ("terrain", blend.texture_classes()),
+        ("edge", blend.edge_texture_classes()),
+    ] {
+        for (index, class) in classes.iter().enumerate() {
+            let legacy = class
+                .legacy()
+                .map_or_else(String::new, |value| value.to_string());
+            writeln!(
+                output,
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                index,
+                kind,
+                class.first_tile(),
+                class.tile_count(),
+                class.width(),
+                legacy,
+                escape_bytes(class.name_bytes())
+            )
+            .expect("writing to a String cannot fail");
+        }
+    }
+}
+
+fn render_map_blend_tiles(output: &mut String, blend: &MapBlendData) {
+    output.push_str(
+        "blend\tblend_index\thorizontal\tvertical\tright_diagonal\tleft_diagonal\tinverted\tlong_diagonal\tcustom_edge_class\n",
+    );
+    for tile in blend.blend_tiles() {
+        writeln!(
+            output,
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            tile.table_index(),
+            tile.blend_index(),
+            tile.horizontal(),
+            tile.vertical(),
+            tile.right_diagonal(),
+            tile.left_diagonal(),
+            tile.inverted(),
+            tile.long_diagonal(),
+            tile.custom_edge_class()
+        )
+        .expect("writing to a String cannot fail");
+    }
+}
+
+fn render_map_cliff_info(output: &mut String, blend: &MapBlendData) {
+    output.push_str("cliff\ttile\tu0\tv0\tu1\tv1\tu2\tv2\tu3\tv3\tflip\tmutant\n");
+    for cliff in blend.cliff_info() {
+        let uv = cliff.uv().map(float_bits);
+        writeln!(
+            output,
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            cliff.table_index(),
+            cliff.tile_index(),
+            uv[0],
+            uv[1],
+            uv[2],
+            uv[3],
+            uv[4],
+            uv[5],
+            uv[6],
+            uv[7],
+            cliff.flip(),
+            cliff.mutant()
+        )
+        .expect("writing to a String cannot fail");
+    }
 }
 
 /// Formats a W3D chunk tree as a stable, depth-first tab-separated inventory.
@@ -255,11 +549,29 @@ fn escape_text(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use cic_formats::{
-        CsfLimits, W3dLimits, W3dMeshLimits, decode_static_mesh, parse_csf, parse_w3d,
+        CsfLimits, MapLimits, W3dLimits, W3dMeshLimits, decode_map_blend, decode_map_height,
+        decode_static_mesh, parse_csf, parse_map, parse_w3d,
     };
     use cic_vfs::{Vfs, VirtualPath};
 
-    use super::{render_csf, render_manifest, render_w3d, render_w3d_mesh};
+    use super::{
+        encode_map_height_png, render_csf, render_manifest, render_map, render_map_blend,
+        render_map_height, render_w3d, render_w3d_mesh,
+    };
+
+    fn hex_fixture(hex: &str) -> Vec<u8> {
+        let digits = hex
+            .bytes()
+            .filter(u8::is_ascii_hexdigit)
+            .collect::<Vec<_>>();
+        digits
+            .chunks_exact(2)
+            .map(|pair| {
+                let pair = std::str::from_utf8(pair).expect("ASCII fixture");
+                u8::from_str_radix(pair, 16).expect("valid hex fixture")
+            })
+            .collect()
+    }
 
     #[test]
     fn manifest_is_sorted_and_reports_winning_provenance() {
@@ -344,6 +656,89 @@ mod tests {
              0/1\t1\t19\t0x22222222\tcontainer\t10\tunknown\n\
              0/1/0\t2\t27\t0x33333333\tdata\t2\tunknown\n\
              1\t0\t37\t0xDEADBEEF\tdata\t4\tunknown\n"
+        );
+    }
+
+    #[test]
+    fn map_reports_preserve_inventory_and_emit_row_major_heights() {
+        let bytes = hex_fixture(include_str!(
+            "../../cic-formats/tests/fixtures/minimal.map.hex"
+        ));
+        let map = parse_map(&bytes, "minimal.map", MapLimits::default()).expect("valid MAP");
+
+        assert_eq!(
+            render_map(&map),
+            "compression\tnone\n\
+             symbol\toffset\tid\tname\n\
+             0\t8\t0x00000007\tHeightMapData\n\
+             1\t26\t0x00000009\tMystery\n\
+             chunk\toffset\tid\tversion\tpayload\tname\n\
+             0\t38\t0x00000007\t4\t34\tHeightMapData\n\
+             1\t82\t0x00000009\t2\t3\tMystery\n\
+             2\t95\t0xFEEDBEEF\t9\t2\tunknown\n"
+        );
+
+        let height = decode_map_height(&map, MapLimits::default()).expect("valid heights");
+        assert_eq!(
+            render_map_height(&height),
+            "version\twidth\theight\tborder\tcell_size\tboundaries\tsamples\n\
+             4\t3\t2\t0\t10\t1\t6\n\
+             boundary\tx\ty\n\
+             0\t3\t2\n\
+             sample\tx\ty\tvalue\n\
+             0\t0\t0\t0\n\
+             1\t1\t0\t16\n\
+             2\t2\t0\t32\n\
+             3\t0\t1\t48\n\
+             4\t1\t1\t64\n\
+             5\t2\t1\t255\n"
+        );
+
+        let png = encode_map_height_png(&height).expect("encode height PNG");
+        let image = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+            .expect("decode height PNG")
+            .to_luma8();
+        assert_eq!(image.dimensions(), (3, 2));
+        assert_eq!(image.as_raw(), &[0, 16, 32, 48, 64, 255]);
+    }
+
+    #[test]
+    fn map_blend_report_is_stable_and_preserves_exact_uv_bits() {
+        let bytes = hex_fixture(include_str!(
+            "../../cic-formats/tests/fixtures/blend.map.hex"
+        ));
+        let map = parse_map(&bytes, "blend.map", MapLimits::default()).expect("valid MAP");
+        let height = decode_map_height(&map, MapLimits::default()).expect("valid heights");
+        let blend = decode_map_blend(&map, &height, MapLimits::default()).expect("valid blend");
+
+        assert_eq!(
+            render_map_blend(&blend),
+            "version\twidth\theight\tcells\tbitmap_tiles\tblended_tiles\tcliff_info\ttexture_classes\tedge_tiles\tedge_texture_classes\tcliff_stride\n\
+             7\t8\t2\t16\t4\t2\t2\t1\t2\t1\t1\n\
+             cell\tx\ty\ttile\tblend\textra_blend\tcliff_info\tcliff_flag\n\
+             0\t0\t0\t0\t0\t0\t1\t1\n\
+             1\t1\t0\t1\t0\t0\t0\t0\n\
+             2\t2\t0\t2\t0\t0\t0\t0\n\
+             3\t3\t0\t3\t0\t0\t0\t0\n\
+             4\t4\t0\t0\t0\t0\t0\t0\n\
+             5\t5\t0\t1\t1\t0\t0\t0\n\
+             6\t6\t0\t2\t0\t1\t0\t0\n\
+             7\t7\t0\t3\t0\t0\t0\t0\n\
+             8\t0\t1\t0\t0\t0\t0\t0\n\
+             9\t1\t1\t1\t0\t0\t0\t0\n\
+             10\t2\t1\t2\t0\t0\t0\t0\n\
+             11\t3\t1\t3\t0\t0\t0\t0\n\
+             12\t4\t1\t0\t0\t0\t0\t0\n\
+             13\t5\t1\t1\t0\t0\t0\t0\n\
+             14\t6\t1\t2\t0\t0\t0\t0\n\
+             15\t7\t1\t3\t0\t0\t0\t1\n\
+             texture\tkind\tfirst\tcount\twidth\tlegacy\tname\n\
+             0\tterrain\t0\t4\t2\t0\tBase\n\
+             0\tedge\t0\t2\t1\t\tShore\n\
+             blend\tblend_index\thorizontal\tvertical\tright_diagonal\tleft_diagonal\tinverted\tlong_diagonal\tcustom_edge_class\n\
+             1\t1\t1\t0\t1\t0\t3\t1\t0\n\
+             cliff\ttile\tu0\tv0\tu1\tv1\tu2\tv2\tu3\tv3\tflip\tmutant\n\
+             1\t3\t0x00000000\t0x00000000\t0x00000000\t0x3F800000\t0x3F800000\t0x3F800000\t0x3F800000\t0x00000000\t1\t0\n"
         );
     }
 

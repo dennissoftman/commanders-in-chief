@@ -2,7 +2,10 @@
 
 mod model;
 mod resource;
+mod terrain;
+mod terrain_viewer;
 mod viewer;
+mod water;
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -14,8 +17,14 @@ use sha2::{Digest, Sha256};
 
 pub use model::{AnimatedModel, StagedModel};
 pub use resource::{TextureId, TextureImage, TextureResourceManager};
+pub use terrain::{
+    StagedTerrain, TERRAIN_HEIGHT_SCALE, TERRAIN_XY_SCALE, TerrainCell, TerrainCompatibilityPolicy,
+    TerrainError, TerrainLayer, TerrainStagingOptions, TerrainVertex,
+};
+pub use terrain_viewer::run_terrain_viewer;
 use viewer::{GpuResourceManager, MaterialPipelines, create_material_layout};
 pub use viewer::{ViewerError, run_model_viewer};
+pub use water::{StagedWater, WaterAppearance, WaterCausticSequence};
 
 const CAPTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const BYTES_PER_PIXEL: u32 = 4;
@@ -202,6 +211,9 @@ pub struct HeadlessRenderer {
     queue: wgpu::Queue,
     synthetic_pipeline: wgpu::RenderPipeline,
     model_pipeline: wgpu::RenderPipeline,
+    terrain_pipeline: wgpu::RenderPipeline,
+    terrain_edge_pipeline: wgpu::RenderPipeline,
+    terrain_layout: wgpu::BindGroupLayout,
     material_layout: wgpu::BindGroupLayout,
     material_pipelines: MaterialPipelines,
     pose_buffer: wgpu::Buffer,
@@ -352,6 +364,53 @@ impl HeadlessRenderer {
             multiview_mask: None,
             cache: None,
         });
+        let terrain_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("cic-render terrain shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("terrain.wgsl").into()),
+        });
+        let terrain_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("cic-render terrain texture layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let terrain_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("cic-render terrain pipeline layout"),
+                bind_group_layouts: &[Some(&terrain_layout)],
+                immediate_size: 0,
+            });
+        let terrain_pipeline = create_headless_terrain_pipeline(
+            &device,
+            &terrain_shader,
+            &terrain_pipeline_layout,
+            "cic-render terrain pipeline",
+            None,
+            true,
+        );
+        let terrain_edge_pipeline = create_headless_terrain_pipeline(
+            &device,
+            &terrain_shader,
+            &terrain_pipeline_layout,
+            "cic-render terrain edge pipeline",
+            Some(wgpu::BlendState::ALPHA_BLENDING),
+            false,
+        );
         let textured_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cic-render textured model shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("viewer.wgsl").into()),
@@ -375,6 +434,9 @@ impl HeadlessRenderer {
             queue,
             synthetic_pipeline,
             model_pipeline,
+            terrain_pipeline,
+            terrain_edge_pipeline,
+            terrain_layout,
             material_layout,
             material_pipelines,
             pose_buffer,
@@ -748,6 +810,258 @@ impl HeadlessRenderer {
         self.finish_capture(encoder, &readback, width, height, unpadded_row, padded_row)
     }
 
+    /// Renders source-scaled terrain geometry with its deterministically composited texture.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured error for invalid capture dimensions, excessive GPU resources,
+    /// submission/readback failures, or index counts outside the draw API limit.
+    #[allow(clippy::too_many_lines)]
+    pub fn capture_terrain(
+        &self,
+        width: u32,
+        height: u32,
+        terrain: &StagedTerrain,
+    ) -> Result<Capture, RenderError> {
+        let (unpadded_row, padded_row, buffer_size) = capture_layout(width, height)?;
+        #[allow(clippy::cast_precision_loss)]
+        let aspect = width as f32 / height as f32;
+        let vertex_bytes = terrain.projected_vertex_bytes(aspect);
+        let index_bytes = terrain.index_bytes();
+        let index_count =
+            u32::try_from(terrain.indices().len()).map_err(|_| RenderError::GeometryTooLarge)?;
+        let edge_index_count = u32::try_from(terrain.edge_indices().len())
+            .map_err(|_| RenderError::GeometryTooLarge)?;
+        let vertex_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cic-render terrain vertices"),
+            size: u64::try_from(vertex_bytes.len()).map_err(|_| RenderError::GeometryTooLarge)?,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let index_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cic-render terrain indices"),
+            size: u64::try_from(index_bytes.len()).map_err(|_| RenderError::GeometryTooLarge)?,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.queue.write_buffer(&vertex_buffer, 0, &vertex_bytes);
+        self.queue.write_buffer(&index_buffer, 0, &index_bytes);
+        let edge_index_buffer = if edge_index_count == 0 {
+            None
+        } else {
+            let bytes = terrain.edge_index_bytes();
+            let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("cic-render terrain edge indices"),
+                size: u64::try_from(bytes.len()).map_err(|_| RenderError::GeometryTooLarge)?,
+                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.queue.write_buffer(&buffer, 0, &bytes);
+            Some(buffer)
+        };
+
+        let terrain_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("cic-render baked terrain texture"),
+            size: wgpu::Extent3d {
+                width: terrain.texture_width(),
+                height: terrain.texture_height(),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &terrain_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            terrain.texture_rgba(),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(
+                    terrain
+                        .texture_width()
+                        .checked_mul(4)
+                        .ok_or(RenderError::TextureTooLarge)?,
+                ),
+                rows_per_image: Some(terrain.texture_height()),
+            },
+            terrain_texture.size(),
+        );
+        let terrain_view = terrain_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let terrain_sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("cic-render terrain sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+        let terrain_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("cic-render terrain bind group"),
+            layout: &self.terrain_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&terrain_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&terrain_sampler),
+                },
+            ],
+        });
+        let edge_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("cic-render baked terrain edge texture"),
+            size: terrain_texture.size(),
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &edge_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            terrain.edge_texture_rgba(),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(
+                    terrain
+                        .texture_width()
+                        .checked_mul(4)
+                        .ok_or(RenderError::TextureTooLarge)?,
+                ),
+                rows_per_image: Some(terrain.texture_height()),
+            },
+            edge_texture.size(),
+        );
+        let edge_view = edge_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let edge_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("cic-render terrain edge bind group"),
+            layout: &self.terrain_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&edge_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&terrain_sampler),
+                },
+            ],
+        });
+
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("cic-render terrain target"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: CAPTURE_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let depth = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("cic-render terrain depth"),
+            size: texture.size(),
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cic-render terrain readback"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("cic-render terrain encoder"),
+            });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("cic-render terrain pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.025,
+                            g: 0.04,
+                            b: 0.055,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.terrain_pipeline);
+            pass.set_bind_group(0, &terrain_bind_group, &[]);
+            pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+            pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..index_count, 0, 0..1);
+            if let Some(edge_index_buffer) = &edge_index_buffer {
+                pass.set_pipeline(&self.terrain_edge_pipeline);
+                pass.set_bind_group(0, &edge_bind_group, &[]);
+                pass.set_index_buffer(edge_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..edge_index_count, 0, 0..1);
+            }
+        }
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            texture.size(),
+        );
+        self.finish_capture(encoder, &readback, width, height, unpadded_row, padded_row)
+    }
+
     fn finish_capture(
         &self,
         encoder: wgpu::CommandEncoder,
@@ -791,6 +1105,66 @@ impl HeadlessRenderer {
             rgba,
         })
     }
+}
+
+fn create_headless_terrain_pipeline(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    layout: &wgpu::PipelineLayout,
+    label: &str,
+    blend: Option<wgpu::BlendState>,
+    depth_write: bool,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vertex_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[Some(wgpu::VertexBufferLayout {
+                array_stride: 20,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &[
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x3,
+                        offset: 0,
+                        shader_location: 0,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x2,
+                        offset: 12,
+                        shader_location: 1,
+                    },
+                ],
+            })],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fragment_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: CAPTURE_FORMAT,
+                blend,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: Some(wgpu::Face::Back),
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: Some(depth_write),
+            depth_compare: Some(wgpu::CompareFunction::LessEqual),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
 }
 
 fn capture_layout(width: u32, height: u32) -> Result<(u32, u32, u64), RenderError> {

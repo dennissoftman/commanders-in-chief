@@ -19,5 +19,19 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "map"
+path = "fuzz_targets/map.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "water_ini"
+path = "fuzz_targets/water_ini.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

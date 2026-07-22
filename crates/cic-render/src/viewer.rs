@@ -796,11 +796,11 @@ fn address_mode(clamp: bool) -> wgpu::AddressMode {
     }
 }
 
-fn nonzero_size(size: PhysicalSize<u32>) -> PhysicalSize<u32> {
+pub(crate) fn nonzero_size(size: PhysicalSize<u32>) -> PhysicalSize<u32> {
     PhysicalSize::new(size.width.max(1), size.height.max(1))
 }
 
-fn create_depth(device: &wgpu::Device, size: PhysicalSize<u32>) -> wgpu::Texture {
+pub(crate) fn create_depth(device: &wgpu::Device, size: PhysicalSize<u32>) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some("cic-render viewer depth"),
         size: wgpu::Extent3d {
@@ -821,6 +821,8 @@ fn create_depth(device: &wgpu::Device, size: PhysicalSize<u32>) -> wgpu::Texture
 #[derive(Debug)]
 pub enum ViewerError {
     Render(RenderError),
+    Terrain(crate::TerrainError),
+    Thread(std::io::Error),
     EventLoop(winit::error::EventLoopError),
     Window(winit::error::OsError),
     CreateSurface(wgpu::CreateSurfaceError),
@@ -835,10 +837,26 @@ impl From<RenderError> for ViewerError {
     }
 }
 
+impl From<crate::TerrainError> for ViewerError {
+    fn from(error: crate::TerrainError) -> Self {
+        Self::Terrain(error)
+    }
+}
+
+impl From<std::io::Error> for ViewerError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Thread(error)
+    }
+}
+
 impl Display for ViewerError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Render(error) => write!(formatter, "rendering interactive W3D: {error}"),
+            Self::Terrain(error) => {
+                write!(formatter, "staging interactive terrain detail: {error}")
+            }
+            Self::Thread(error) => write!(formatter, "starting terrain detail worker: {error}"),
             Self::EventLoop(error) => write!(formatter, "running viewer event loop: {error}"),
             Self::Window(error) => write!(formatter, "creating viewer window: {error}"),
             Self::CreateSurface(error) => write!(formatter, "creating GPU surface: {error}"),
@@ -857,6 +875,8 @@ impl Error for ViewerError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Render(error) => Some(error),
+            Self::Terrain(error) => Some(error),
+            Self::Thread(error) => Some(error),
             Self::EventLoop(error) => Some(error),
             Self::Window(error) => Some(error),
             Self::CreateSurface(error) => Some(error),

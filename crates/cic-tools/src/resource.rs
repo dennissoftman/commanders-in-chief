@@ -25,6 +25,10 @@ pub enum ResourceKind {
     Manifest,
     /// Localization archives.
     Localization,
+    /// Terrain MAP archives.
+    Map,
+    /// Terrain MAP, terrain texture-sheet, and Terrain INI archives.
+    Terrain,
     /// W3D model archives without texture images.
     W3d,
     /// W3D model and texture archives.
@@ -272,6 +276,26 @@ fn edition_archives(
         (_, ResourceKind::Manifest) => return all_big_files(root),
         (GameEdition::Generals, ResourceKind::Localization) => vec!["English.big", "Patch.big"],
         (GameEdition::ZeroHour, ResourceKind::Localization) => vec!["EnglishZH.big", "PatchZH.big"],
+        (GameEdition::Generals, ResourceKind::Map) => vec!["Maps.big", "Patch.big"],
+        (GameEdition::ZeroHour, ResourceKind::Map) => vec!["MapsZH.big", "PatchZH.big"],
+        (GameEdition::Generals, ResourceKind::Terrain) => {
+            vec![
+                "Maps.big",
+                "Terrain.big",
+                "Textures.big",
+                "INI.big",
+                "Patch.big",
+            ]
+        }
+        (GameEdition::ZeroHour, ResourceKind::Terrain) => {
+            vec![
+                "MapsZH.big",
+                "TerrainZH.big",
+                "TexturesZH.big",
+                "INIZH.big",
+                "PatchZH.big",
+            ]
+        }
         (GameEdition::Generals, ResourceKind::W3d) => vec!["W3D.big", "Patch.big"],
         (GameEdition::ZeroHour, ResourceKind::W3d) => {
             vec!["W3DZH.big", "W3DEnglishZH.big", "PatchZH.big"]
@@ -509,11 +533,17 @@ mod tests {
         }
         fs::create_dir_all(&root).expect("create profile test");
         for name in [
+            "Maps.big",
             "Patch.big",
             "Textures.big",
+            "Terrain.big",
+            "INI.big",
             "W3D.big",
+            "MapsZH.big",
             "PatchZH.big",
             "TexturesZH.big",
+            "TerrainZH.big",
+            "INIZH.big",
             "W3DEnglishZH.big",
             "W3DZH.big",
         ] {
@@ -536,6 +566,34 @@ mod tests {
                 "W3DZH.big",
                 "W3DEnglishZH.big",
                 "TexturesZH.big",
+                "PatchZH.big"
+            ]
+        );
+        assert_eq!(
+            edition_archives(GameEdition::Generals, ResourceKind::Terrain, &root)
+                .expect("terrain archive profile")
+                .into_iter()
+                .map(|path| path.file_name().expect("file name").to_owned())
+                .collect::<Vec<_>>(),
+            [
+                "Maps.big",
+                "Terrain.big",
+                "Textures.big",
+                "INI.big",
+                "Patch.big"
+            ]
+        );
+        assert_eq!(
+            edition_archives(GameEdition::ZeroHour, ResourceKind::Terrain, &root)
+                .expect("Zero Hour terrain archive profile")
+                .into_iter()
+                .map(|path| path.file_name().expect("file name").to_owned())
+                .collect::<Vec<_>>(),
+            [
+                "MapsZH.big",
+                "TerrainZH.big",
+                "TexturesZH.big",
+                "INIZH.big",
                 "PatchZH.big"
             ]
         );

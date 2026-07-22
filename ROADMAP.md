@@ -168,7 +168,7 @@ remains explicitly excluded until broader image comparisons exist.
 
 ## R3: MAP terrain inspection and viewer
 
-**Status:** Not started.
+**Status:** In progress.
 
 **Scope:** Add a bounded, unknown-preserving MAP chunk inventory, then separately gate versioned
 terrain heights, blend/shore data, object placement, lighting, and a terrain viewer.
@@ -197,6 +197,32 @@ updates where the existing boundary changes, and user-owned capture instructions
 
 **Completion artifact:** Original versioned terrain fixture(s), checked stable reports and capture
 hashes, plus a local user-owned MAP verification record without copied game content.
+
+**Progress:** The initial source-backed gate inventories the `CkMp` symbol table and top-level
+chunks with exact closure and opaque payload preservation. A separate semantic decoder accepts
+`HeightMapData` versions 1 through 4, validates dimensions, border, boundaries, and exact row-major
+sample cardinality, and retains the stored version-1 grid pending an explicit compatibility policy.
+`cic-inspect map` and `map-height --report` produce stable VFS-backed reports from an original
+synthetic MAP inside a synthetic BIG, while `map-height` writes exact samples as a basename-derived
+deterministic grayscale PNG by default.
+`BlendTileData` versions 6 and 7 now decode bounded tile-index planes, height-derived or stored
+legacy cliff flags, terrain and edge texture classes, blend selectors, and cliff records; an
+original negative fixture and stable
+`map-blend` report cover the gate. Source-backed bounded `EAR\0` RefPack decompression closed one
+user-owned installed MAP, whose height and blend cell counts both validated at 152,000. A bounded
+Terrain INI gate now maps semantic classes to VFS terrain sheets with explicit default inheritance.
+`cic-render` stages source-scaled geometry, packed tile quadrants, base/primary/extra procedural
+layers, mip rounding, stored and legacy-adjusted cliff UVs, height-selected cliff diagonals, and a
+separately indexed custom-edge atlas pass. `map-render` exposes explicit legacy/modern policies and
+emits an sRGB headless PNG with stable diagnostics. `map-view` shares that resource/staging path and
+adds perspective free-flight camera controls. Original synthetic tests cover cliff adjustment and
+custom-edge geometry/texturing; an installed 151,221-cell Generals visual and viewer smoke resolved
+all 14 classes and retained no retail capture. The viewer now streams independently cancellable,
+depth-capped 16/32-pixel screen-space tiers over the stable 8-pixel background, retains old GPU
+patches during replacement, and applies an explicit viewer-only directional slope light; synthetic
+region output matches a full-resolution bake byte-for-byte. Hybrid-deferred water and Modern
+de-tiling are active. Blend version 8, object placement, source-authored lighting, and custom-map
+verification remain open.
 
 ## R4: Deterministic simulation kernel
 

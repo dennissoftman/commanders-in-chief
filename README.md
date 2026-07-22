@@ -11,6 +11,11 @@ BIG archive mounting, and a CLI that inventories mounted resources.
 ```powershell
 cargo test --workspace
 cargo run -p cic-tools -- manifest path\to\base path\to\archive.big path\to\override
+cargo run -p cic-tools -- map maps\synthetic\synthetic.map path\to\maps.big
+cargo run -p cic-tools -- map-height maps\synthetic\synthetic.map path\to\maps.big
+cargo run -p cic-tools -- map-height --report maps\synthetic\synthetic.map path\to\maps.big
+cargo run -p cic-tools -- map-blend maps\synthetic\blend.map path\to\maps.big
+cargo run -p cic-tools -- map-render --size 768 maps\synthetic\blend.map path\to\maps.big path\to\terrain-resources
 cargo run -p cic-render --example headless_capture -- target/synthetic-capture.ppm
 ```
 
@@ -74,6 +79,34 @@ Directories and BIG archives are mounted from left to right. Later mounts overri
 earlier mounts. Archive backslashes and host separators are normalized; manifests always
 emit portable `/` virtual paths.
 No retail game assets are included in this repository.
+
+The current R3 terrain gate inventories MAP chunks, decodes immutable height and version-6/7 blend
+values, resolves semantic terrain classes through mounted Terrain INI definitions, and stages
+source-scaled layered terrain for a deterministic headless capture:
+
+```powershell
+cargo run -p cic-tools -- map-height "maps/synthetic/synthetic.map"
+cargo run -p cic-tools -- map-height --report "maps/synthetic/synthetic.map"
+cargo run -p cic-tools -- map-render --size 768 "maps/synthetic/synthetic.map"
+cargo run -p cic-tools -- map-view "maps/synthetic/synthetic.map"
+cargo run -p cic-tools -- map-water "maps/synthetic/synthetic.map"
+```
+
+The first command derives `synthetic.png`; the terrain render derives `synthetic-terrain.png`.
+Explicit output paths and directory/BIG mounts remain supported. `map-view` opens a perspective
+flyover: WASD moves, Space/Ctrl changes altitude, Shift boosts, right-drag looks, the wheel moves
+forward/back, R resets, and Escape closes. Terrain rendering defaults to the source-compatible
+`--terrain-policy legacy`; `modern` keeps stored cliff mappings, disables implicit steep-slope
+retiling, and adds world-anchored macro variation. Custom edge classes render through a separately
+indexed overlay pass. The viewer resolves opaque terrain through a G-buffer, then draws decoded
+water polygons in a depth-aware forward pass. It keeps the deterministic 8-pixel background and
+streams depth-capped 16- and 32-texel screen-space tiers over the stable 8-texel background.
+Oblique horizon coverage therefore cannot lower foreground resolution. Obsolete CPU bakes cancel
+immediately, while old and new resident patches briefly overlap; linear-light mipmaps, trilinear
+filtering, and up to 16x anisotropy keep terrain stable across movement and pitch changes.
+Installed profiles resolve bounded source caustic frames and water-transparency
+depth into renderer-neutral appearance inputs. The shader projects the subtle animation onto the
+underwater bed and combines it with depth absorption and shallow shoreline effects.
 
 See [CURRENT.md](CURRENT.md) for the active objective and [ROADMAP.md](ROADMAP.md) for
 completion gates.

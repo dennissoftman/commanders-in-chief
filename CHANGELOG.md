@@ -6,6 +6,13 @@ All notable user-visible changes are recorded here.
 
 ### Added
 
+- Bounded water-only MAP decoding/reporting, stable lake/river staging, a modern hybrid-deferred
+  terrain viewer with thickness-aware forward water, and deterministic Modern-profile de-tiling.
+- Horizon-safe terrain detail streaming with nested screen-space 16/32-pixel tiers over the stable
+  8-pixel background, predictive margins, independently cancellable stale bakes, overlap
+  transitions, linear-light mipmaps, and anisotropic sampling. Water now uses bounded
+  source-resolved caustic animation, source transparency depth,
+  a more opaque body, and restored shallow shoreline haze and crest effects.
 - Initial GPL-3.0-only repository charter and provenance policy.
 - Rust workspace with bounded binary input and deterministic virtual filesystem crates.
 - `cic-inspect manifest` command for deterministic loose-directory inventories.
@@ -81,3 +88,47 @@ All notable user-visible changes are recorded here.
   frame, mapper time, and rotation without reading a clock. The synthetic two-pass/two-stage
   textured animation capture has a checked RGBA SHA-256 completion hash.
 - Synthetic unit and integration tests plus CI quality gates.
+- Added bounded bare and `EAR\0` RefPack-wrapped `CkMp` MAP symbol-table and top-level chunk
+  inventories with opaque unknown payload preservation, deterministic last-symbol-wins name
+  resolution, and stable VFS-backed reports.
+- Added `HeightMapData` versions 1 through 4 with explicit dimension, border, boundary, payload,
+  allocation, and sample-cardinality checks plus stable row-major `cic-inspect map-height` output.
+- Added deterministic 8-bit grayscale PNG export to `cic-inspect map-height --png` with exact
+  stored sample order and no color-space transform.
+- Added bounded immutable `BlendTileData` version-6/7 tile planes, version-6 source-equivalent
+  height-derived cliff flags, version-7 legacy cliff-bitmap normalization, terrain and edge texture
+  classes, blend records, and cliff UV records, plus a stable VFS-backed `cic-inspect map-blend`
+  report.
+- Added an original versioned MAP fixture, negative parser tests, a synthetic BIG-backed completion
+  artifact, and a bounded MAP fuzz target.
+- `cic-inspect map-height` now writes a basename-derived grayscale PNG by default; `--report`
+  selects the stable text report and `--png` supplies an explicit output path.
+- Added a bounded Terrain INI declaration decoder and deterministic `DefaultTerrain` inheritance so
+  semantic MAP texture classes resolve through mounted `Terrain.big`/`INI.big` resources.
+- Added source-scaled terrain geometry and deterministic base/primary/extra texture staging with
+  packed tile quadrants, source-rounded mip reduction, procedural blend masks, and source-selected
+  triangle diagonals.
+- Added `cic-inspect map-render`, which produces a depth-tested isometric sRGB PNG and stable
+  geometry/layer/hash diagnostics through the headless GPU renderer. An original layered-terrain
+  fixture carries a checked RGBA SHA-256 completion hash.
+- Added `cic-inspect map-view`, a perspective terrain flyover sharing the map-render resource and
+  staging path, with WASD/vertical flight, speed boost, right-mouse look, wheel dolly, and camera
+  reset controls.
+- Added explicit `legacy` and `modern` terrain policies. Both apply same-class stored cliff UVs;
+  the default legacy policy also reproduces bounded steep-slope UV retile and height-selected
+  triangle diagonals.
+- Added separately indexed custom-edge geometry and deterministic quarter-atlas texturing for
+  white material coverage, black gaps, and colored decorative edge pixels in both headless and
+  interactive terrain rendering.
+- Added bounded renderer detail streaming: quantized, depth-capped screen-space footprints rebake
+  authored terrain as independent 16- and 32-pixel tiers over the unchanged deterministic 8-pixel
+  background. Generation checks immediately cancel obsolete work and suppress stale uploads;
+  explicit-time overlap transitions retain the previous resident patch during replacement.
+- Added a bounded `WaterTransparency` INI decoder and renderer-neutral `WaterAppearance` input.
+  Installed profiles may resolve complete `caust00`-`caust31` image sequences into a mipmapped GPU
+  texture array; synthetic mounts remain valid without retail resources.
+- Added terrain-surface directional shading to `map-view`. This explicit presentation preview
+  improves slope readability without changing staged values or deterministic headless hashes;
+  source-authored MAP lighting remains a later semantic decoder.
+- Enabled back-face culling for terrain, custom edges, and streamed detail after verifying the
+  stable height-field winding; deterministic terrain capture hashes remain unchanged.

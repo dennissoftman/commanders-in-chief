@@ -160,6 +160,13 @@ impl TextureResourceManager {
         self.aliases.get(&normalized_alias(alias)).copied()
     }
 
+    /// Returns the decoded image registered for an alias.
+    #[must_use]
+    pub fn image(&self, alias: &[u8]) -> Option<&TextureImage> {
+        let id = self.texture(alias)?;
+        self.images.get(id.index())
+    }
+
     #[must_use]
     pub const fn fallback_white(&self) -> TextureId {
         TextureId(0)

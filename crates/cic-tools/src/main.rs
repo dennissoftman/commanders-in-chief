@@ -7,20 +7,24 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use cic_formats::{
-    CsfLimits, W3dFile, W3dLimits, W3dMeshLimits, W3dSceneLimits, decode_static_mesh,
-    decode_w3d_model_set, parse_csf, parse_w3d, w3d_model_hierarchy_name,
+    CsfLimits, MapLimits, MapWaterError, TerrainIniLimits, W3dFile, W3dLimits, W3dMeshLimits,
+    W3dSceneLimits, WaterIniLimits, decode_map_blend, decode_map_height, decode_map_water,
+    decode_static_mesh, decode_w3d_model_set, parse_csf, parse_map, parse_terrain_ini, parse_w3d,
+    parse_water_transparency_ini, w3d_model_hierarchy_name,
 };
 use cic_render::{
-    AnimatedModel, HeadlessRenderer, ModelFrame, TextureId, TextureResourceManager,
-    run_model_viewer,
+    AnimatedModel, HeadlessRenderer, ModelFrame, StagedTerrain, StagedWater,
+    TerrainCompatibilityPolicy, TerrainStagingOptions, TextureId, TextureResourceManager,
+    WaterAppearance, WaterCausticSequence, run_model_viewer, run_terrain_viewer,
 };
 use cic_tools::resource::{
     GameEdition, ResourceKind, StoredLocations, config_path, discover_steam_locations,
     resolve_archives, validate_installation,
 };
 use cic_tools::{
-    GltfTextureRequest, pack_w3d_glb, render_csf, render_manifest, render_w3d, render_w3d_gltf,
-    render_w3d_mesh,
+    GltfTextureRequest, encode_capture_png, encode_map_height_png, pack_w3d_glb, render_csf,
+    render_manifest, render_map, render_map_blend, render_map_height, render_map_water, render_w3d,
+    render_w3d_gltf, render_w3d_mesh,
 };
 use cic_vfs::{BigLimits, Vfs, VirtualPath};
 
@@ -30,6 +34,12 @@ const USAGE: &str = "Usage:\n\
   cic-inspect config set <generals-dir|zero-hour-dir> <path>\n\
   cic-inspect manifest <mount> [<mount> ...]\n\
   cic-inspect csf <virtual-path> <mount> [<mount> ...]\n\
+  cic-inspect map <virtual-path> <mount> [<mount> ...]\n\
+  cic-inspect map-height [--report | --png <output.png>] <virtual-path> <mount> [<mount> ...]\n\
+  cic-inspect map-blend <virtual-path> <mount> [<mount> ...]\n\
+  cic-inspect map-water <virtual-path> <mount> [<mount> ...]\n\
+  cic-inspect map-render [--size <pixels>] [--pixels-per-cell <pixels>] [--terrain-policy <legacy|modern>] <virtual-path> [<output.png>] [<mount> ...]\n\
+  cic-inspect map-view [--pixels-per-cell <pixels>] [--terrain-policy <legacy|modern>] <virtual-path> [<mount> ...]\n\
   cic-inspect w3d <virtual-path> <mount> [<mount> ...]\n\
   cic-inspect w3d-mesh <virtual-path> <top-level-index> <mount> [<mount> ...]\n\
   cic-inspect w3d-view <virtual-path> [<mount> ...]\n\
@@ -102,6 +112,24 @@ fn run(arguments: impl IntoIterator<Item = String>) -> Result<String, Box<dyn Er
             let csf = parse_csf(entry.bytes(), resource_path.as_str(), CsfLimits::default())?;
             Ok(render_csf(&csf))
         }
+        "map" => {
+            let resource_name = arguments
+                .next()
+                .ok_or_else(|| format!("{command} requires a virtual path"))?;
+            let mounts = arguments.collect::<Vec<_>>();
+            let vfs = mount_all(&command, &mounts, &options, ResourceKind::Map)?;
+            let resource_path = VirtualPath::new(&resource_name)?;
+            let entry = vfs
+                .resolve(&resource_path)
+                .ok_or_else(|| format!("resource not found: {resource_path}"))?;
+            let map = parse_map(entry.bytes(), resource_path.as_str(), MapLimits::default())?;
+            Ok(render_map(&map))
+        }
+        "map-height" => report_map_height(&mut arguments, &options),
+        "map-blend" => report_map_blend(arguments, &options),
+        "map-water" => report_map_water(arguments, &options),
+        "map-render" => render_terrain_capture(&mut arguments, &options),
+        "map-view" => view_terrain(&mut arguments, &options),
         "w3d" => {
             let resource_name = arguments.next().ok_or("w3d requires a virtual path")?;
             let mounts = arguments.collect::<Vec<_>>();
@@ -140,6 +168,401 @@ fn run(arguments: impl IntoIterator<Item = String>) -> Result<String, Box<dyn Er
         "w3d-export" => export_model(&mut arguments, &options),
         _ => Err(format!("unknown command {command:?}").into()),
     }
+}
+
+fn report_map_height<I>(
+    arguments: &mut std::iter::Peekable<I>,
+    options: &CliOptions,
+) -> Result<String, Box<dyn Error>>
+where
+    I: Iterator<Item = String>,
+{
+    let mut report = false;
+    let mut png_path = None;
+    while arguments
+        .peek()
+        .is_some_and(|argument| argument.starts_with("--"))
+    {
+        match arguments.next().expect("peeked map-height option").as_str() {
+            "--report" => report = true,
+            "--png" => {
+                png_path = Some(PathBuf::from(
+                    arguments.next().ok_or("--png requires an output path")?,
+                ));
+            }
+            option => return Err(format!("unknown map-height option {option:?}").into()),
+        }
+    }
+    if report && png_path.is_some() {
+        return Err("map-height --report and --png are mutually exclusive".into());
+    }
+    let resource_name = arguments
+        .next()
+        .ok_or("map-height requires a virtual path")?;
+    let mounts = arguments.collect::<Vec<_>>();
+    let vfs = mount_all("map-height", &mounts, options, ResourceKind::Map)?;
+    let resource_path = VirtualPath::new(&resource_name)?;
+    let entry = vfs
+        .resolve(&resource_path)
+        .ok_or_else(|| format!("resource not found: {resource_path}"))?;
+    let map = parse_map(entry.bytes(), resource_path.as_str(), MapLimits::default())?;
+    let height = decode_map_height(&map, MapLimits::default())?;
+    if report {
+        Ok(render_map_height(&height))
+    } else {
+        let path = png_path.unwrap_or(default_map_output_path(&resource_path, "png")?);
+        let png = encode_map_height_png(&height)?;
+        fs::write(&path, &png)?;
+        Ok(format!(
+            "height-png\t{}\t{}\t{}\t{}\n",
+            path.display(),
+            height.width(),
+            height.height(),
+            png.len()
+        ))
+    }
+}
+
+fn default_map_output_path(
+    resource_path: &VirtualPath,
+    extension: &str,
+) -> Result<PathBuf, Box<dyn Error>> {
+    let stem = Path::new(resource_path.as_str())
+        .file_stem()
+        .ok_or("MAP resource path has no file name")?;
+    Ok(PathBuf::from(stem).with_extension(extension))
+}
+
+fn report_map_blend<I>(arguments: I, options: &CliOptions) -> Result<String, Box<dyn Error>>
+where
+    I: Iterator<Item = String>,
+{
+    let mut arguments = arguments;
+    let resource_name = arguments
+        .next()
+        .ok_or("map-blend requires a virtual path")?;
+    let mounts = arguments.collect::<Vec<_>>();
+    let vfs = mount_all("map-blend", &mounts, options, ResourceKind::Map)?;
+    let resource_path = VirtualPath::new(&resource_name)?;
+    let entry = vfs
+        .resolve(&resource_path)
+        .ok_or_else(|| format!("resource not found: {resource_path}"))?;
+    let map = parse_map(entry.bytes(), resource_path.as_str(), MapLimits::default())?;
+    let height = decode_map_height(&map, MapLimits::default())?;
+    let blend = decode_map_blend(&map, &height, MapLimits::default())?;
+    Ok(render_map_blend(&blend))
+}
+
+fn report_map_water<I>(arguments: I, options: &CliOptions) -> Result<String, Box<dyn Error>>
+where
+    I: Iterator<Item = String>,
+{
+    let mut arguments = arguments;
+    let resource_name = arguments
+        .next()
+        .ok_or("map-water requires a virtual path")?;
+    let mounts = arguments.collect::<Vec<_>>();
+    let vfs = mount_all("map-water", &mounts, options, ResourceKind::Map)?;
+    let resource_path = VirtualPath::new(&resource_name)?;
+    let entry = vfs
+        .resolve(&resource_path)
+        .ok_or_else(|| format!("resource not found: {resource_path}"))?;
+    let map = parse_map(entry.bytes(), resource_path.as_str(), MapLimits::default())?;
+    let water = decode_map_water(&map, MapLimits::default())?;
+    Ok(render_map_water(&water))
+}
+
+fn render_terrain_capture<I>(
+    arguments: &mut std::iter::Peekable<I>,
+    options: &CliOptions,
+) -> Result<String, Box<dyn Error>>
+where
+    I: Iterator<Item = String>,
+{
+    let mut size = 768_u32;
+    let mut pixels_per_cell = TerrainStagingOptions::SOURCE_BACKGROUND.pixels_per_cell();
+    let mut compatibility = TerrainCompatibilityPolicy::ZeroHourLegacy;
+    while arguments
+        .peek()
+        .is_some_and(|argument| argument.starts_with("--"))
+    {
+        let option = arguments.next().expect("peeked map-render option");
+        let value = arguments
+            .next()
+            .ok_or_else(|| format!("{option} requires a value"))?;
+        match option.as_str() {
+            "--size" => size = value.parse::<u32>()?,
+            "--pixels-per-cell" => pixels_per_cell = value.parse::<u32>()?,
+            "--terrain-policy" => compatibility = parse_terrain_policy(&value)?,
+            _ => return Err(format!("unknown map-render option {option:?}").into()),
+        }
+    }
+    let resource_name = arguments
+        .next()
+        .ok_or("map-render requires a virtual path")?;
+    let resource_path = VirtualPath::new(&resource_name)?;
+    let remaining = arguments.collect::<Vec<_>>();
+    let (output_path, mounts) = if remaining.first().is_some_and(|candidate| {
+        Path::new(candidate)
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
+    }) {
+        (PathBuf::from(&remaining[0]), remaining[1..].to_vec())
+    } else {
+        (default_terrain_render_path(&resource_path)?, remaining)
+    };
+    let vfs = mount_all("map-render", &mounts, options, ResourceKind::Terrain)?;
+    let terrain = load_staged_terrain(&vfs, &resource_path, pixels_per_cell, compatibility)?;
+    let renderer = pollster::block_on(HeadlessRenderer::new())?;
+    let capture = renderer.capture_terrain(size, size, &terrain)?;
+    let png = encode_capture_png(&capture)?;
+    fs::write(&output_path, png)?;
+    let primary_layers = terrain
+        .cells()
+        .iter()
+        .filter(|cell| cell.primary().is_some())
+        .count();
+    let extra_layers = terrain
+        .cells()
+        .iter()
+        .filter(|cell| cell.extra().is_some())
+        .count();
+    Ok(format!(
+        "adapter\t{}\nterrain_policy\t{}\ngrid\t{}\t{}\ncells\t{}\nvertices\t{}\nindices\t{}\nedge_indices\t{}\nprimary_layers\t{}\nextra_layers\t{}\ncustom_edge_cells\t{}\nbaked_texture\t{}\t{}\nrgba_sha256\t{}\nwrote\t{}\n",
+        renderer.adapter_info().name,
+        terrain_policy_name(compatibility),
+        terrain.width(),
+        terrain.height(),
+        terrain.cells().len(),
+        terrain.vertices().len(),
+        terrain.indices().len(),
+        terrain.edge_indices().len(),
+        primary_layers,
+        extra_layers,
+        terrain.custom_edge_cell_count(),
+        terrain.texture_width(),
+        terrain.texture_height(),
+        capture.sha256(),
+        output_path.display()
+    ))
+}
+
+fn view_terrain<I>(
+    arguments: &mut std::iter::Peekable<I>,
+    options: &CliOptions,
+) -> Result<String, Box<dyn Error>>
+where
+    I: Iterator<Item = String>,
+{
+    let mut pixels_per_cell = TerrainStagingOptions::SOURCE_BACKGROUND.pixels_per_cell();
+    let mut compatibility = TerrainCompatibilityPolicy::ZeroHourLegacy;
+    while arguments
+        .peek()
+        .is_some_and(|argument| argument.starts_with("--"))
+    {
+        let option = arguments.next().expect("peeked map-view option");
+        let value = arguments
+            .next()
+            .ok_or_else(|| format!("{option} requires a value"))?;
+        match option.as_str() {
+            "--pixels-per-cell" => pixels_per_cell = value.parse::<u32>()?,
+            "--terrain-policy" => compatibility = parse_terrain_policy(&value)?,
+            _ => return Err(format!("unknown map-view option {option:?}").into()),
+        }
+    }
+    let resource_name = arguments.next().ok_or("map-view requires a virtual path")?;
+    let resource_path = VirtualPath::new(&resource_name)?;
+    let mounts = arguments.collect::<Vec<_>>();
+    let vfs = mount_all("map-view", &mounts, options, ResourceKind::Terrain)?;
+    let (terrain, water, water_appearance) =
+        load_staged_terrain_and_water(&vfs, &resource_path, pixels_per_cell, compatibility)?;
+    let cells = terrain.cells().len();
+    let vertices = terrain.vertices().len();
+    run_terrain_viewer(
+        terrain,
+        water,
+        water_appearance,
+        format!("Commanders in Chief - terrain - {resource_path}"),
+    )?;
+    Ok(format!(
+        "closed terrain viewer for {resource_path} ({cells} cells, {vertices} vertices)\n"
+    ))
+}
+
+fn load_staged_terrain_and_water(
+    vfs: &Vfs,
+    resource_path: &VirtualPath,
+    pixels_per_cell: u32,
+    compatibility: TerrainCompatibilityPolicy,
+) -> Result<(StagedTerrain, StagedWater, WaterAppearance), Box<dyn Error>> {
+    let entry = vfs
+        .resolve(resource_path)
+        .ok_or_else(|| format!("resource not found: {resource_path}"))?;
+    let limits = MapLimits::default();
+    let map = parse_map(entry.bytes(), resource_path.as_str(), limits)?;
+    let height = decode_map_height(&map, limits)?;
+    let blend = decode_map_blend(&map, &height, limits)?;
+    let water = match decode_map_water(&map, limits) {
+        Ok(water) => StagedWater::from_map(&water)?,
+        Err(MapWaterError::MissingPolygonTriggers | MapWaterError::UnsupportedVersion(1)) => {
+            StagedWater::empty()
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let textures = load_terrain_textures(vfs, &blend)?;
+    let staging = TerrainStagingOptions::new(pixels_per_cell)?.with_compatibility(compatibility);
+    let terrain = StagedTerrain::from_map(&height, &blend, &textures, staging)?;
+    let water_appearance = load_water_appearance(vfs)?;
+    Ok((terrain, water, water_appearance))
+}
+
+fn load_water_appearance(vfs: &Vfs) -> Result<WaterAppearance, Box<dyn Error>> {
+    let first_path = VirtualPath::new("art/textures/caust00.tga")?;
+    let mut appearance = WaterAppearance::without_caustics();
+    if vfs.resolve(&first_path).is_some() {
+        let mut frames = Vec::with_capacity(32);
+        let mut dimensions = None;
+        for index in 0..32 {
+            let path = VirtualPath::new(&format!("art/textures/caust{index:02}.tga"))?;
+            let entry = vfs
+                .resolve(&path)
+                .ok_or_else(|| format!("incomplete caustic sequence: missing {path}"))?;
+            let image = decode_viewer_texture(entry.bytes(), image::ImageFormat::Tga)?;
+            let current = (image.width(), image.height());
+            if dimensions.is_some_and(|expected| expected != current) {
+                return Err(format!("caustic frame dimensions disagree at {path}").into());
+            }
+            dimensions = Some(current);
+            frames.push(image.pixels().map(|pixel| pixel[0]).collect());
+        }
+        let (width, height) = dimensions.ok_or("caustic sequence is empty")?;
+        appearance =
+            WaterAppearance::with_caustics(WaterCausticSequence::new(width, height, 16, frames)?);
+    }
+    let mut deep_opacity = appearance.deep_opacity();
+    let mut opaque_depth = appearance.opaque_depth();
+    for raw_path in ["data/ini/default/water.ini", "data/ini/water.ini"] {
+        let path = VirtualPath::new(raw_path)?;
+        let Some(entry) = vfs.resolve(&path) else {
+            continue;
+        };
+        let parsed = parse_water_transparency_ini(entry.bytes(), WaterIniLimits::default())?;
+        deep_opacity = parsed.minimum_opacity().unwrap_or(deep_opacity);
+        opaque_depth = parsed.opaque_depth().unwrap_or(opaque_depth);
+    }
+    Ok(appearance.with_transparency(deep_opacity, opaque_depth)?)
+}
+
+fn load_staged_terrain(
+    vfs: &Vfs,
+    resource_path: &VirtualPath,
+    pixels_per_cell: u32,
+    compatibility: TerrainCompatibilityPolicy,
+) -> Result<StagedTerrain, Box<dyn Error>> {
+    let entry = vfs
+        .resolve(resource_path)
+        .ok_or_else(|| format!("resource not found: {resource_path}"))?;
+    let limits = MapLimits::default();
+    let map = parse_map(entry.bytes(), resource_path.as_str(), limits)?;
+    let height = decode_map_height(&map, limits)?;
+    let blend = decode_map_blend(&map, &height, limits)?;
+    let textures = load_terrain_textures(vfs, &blend)?;
+    let staging = TerrainStagingOptions::new(pixels_per_cell)?.with_compatibility(compatibility);
+    Ok(StagedTerrain::from_map(
+        &height, &blend, &textures, staging,
+    )?)
+}
+
+fn parse_terrain_policy(value: &str) -> Result<TerrainCompatibilityPolicy, Box<dyn Error>> {
+    match value {
+        "legacy" => Ok(TerrainCompatibilityPolicy::ZeroHourLegacy),
+        "modern" => Ok(TerrainCompatibilityPolicy::Modern),
+        _ => Err(format!("unknown terrain policy {value:?}; expected legacy or modern").into()),
+    }
+}
+
+const fn terrain_policy_name(policy: TerrainCompatibilityPolicy) -> &'static str {
+    match policy {
+        TerrainCompatibilityPolicy::ZeroHourLegacy => "legacy",
+        TerrainCompatibilityPolicy::Modern => "modern",
+    }
+}
+
+fn default_terrain_render_path(resource_path: &VirtualPath) -> Result<PathBuf, Box<dyn Error>> {
+    let stem = Path::new(resource_path.as_str())
+        .file_stem()
+        .ok_or("MAP resource path has no file name")?;
+    Ok(PathBuf::from(format!("{}-terrain", stem.to_string_lossy())).with_extension("png"))
+}
+
+fn load_terrain_textures(
+    vfs: &Vfs,
+    blend: &cic_formats::MapBlendData,
+) -> Result<TextureResourceManager, Box<dyn Error>> {
+    let mut textures = TextureResourceManager::default();
+    let catalog = load_terrain_texture_catalog(vfs)?;
+    for class in blend
+        .texture_classes()
+        .iter()
+        .chain(blend.edge_texture_classes())
+    {
+        if textures.contains_alias(class.name_bytes()) {
+            continue;
+        }
+        let (path, bytes) = resolve_terrain_texture(vfs, class.name_bytes(), &catalog)?;
+        let image = decode_viewer_texture(bytes, image_format(&path)?)?;
+        textures.insert(
+            class.name_bytes(),
+            image.width(),
+            image.height(),
+            image.into_raw(),
+        )?;
+    }
+    Ok(textures)
+}
+
+fn load_terrain_texture_catalog(vfs: &Vfs) -> Result<BTreeMap<Vec<u8>, Vec<u8>>, Box<dyn Error>> {
+    let mut catalog = BTreeMap::new();
+    for raw_path in ["data/ini/default/terrain.ini", "data/ini/terrain.ini"] {
+        let path = VirtualPath::new(raw_path)?;
+        let Some(entry) = vfs.resolve(&path) else {
+            continue;
+        };
+        let ini = parse_terrain_ini(entry.bytes(), TerrainIniLimits::default())?;
+        for definition in ini.definitions() {
+            let key = ascii_fold(definition.name_bytes());
+            let inherited = catalog
+                .get(&key)
+                .cloned()
+                .or_else(|| catalog.get(b"defaultterrain".as_slice()).cloned());
+            if let Some(texture) = definition.texture_bytes().map(Vec::from).or(inherited) {
+                catalog.insert(key, texture);
+            }
+        }
+    }
+    Ok(catalog)
+}
+
+fn resolve_terrain_texture<'a>(
+    vfs: &'a Vfs,
+    class_name: &[u8],
+    catalog: &BTreeMap<Vec<u8>, Vec<u8>>,
+) -> Result<(VirtualPath, &'a [u8]), Box<dyn Error>> {
+    if let Some(texture_name) = catalog.get(&ascii_fold(class_name)) {
+        return resolve_image(vfs, texture_name, "art/terrain").map_err(|error| {
+            format!(
+                "terrain class {} maps to {} but its image could not be loaded: {error}",
+                String::from_utf8_lossy(class_name),
+                String::from_utf8_lossy(texture_name)
+            )
+            .into()
+        });
+    }
+    resolve_texture(vfs, class_name)
+}
+
+fn ascii_fold(bytes: &[u8]) -> Vec<u8> {
+    bytes.iter().map(u8::to_ascii_lowercase).collect()
 }
 
 fn view_model<I>(
@@ -692,7 +1115,7 @@ fn image_format(path: &VirtualPath) -> Result<image::ImageFormat, Box<dyn Error>
         Some("dds") => Ok(image::ImageFormat::Dds),
         Some("tga") => Ok(image::ImageFormat::Tga),
         Some("png") => Ok(image::ImageFormat::Png),
-        extension => Err(format!("unsupported W3D texture image format: {extension:?}").into()),
+        extension => Err(format!("unsupported texture image format: {extension:?}").into()),
     }
 }
 
@@ -700,24 +1123,52 @@ fn resolve_texture<'a>(
     vfs: &'a Vfs,
     raw_name: &[u8],
 ) -> Result<(VirtualPath, &'a [u8]), Box<dyn Error>> {
+    resolve_image(vfs, raw_name, "art/textures")
+}
+
+fn resolve_image<'a>(
+    vfs: &'a Vfs,
+    raw_name: &[u8],
+    resource_directory: &str,
+) -> Result<(VirtualPath, &'a [u8]), Box<dyn Error>> {
     let name = std::str::from_utf8(raw_name)
-        .map_err(|_| "W3D texture name is not UTF-8 and cannot be mapped to the VFS")?;
+        .map_err(|_| "texture name is not UTF-8 and cannot be mapped to the VFS")?;
     let normalized = name.replace('\\', "/");
     let basename = normalized
         .rsplit('/')
         .next()
-        .ok_or("W3D texture name is empty")?;
-    let mut candidates = vec![normalized.clone(), format!("art/textures/{normalized}")];
+        .ok_or("texture name is empty")?;
+    let mut candidates = vec![
+        normalized.clone(),
+        format!("{resource_directory}/{normalized}"),
+    ];
     if basename != normalized {
-        candidates.push(format!("art/textures/{basename}"));
+        candidates.push(format!("{resource_directory}/{basename}"));
     }
-    if let Some(stem) = basename
-        .strip_suffix(".tga")
-        .or_else(|| basename.strip_suffix(".TGA"))
-    {
-        candidates.push(format!("art/textures/{stem}.dds"));
+    let original_candidates = candidates.clone();
+    for candidate in &original_candidates {
+        if candidate
+            .get(candidate.len().saturating_sub(4)..)
+            .is_some_and(|extension| extension.eq_ignore_ascii_case(".tga"))
+        {
+            candidates.push(format!("{}.dds", &candidate[..candidate.len() - 4]));
+        }
     }
+    if Path::new(basename).extension().is_none() {
+        for extension in ["tga", "dds", "png"] {
+            candidates.push(format!("{normalized}.{extension}"));
+            candidates.push(format!("{resource_directory}/{normalized}.{extension}"));
+            if basename != normalized {
+                candidates.push(format!("{resource_directory}/{basename}.{extension}"));
+            }
+        }
+    }
+    let mut checked = Vec::new();
     for candidate in candidates {
+        if checked.contains(&candidate) {
+            continue;
+        }
+        checked.push(candidate.clone());
         let path = VirtualPath::new(&candidate)?;
         if let Some(entry) = vfs.resolve(&path) {
             return Ok((path, entry.bytes()));

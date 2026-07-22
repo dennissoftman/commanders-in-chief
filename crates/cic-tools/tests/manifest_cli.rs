@@ -210,6 +210,228 @@ fn w3d_inside_big_produces_a_stable_nested_inventory() {
     fs::remove_dir_all(root).expect("remove test tree");
 }
 
+#[test]
+fn map_inside_big_produces_stable_inventory_and_height_reports() {
+    let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("map-cli");
+    if root.exists() {
+        fs::remove_dir_all(&root).expect("remove stale test tree");
+    }
+    fs::create_dir_all(&root).expect("create test tree");
+    let archive_path = root.join("maps.big");
+    let map = map_fixture();
+    fs::write(
+        &archive_path,
+        big_with_entry(r"Maps\Synthetic Valley\synthetic valley.map", &map),
+    )
+    .expect("write synthetic archive");
+
+    let inventory = Command::new(env!("CARGO_BIN_EXE_cic-inspect"))
+        .arg("map")
+        .arg("MAPS/SYNTHETIC VALLEY/SYNTHETIC VALLEY.MAP")
+        .arg(&archive_path)
+        .output()
+        .expect("run MAP inventory");
+    assert!(inventory.status.success());
+    assert_eq!(
+        String::from_utf8(inventory.stdout).expect("UTF-8 inventory"),
+        "compression\tnone\n\
+         symbol\toffset\tid\tname\n\
+         0\t8\t0x00000007\tHeightMapData\n\
+         1\t26\t0x00000009\tMystery\n\
+         chunk\toffset\tid\tversion\tpayload\tname\n\
+         0\t38\t0x00000007\t4\t34\tHeightMapData\n\
+         1\t82\t0x00000009\t2\t3\tMystery\n\
+         2\t95\t0xFEEDBEEF\t9\t2\tunknown\n"
+    );
+
+    let heights = Command::new(env!("CARGO_BIN_EXE_cic-inspect"))
+        .arg("map-height")
+        .arg("--report")
+        .arg("maps/synthetic valley/synthetic valley.map")
+        .arg(&archive_path)
+        .output()
+        .expect("run MAP height report");
+    assert!(heights.status.success());
+    assert_eq!(
+        String::from_utf8(heights.stdout).expect("UTF-8 height report"),
+        "version\twidth\theight\tborder\tcell_size\tboundaries\tsamples\n\
+         4\t3\t2\t0\t10\t1\t6\n\
+         boundary\tx\ty\n\
+         0\t3\t2\n\
+         sample\tx\ty\tvalue\n\
+         0\t0\t0\t0\n\
+         1\t1\t0\t16\n\
+         2\t2\t0\t32\n\
+         3\t0\t1\t48\n\
+         4\t1\t1\t64\n\
+         5\t2\t1\t255\n"
+    );
+
+    let png_path = root.join("height.png");
+    let png = Command::new(env!("CARGO_BIN_EXE_cic-inspect"))
+        .arg("map-height")
+        .arg("--png")
+        .arg(&png_path)
+        .arg("maps/synthetic valley/synthetic valley.map")
+        .arg(&archive_path)
+        .output()
+        .expect("run MAP height PNG export");
+    assert!(png.status.success());
+    let image = image::open(&png_path).expect("open height PNG").to_luma8();
+    assert_eq!(image.dimensions(), (3, 2));
+    assert_eq!(image.as_raw(), &[0, 16, 32, 48, 64, 255]);
+
+    let default_png = Command::new(env!("CARGO_BIN_EXE_cic-inspect"))
+        .current_dir(&root)
+        .arg("map-height")
+        .arg("maps/synthetic valley/synthetic valley.map")
+        .arg(&archive_path)
+        .output()
+        .expect("run default MAP height PNG export");
+    assert!(default_png.status.success());
+    assert!(root.join("synthetic valley.png").is_file());
+
+    fs::remove_dir_all(root).expect("remove test tree");
+}
+
+#[test]
+fn map_blend_inside_big_produces_stable_semantic_report() {
+    let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("map-blend-cli");
+    if root.exists() {
+        fs::remove_dir_all(&root).expect("remove stale test tree");
+    }
+    fs::create_dir_all(&root).expect("create test tree");
+    let archive_path = root.join("maps.big");
+    fs::write(
+        &archive_path,
+        big_with_entry(r"Maps\Synthetic\blend.map", &map_blend_fixture()),
+    )
+    .expect("write synthetic archive");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cic-inspect"))
+        .arg("map-blend")
+        .arg("maps/synthetic/blend.map")
+        .arg(&archive_path)
+        .output()
+        .expect("run MAP blend report");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 blend report");
+    assert!(stdout.starts_with(
+        "version\twidth\theight\tcells\tbitmap_tiles\tblended_tiles\tcliff_info\ttexture_classes\tedge_tiles\tedge_texture_classes\tcliff_stride\n\
+         7\t8\t2\t16\t4\t2\t2\t1\t2\t1\t1\n"
+    ));
+    assert!(stdout.contains("0\tterrain\t0\t4\t2\t0\tBase\n"));
+    assert!(stdout.contains("0\tedge\t0\t2\t1\t\tShore\n"));
+    assert!(stdout.ends_with(
+        "1\t3\t0x00000000\t0x00000000\t0x00000000\t0x3F800000\t0x3F800000\t0x3F800000\t0x3F800000\t0x00000000\t1\t0\n"
+    ));
+
+    fs::remove_dir_all(root).expect("remove test tree");
+}
+
+#[test]
+fn map_render_inside_big_writes_a_textured_png() {
+    let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("map-render-cli");
+    if root.exists() {
+        fs::remove_dir_all(&root).expect("remove stale test tree");
+    }
+    let texture_dir = root.join("art/terrain");
+    let ini_dir = root.join("data/ini");
+    fs::create_dir_all(&texture_dir).expect("create texture tree");
+    fs::create_dir_all(&ini_dir).expect("create INI tree");
+    let archive_path = root.join("maps.big");
+    fs::write(
+        &archive_path,
+        big_with_entry(r"Maps\Synthetic\blend.map", &map_blend_fixture()),
+    )
+    .expect("write synthetic archive");
+    image::RgbaImage::from_raw(128, 128, vec![96; 128 * 128 * 4])
+        .expect("terrain image")
+        .save(texture_dir.join("SyntheticGround.png"))
+        .expect("write terrain image");
+    let mut edge = vec![0_u8; 64 * 64 * 4];
+    for y in 0..64 {
+        for x in 0..64 {
+            let color = match x % 16 {
+                0..=3 => [255, 255, 255, 255],
+                4..=11 => [240, 48, 192, 255],
+                _ => [0, 0, 0, 255],
+            };
+            let offset = (y * 64 + x) * 4;
+            edge[offset..offset + 4].copy_from_slice(&color);
+        }
+    }
+    image::RgbaImage::from_raw(64, 64, edge)
+        .expect("edge image")
+        .save(texture_dir.join("SyntheticEdge.png"))
+        .expect("write edge image");
+    fs::write(
+        ini_dir.join("terrain.ini"),
+        b"Terrain DefaultTerrain\n  Texture = SyntheticGround.png\nEnd\nTerrain Base\n  BlendEdges = Yes\nEnd\nTerrain Shore\n  Texture = SyntheticEdge.png\nEnd\n",
+    )
+    .expect("write terrain catalog");
+    let output_path = root.join("terrain.png");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cic-inspect"))
+        .arg("map-render")
+        .arg("--size")
+        .arg("128")
+        .arg("maps/synthetic/blend.map")
+        .arg(&output_path)
+        .arg(&archive_path)
+        .arg(&root)
+        .output()
+        .expect("run MAP terrain renderer");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 terrain report");
+    assert!(stdout.contains("grid\t8\t2\n"));
+    assert!(stdout.contains("primary_layers\t1\n"));
+    assert!(stdout.contains("extra_layers\t1\n"));
+    assert!(stdout.contains("custom_edge_cells\t1\n"));
+    assert!(stdout.contains("edge_indices\t6\n"));
+    assert!(stdout.contains("terrain_policy\tlegacy\n"));
+    let image = image::open(&output_path)
+        .expect("open terrain PNG")
+        .to_rgba8();
+    assert_eq!(image.dimensions(), (128, 128));
+
+    fs::remove_dir_all(root).expect("remove test tree");
+}
+
+fn map_fixture() -> Vec<u8> {
+    let hex = include_str!("../../cic-formats/tests/fixtures/minimal.map.hex");
+    let digits = hex
+        .bytes()
+        .filter(u8::is_ascii_hexdigit)
+        .collect::<Vec<_>>();
+    digits
+        .chunks_exact(2)
+        .map(|pair| {
+            let pair = std::str::from_utf8(pair).expect("ASCII hex");
+            u8::from_str_radix(pair, 16).expect("valid hex fixture")
+        })
+        .collect()
+}
+
+fn map_blend_fixture() -> Vec<u8> {
+    let hex = include_str!("../../cic-formats/tests/fixtures/blend.map.hex");
+    let digits = hex
+        .bytes()
+        .filter(u8::is_ascii_hexdigit)
+        .collect::<Vec<_>>();
+    digits
+        .chunks_exact(2)
+        .map(|pair| {
+            let pair = std::str::from_utf8(pair).expect("ASCII hex");
+            u8::from_str_radix(pair, 16).expect("valid hex fixture")
+        })
+        .collect()
+}
+
 fn w3d_fixture() -> Vec<u8> {
     let hex = include_str!("../../cic-formats/tests/fixtures/minimal.w3d.hex");
     let digits = hex
