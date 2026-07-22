@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use cic_formats::{MapLimits, decode_map_blend, decode_map_height, parse_map};
-use cic_render::{HeadlessRenderer, StagedTerrain, TerrainStagingOptions, TextureResourceManager};
+use cic_render::{
+    HeadlessRenderer, RenderError, StagedTerrain, TerrainStagingOptions, TextureResourceManager,
+};
 
 #[test]
 fn synthetic_layered_terrain_capture_matches_completion_hash() {
@@ -27,7 +29,9 @@ fn synthetic_layered_terrain_capture_matches_completion_hash() {
         TerrainStagingOptions::SOURCE_BACKGROUND,
     )
     .expect("staged terrain");
-    let renderer = pollster::block_on(HeadlessRenderer::new()).expect("headless renderer");
+    let Some(renderer) = headless_renderer_or_skip() else {
+        return;
+    };
     let capture = renderer
         .capture_terrain(128, 128, &terrain)
         .expect("terrain capture");
@@ -59,7 +63,9 @@ fn synthetic_custom_edge_capture_matches_completion_hash() {
         TerrainStagingOptions::SOURCE_BACKGROUND,
     )
     .expect("staged terrain");
-    let renderer = pollster::block_on(HeadlessRenderer::new()).expect("headless renderer");
+    let Some(renderer) = headless_renderer_or_skip() else {
+        return;
+    };
     let capture = renderer
         .capture_terrain(128, 128, &terrain)
         .expect("terrain capture");
@@ -68,6 +74,17 @@ fn synthetic_custom_edge_capture_matches_completion_hash() {
         capture.sha256(),
         "5f5761f44446d8784b7c0910adee7ede440c9e428a3d4b25be26ce470bfabd27"
     );
+}
+
+fn headless_renderer_or_skip() -> Option<HeadlessRenderer> {
+    match pollster::block_on(HeadlessRenderer::new()) {
+        Ok(renderer) => Some(renderer),
+        Err(RenderError::RequestAdapter(error)) => {
+            eprintln!("skipping GPU terrain capture without a headless adapter: {error}");
+            None
+        }
+        Err(error) => panic!("initializing headless renderer: {error}"),
+    }
 }
 
 fn blend_fixture() -> Vec<u8> {

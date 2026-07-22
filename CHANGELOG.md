@@ -6,6 +6,8 @@ All notable user-visible changes are recorded here.
 
 ### Fixed
 
+- Headless terrain capture tests now skip when the host exposes no graphics adapter, matching the
+  existing synthetic capture policy while preserving real renderer and hash failures.
 - Linux and macOS builds no longer retain the Windows-only Steam registry command import.
 - Angled terrain views now select virtual-texture detail in camera-space depth and rank projected
   page bounds instead of filling a world-axis square around the viewport footprint. Coarse visible
