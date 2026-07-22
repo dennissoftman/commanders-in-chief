@@ -28,7 +28,7 @@ pub enum ResourceKind {
     Localization,
     /// Terrain MAP archives.
     Map,
-    /// Terrain MAP, terrain texture-sheet, and Terrain INI archives.
+    /// Terrain MAP, texture, INI, and static W3D presentation archives.
     Terrain,
     /// W3D model archives without texture images.
     W3d,
@@ -547,6 +547,7 @@ fn edition_archives(
                 "Terrain.big",
                 "Textures.big",
                 "INI.big",
+                "W3D.big",
                 "Patch.big",
             ]
         }
@@ -556,6 +557,8 @@ fn edition_archives(
                 "TerrainZH.big",
                 "TexturesZH.big",
                 "INIZH.big",
+                "W3DZH.big",
+                "W3DEnglishZH.big",
                 "PatchZH.big",
             ]
         }
@@ -986,6 +989,7 @@ mod tests {
                 "Terrain.big",
                 "Textures.big",
                 "INI.big",
+                "W3D.big",
                 "Patch.big"
             ]
         );
@@ -1000,6 +1004,8 @@ mod tests {
                 "TerrainZH.big",
                 "TexturesZH.big",
                 "INIZH.big",
+                "W3DZH.big",
+                "W3DEnglishZH.big",
                 "PatchZH.big"
             ]
         );

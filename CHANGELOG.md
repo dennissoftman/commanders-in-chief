@@ -4,6 +4,35 @@ All notable user-visible changes are recorded here.
 
 ## Unreleased
 
+### Added
+
+- Added bounded immutable `WorldInfo`, `ObjectsList`, `SidesList`, build-list, team, and complete
+  nested player-script decoders. Stable `map-objects` and `map-sides` reports expose exact scalar
+  bits, typed dictionaries, endpoint flags, spawn candidates, and raw script opcodes/parameters
+  without validation repair, live object construction, or script execution.
+- Added source-order scene staging for road/bridge endpoints, visible scenery placements, hidden
+  records, waypoints, and one-based `Player_n_Start` candidates. Definition resolution and actual
+  road, bridge, building, vegetation, and prop rendering remain separate presentation gates.
+- Added WaterSet sky/environment texture resolution, sibling-map overrides, Modern bounded
+  screen-space/environment reflection inputs, and a frozen explicit presentation-time mode for
+  `map-view`.
+- Added bounded `Road` INI decoding and deterministic regular-road rendering in `map-view`.
+  Consecutive Point1/Point2 records resolve source textures and widths, tessellate at terrain-cell
+  intervals, follow maximum underlying height, and alpha-overlay in stable MAP order. Missing
+  definitions/textures remain explicit diagnostics. Connected endpoints now receive bounded
+  edge-derived corner/junction polygons instead of oversized circular fillers.
+- Added bounded intact `Bridge` model/scale decoding and source-style bridge presentation from
+  consecutive endpoints. `BRIDGE_LEFT`/`BRIDGE_SPAN`/`BRIDGE_RIGHT` sections repeat and deform onto
+  the terrain-sampled sloped axis; damage, repair, collision, towers, and state selection remain
+  deferred.
+- Added bounded initial Object draw-definition decoding, reskin inheritance, default W3D model and
+  scale selection, standalone static-mesh composition, and GPU-instanced static scenery in
+  `map-view`. Placements sample the exact rendered terrain triangle, including MAP border and
+  diagonal selection, then add the authored relative Z offset verbatim, including negative
+  offsets and with no clamp or renderer epsilon.
+- Added a renderer-only translucent playable-boundary fence. Its base follows perimeter terrain and
+  its global top clears the map's highest terrain sample without changing pathing or simulation.
+
 ### Changed
 
 - Documented the repository-wide Zero Hour layering invariant: enumerate and mount Generals first,
@@ -21,6 +50,18 @@ All notable user-visible changes are recorded here.
   spawn candidates.
 
 ### Fixed
+
+- `map-view` now uses an explicit legacy-preview W3D recovery policy for damaged shipped assets:
+  missing optional HLOD meshes are skipped, invalid one-past-end HLOD/skin references fall back to
+  a rigid root/pivot, and non-finite UVs become zero only at presentation/export boundaries while
+  their immutable exact bits remain preserved. Strict W3D composition remains unchanged.
+- Intact bridges no longer treat the complete W3D as a midpoint-scaled static prop. Their endpoint
+  marker height, repeated sections, lateral scale, slope, and orientation now follow the dedicated
+  bridge presentation path.
+
+- Static W3D meshes now honor the Header3 two-sided flag: ordinary meshes cull back faces while
+  explicitly two-sided foliage and planar props retain both sides, removing coplanar backface
+  flicker caused by the previous global no-cull policy.
 
 - Version-4 height maps now preserve signed playable-boundary coordinates instead of rejecting
   negative values accepted by the source reader. River staging now honors the stored seam index

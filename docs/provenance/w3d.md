@@ -47,6 +47,10 @@ the high-bit child-container flag, nested boundary accounting, W3D identifiers, 
 the 16-byte material inventory, 32-byte vertex materials, material-pass ID cardinality,
 and four-byte DCG colors.
 
+Header3 also defines `W3D_MESH_FLAG_TWO_SIDED` as `0x00002000`. The interactive model and
+instanced-scenery renderers use that decoded flag only to select between project-authored
+back-face-culled and two-sided `wgpu` pipelines; no legacy draw-state implementation is copied.
+
 The same revision establishes the hierarchy and pivot layouts, parent-before-child world
 transform composition, last-array HLOD selection, one-bone vertex influences, classic raw
 animation headers and channels, post-multiplied translation/quaternion application, and direct
@@ -110,6 +114,14 @@ pass/stage draws with 17 effective materials and 14 unique textures; its additiv
 transparent black backgrounds. The same explicit-input path rendered installed infantry animation
 frame 1 as four textured draws. Only hashes and aggregate counts were recorded; no retail bytes,
 images, names, or captures were retained in the repository.
+
+On 2026-07-22, user-owned static-map assets exercised missing optional HLOD meshes, one-past-end
+HLOD/skin/animation pivots, and a non-finite UV. Strict model composition retains its structured
+errors. The project-authored `LegacyPreview` recovery is selected only by `map-view`; exact UV bits
+remain immutable metadata and visible output substitutes a deterministic zero pair. A release
+USA01 staging smoke then resolved 1,630 instances across 71 batches with zero invalid models. Only
+aggregate counts and error classes were retained; no retail bytes, names, meshes, or textures were
+copied.
 
 ## Implementation record
 

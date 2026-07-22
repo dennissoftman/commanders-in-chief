@@ -1,8 +1,12 @@
 //! Renderer boundary and deterministic headless capture support.
 
+mod boundary;
 mod lighting;
+mod map_scene;
 mod model;
 mod resource;
+mod road;
+mod scenery;
 mod terrain;
 mod terrain_viewer;
 mod terrain_virtual;
@@ -17,14 +21,31 @@ use std::time::Duration;
 use cic_formats::W3dStaticMesh;
 use sha2::{Digest, Sha256};
 
+pub use boundary::{BoundaryStagingError, BoundaryVertex, StagedBoundaryFence};
 pub use lighting::{TerrainDirectionalLight, TerrainLighting};
+pub use map_scene::{
+    MapEndpointKind, MapPresentationFrame, MapSceneStagingError, StagedMapEndpoint,
+    StagedMapPlacement, StagedMapScene, StagedWaypoint,
+};
 pub use model::{AnimatedModel, StagedModel};
 pub use resource::{TextureId, TextureImage, TextureResourceManager};
+pub use road::{
+    RoadDiagnostic, RoadDiagnosticKind, RoadDrawKind, RoadStagingError, RoadTexture, RoadVertex,
+    StagedRoadDraw, StagedRoadMaterial, StagedRoads,
+};
+pub use scenery::{
+    StagedStaticScenery, StagedStaticSceneryModel, StaticSceneryDiagnostic,
+    StaticSceneryDiagnosticKind, StaticSceneryError, StaticSceneryInstance,
+};
 pub use terrain::{
     StagedTerrain, TERRAIN_HEIGHT_SCALE, TERRAIN_XY_SCALE, TerrainCell, TerrainCompatibilityPolicy,
     TerrainError, TerrainLayer, TerrainStagingOptions, TerrainVertex,
 };
-pub use terrain_viewer::run_terrain_viewer;
+pub use terrain_viewer::{
+    run_terrain_viewer, run_terrain_viewer_at_time, run_terrain_viewer_with_map,
+    run_terrain_viewer_with_map_at_time, run_terrain_viewer_with_roads,
+    run_terrain_viewer_with_roads_at_time,
+};
 use viewer::{GpuResourceManager, MaterialPipelines, create_material_layout};
 pub use viewer::{ViewerError, run_model_viewer};
 pub use water::{
@@ -788,10 +809,11 @@ impl HeadlessRenderer {
                     .first_index
                     .checked_add(draw.index_count)
                     .ok_or(RenderError::GeometryTooLarge)?;
-                pass.set_pipeline(
-                    self.material_pipelines
-                        .get(material.blend, material.depth_write),
-                );
+                pass.set_pipeline(self.material_pipelines.get(
+                    material.blend,
+                    material.depth_write,
+                    material.two_sided,
+                ));
                 pass.set_bind_group(0, &material.bind_group, &[]);
                 pass.draw_indexed(draw.first_index..end, 0, 0..1);
             }

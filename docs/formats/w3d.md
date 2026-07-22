@@ -148,9 +148,10 @@ Declared shader and texture counts must exactly match their decoded tables.
 
 Material-pass shader IDs and texture-stage texture IDs are either one 32-bit value or one
 value per triangle. Texture ID `0xFFFFFFFF` means no texture; every other shader or texture
-ID must be in range. Stage UVs are finite `(U, V)` float pairs. Without a per-face index
-array there must be one UV per vertex; an optional per-face array contains three checked
-UV indices per triangle.
+ID must be in range. Stage UVs preserve exact `(U, V)` float bits, including malformed non-finite
+legacy payloads. Without a per-face index array there must be one UV per vertex; an optional
+per-face array contains three checked UV indices per triangle. Renderer and visible glTF preview
+replace a non-finite pair with `(0, 0)` while fixed-function metadata retains the source bits.
 
 ## Hierarchy, HLOD, skinning, and animation
 
@@ -170,6 +171,12 @@ Consequently glTF export uses identity inverse-bind matrices rather than cancell
 bind transform. The decoder requires the skin geometry flag, bone channel, and influence chunk to
 agree, and checks every influence against the composed hierarchy before export. Rigid HLOD meshes
 are attached to their selected pivot instead.
+
+Strict composition rejects missing named render meshes and every out-of-range HLOD, skin, or
+animation pivot. `map-view` alone opts into `LegacyPreview`: it skips a missing optional HLOD mesh,
+roots an invalid HLOD pivot, falls back from an invalid skin influence to that mesh's rigid HLOD
+pivot, and omits an animation whose channels reference absent pivots. This recovery never enters
+the immutable strict inspection/export path or simulation data.
 
 Classic raw-animation headers contain fixed animation and hierarchy names, a 32-bit frame
 count, and frame rate. Translation and quaternion channels use checked 16-bit inclusive

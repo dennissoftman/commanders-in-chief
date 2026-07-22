@@ -556,7 +556,12 @@ fn expand_mesh(mesh: &W3dStaticMesh) -> ExpandedMesh {
             if let (Some(stage), Some(uv_indices)) = (stage, uv_indices) {
                 let uv = stage.texture_coordinates()
                     [usize::try_from(uv_indices[corner]).expect("decoded UV index")];
-                result.texcoords.extend_from_slice(&[uv.u(), 1.0 - uv.v()]);
+                let texcoord = if uv.u().is_finite() && uv.v().is_finite() {
+                    [uv.u(), 1.0 - uv.v()]
+                } else {
+                    [0.0, 0.0]
+                };
+                result.texcoords.extend_from_slice(&texcoord);
             }
             if let Some(color) = colors.as_ref().and_then(|colors| colors.get(vertex_index)) {
                 result.colors.extend_from_slice(&[

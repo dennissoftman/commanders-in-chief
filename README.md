@@ -124,6 +124,8 @@ cargo run -p cic-tools -- map-height --report "maps/synthetic/synthetic.map"
 cargo run -p cic-tools -- map-render --size 768 "maps/synthetic/synthetic.map"
 cargo run -p cic-tools -- map-view "maps/synthetic/synthetic.map"
 cargo run -p cic-tools -- map-water "maps/synthetic/synthetic.map"
+cargo run -p cic-tools -- map-objects "maps/synthetic/synthetic.map"
+cargo run -p cic-tools -- map-sides "maps/synthetic/synthetic.map"
 ```
 
 The first command derives `synthetic.png`; the terrain render derives `synthetic-terrain.png`.
@@ -131,9 +133,19 @@ Explicit output paths and directory/BIG mounts remain supported. `map-view` open
 flyover: WASD moves, Space/Ctrl changes altitude, Shift boosts, right-drag looks, the wheel moves
 forward/back, R resets, and Escape closes. Terrain rendering defaults to the source-compatible
 `--terrain-policy legacy`; `modern` keeps stored cliff mappings, disables implicit steep-slope
-retiling, and adds world-anchored macro variation. Custom edge classes render through a separately
-indexed overlay pass. The viewer resolves opaque terrain through a G-buffer, then draws decoded
-water polygons in a depth-aware forward pass. It keeps the deterministic 8-pixel background and
+retiling, and adds world-anchored macro variation. `--time <seconds>` freezes presentation time for
+repeatable interactive comparison. Custom edge classes render through a separately
+indexed overlay pass. Consecutive road endpoints resolve bounded `Road` definitions and source
+textures into terrain-fitted regular strips with bounded endpoint-edge corner/junction fillers.
+Paired bridge endpoints resolve bounded intact bridge model/scale fields through the same static
+instance path.
+Placed `Object`/`ObjectReskin` definitions resolve default W3D draw states and scale into stable GPU
+instance batches; standalone mesh W3Ds receive a neutral renderer-only root, and ground placements
+sample the exact rendered terrain triangle and add the MAP-authored relative Z offset verbatim,
+without clamping or an added epsilon. W3D Header3 two-sided flags select static culling. A translucent
+renderer-only fence follows the primary playable boundary and clears the map's highest cliff. The
+viewer resolves terrain and static scenery through a G-buffer, alpha-overlays roads, then draws
+decoded water polygons and the boundary in depth-aware forward passes. It keeps the deterministic 8-pixel background and
 uses a persistent GPU-composed virtual-texture cache for camera-space-depth-capped 16- and
 32-texel pages. Fixed-size bordered pages retain authored base/primary/extra blends, cliff UVs,
 custom edges, and Modern macro variation; projected viewport ranking preserves coarse visible
@@ -141,14 +153,18 @@ coverage before fine upgrades, while an LRU page table reuses revisited regions 
 texture rebakes.
 GPU-generated linear mip chains, trilinear filtering, and up to 16x anisotropy keep terrain stable
 across movement and pitch changes.
-Installed profiles resolve bounded source caustic frames and water-transparency
-depth into renderer-neutral appearance inputs. The shader projects the subtle animation onto the
-underwater bed and combines it with depth absorption and shallow shoreline effects.
+Installed profiles resolve bounded source caustic frames, water-transparency depth, and WaterSet
+sky/environment textures after ordered sibling-map overrides. The shader projects caustics onto the
+underwater bed and combines them with depth absorption, shallow shoreline effects, and bounded
+Modern reflections.
 
-Water remains a work-in-progress presentation path. R3 is designed to continue through source
-`GlobalLighting` and water appearance, immutable `WorldInfo`/`ObjectsList` placement data, roads and
-bridges, initial object draw definitions, and all resolvable buildings, trees, props, decals, and
-other static terrain scenery. Source-authored vegetation sway and other ambient visual animation
+Water remains a work-in-progress presentation path: real scene shadows, anti-aliasing, headless
+explicit-time hashes, and repeatable visual comparisons remain open. R3 now decodes immutable
+`WorldInfo`/`ObjectsList` placement data, waypoints/player starts, sides, teams, build lists, and the
+complete nested script tree, and stages source-order endpoint/scenery buckets. It is designed to
+continue through exact source curve/tee UVs, bridge towers/states, additional draw modules, and all remaining
+resolvable decals and static lights. Source-authored vegetation sway and other
+ambient visual animation
 will use explicit presentation time. R3 will also decode waypoints and `Player_n_Start` candidates,
 sides, teams, build lists, polygon areas, and the complete nested MAP script tree for stable
 inspection. It will not activate players, construct gameplay objects, or execute scripts; those

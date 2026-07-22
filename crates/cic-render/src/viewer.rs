@@ -432,7 +432,9 @@ impl ViewerGpu {
                     .materials
                     .get(draw.material)
                     .ok_or(RenderError::InvalidMaterial)?;
-                let pipeline = self.pipelines.get(material.blend, material.depth_write);
+                let pipeline =
+                    self.pipelines
+                        .get(material.blend, material.depth_write, material.two_sided);
                 let end = draw
                     .first_index
                     .checked_add(draw.index_count)
@@ -463,6 +465,7 @@ pub(crate) struct GpuMaterial {
     pub(crate) bind_group: wgpu::BindGroup,
     pub(crate) blend: BlendMode,
     pub(crate) depth_write: bool,
+    pub(crate) two_sided: bool,
 }
 
 pub(crate) struct GpuResourceManager {
@@ -573,6 +576,7 @@ impl GpuResourceManager {
                 bind_group,
                 blend: material.blend,
                 depth_write: material.depth_write,
+                two_sided: material.two_sided,
             });
         }
         Ok(Self {
@@ -625,6 +629,7 @@ fn create_pipeline(
     label: &str,
     blend: Option<wgpu::BlendState>,
     depth_write_enabled: bool,
+    two_sided: bool,
 ) -> wgpu::RenderPipeline {
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(label),
@@ -666,7 +671,7 @@ fn create_pipeline(
             })],
         }),
         primitive: wgpu::PrimitiveState {
-            cull_mode: None,
+            cull_mode: (!two_sided).then_some(wgpu::Face::Back),
             ..Default::default()
         },
         depth_stencil: Some(wgpu::DepthStencilState {
@@ -713,11 +718,11 @@ fn multiply_blend() -> wgpu::BlendState {
 }
 
 pub(crate) struct MaterialPipelines {
-    opaque: wgpu::RenderPipeline,
-    overlay: wgpu::RenderPipeline,
-    alpha: wgpu::RenderPipeline,
-    additive: wgpu::RenderPipeline,
-    multiply: wgpu::RenderPipeline,
+    opaque: [wgpu::RenderPipeline; 2],
+    overlay: [wgpu::RenderPipeline; 2],
+    alpha: [wgpu::RenderPipeline; 2],
+    additive: [wgpu::RenderPipeline; 2],
+    multiply: [wgpu::RenderPipeline; 2],
 }
 
 impl MaterialPipelines {
@@ -729,7 +734,7 @@ impl MaterialPipelines {
         label_prefix: &str,
     ) -> Self {
         Self {
-            opaque: create_pipeline(
+            opaque: create_pipeline_pair(
                 device,
                 shader,
                 layout,
@@ -738,7 +743,7 @@ impl MaterialPipelines {
                 None,
                 true,
             ),
-            overlay: create_pipeline(
+            overlay: create_pipeline_pair(
                 device,
                 shader,
                 layout,
@@ -747,7 +752,7 @@ impl MaterialPipelines {
                 None,
                 false,
             ),
-            alpha: create_pipeline(
+            alpha: create_pipeline_pair(
                 device,
                 shader,
                 layout,
@@ -756,7 +761,7 @@ impl MaterialPipelines {
                 Some(wgpu::BlendState::ALPHA_BLENDING),
                 false,
             ),
-            additive: create_pipeline(
+            additive: create_pipeline_pair(
                 device,
                 shader,
                 layout,
@@ -765,7 +770,7 @@ impl MaterialPipelines {
                 Some(additive_blend()),
                 false,
             ),
-            multiply: create_pipeline(
+            multiply: create_pipeline_pair(
                 device,
                 shader,
                 layout,
@@ -777,15 +782,55 @@ impl MaterialPipelines {
         }
     }
 
-    pub(crate) fn get(&self, blend: BlendMode, depth_write: bool) -> &wgpu::RenderPipeline {
-        match (blend, depth_write) {
+    pub(crate) fn get(
+        &self,
+        blend: BlendMode,
+        depth_write: bool,
+        two_sided: bool,
+    ) -> &wgpu::RenderPipeline {
+        let pair = match (blend, depth_write) {
             (BlendMode::Opaque, true) => &self.opaque,
             (BlendMode::Opaque, false) => &self.overlay,
             (BlendMode::Alpha, _) => &self.alpha,
             (BlendMode::Additive, _) => &self.additive,
             (BlendMode::Multiply, _) => &self.multiply,
-        }
+        };
+        &pair[usize::from(two_sided)]
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_pipeline_pair(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    layout: &wgpu::PipelineLayout,
+    format: wgpu::TextureFormat,
+    label: &str,
+    blend: Option<wgpu::BlendState>,
+    depth_write_enabled: bool,
+) -> [wgpu::RenderPipeline; 2] {
+    [
+        create_pipeline(
+            device,
+            shader,
+            layout,
+            format,
+            &format!("{label} single-sided"),
+            blend,
+            depth_write_enabled,
+            false,
+        ),
+        create_pipeline(
+            device,
+            shader,
+            layout,
+            format,
+            &format!("{label} two-sided"),
+            blend,
+            depth_write_enabled,
+            true,
+        ),
+    ]
 }
 
 fn address_mode(clamp: bool) -> wgpu::AddressMode {

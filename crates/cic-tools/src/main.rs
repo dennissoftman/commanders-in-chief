@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::error::Error;
 use std::fs;
@@ -7,16 +7,22 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use cic_formats::{
-    CsfLimits, MapLightingError, MapLimits, MapWaterError, TerrainIniLimits, W3dFile, W3dLimits,
-    W3dMeshLimits, W3dSceneLimits, WaterIniLimits, decode_map_blend, decode_map_height,
-    decode_map_lighting, decode_map_water, decode_static_mesh, decode_w3d_model_set, parse_csf,
-    parse_map, parse_terrain_ini, parse_w3d, parse_water_ini, w3d_model_hierarchy_name,
+    BridgeDefinition, CsfLimits, MapLightingError, MapLimits, MapScenarioError, MapScenarioLimits,
+    MapWaterError, ObjectDefinition, ObjectIniLimits, RoadDefinition, RoadIniLimits,
+    TerrainIniLimits, W3dFile, W3dLimits, W3dMeshLimits, W3dModelDecodePolicy, W3dSceneLimits,
+    WaterIniLimits, compose_static_w3d_model, decode_map_blend, decode_map_height,
+    decode_map_lighting, decode_map_sides, decode_map_water, decode_map_world_objects,
+    decode_static_mesh, decode_w3d_model_set_with_policy, parse_csf, parse_map, parse_object_ini,
+    parse_road_ini, parse_terrain_ini, parse_w3d, parse_water_ini, w3d_model_hierarchy_name,
 };
 use cic_render::{
-    AnimatedModel, HeadlessRenderer, ModelFrame, StagedTerrain, StagedWater,
+    AnimatedModel, HeadlessRenderer, MapPresentationFrame, ModelFrame, StagedBoundaryFence,
+    StagedMapScene, StagedRoads, StagedStaticScenery, StagedStaticSceneryModel, StagedTerrain,
+    StagedWater, StaticSceneryDiagnostic, StaticSceneryDiagnosticKind, StaticSceneryInstance,
     TerrainCompatibilityPolicy, TerrainLighting, TerrainStagingOptions, TextureId,
     TextureResourceManager, WaterAppearance, WaterCausticSequence, WaterPresentationPolicy,
-    WaterSurfaceTexture, run_model_viewer, run_terrain_viewer,
+    WaterSurfaceTexture, run_model_viewer, run_terrain_viewer_with_map,
+    run_terrain_viewer_with_map_at_time,
 };
 use cic_tools::resource::{
     GameEdition, MountProfile, MountProfileLimits, ResourceKind, StoredLocations, config_path,
@@ -25,7 +31,8 @@ use cic_tools::resource::{
 use cic_tools::{
     GltfTextureRequest, encode_capture_png, encode_map_height_png, pack_w3d_glb, render_csf,
     render_manifest, render_map, render_map_blend, render_map_height, render_map_lighting,
-    render_map_water, render_w3d, render_w3d_gltf, render_w3d_mesh,
+    render_map_sides, render_map_water, render_map_world_objects, render_w3d, render_w3d_gltf,
+    render_w3d_mesh,
 };
 use cic_vfs::{BigLimits, Vfs, VirtualPath};
 
@@ -40,8 +47,10 @@ const USAGE: &str = "Usage:\n\
   cic-inspect map-blend <virtual-path> <mount> [<mount> ...]\n\
   cic-inspect map-lighting <virtual-path> <mount> [<mount> ...]\n\
   cic-inspect map-water <virtual-path> <mount> [<mount> ...]\n\
+  cic-inspect map-objects <virtual-path> <mount> [<mount> ...]\n\
+  cic-inspect map-sides <virtual-path> <mount> [<mount> ...]\n\
   cic-inspect map-render [--size <pixels>] [--pixels-per-cell <pixels>] [--terrain-policy <legacy|modern>] <virtual-path> [<output.png>] [<mount> ...]\n\
-  cic-inspect map-view [--pixels-per-cell <pixels>] [--terrain-policy <legacy|modern>] <virtual-path> [<mount> ...]\n\
+  cic-inspect map-view [--pixels-per-cell <pixels>] [--terrain-policy <legacy|modern>] [--time <seconds>] <virtual-path> [<mount> ...]\n\
   cic-inspect w3d <virtual-path> <mount> [<mount> ...]\n\
   cic-inspect w3d-mesh <virtual-path> <top-level-index> <mount> [<mount> ...]\n\
   cic-inspect w3d-view <virtual-path> [<mount> ...]\n\
@@ -50,7 +59,18 @@ const USAGE: &str = "Usage:\n\
 Each mount is a directory or BIG archive. Mounts are applied from left to right; later mounts override earlier mounts.";
 
 const MAX_ENCODED_IMAGE_BYTES: usize = 256 * 1_024 * 1_024;
+const MAX_OBJECT_CATALOG_DEFINITIONS: usize = 200_000;
+const MAX_OBJECT_RESKIN_DEPTH: usize = 32;
 const DEFAULT_STANDING_WATER_TEXTURE: &[u8] = b"TWWater01.tga";
+type StagedTerrainScene = (
+    StagedTerrain,
+    StagedRoads,
+    StagedBoundaryFence,
+    StagedStaticScenery,
+    StagedWater,
+    WaterAppearance,
+    TerrainLighting,
+);
 
 #[derive(Debug)]
 struct CliOptions {
@@ -123,6 +143,8 @@ fn run(arguments: impl IntoIterator<Item = String>) -> Result<String, Box<dyn Er
         "map-blend" => report_map_blend(arguments, &options),
         "map-lighting" => report_map_lighting(arguments, &options),
         "map-water" => report_map_water(arguments, &options),
+        "map-objects" => report_map_objects(arguments, &options),
+        "map-sides" => report_map_sides(arguments, &options),
         "map-render" => render_terrain_capture(&mut arguments, &options),
         "map-view" => view_terrain(&mut arguments, &options),
         "w3d" => {
@@ -348,6 +370,47 @@ where
     Ok(render_map_lighting(&lighting))
 }
 
+fn report_map_objects<I>(arguments: I, options: &CliOptions) -> Result<String, Box<dyn Error>>
+where
+    I: Iterator<Item = String>,
+{
+    let map = load_map_for_report("map-objects", arguments, options)?;
+    let world = decode_map_world_objects(&map, MapScenarioLimits::default())?;
+    Ok(render_map_world_objects(&world))
+}
+
+fn report_map_sides<I>(arguments: I, options: &CliOptions) -> Result<String, Box<dyn Error>>
+where
+    I: Iterator<Item = String>,
+{
+    let map = load_map_for_report("map-sides", arguments, options)?;
+    let sides = decode_map_sides(&map, MapScenarioLimits::default())?;
+    Ok(render_map_sides(&sides))
+}
+
+fn load_map_for_report<I>(
+    command: &str,
+    arguments: I,
+    options: &CliOptions,
+) -> Result<cic_formats::MapFile, Box<dyn Error>>
+where
+    I: Iterator<Item = String>,
+{
+    let mut arguments = arguments;
+    let resource_name = arguments
+        .next()
+        .ok_or_else(|| format!("{command} requires a virtual path"))?;
+    let mounts = arguments.collect::<Vec<_>>();
+    let vfs = mount_all(command, &mounts, options, ResourceKind::Map)?;
+    let resource_path = VirtualPath::new(&resource_name)?;
+    let entry = vfs
+        .resolve(&resource_path)
+        .ok_or_else(|| format!("resource not found: {resource_path}"))?;
+    let limits = MapLimits::default();
+    let bytes = entry.read(limits.maximum_file_bytes)?;
+    Ok(parse_map(&bytes, resource_path.as_str(), limits)?)
+}
+
 fn render_terrain_capture<I>(
     arguments: &mut std::iter::Peekable<I>,
     options: &CliOptions,
@@ -432,6 +495,7 @@ where
 {
     let mut pixels_per_cell = TerrainStagingOptions::SOURCE_BACKGROUND.pixels_per_cell();
     let mut compatibility = TerrainCompatibilityPolicy::ZeroHourLegacy;
+    let mut fixed_frame = None;
     while arguments
         .peek()
         .is_some_and(|argument| argument.starts_with("--"))
@@ -443,6 +507,7 @@ where
         match option.as_str() {
             "--pixels-per-cell" => pixels_per_cell = value.parse::<u32>()?,
             "--terrain-policy" => compatibility = parse_terrain_policy(&value)?,
+            "--time" => fixed_frame = Some(MapPresentationFrame::new(value.parse::<f32>()?)?),
             _ => return Err(format!("unknown map-view option {option:?}").into()),
         }
     }
@@ -450,19 +515,66 @@ where
     let resource_path = VirtualPath::new(&resource_name)?;
     let mounts = arguments.collect::<Vec<_>>();
     let vfs = mount_all("map-view", &mounts, options, ResourceKind::Terrain)?;
-    let (terrain, water, water_appearance, lighting) =
+    let (terrain, roads, boundary, scenery, water, water_appearance, lighting) =
         load_staged_terrain_and_water(&vfs, &resource_path, pixels_per_cell, compatibility)?;
     let cells = terrain.cells().len();
     let vertices = terrain.vertices().len();
-    run_terrain_viewer(
-        terrain,
-        water,
-        water_appearance,
-        lighting,
-        format!("Commanders in Chief - terrain - {resource_path}"),
-    )?;
+    let road_draws = roads.draws().len();
+    let road_diagnostics = roads.diagnostics().len();
+    let boundary_segments = boundary.indices().len() / 6;
+    let scenery_instances = scenery.instance_count();
+    let scenery_models = scenery.models().len();
+    let scenery_diagnostics = scenery.diagnostics().len();
+    let missing_definitions = scenery
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| diagnostic.kind() == StaticSceneryDiagnosticKind::MissingDefinition)
+        .count();
+    let missing_defaults = scenery
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| diagnostic.kind() == StaticSceneryDiagnosticKind::MissingDefaultModel)
+        .count();
+    let missing_models = scenery
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| diagnostic.kind() == StaticSceneryDiagnosticKind::MissingModelResource)
+        .count();
+    let invalid_models =
+        scenery_diagnostics.saturating_sub(missing_definitions + missing_defaults + missing_models);
+    eprintln!(
+        "static scenery: {scenery_instances} instances/{scenery_models} models; skipped {missing_definitions} missing definitions, {missing_defaults} without default models, {missing_models} missing model resources, {invalid_models} invalid models"
+    );
+    let title = format!(
+        "Commanders in Chief - terrain - {resource_path} | {road_draws} roads, {scenery_instances} scenery instances/{scenery_models} models, {boundary_segments} boundary segments, {} diagnostics",
+        road_diagnostics + scenery_diagnostics
+    );
+    if let Some(frame) = fixed_frame {
+        run_terrain_viewer_with_map_at_time(
+            terrain,
+            roads,
+            boundary,
+            scenery,
+            water,
+            water_appearance,
+            lighting,
+            title,
+            frame,
+        )?;
+    } else {
+        run_terrain_viewer_with_map(
+            terrain,
+            roads,
+            boundary,
+            scenery,
+            water,
+            water_appearance,
+            lighting,
+            title,
+        )?;
+    }
     Ok(format!(
-        "closed terrain viewer for {resource_path} ({cells} cells, {vertices} vertices)\n"
+        "closed terrain viewer for {resource_path} ({cells} cells, {vertices} terrain vertices, {road_draws} road draws, {scenery_instances} scenery instances/{scenery_models} models, {boundary_segments} boundary segments, {road_diagnostics} road diagnostics, {scenery_diagnostics} scenery diagnostics)\n"
     ))
 }
 
@@ -471,7 +583,7 @@ fn load_staged_terrain_and_water(
     resource_path: &VirtualPath,
     pixels_per_cell: u32,
     compatibility: TerrainCompatibilityPolicy,
-) -> Result<(StagedTerrain, StagedWater, WaterAppearance, TerrainLighting), Box<dyn Error>> {
+) -> Result<StagedTerrainScene, Box<dyn Error>> {
     let entry = vfs
         .resolve(resource_path)
         .ok_or_else(|| format!("resource not found: {resource_path}"))?;
@@ -490,7 +602,24 @@ fn load_staged_terrain_and_water(
         Err(error) => return Err(error.into()),
     };
     let height = decode_map_height(&map, limits)?;
+    let boundary = StagedBoundaryFence::from_map(&height)?;
     let blend = decode_map_blend(&map, &height, limits)?;
+    let textures = load_terrain_textures(vfs, &blend)?;
+    let staging = TerrainStagingOptions::new(pixels_per_cell)?.with_compatibility(compatibility);
+    let terrain = StagedTerrain::from_map(&height, &blend, &textures, staging)?;
+    let (roads, scenery) = match decode_map_world_objects(&map, MapScenarioLimits::default()) {
+        Ok(world) => {
+            let road_catalog = load_road_catalog(vfs, resource_path)?;
+            (
+                load_staged_roads(vfs, &world, &height, &road_catalog)?,
+                load_staged_static_scenery(vfs, resource_path, &world, &terrain, &road_catalog)?,
+            )
+        }
+        Err(MapScenarioError::MissingChunk(_)) => {
+            (StagedRoads::empty(), StagedStaticScenery::empty())
+        }
+        Err(error) => return Err(error.into()),
+    };
     let water = match decode_map_water(&map, limits) {
         Ok(water) => StagedWater::from_map(&water)?,
         Err(MapWaterError::MissingPolygonTriggers | MapWaterError::UnsupportedVersion(1)) => {
@@ -498,13 +627,514 @@ fn load_staged_terrain_and_water(
         }
         Err(error) => return Err(error.into()),
     };
-    let textures = load_terrain_textures(vfs, &blend)?;
-    let staging = TerrainStagingOptions::new(pixels_per_cell)?.with_compatibility(compatibility);
-    let terrain = StagedTerrain::from_map(&height, &blend, &textures, staging)?;
     let water_appearance = load_water_appearance(vfs, resource_path, time_of_day, compatibility)?;
-    Ok((terrain, water, water_appearance, lighting))
+    Ok((
+        terrain,
+        roads,
+        boundary,
+        scenery,
+        water,
+        water_appearance,
+        lighting,
+    ))
 }
 
+#[derive(Debug, Default)]
+struct RoadCatalog {
+    roads: BTreeMap<Vec<u8>, RoadDefinition>,
+    bridges: BTreeMap<Vec<u8>, BridgeDefinition>,
+}
+
+fn load_road_catalog(vfs: &Vfs, map_path: &VirtualPath) -> Result<RoadCatalog, Box<dyn Error>> {
+    let mut catalog = RoadCatalog::default();
+    let default_bridge_key = ascii_fold(b"DefaultBridge");
+    for path in [
+        VirtualPath::new("data/ini/default/roads.ini")?,
+        VirtualPath::new("data/ini/roads.ini")?,
+        sibling_map_ini_path(map_path)?,
+    ] {
+        let Some(history) = vfs.history(&path) else {
+            continue;
+        };
+        for entry in history {
+            let limits = RoadIniLimits::default();
+            let bytes = entry.read(limits.max_file_bytes)?;
+            let ini = parse_road_ini(&bytes, limits)?;
+            for definition in ini.definitions() {
+                catalog
+                    .roads
+                    .insert(ascii_fold(definition.name_bytes()), definition.clone());
+            }
+            for definition in ini.bridges() {
+                let key = ascii_fold(definition.name_bytes());
+                let resolved = if key == default_bridge_key {
+                    definition.clone()
+                } else if let Some(default_bridge) = catalog.bridges.get(&default_bridge_key) {
+                    definition.inherit_missing(default_bridge)
+                } else {
+                    definition.clone()
+                };
+                catalog.bridges.insert(key, resolved);
+            }
+        }
+    }
+    Ok(catalog)
+}
+
+fn load_staged_roads(
+    vfs: &Vfs,
+    world: &cic_formats::MapWorldObjects,
+    height: &cic_formats::MapHeightField,
+    catalog: &RoadCatalog,
+) -> Result<StagedRoads, Box<dyn Error>> {
+    let referenced = world
+        .objects()
+        .iter()
+        .filter(|object| object.flags() & cic_formats::object_flags::ROAD_POINT1 != 0)
+        .map(|object| ascii_fold(object.name_bytes()))
+        .collect::<BTreeSet<_>>();
+    let definitions = catalog.roads.values().cloned().collect::<Vec<_>>();
+    let mut textures = TextureResourceManager::default();
+    for definition in &definitions {
+        if !referenced.contains(&ascii_fold(definition.name_bytes())) {
+            continue;
+        }
+        let Some(texture_name) = definition.texture_bytes() else {
+            continue;
+        };
+        let Ok((path, bytes)) = resolve_image(vfs, texture_name, "art/textures") else {
+            continue;
+        };
+        let image = decode_viewer_texture(&bytes, image_format(&path)?)?;
+        textures.insert(
+            texture_name,
+            image.width(),
+            image.height(),
+            image.into_raw(),
+        )?;
+    }
+    Ok(StagedRoads::from_map(
+        world,
+        height,
+        &definitions,
+        &textures,
+    )?)
+}
+
+#[derive(Debug)]
+struct PendingStaticModel {
+    name: Vec<u8>,
+    instances: Vec<StaticSceneryInstance>,
+}
+
+#[derive(Debug)]
+struct PendingBridgeModel {
+    name: Vec<u8>,
+    placement_id: u32,
+    start: [f32; 3],
+    end: [f32; 3],
+    scale: f32,
+}
+
+fn load_staged_static_scenery(
+    vfs: &Vfs,
+    map_path: &VirtualPath,
+    world: &cic_formats::MapWorldObjects,
+    terrain: &StagedTerrain,
+    road_catalog: &RoadCatalog,
+) -> Result<StagedStaticScenery, Box<dyn Error>> {
+    let catalog = load_object_catalog(vfs, map_path)?;
+    let scene = StagedMapScene::from_world_objects(world)?;
+    let mut pending = Vec::<PendingStaticModel>::new();
+    let mut pending_indices = BTreeMap::<Vec<u8>, usize>::new();
+    let mut diagnostics = Vec::new();
+    for source_index in scene.scenery_indices() {
+        let Some(object) = usize::try_from(*source_index)
+            .ok()
+            .and_then(|index| world.objects().get(index))
+        else {
+            continue;
+        };
+        let template_key = ascii_fold(object.name_bytes());
+        let Some(draws) = resolve_object_draws(&catalog, &template_key) else {
+            // Templates without a default W3D draw include sound and scripting markers. They are
+            // valid non-visual placements, not failed static scenery.
+            if catalog.contains_key(&template_key) {
+                continue;
+            }
+            diagnostics.push(StaticSceneryDiagnostic::new(
+                object.placement_id(),
+                object.name_bytes().to_vec(),
+                StaticSceneryDiagnosticKind::MissingDefinition,
+            ));
+            continue;
+        };
+        for draw in draws {
+            let mut position = object.position();
+            if let Some(ground) = terrain.height_at_world([position[0], position[1]]) {
+                position[2] = static_world_height(ground, position[2]);
+            }
+            let instance = StaticSceneryInstance::new(
+                object.placement_id(),
+                position,
+                object.angle(),
+                draw.scale(),
+            )?;
+            push_pending_static_model(
+                &mut pending,
+                &mut pending_indices,
+                draw.model_bytes(),
+                instance,
+            );
+        }
+    }
+
+    let pending_bridges = append_staged_bridges(world, terrain, road_catalog, &mut diagnostics);
+
+    let mut models = Vec::new();
+    for batch in pending {
+        let Some(path) = resolve_w3d_model_path(vfs, &batch.name)? else {
+            append_static_diagnostics(
+                &mut diagnostics,
+                &batch,
+                StaticSceneryDiagnosticKind::MissingModelResource,
+            );
+            continue;
+        };
+        let staged = (|| -> Result<AnimatedModel, Box<dyn Error>> {
+            let model = load_composed_preview_model(vfs, &path)?;
+            let textures = load_renderer_textures(vfs, &model)?;
+            Ok(AnimatedModel::from_w3d_with_textures(&model, textures)?)
+        })();
+        let staged = match staged {
+            Ok(staged) => staged,
+            Err(error) => {
+                eprintln!(
+                    "warning: static model {} could not be staged: {error}",
+                    String::from_utf8_lossy(&batch.name)
+                );
+                append_static_diagnostics(
+                    &mut diagnostics,
+                    &batch,
+                    StaticSceneryDiagnosticKind::InvalidModel,
+                );
+                continue;
+            }
+        };
+        models.push(StagedStaticSceneryModel::new(
+            batch.name,
+            staged,
+            batch.instances,
+        )?);
+    }
+    append_resolved_bridges(vfs, pending_bridges, &mut models, &mut diagnostics)?;
+    Ok(StagedStaticScenery::new(models, diagnostics)?)
+}
+
+fn append_resolved_bridges(
+    vfs: &Vfs,
+    pending: Vec<PendingBridgeModel>,
+    models: &mut Vec<StagedStaticSceneryModel>,
+    diagnostics: &mut Vec<StaticSceneryDiagnostic>,
+) -> Result<(), Box<dyn Error>> {
+    for bridge in pending {
+        let batch = PendingStaticModel {
+            name: bridge.name.clone(),
+            instances: vec![StaticSceneryInstance::new(
+                bridge.placement_id,
+                [0.0; 3],
+                0.0,
+                1.0,
+            )?],
+        };
+        let Some(path) = resolve_w3d_model_path(vfs, &bridge.name)? else {
+            append_static_diagnostics(
+                diagnostics,
+                &batch,
+                StaticSceneryDiagnosticKind::MissingModelResource,
+            );
+            continue;
+        };
+        let staged = (|| -> Result<AnimatedModel, Box<dyn Error>> {
+            let model = load_composed_preview_model(vfs, &path)?;
+            let textures = load_renderer_textures(vfs, &model)?;
+            Ok(AnimatedModel::from_bridge_w3d_with_textures(
+                &model,
+                textures,
+                bridge.start,
+                bridge.end,
+                bridge.scale,
+            )?)
+        })();
+        let staged = match staged {
+            Ok(staged) => staged,
+            Err(error) => {
+                eprintln!(
+                    "warning: bridge model {} could not be staged: {error}",
+                    String::from_utf8_lossy(&bridge.name)
+                );
+                append_static_diagnostics(
+                    diagnostics,
+                    &batch,
+                    StaticSceneryDiagnosticKind::InvalidModel,
+                );
+                continue;
+            }
+        };
+        models.push(StagedStaticSceneryModel::new(
+            bridge.name,
+            staged,
+            batch.instances,
+        )?);
+    }
+    Ok(())
+}
+
+fn append_staged_bridges(
+    world: &cic_formats::MapWorldObjects,
+    terrain: &StagedTerrain,
+    road_catalog: &RoadCatalog,
+    diagnostics: &mut Vec<StaticSceneryDiagnostic>,
+) -> Vec<PendingBridgeModel> {
+    // Provenance: paired bridge endpoint flags and intact model/scale fields are established by
+    // `MapObject.h`, `TerrainRoads.h`, and `INITerrainRoad.cpp` at GeneralsGameCode revision
+    // `9f7abb866f5afd446db14149979e744c7216baaf`; notices are in `docs/provenance/map.md`.
+    // Endpoint Z deliberately ignores the stored marker Z: the source rebuilds bridge endpoints
+    // from terrain height plus BRIDGE_FLOAT_AMT (0.25), while ordinary scenery retains authored
+    // terrain-relative Z verbatim.
+    let objects = world.objects();
+    let mut bridges = Vec::new();
+    let mut source_index = 0_usize;
+    while source_index < objects.len() {
+        let first = &objects[source_index];
+        if first.flags() & cic_formats::object_flags::BRIDGE_POINT1 == 0 {
+            source_index += 1;
+            continue;
+        }
+        let Some(second) = objects.get(source_index + 1) else {
+            push_bridge_diagnostic(
+                diagnostics,
+                first,
+                StaticSceneryDiagnosticKind::MissingDefinition,
+            );
+            break;
+        };
+        if second.flags() & cic_formats::object_flags::BRIDGE_POINT2 == 0 {
+            push_bridge_diagnostic(
+                diagnostics,
+                first,
+                StaticSceneryDiagnosticKind::MissingDefinition,
+            );
+            source_index += 1;
+            continue;
+        }
+        let Some(definition) = road_catalog.bridges.get(&ascii_fold(first.name_bytes())) else {
+            push_bridge_diagnostic(
+                diagnostics,
+                first,
+                StaticSceneryDiagnosticKind::MissingDefinition,
+            );
+            source_index += 2;
+            continue;
+        };
+        let Some(model) = definition.model_bytes() else {
+            push_bridge_diagnostic(
+                diagnostics,
+                first,
+                StaticSceneryDiagnosticKind::MissingDefaultModel,
+            );
+            source_index += 2;
+            continue;
+        };
+        let first_position = bridge_endpoint_position(terrain, first.position());
+        let second_position = bridge_endpoint_position(terrain, second.position());
+        let delta = [
+            second_position[0] - first_position[0],
+            second_position[1] - first_position[1],
+        ];
+        if !delta[0].is_finite()
+            || !delta[1].is_finite()
+            || delta[0].hypot(delta[1]) <= f32::EPSILON
+        {
+            push_bridge_diagnostic(
+                diagnostics,
+                first,
+                StaticSceneryDiagnosticKind::InvalidModel,
+            );
+            source_index += 2;
+            continue;
+        }
+        bridges.push(PendingBridgeModel {
+            name: model.to_vec(),
+            placement_id: first.placement_id(),
+            start: first_position,
+            end: second_position,
+            scale: definition.bridge_scale(),
+        });
+        source_index += 2;
+    }
+    bridges
+}
+
+fn push_bridge_diagnostic(
+    diagnostics: &mut Vec<StaticSceneryDiagnostic>,
+    placement: &cic_formats::MapObjectPlacement,
+    kind: StaticSceneryDiagnosticKind,
+) {
+    diagnostics.push(StaticSceneryDiagnostic::new(
+        placement.placement_id(),
+        placement.name_bytes().to_vec(),
+        kind,
+    ));
+}
+
+fn push_pending_static_model(
+    pending: &mut Vec<PendingStaticModel>,
+    indices: &mut BTreeMap<Vec<u8>, usize>,
+    model: &[u8],
+    instance: StaticSceneryInstance,
+) {
+    let key = ascii_fold(model);
+    let index = if let Some(index) = indices.get(&key) {
+        *index
+    } else {
+        let index = pending.len();
+        pending.push(PendingStaticModel {
+            name: model.to_vec(),
+            instances: Vec::new(),
+        });
+        indices.insert(key, index);
+        index
+    };
+    pending[index].instances.push(instance);
+}
+
+fn bridge_endpoint_position(terrain: &StagedTerrain, mut position: [f32; 3]) -> [f32; 3] {
+    const BRIDGE_FLOAT_AMOUNT: f32 = 0.25;
+    if let Some(ground) = terrain.height_at_world([position[0], position[1]]) {
+        position[2] = ground + BRIDGE_FLOAT_AMOUNT;
+    }
+    position
+}
+
+fn static_world_height(terrain_height: f32, authored_offset: f32) -> f32 {
+    terrain_height + authored_offset
+}
+
+fn load_object_catalog(
+    vfs: &Vfs,
+    map_path: &VirtualPath,
+) -> Result<BTreeMap<Vec<u8>, ObjectDefinition>, Box<dyn Error>> {
+    let mut catalog = BTreeMap::new();
+    for (path, entry) in vfs.iter_resolved() {
+        let normalized = path.as_str();
+        let object_file = (normalized.starts_with("data/ini/object/")
+            && Path::new(normalized)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("ini")))
+            || normalized == "data/ini/object.ini";
+        if !object_file {
+            continue;
+        }
+        let limits = ObjectIniLimits::default();
+        let bytes = entry.read(limits.max_file_bytes)?;
+        insert_object_definitions(&mut catalog, &bytes, limits)?;
+        if catalog.len() > MAX_OBJECT_CATALOG_DEFINITIONS {
+            return Err(format!(
+                "object catalog exceeds {MAX_OBJECT_CATALOG_DEFINITIONS} definitions"
+            )
+            .into());
+        }
+    }
+    let map_ini = sibling_map_ini_path(map_path)?;
+    if let Some(history) = vfs.history(&map_ini) {
+        for entry in history {
+            let limits = ObjectIniLimits::default();
+            let bytes = entry.read(limits.max_file_bytes)?;
+            insert_object_definitions(&mut catalog, &bytes, limits)?;
+            if catalog.len() > MAX_OBJECT_CATALOG_DEFINITIONS {
+                return Err(format!(
+                    "object catalog exceeds {MAX_OBJECT_CATALOG_DEFINITIONS} definitions"
+                )
+                .into());
+            }
+        }
+    }
+    Ok(catalog)
+}
+
+fn insert_object_definitions(
+    catalog: &mut BTreeMap<Vec<u8>, ObjectDefinition>,
+    bytes: &[u8],
+    limits: ObjectIniLimits,
+) -> Result<(), Box<dyn Error>> {
+    let ini = parse_object_ini(bytes, limits)?;
+    for definition in ini.definitions() {
+        catalog.insert(ascii_fold(definition.name_bytes()), definition.clone());
+    }
+    Ok(())
+}
+
+fn resolve_object_draws<'a>(
+    catalog: &'a BTreeMap<Vec<u8>, ObjectDefinition>,
+    initial: &[u8],
+) -> Option<&'a [cic_formats::ObjectModelDraw]> {
+    let mut key = initial.to_vec();
+    let mut visited = BTreeSet::new();
+    for _ in 0..MAX_OBJECT_RESKIN_DEPTH {
+        if !visited.insert(key.clone()) {
+            return None;
+        }
+        let definition = catalog.get(&key)?;
+        if !definition.draws().is_empty() {
+            return Some(definition.draws());
+        }
+        key = ascii_fold(definition.reskin_of_bytes()?);
+    }
+    None
+}
+
+fn resolve_w3d_model_path(
+    vfs: &Vfs,
+    raw_name: &[u8],
+) -> Result<Option<VirtualPath>, Box<dyn Error>> {
+    let name = std::str::from_utf8(raw_name)
+        .map_err(|_| "W3D model name is not UTF-8 and cannot be mapped to the VFS")?;
+    let normalized = name.replace('\\', "/");
+    let basename = normalized.rsplit('/').next().unwrap_or(&normalized);
+    let has_extension = Path::new(basename).extension().is_some();
+    let mut candidates = Vec::new();
+    for stem in [&normalized, basename] {
+        let candidate = if has_extension {
+            stem.to_owned()
+        } else {
+            format!("{stem}.w3d")
+        };
+        candidates.push(candidate.clone());
+        candidates.push(format!("art/w3d/{candidate}"));
+    }
+    candidates.sort();
+    candidates.dedup();
+    for candidate in candidates {
+        let path = VirtualPath::new(&candidate)?;
+        if vfs.resolve(&path).is_some() {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
+fn append_static_diagnostics(
+    diagnostics: &mut Vec<StaticSceneryDiagnostic>,
+    batch: &PendingStaticModel,
+    kind: StaticSceneryDiagnosticKind,
+) {
+    diagnostics.extend(batch.instances.iter().map(|instance| {
+        StaticSceneryDiagnostic::new(instance.placement_id(), batch.name.clone(), kind)
+    }));
+}
+
+#[allow(clippy::too_many_lines)]
 fn load_water_appearance(
     vfs: &Vfs,
     map_path: &VirtualPath,
@@ -538,6 +1168,8 @@ fn load_water_appearance(
     let mut opaque_depth = appearance.opaque_depth();
     let mut source_surface_rgba = None;
     let mut source_scroll_per_ms = [0.0; 2];
+    let mut sky_texture_name = None;
+    let mut environment_texture_name = None;
     // Derived from Water.h at GeneralsGameCode revision
     // 9f7abb866f5afd446db14149979e744c7216baaf (GPL-3.0-or-later upstream; see
     // docs/provenance/map.md): WaterTransparencySetting's constructor establishes these values
@@ -576,6 +1208,12 @@ fn load_water_appearance(
                 .additive_blending()
                 .unwrap_or(additive_blending);
             if let Some(set) = parsed.water_set(time_of_day) {
+                if let Some(name) = set.sky_texture_bytes() {
+                    sky_texture_name = Some(name.to_vec());
+                }
+                if let Some(name) = set.water_texture_bytes() {
+                    environment_texture_name = Some(name.to_vec());
+                }
                 if let Some(color) = set.diffuse_color() {
                     source_surface_rgba =
                         Some(color.channels().map(|channel| f32::from(channel) / 255.0));
@@ -597,15 +1235,16 @@ fn load_water_appearance(
         source_surface_rgba = Some(surface);
     }
     let surface_texture = standing_water_texture
-        .map(|name| -> Result<WaterSurfaceTexture, Box<dyn Error>> {
-            let (path, bytes) = resolve_image(vfs, &name, "art/textures")?;
-            let image = decode_viewer_texture(&bytes, image_format(&path)?)?;
-            Ok(WaterSurfaceTexture::new(
-                image.width(),
-                image.height(),
-                image.into_raw(),
-            )?)
-        })
+        .as_deref()
+        .map(|name| load_water_surface_texture(vfs, name))
+        .transpose()?;
+    let sky_texture = sky_texture_name
+        .as_deref()
+        .map(|name| load_water_surface_texture(vfs, name))
+        .transpose()?;
+    let environment_texture = environment_texture_name
+        .as_deref()
+        .map(|name| load_water_surface_texture(vfs, name))
         .transpose()?;
     let presentation = match compatibility {
         TerrainCompatibilityPolicy::ZeroHourLegacy => WaterPresentationPolicy::ZeroHourLegacy,
@@ -615,7 +1254,21 @@ fn load_water_appearance(
         .with_transparency(minimum_opacity, opaque_depth)?
         .with_source_surface(source_surface_rgba, source_scroll_per_ms)?
         .with_standing_surface(surface_texture, additive_blending)
+        .with_environment_textures(sky_texture, environment_texture)
         .with_presentation(presentation))
+}
+
+fn load_water_surface_texture(
+    vfs: &Vfs,
+    name: &[u8],
+) -> Result<WaterSurfaceTexture, Box<dyn Error>> {
+    let (path, bytes) = resolve_image(vfs, name, "art/textures")?;
+    let image = decode_viewer_texture(&bytes, image_format(&path)?)?;
+    Ok(WaterSurfaceTexture::new(
+        image.width(),
+        image.height(),
+        image.into_raw(),
+    )?)
 }
 
 fn sibling_map_ini_path(map_path: &VirtualPath) -> Result<VirtualPath, Box<dyn Error>> {
@@ -975,18 +1628,45 @@ fn load_composed_model(
     vfs: &Vfs,
     resource_path: &VirtualPath,
 ) -> Result<cic_formats::W3dModel, Box<dyn Error>> {
+    load_composed_model_with_policy(vfs, resource_path, W3dModelDecodePolicy::Strict)
+}
+
+fn load_composed_preview_model(
+    vfs: &Vfs,
+    resource_path: &VirtualPath,
+) -> Result<cic_formats::W3dModel, Box<dyn Error>> {
+    load_composed_model_with_policy(vfs, resource_path, W3dModelDecodePolicy::LegacyPreview)
+}
+
+fn load_composed_model_with_policy(
+    vfs: &Vfs,
+    resource_path: &VirtualPath,
+    policy: W3dModelDecodePolicy,
+) -> Result<cic_formats::W3dModel, Box<dyn Error>> {
     let entry = vfs
         .resolve(resource_path)
         .ok_or_else(|| format!("resource not found: {resource_path}"))?;
     let limits = W3dLimits::default();
     let bytes = entry.read(limits.maximum_file_bytes)?;
     let w3d = parse_w3d(&bytes, resource_path.as_str(), limits)?;
+    if w3d_model_hierarchy_name(&w3d)?.is_none() {
+        let meshes = w3d
+            .chunks()
+            .iter()
+            .filter(|chunk| chunk.id() == 0)
+            .map(|chunk| decode_static_mesh(chunk, W3dMeshLimits::default()))
+            .collect::<Result<Vec<_>, _>>()?;
+        if !meshes.is_empty() {
+            return Ok(compose_static_w3d_model(meshes));
+        }
+    }
     let files = collect_model_files(vfs, resource_path, w3d)?;
     let file_refs = files.iter().collect::<Vec<_>>();
-    Ok(decode_w3d_model_set(
+    Ok(decode_w3d_model_set_with_policy(
         &file_refs,
         W3dMeshLimits::default(),
         W3dSceneLimits::default(),
+        policy,
     )?)
 }
 
@@ -1409,6 +2089,7 @@ mod tests {
 
     use super::{
         apply_additive_preview_alpha, load_terrain_texture_catalog, load_water_appearance,
+        static_world_height,
     };
 
     fn path(value: &str) -> VirtualPath {
@@ -1427,6 +2108,18 @@ mod tests {
             image.as_raw(),
             &[0, 0, 0, 0, 255, 128, 0, 64, 255, 128, 64, 255]
         );
+    }
+
+    #[test]
+    fn static_height_preserves_authored_stacking_offset() {
+        let ground = 31.25;
+        let lower = static_world_height(ground, 0.0);
+        let upper = static_world_height(ground, 15.0);
+        let sunk = static_world_height(ground, -2.5);
+
+        assert_eq!(lower.to_bits(), ground.to_bits());
+        assert_eq!((upper - lower).to_bits(), 15.0_f32.to_bits());
+        assert_eq!(sunk.to_bits(), 28.75_f32.to_bits());
     }
 
     #[test]
@@ -1470,7 +2163,7 @@ mod tests {
             [
                 (
                     path("Data/INI/Water.ini"),
-                    b"WaterSet MORNING\n DiffuseColor = R:10 G:20 B:30\nEnd\n\
+                    b"WaterSet MORNING\n DiffuseColor = R:10 G:20 B:30\n SkyTexture = base-sky.tga\n WaterTexture = environment.tga\nEnd\n\
                       WaterTransparency\n TransparentWaterDepth = 4\nEnd\n"
                         .to_vec(),
                 ),
@@ -1478,6 +2171,18 @@ mod tests {
                     path("Art/Textures/TWWater01.tga"),
                     vec![
                         0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 32, 40, 30, 20, 10, 40,
+                    ],
+                ),
+                (
+                    path("Art/Textures/base-sky.tga"),
+                    vec![
+                        0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 32, 40, 3, 2, 1, 255,
+                    ],
+                ),
+                (
+                    path("Art/Textures/environment.tga"),
+                    vec![
+                        0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 32, 40, 6, 5, 4, 255,
                     ],
                 ),
             ],
@@ -1492,7 +2197,15 @@ mod tests {
                 ),
                 (
                     path("maps/test/map.ini"),
-                    b"WaterTransparency\n TransparentWaterMinOpacity = 0.25\nEnd\n".to_vec(),
+                    b"WaterSet MORNING\n SkyTexture = map-sky.tga\nEnd\n\
+                      WaterTransparency\n TransparentWaterMinOpacity = 0.25\nEnd\n"
+                        .to_vec(),
+                ),
+                (
+                    path("Art/Textures/map-sky.tga"),
+                    vec![
+                        0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 32, 40, 9, 8, 7, 255,
+                    ],
                 ),
             ],
         )
@@ -1517,6 +2230,17 @@ mod tests {
                 .expect("default surface")
                 .rgba(),
             [10, 20, 30, 40]
+        );
+        assert_eq!(
+            appearance.sky_texture().expect("map sky override").rgba(),
+            [7, 8, 9, 255]
+        );
+        assert_eq!(
+            appearance
+                .environment_texture()
+                .expect("environment")
+                .rgba(),
+            [4, 5, 6, 255]
         );
     }
 }

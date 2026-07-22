@@ -36,7 +36,7 @@
   - `Core/GameEngine/Source/Common/INI/INIWater.cpp`
   - `Core/GameEngine/Source/Common/INI/INI.cpp`
   - `Core/GameEngineDevice/Source/W3DDevice/GameClient/Water/W3DWater.cpp`
-- Planned object, waypoint, road, bridge, and world-metadata boundaries:
+- Object, waypoint, road/bridge endpoint, and world-metadata boundaries:
   - `Core/GameEngine/Include/Common/MapObject.h`
   - `Core/GameEngine/Source/GameClient/MapUtil.cpp`
   - `Core/GameEngine/Include/GameClient/TerrainRoads.h`
@@ -44,13 +44,23 @@
   - `Core/GameEngine/Source/GameClient/Terrain/TerrainRoads.cpp`
   - `Generals/Code/GameEngineDevice/Include/W3DDevice/GameClient/W3DRoadBuffer.h`
   - `Generals/Code/GameEngineDevice/Source/W3DDevice/GameClient/W3DRoadBuffer.cpp`
+  - `GeneralsMD/Code/GameEngineDevice/Source/W3DDevice/GameClient/W3DBridgeBuffer.cpp`
   - `Generals/Code/Tools/WorldBuilder/src/WHeightMapEdit.cpp`
-- Planned side, team, build-list, and player-script boundary:
+- Initial object draw-definition boundary:
+  - `Generals/Code/GameEngineDevice/Source/W3DDevice/GameClient/Module/W3DModelDraw.cpp`
+  - `Generals/Code/GameEngineDevice/Include/W3DDevice/GameClient/Module/W3DModelDraw.h`
+  - `Core/GameEngine/Source/Common/INI/INI.cpp`
+- Tree draw and ambient breeze boundary:
+  - `Core/GameEngineDevice/Source/W3DDevice/GameClient/Drawable/Draw/W3DTreeDraw.cpp`
+  - `Core/GameEngineDevice/Source/W3DDevice/GameClient/W3DTreeBuffer.cpp`
+  - `GeneralsMD/Code/GameEngine/Include/GameLogic/ScriptEngine.h`
+  - `GeneralsMD/Code/GameEngine/Source/GameLogic/ScriptEngine/ScriptEngine.cpp`
+- Side, team, build-list, and player-script boundary:
   - `Generals/Code/GameEngine/Include/GameLogic/SidesList.h`
   - `Generals/Code/GameEngine/Source/GameLogic/Map/SidesList.cpp`
   - `Generals/Code/GameEngine/Include/Common/Team.h`
   - `Generals/Code/GameEngine/Source/Common/RTS/Team.cpp`
-- Planned nested script-data boundary:
+- Nested script-data boundary:
   - `Generals/Code/GameEngine/Include/GameLogic/Scripts.h`
   - `Generals/Code/GameEngine/Source/GameLogic/ScriptEngine/Scripts.cpp`
   - `Generals/Code/GameEngine/Include/GameLogic/ScriptConditions.h`
@@ -138,13 +148,43 @@ and Modern macro variation are original implementation and are not derived from 
 renderer. Caustic illumination is likewise project-authored, but samples caller-owned animation
 frames rather than inventing a procedural pattern or copying legacy fixed-function equations.
 
-For the planned ADR-0009 gates, the pinned WorldBuilder writer establishes top-level `WorldInfo`,
+For the ADR-0009 gates, the pinned WorldBuilder writer establishes top-level `WorldInfo`,
 `ObjectsList`, `PolygonTriggers`, `GlobalLighting`, and `SidesList` output. `MapUtil.cpp` establishes
 nested `Object` location, angle, flags, name, later-version typed dictionary data, waypoint
 collection, and one-based `Player_n_Start` recognition. `MapObject.h` establishes distinct road and
 bridge endpoint, corner, join, mirror, and no-draw flags. The TerrainRoad declarations and INI
 reader establish road texture/width inputs and bridge model/scale/state/tower references. These
-facts support a future immutable placement and presentation view; no implementation is claimed yet.
+facts support the immutable placement view and endpoint staging implemented here. The regular-road
+gate additionally follows `W3DRoadBuffer.cpp` for consecutive Point1/Point2 pairing, the product of
+road width and in-texture width, terrain-cell tessellation, maximum supporting height, small
+height offset, and regular-segment UV scale. Complex source curve, tee, cross-type join, stacking,
+and cloud/noise lighting are not claimed yet. Connected-endpoint polygon fills are project-authored
+from the staged strip edges and make no source-equivalence claim. `W3DBridgeBuffer.cpp` establishes
+that bridge marker Z is rebuilt as terrain plus `BRIDGE_FLOAT_AMT` (`0.25`), and establishes the
+`BRIDGE_LEFT`/`BRIDGE_SPAN`/`BRIDGE_RIGHT` section lookup, rounded span repetition, X offsets, and
+endpoint-axis deformation used by the intact bridge preview. Texture/material staging is native to
+this repository. It does not claim source-equivalent tower, collision, damage, repair, or state
+behavior.
+
+`W3DTreeDraw.cpp`/`.h` establish tree model/texture plus move-outward, move-inward, darkening,
+topple, and shadow module fields. `ScriptEngine.h`/`.cpp` establish global `BreezeInfo`, its default
+direction/intensity/lean/period/randomness, and the `SET_TREE_SWAY` script action; `W3DTreeBuffer.cpp`
+establishes explicit-frame cosine sway consumption. These facts document the future presentation
+input boundary only. R3 does not execute that action, and any source-default breeze preview will be
+an explicit compatibility policy rather than hidden script execution.
+
+`W3DModelDraw.cpp`/`.h` and the generic INI reader establish top-level `Object`/`ObjectReskin`
+declarations, draw-module naming, `DefaultConditionState` model selection, and per-draw `Scale`.
+The bounded indentation-based subset, reskin ancestry resolution, stable first-use GPU instancing,
+and neutral identity root/HLOD wrapper for validated standalone meshes are project-authored. The
+renderer-only placement composition samples the exact already-staged terrain triangle, including
+the height-field border and selected diagonal, then adds the persisted relative Z offset verbatim;
+there is no clamp or renderer epsilon, and this is not an upstream gameplay or construction policy.
+
+The height reader establishes signed version-4 boundary coordinates and the terrain sources
+establish their relationship to the height grid. The translucent fence, terrain-following base,
+and common top above the greatest MAP height are project-authored viewer policy. They do not alter
+collision or reachable terrain.
 
 `SidesList.cpp` establishes versions 1 through 3, ordered side dictionaries and build lists,
 version-2 team dictionaries, version-3 build-list extensions, and nested `PlayerScriptsList` data.
@@ -152,6 +192,8 @@ version-2 team dictionaries, version-3 build-list extensions, and nested `Player
 nesting, OR/AND condition records, true/false action lists, typed parameters, source flags/comments,
 and versioned evaluation delay. ADR 0009 requires the project to preserve these records as bounded
 data in R3 without calling the upstream runtime validation/repair or opcode-dispatch behavior.
+The project implementation follows that boundary: it retains ordered raw values and unknown
+opcodes, but exposes no evaluator, scheduler, runtime objects, or repair pass.
 
 The WorldBuilder writer and runtime reader establish `GlobalLighting` versions 1 through 3. The
 payload begins with the one-based selected time and then four ordered time variants. Version 1 has
@@ -354,9 +396,29 @@ copied into the repository.
 ## Implementation record
 
 The Rust implementations in `crates/cic-formats/src/map.rs`, `map_blend.rs`, `map_water.rs`,
-`refpack.rs`, `terrain_ini.rs`, and `water_ini.rs`, terrain/water staging in
-`crates/cic-render/src/terrain.rs` and `water.rs`, plus report/CLI integration
+`map_scenario.rs`, `object_ini.rs`,
+`refpack.rs`, `road_ini.rs`, `terrain_ini.rs`, and `water_ini.rs`, terrain/water/road/scenery staging in
+`crates/cic-render/src/terrain.rs`, `water.rs`, `map_scene.rs`, `road.rs`, `scenery.rs`, and
+`boundary.rs`, plus report/CLI integration
 in `crates/cic-tools`, were authored for this project from the documented facts. No C++ source code
 was copied, translated line by line, or imported. The immutable values, structured errors, explicit
 limits, exact closure checks, top-level opaque-payload policy, stable staging/report schemas, and
 synthetic fixtures are native to this repository.
+
+Project-authored scenario tests synthesize complete dictionaries, world/object records,
+waypoints/player starts, endpoint flags, side/team/build-list versions, and grouped/ungrouped nested
+scripts. They cover exact closure, every truncated object prefix, finite-value checks, independent
+allocation/depth limits, both action branches, and raw coordinate/scalar parameters. Water tests
+use synthetic VFS providers to reproduce constructor/global/sibling-map precedence for standing,
+sky, and environment textures; the WGSL parser/validator test checks the expanded bindings. No
+retail bytes, strings, maps, or images are retained.
+
+Project-authored road tests cover source-order road/bridge field replacement, malformed structure,
+finite reals, definition limits, consecutive endpoint pairing, terrain fitting,
+first-use materials, unresolved definitions, and edge-derived corner/junction approximation.
+Object-definition tests cover multiple draws, reskins, invalid scales, and independent resource
+limits; renderer tests cover stable instance transforms, exact terrain-triangle sampling, the
+global boundary top, Header3 two-sided selection, and WGSL validation. A controlled user-owned
+Bridge Busters staging smoke resolved seven intact bridges through seven endpoint-deformed model
+batches while roads, scenery, water, and 760 boundary segments remained loadable. Only aggregate counts were retained; no retail
+bytes, strings, models, textures, MAP data, or captures were copied into the repository.

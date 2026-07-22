@@ -54,6 +54,16 @@ pub struct W3dSceneLimits {
     pub maximum_sub_objects_per_lod: usize,
 }
 
+/// Composition policy for source-valid models versus renderer-only legacy recovery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum W3dModelDecodePolicy {
+    /// Reject every missing render mesh and out-of-range skin influence.
+    Strict,
+    /// Skip missing optional HLOD render meshes and leave bad skin influences for the renderer's
+    /// deterministic rigid-pivot fallback.
+    LegacyPreview,
+}
+
 impl Default for W3dSceneLimits {
     fn default() -> Self {
         Self {
@@ -331,6 +341,53 @@ impl W3dModel {
     }
 }
 
+/// Wraps validated standalone meshes in an immutable identity-root preview model.
+///
+/// Standalone static W3Ds do not carry hierarchy or HLOD chunks. This project-authored adapter
+/// supplies only the neutral composition metadata required by renderer staging; it does not infer
+/// animation, attachments, or gameplay state.
+#[must_use]
+pub fn compose_static_w3d_model(meshes: Vec<W3dStaticMesh>) -> W3dModel {
+    let name = meshes.first().map_or_else(
+        || b"STATIC".to_vec(),
+        |mesh| fixed_name(*mesh.header().mesh_name_bytes()),
+    );
+    let hierarchy = W3dHierarchy {
+        version: 0,
+        name: name.clone(),
+        center: [0.0; 3],
+        pivots: vec![W3dPivot {
+            name: b"ROOTTRANSFORM".to_vec(),
+            parent: None,
+            translation: [0.0; 3],
+            rotation: W3dQuaternion([0.0, 0.0, 0.0, 1.0]),
+        }],
+    };
+    let sub_objects = meshes
+        .iter()
+        .map(|mesh| W3dSubObject {
+            bone_index: 0,
+            name: fixed_name(*mesh.header().mesh_name_bytes()),
+        })
+        .collect();
+    W3dModel {
+        hierarchy,
+        hlod: W3dHlod {
+            name: name.clone(),
+            hierarchy_name: name,
+            lods: vec![W3dLod {
+                maximum_screen_size: f32::MAX,
+                sub_objects,
+            }],
+        },
+        meshes: meshes
+            .into_iter()
+            .map(|mesh| W3dModelMesh { mesh, pivot: 0 })
+            .collect(),
+        animations: Vec::new(),
+    }
+}
+
 /// Decodes the hierarchy, highest-detail HLOD composition, referenced meshes, and animations.
 ///
 /// # Errors
@@ -377,11 +434,34 @@ pub fn decode_w3d_model_set(
     mesh_limits: W3dMeshLimits,
     scene_limits: W3dSceneLimits,
 ) -> Result<W3dModel, W3dSceneError> {
+    decode_w3d_model_set_with_policy(
+        files,
+        mesh_limits,
+        scene_limits,
+        W3dModelDecodePolicy::Strict,
+    )
+}
+
+/// Composes a model under an explicit compatibility policy.
+///
+/// `LegacyPreview` exists only for non-authoritative presentation of damaged retail-era assets;
+/// strict inspection and export should use [`decode_w3d_model_set`].
+///
+/// # Errors
+///
+/// Returns the same bounded structured errors as [`decode_w3d_model_set`], except for the two
+/// explicitly recoverable legacy cases described by [`W3dModelDecodePolicy::LegacyPreview`].
+pub fn decode_w3d_model_set_with_policy(
+    files: &[&W3dFile],
+    mesh_limits: W3dMeshLimits,
+    scene_limits: W3dSceneLimits,
+    policy: W3dModelDecodePolicy,
+) -> Result<W3dModel, W3dSceneError> {
     let hierarchy_chunk =
         unique_top_set(files, HIERARCHY)?.ok_or(W3dSceneError::MissingChunk(HIERARCHY))?;
     let hierarchy = decode_hierarchy(hierarchy_chunk, scene_limits)?;
     let hlod_chunk = unique_top_set(files, HLOD)?.ok_or(W3dSceneError::MissingChunk(HLOD))?;
-    let hlod = decode_hlod(hlod_chunk, hierarchy.pivots.len(), scene_limits)?;
+    let hlod = decode_hlod(hlod_chunk, hierarchy.pivots.len(), scene_limits, policy)?;
     if !ascii_eq(&hlod.hierarchy_name, &hierarchy.name) {
         return Err(W3dSceneError::HierarchyNameMismatch);
     }
@@ -400,12 +480,17 @@ pub fn decode_w3d_model_set(
             }) {
                 continue;
             }
+            if policy == W3dModelDecodePolicy::LegacyPreview {
+                continue;
+            }
             return Err(W3dSceneError::MissingMesh(sub_object.name.clone()));
         };
         let mesh = decode_static_mesh(chunk, mesh_limits)?;
         if let Some(bones) = mesh.vertex_bones() {
             for (vertex, bone) in bones.iter().copied().enumerate() {
-                if usize::from(bone) >= hierarchy.pivots.len() {
+                if policy == W3dModelDecodePolicy::Strict
+                    && usize::from(bone) >= hierarchy.pivots.len()
+                {
                     return Err(W3dSceneError::BoneIndexOutOfRange {
                         vertex,
                         index: u32::from(bone),
@@ -433,11 +518,20 @@ pub fn decode_w3d_model_set(
             ));
         }
         let animation = match chunk.id() {
-            ANIMATION => decode_animation(chunk, hierarchy.pivots.len(), scene_limits)?,
+            ANIMATION => decode_animation(chunk, hierarchy.pivots.len(), scene_limits),
             COMPRESSED_ANIMATION => {
-                decode_compressed_animation(chunk, hierarchy.pivots.len(), scene_limits)?
+                decode_compressed_animation(chunk, hierarchy.pivots.len(), scene_limits)
             }
             _ => unreachable!("animation filter only accepts known top-level IDs"),
+        };
+        let animation = match animation {
+            Ok(animation) => animation,
+            Err(W3dSceneError::BoneIndexOutOfRange { .. })
+                if policy == W3dModelDecodePolicy::LegacyPreview =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error),
         };
         if ascii_eq(&animation.hierarchy_name, &hierarchy.name) {
             animations.push(animation);
@@ -1170,6 +1264,7 @@ fn decode_hlod(
     chunk: &W3dChunk,
     pivot_count: usize,
     limits: W3dSceneLimits,
+    policy: W3dModelDecodePolicy,
 ) -> Result<W3dHlod, W3dSceneError> {
     let children = container(chunk)?;
     let header = data(required(children, HLOD_HEADER)?)?;
@@ -1192,7 +1287,7 @@ fn decode_hlod(
     }
     let mut lods = Vec::with_capacity(lod_count);
     for wrapper in wrappers {
-        lods.push(decode_lod(wrapper, pivot_count, limits)?);
+        lods.push(decode_lod(wrapper, pivot_count, limits, policy)?);
     }
     Ok(W3dHlod {
         name,
@@ -1205,6 +1300,7 @@ fn decode_lod(
     chunk: &W3dChunk,
     pivot_count: usize,
     limits: W3dSceneLimits,
+    policy: W3dModelDecodePolicy,
 ) -> Result<W3dLod, W3dSceneError> {
     let children = container(chunk)?;
     let header = data(required(children, HLOD_ARRAY_HEADER)?)?;
@@ -1238,13 +1334,16 @@ fn decode_lod(
         let bytes = data(object)?;
         exact(HLOD_SUB_OBJECT, bytes.len(), HLOD_SUB_OBJECT_BYTES)?;
         let mut reader = BinaryReader::new(bytes, "W3D HLOD sub-object");
-        let bone_index = reader.read_u32_le()?;
+        let mut bone_index = reader.read_u32_le()?;
         if usize::try_from(bone_index).map_or(true, |bone| bone >= pivot_count) {
-            return Err(W3dSceneError::BoneIndexOutOfRange {
-                vertex: index,
-                index: bone_index,
-                count: pivot_count,
-            });
+            if policy == W3dModelDecodePolicy::Strict {
+                return Err(W3dSceneError::BoneIndexOutOfRange {
+                    vertex: index,
+                    index: bone_index,
+                    count: pivot_count,
+                });
+            }
+            bone_index = 0;
         }
         let name = fixed_name(read_array::<32>(&mut reader)?);
         sub_objects.push(W3dSubObject { bone_index, name });
@@ -1576,8 +1675,9 @@ mod tests {
     use crate::{W3dLimits, parse_w3d};
 
     use super::{
-        W3dAnimationChannelKind, W3dAnimationEncoding, W3dMeshLimits, W3dSceneError,
-        W3dSceneLimits, decode_animation_channel, decode_compressed_animation, decode_w3d_model,
+        W3dAnimationChannelKind, W3dAnimationEncoding, W3dMeshLimits, W3dModelDecodePolicy,
+        W3dSceneError, W3dSceneLimits, decode_animation_channel, decode_compressed_animation,
+        decode_w3d_model, decode_w3d_model_set_with_policy,
     };
 
     fn chunk(id: u32, container: bool, payload: &[u8]) -> Vec<u8> {
@@ -1603,6 +1703,39 @@ mod tests {
         chunk(0x280, true, &children)
     }
 
+    fn missing_mesh_model(sub_object_bone: u32) -> Vec<u8> {
+        let mut hierarchy_header = vec![0; 36];
+        hierarchy_header[..4].copy_from_slice(&1_u32.to_le_bytes());
+        hierarchy_header[4..8].copy_from_slice(b"TREE");
+        hierarchy_header[20..24].copy_from_slice(&1_u32.to_le_bytes());
+        let mut pivot = vec![0; 60];
+        pivot[..4].copy_from_slice(b"ROOT");
+        pivot[16..20].copy_from_slice(&u32::MAX.to_le_bytes());
+        pivot[56..60].copy_from_slice(&1.0_f32.to_le_bytes());
+        let mut hierarchy_children = chunk(0x101, false, &hierarchy_header);
+        hierarchy_children.extend_from_slice(&chunk(0x102, false, &pivot));
+
+        let mut hlod_header = vec![0; 40];
+        hlod_header[..4].copy_from_slice(&1_u32.to_le_bytes());
+        hlod_header[4..8].copy_from_slice(&1_u32.to_le_bytes());
+        hlod_header[8..12].copy_from_slice(b"TREE");
+        hlod_header[24..28].copy_from_slice(b"TREE");
+        let mut array_header = vec![0; 8];
+        array_header[..4].copy_from_slice(&1_u32.to_le_bytes());
+        array_header[4..8].copy_from_slice(&f32::MAX.to_le_bytes());
+        let mut sub_object = vec![0; 36];
+        sub_object[..4].copy_from_slice(&sub_object_bone.to_le_bytes());
+        sub_object[4..16].copy_from_slice(b"TREE.MISSING");
+        let mut array_children = chunk(0x703, false, &array_header);
+        array_children.extend_from_slice(&chunk(0x704, false, &sub_object));
+        let mut hlod_children = chunk(0x701, false, &hlod_header);
+        hlod_children.extend_from_slice(&chunk(0x702, true, &array_children));
+
+        let mut bytes = chunk(0x100, true, &hierarchy_children);
+        bytes.extend_from_slice(&chunk(0x700, true, &hlod_children));
+        bytes
+    }
+
     fn decode_compressed(bytes: &[u8]) -> Result<super::W3dAnimation, W3dSceneError> {
         let file = parse_w3d(bytes, "compressed.w3d", W3dLimits::default())
             .expect("valid compressed animation chunk framing");
@@ -1623,6 +1756,26 @@ mod tests {
             decode_w3d_model(&file, W3dMeshLimits::default(), W3dSceneLimits::default()),
             Err(W3dSceneError::EmptyHierarchy)
         );
+    }
+
+    #[test]
+    fn legacy_preview_recovers_missing_mesh_and_bad_hlod_pivot_only_when_explicit() {
+        let bytes = missing_mesh_model(1);
+        let file = parse_w3d(&bytes, "legacy-preview.w3d", W3dLimits::default())
+            .expect("valid synthetic model framing");
+        assert!(matches!(
+            decode_w3d_model(&file, W3dMeshLimits::default(), W3dSceneLimits::default()),
+            Err(W3dSceneError::BoneIndexOutOfRange { .. })
+        ));
+        let preview = decode_w3d_model_set_with_policy(
+            &[&file],
+            W3dMeshLimits::default(),
+            W3dSceneLimits::default(),
+            W3dModelDecodePolicy::LegacyPreview,
+        )
+        .expect("explicit preview policy recovers optional legacy damage");
+        assert!(preview.meshes().is_empty());
+        assert_eq!(preview.hlod().lods()[0].sub_objects()[0].bone_index(), 0);
     }
 
     #[test]

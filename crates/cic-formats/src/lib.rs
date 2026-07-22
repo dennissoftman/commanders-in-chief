@@ -4,8 +4,11 @@ mod csf;
 mod map;
 mod map_blend;
 mod map_lighting;
+mod map_scenario;
 mod map_water;
+mod object_ini;
 mod refpack;
+mod road_ini;
 mod terrain_ini;
 mod w3d;
 mod w3d_material;
@@ -25,8 +28,21 @@ pub use map_lighting::{
     MapLight, MapLightSet, MapLightingData, MapLightingError, MapLightingPeriod, MapTimeOfDay,
     decode_map_lighting,
 };
+pub use map_scenario::{
+    MapBuildListEntry, MapDictionary, MapDictionaryEntry, MapDictionaryValue, MapObjectPlacement,
+    MapOpaqueScenarioChunk, MapPlayerScripts, MapScenarioError, MapScenarioLimits, MapScript,
+    MapScriptAction, MapScriptCondition, MapScriptGroup, MapScriptList, MapScriptOrCondition,
+    MapScriptParameter, MapScriptParameterValue, MapSide, MapSidesData, MapWorldInfo,
+    MapWorldObjects, decode_map_sides, decode_map_world_objects, object_flags,
+};
 pub use map_water::{MapWaterArea, MapWaterData, MapWaterError, MapWaterPoint, decode_map_water};
+pub use object_ini::{
+    ObjectDefinition, ObjectIni, ObjectIniError, ObjectIniLimits, ObjectModelDraw, parse_object_ini,
+};
 pub use refpack::RefPackError;
+pub use road_ini::{
+    BridgeDefinition, RoadDefinition, RoadIni, RoadIniError, RoadIniLimits, parse_road_ini,
+};
 pub use terrain_ini::{
     TerrainDefinition, TerrainIni, TerrainIniError, TerrainIniLimits, parse_terrain_ini,
 };
@@ -42,8 +58,9 @@ pub use w3d_mesh::{
 };
 pub use w3d_scene::{
     W3dAnimation, W3dAnimationChannel, W3dAnimationChannelKind, W3dAnimationEncoding, W3dHierarchy,
-    W3dHlod, W3dLod, W3dModel, W3dModelMesh, W3dPivot, W3dQuaternion, W3dSceneError,
-    W3dSceneLimits, W3dSubObject, decode_w3d_model, decode_w3d_model_set, w3d_model_hierarchy_name,
+    W3dHlod, W3dLod, W3dModel, W3dModelDecodePolicy, W3dModelMesh, W3dPivot, W3dQuaternion,
+    W3dSceneError, W3dSceneLimits, W3dSubObject, compose_static_w3d_model, decode_w3d_model,
+    decode_w3d_model_set, decode_w3d_model_set_with_policy, w3d_model_hierarchy_name,
 };
 pub use water_ini::{
     WaterIni, WaterIniError, WaterIniLimits, WaterRgba8, WaterSetIni, WaterTransparencyIni,

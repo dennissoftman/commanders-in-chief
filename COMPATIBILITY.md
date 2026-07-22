@@ -58,16 +58,16 @@ observable behavior.
 | MAP | Terrain INI resolution and layered terrain staging | verified | Synthetic ordered-history test/capture hashes + installed Generals-under-ZH class smoke |
 | MAP | Water/river `PolygonTriggers` versions 2 and 3 | verified | Synthetic truncation/seam reconstruction tests + installed lake/long-river/empty-marker smokes |
 | MAP | Water transparency, standing texture, and source caustic inputs | verified | Synthetic constructor/history/map-overlay tests + installed texture/scalar/frame smokes; final appearance remains WIP |
-| MAP | Final water appearance quality | partial | Legacy standing-water texture/tint/alpha/depth feathering implemented; sky/environment, shadows, reflections, and comparisons remain open |
+| MAP | Final water appearance quality | partial | Sky/environment and sibling overrides resolve; Modern bounded reflections and frozen viewer time implemented; shadows, headless capture hashes, AA, and comparisons remain open |
 | MAP | `GlobalLighting` versions 1 through 3 | verified | Synthetic exact-layout/truncation tests + installed selected-time smoke |
-| MAP | `WorldInfo` and `ObjectsList` placements | unknown | Source-established ADR-0009 gate; decoder not started |
-| MAP | Roads and bridges | unknown | Source-established object flags/INI definitions; staging not started |
-| MAP | Object draw-definition resolution and static scenery | unknown | Planned initial-presentation subset; no gameplay modules |
-| MAP | Waypoints and `Player_n_Start` spawn candidates | unknown | Source-established ADR-0009 gate; decoder not started |
-| MAP | `SidesList`, teams, and build lists | unknown | Source-established versions 1 through 3; decoder not started |
+| MAP | `WorldInfo` and `ObjectsList` placements | verified | Bounded synthetic layouts, truncation/limit tests, stable report, and immutable source-order staging |
+| MAP | Roads and bridges | partial | Regular roads, endpoint-edge corner/junction fillers, and intact instanced bridge models render from bounded definitions; exact source curve/tee UVs, tower scenery, and bridge state transitions remain open |
+| MAP | Object draw-definition resolution and static scenery | partial | Default W3D draw states, reskins, scales, standalone meshes, exact terrain plus verbatim relative-Z placement, Header3 two-sided culling, and GPU instancing verified; ambient animation and remaining draw modules open; no gameplay modules |
+| MAP | Waypoints and `Player_n_Start` spawn candidates | verified | Immutable object projection preserves ordered candidates without assigning slots |
+| MAP | `SidesList`, teams, and build lists | verified | Versions 1 through 3 decode under explicit limits without runtime repair or activation |
 | MAP | Complete polygon-area semantics | unknown | Water-only projection implemented; general areas not started |
-| MAP | Nested player-script tree | unknown | Source-established non-executing R3 data gate; decoder not started |
-| MAP viewer | Complete terrain scene with roads, static objects, and ambient animation | unknown | Planned R3 integration gate |
+| MAP | Nested player-script tree | verified | Bounded nested synthetic tree, truncation/limit tests, stable raw-opcode report; execution intentionally deferred to R5 |
+| MAP viewer | Complete terrain scene with roads, static objects, and ambient animation | partial | Roads, edge-derived joins, intact bridges, instanced static models, and playable-boundary fence integrated; bridge states/towers and ambient animation remain open |
 | WND | File/layout blocks, nested windows, fields, and unknown preservation | unknown | Source-established R4 gate; decoder not started |
 | WND | Complete classic status/style and gadget vocabulary | unknown | Source-established R4 gate; immutable control definitions not started |
 | WND | Versioned post-parse patch overlays with provenance | unknown | Planned project-owned R4 format; no source WND mutation |

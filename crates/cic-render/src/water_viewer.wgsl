@@ -27,6 +27,10 @@ struct WaterVertexOutput {
 @group(0) @binding(4) var caustic_sampler: sampler;
 @group(0) @binding(5) var standing_water_texture: texture_2d<f32>;
 @group(0) @binding(6) var standing_water_sampler: sampler;
+@group(0) @binding(7) var water_sky_texture: texture_2d<f32>;
+@group(0) @binding(8) var water_sky_sampler: sampler;
+@group(0) @binding(9) var water_environment_texture: texture_2d<f32>;
+@group(0) @binding(10) var water_environment_sampler: sampler;
 
 @vertex
 fn water_vertex(@location(0) position: vec3<f32>) -> WaterVertexOutput {
@@ -111,8 +115,14 @@ fn water_fragment(input: WaterVertexOutput) -> @location(0) vec4<f32> {
         deep_color,
         smoothstep(3.0, 18.0, thickness)
     );
+    let authored_environment = textureSample(
+        water_environment_texture,
+        water_environment_sampler,
+        input.world_position.xy / 150.0 + source_scroll
+    ).rgb;
+    let authored_water_body = mix(water_body, authored_environment * source_surface.rgb, 0.18);
     let attenuated_scene = refracted_scene * transmittance;
-    var transmission = mix(attenuated_scene, water_body, depth_opacity);
+    var transmission = mix(attenuated_scene, authored_water_body, depth_opacity);
     if (bed.a > 0.5) {
         let caustic_depth = smoothstep(0.35, 0.9, thickness)
             * (1.0 - smoothstep(8.0, 18.0, thickness));
@@ -132,8 +142,26 @@ fn water_fragment(input: WaterVertexOutput) -> @location(0) vec4<f32> {
             highlight += light.diffuse.rgb * response * 1.25;
         }
     }
-    let sky_reflection = mix(vec3<f32>(0.10, 0.20, 0.28), vec3<f32>(0.34, 0.48, 0.62), max(normal.z, 0.0));
-    var color = mix(transmission, sky_reflection, fresnel) + highlight;
+    let reflected_view = reflect(-view_direction, normal);
+    let sky_uv = vec2<f32>(
+        fract(0.5 + atan2(reflected_view.y, reflected_view.x) / 6.28318530718),
+        clamp(0.5 - asin(clamp(reflected_view.z, -1.0, 1.0)) / 3.14159265359, 0.0, 1.0)
+    );
+    let authored_sky = textureSample(water_sky_texture, water_sky_sampler, sky_uv).rgb;
+    let preview_sky = mix(
+        vec3<f32>(0.10, 0.20, 0.28),
+        vec3<f32>(0.34, 0.48, 0.62),
+        max(normal.z, 0.0)
+    );
+    let reflected_pixel = clamp(
+        pixel + vec2<i32>(round(reflected_view.xy * 18.0)),
+        vec2<i32>(0),
+        dimensions - vec2<i32>(1)
+    );
+    let screen_reflection = textureLoad(opaque_scene, reflected_pixel, 0).rgb;
+    let sky_reflection = mix(preview_sky, authored_sky, 0.65);
+    let bounded_reflection = mix(sky_reflection, screen_reflection, 0.22);
+    var color = mix(transmission, bounded_reflection, fresnel) + highlight;
     let shore_haze = 1.0 - smoothstep(0.2, 2.8, thickness);
     let shore_crest = smoothstep(0.08, 0.45, thickness)
         * (1.0 - smoothstep(1.35, 2.8, thickness));
@@ -148,4 +176,5 @@ fn water_fragment(input: WaterVertexOutput) -> @location(0) vec4<f32> {
 // Legacy standing-water texture scale, source tint/alpha, and depth-feather policy are derived
 // from W3DWater.cpp in GeneralsGameCode revision
 // 9f7abb866f5afd446db14149979e744c7216baaf (GPL-3.0 with Section 7 terms); see
-// docs/provenance/map.md. The Modern branch remains original project work.
+// docs/provenance/map.md. The bounded screen/sky reflection and Modern branch remain original
+// project work sampled only from explicit presentation time and caller-resolved textures.

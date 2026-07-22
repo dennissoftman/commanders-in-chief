@@ -68,6 +68,16 @@ pub(crate) struct StagedMaterial {
     pub(crate) blend: BlendMode,
     pub(crate) alpha_test: bool,
     pub(crate) depth_write: bool,
+    pub(crate) two_sided: bool,
+}
+
+// Provenance: `W3D_MESH_FLAG_TWO_SIDED` is defined as 0x00002000 in `w3d_file.h` at
+// GeneralsGameCode revision `9f7abb866f5afd446db14149979e744c7216baaf`; see
+// `docs/provenance/w3d.md` for license and notice details.
+const W3D_MESH_FLAG_TWO_SIDED: u32 = 0x0000_2000;
+
+const fn mesh_is_two_sided(attributes: u32) -> bool {
+    attributes & W3D_MESH_FLAG_TWO_SIDED != 0
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -251,12 +261,14 @@ impl AnimatedModel {
                             let pivot = mesh
                                 .vertex_bones()
                                 .map_or(model_mesh.pivot(), |bones| u32::from(bones[vertex_index]));
-                            if usize::try_from(pivot)
+                            let pivot = if usize::try_from(pivot)
                                 .ok()
                                 .is_none_or(|pivot| pivot >= model.hierarchy().pivots().len())
                             {
-                                return Err(RenderError::InvalidHierarchy);
-                            }
+                                model_mesh.pivot()
+                            } else {
+                                pivot
+                            };
                             let color = preview_color(mesh, pass, vertex_index);
                             let texcoord = stage
                                 .zip(uv_indices)
@@ -265,7 +277,7 @@ impl AnimatedModel {
                                         .ok()
                                         .and_then(|index| stage.texture_coordinates().get(index))
                                 })
-                                .map_or([0.0, 0.0], |uv| [uv.u(), uv.v()]);
+                                .map_or([0.0, 0.0], |uv| finite_texcoord(uv.u(), uv.v()));
                             let mapper =
                                 staged_mapper(pass, stage_index, vertex_index, &mapper_table);
                             let index = u32::try_from(vertices.len())
@@ -308,6 +320,288 @@ impl AnimatedModel {
             pivots,
             animations: model.animations().to_vec(),
             hidden_attachment_distance: hidden_attachment_distance(&staged),
+            texture_resources,
+            materials,
+            draws,
+        })
+    }
+
+    /// Stitches and deforms one intact `TerrainBridge` between source endpoints.
+    ///
+    /// Provenance: section naming, span-count rounding, X-offsets, and the bridge basis follow
+    /// `W3DBridgeBuffer.cpp` from `GeneralsGameCode` revision
+    /// `9f7abb866f5afd446db14149979e744c7216baaf`; notices are recorded in
+    /// `docs/provenance/map.md`. Texture/material staging remains project-authored.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured error when the bridge lacks a usable `BRIDGE_LEFT` section, its
+    /// endpoints or natural dimensions are degenerate, or expanded geometry exceeds limits.
+    #[allow(clippy::too_many_lines)]
+    pub fn from_bridge_w3d_with_textures(
+        model: &W3dModel,
+        texture_resources: TextureResourceManager,
+        start: [f32; 3],
+        end: [f32; 3],
+        bridge_scale: f32,
+    ) -> Result<Self, RenderError> {
+        if start
+            .into_iter()
+            .chain(end)
+            .chain([bridge_scale])
+            .any(|value| !value.is_finite())
+            || bridge_scale <= 0.0
+        {
+            return Err(RenderError::NonFinitePose);
+        }
+        let worlds = bind_pose_transforms(model)?;
+        let left = model
+            .meshes()
+            .iter()
+            .find(|mesh| mesh_name_eq(mesh.mesh(), b"BRIDGE_LEFT"))
+            .ok_or(RenderError::EmptyModel)?;
+        let span = model
+            .meshes()
+            .iter()
+            .find(|mesh| mesh_name_eq(mesh.mesh(), b"BRIDGE_SPAN"));
+        let right = model
+            .meshes()
+            .iter()
+            .find(|mesh| mesh_name_eq(mesh.mesh(), b"BRIDGE_RIGHT"));
+        let left_bounds = mesh_bind_x_bounds(left, &worlds)?;
+        let mut natural_length;
+        let mut occurrences = Vec::new();
+        if let (Some(span), Some(right)) = (span, right) {
+            let right_bounds = mesh_bind_x_bounds(right, &worlds)?;
+            let span_length = right_bounds[0] - left_bounds[1];
+            natural_length = right_bounds[1] - left_bounds[0];
+            if !span_length.is_finite()
+                || span_length <= f32::EPSILON
+                || !natural_length.is_finite()
+                || natural_length <= f32::EPSILON
+            {
+                return Err(RenderError::GeometryOutsideLimits);
+            }
+            let desired = dot(subtract(end, start), subtract(end, start)).sqrt();
+            let spannable = desired - (natural_length - span_length);
+            let (span_count, repeated_length, generated_length) =
+                bridge_span_layout(spannable, span_length, natural_length)?;
+            if generated_length <= f32::EPSILON || !generated_length.is_finite() {
+                return Err(RenderError::GeometryOutsideLimits);
+            }
+            occurrences.push((left, -left_bounds[0]));
+            let mut span_offset = 0.0_f32;
+            for _ in 0..span_count {
+                occurrences.push((span, -left_bounds[0] + span_offset));
+                span_offset += span_length;
+            }
+            occurrences.push((right, -left_bounds[0] + repeated_length - span_length));
+            natural_length = generated_length;
+        } else {
+            natural_length = left_bounds[1] - left_bounds[0];
+            if !natural_length.is_finite() || natural_length <= f32::EPSILON {
+                return Err(RenderError::GeometryOutsideLimits);
+            }
+            occurrences.push((left, -left_bounds[0]));
+        }
+
+        let delta = subtract(end, start);
+        let horizontal = delta[0].hypot(delta[1]);
+        if horizontal <= f32::EPSILON {
+            return Err(RenderError::GeometryOutsideLimits);
+        }
+        let axis = scale(delta, natural_length.recip());
+        let lateral = [
+            -delta[1] / horizontal * bridge_scale,
+            delta[0] / horizontal * bridge_scale,
+            0.0,
+        ];
+        let direction = normalize_vector(delta);
+        let lateral_direction = normalize_vector(lateral);
+        let up = scale(cross(direction, lateral_direction), bridge_scale);
+
+        let estimated_triangles = occurrences.iter().try_fold(0_usize, |total, (mesh, _)| {
+            let pass_stages = mesh
+                .mesh()
+                .materials()
+                .passes()
+                .iter()
+                .map(|pass| pass.texture_stages().len().max(1))
+                .sum::<usize>()
+                .max(1);
+            total
+                .checked_add(
+                    mesh.mesh()
+                        .triangles()
+                        .len()
+                        .checked_mul(pass_stages)
+                        .ok_or(RenderError::GeometryTooLarge)?,
+                )
+                .ok_or(RenderError::GeometryTooLarge)
+        })?;
+        let vertex_capacity = estimated_triangles
+            .checked_mul(3)
+            .ok_or(RenderError::GeometryTooLarge)?;
+        if vertex_capacity
+            .checked_mul(36)
+            .is_none_or(|bytes| bytes > MAX_GEOMETRY_BUFFER_BYTES)
+        {
+            return Err(RenderError::GeometryTooLarge);
+        }
+        let mut vertices = Vec::with_capacity(vertex_capacity);
+        let mut indices = Vec::with_capacity(vertex_capacity);
+        let mut materials = Vec::new();
+        let mut material_indices = BTreeMap::new();
+        let mut draws: Vec<DrawRange> = Vec::new();
+        for (model_mesh, x_offset) in occurrences {
+            let mesh = model_mesh.mesh();
+            let rigid = worlds
+                .get(
+                    usize::try_from(model_mesh.pivot())
+                        .map_err(|_| RenderError::InvalidHierarchy)?,
+                )
+                .copied()
+                .ok_or(RenderError::InvalidHierarchy)?;
+            let mapper_table = mesh
+                .materials()
+                .vertex_materials()
+                .iter()
+                .map(|material| {
+                    [
+                        material
+                            .mapper(0)
+                            .map_or_else(StagedMapper::default, stage_mapper),
+                        material
+                            .mapper(1)
+                            .map_or_else(StagedMapper::default, stage_mapper),
+                    ]
+                })
+                .collect::<Vec<_>>();
+            let pass_count = mesh.materials().passes().len().max(1);
+            for pass_index in 0..pass_count {
+                let pass = mesh.materials().passes().get(pass_index);
+                let stage_count = pass.map_or(1, |pass| pass.texture_stages().len().max(1));
+                for stage_index in 0..stage_count {
+                    let stage = pass.and_then(|pass| pass.texture_stages().get(stage_index));
+                    for (triangle_index, triangle) in mesh.triangles().iter().enumerate() {
+                        let material = staged_material(
+                            mesh,
+                            pass_index,
+                            stage_index,
+                            triangle_index,
+                            &texture_resources,
+                        );
+                        let material_index =
+                            *material_indices.entry(material).or_insert_with(|| {
+                                let index = materials.len();
+                                materials.push(material);
+                                index
+                            });
+                        let first_index = u32::try_from(indices.len())
+                            .map_err(|_| RenderError::GeometryTooLarge)?;
+                        if let Some(draw) = draws.last_mut()
+                            && draw.material == material_index
+                            && draw.pass == pass_index
+                            && draw.stage == stage_index
+                            && draw.first_index.checked_add(draw.index_count) == Some(first_index)
+                        {
+                            draw.index_count = draw
+                                .index_count
+                                .checked_add(3)
+                                .ok_or(RenderError::GeometryTooLarge)?;
+                        } else {
+                            draws.push(DrawRange {
+                                material: material_index,
+                                first_index,
+                                index_count: 3,
+                                pass: pass_index,
+                                stage: stage_index,
+                            });
+                        }
+                        let source_indices = triangle.vertex_indices();
+                        let uv_indices = stage.and_then(|stage| {
+                            stage.coordinate_indices(triangle_index, source_indices)
+                        });
+                        for corner in 0..3 {
+                            let vertex_index = usize::try_from(source_indices[corner])
+                                .map_err(|_| RenderError::GeometryTooLarge)?;
+                            let source_position = mesh.vertices()[vertex_index];
+                            let source_normal = mesh.normals()[vertex_index];
+                            let transform = mesh
+                                .vertex_bones()
+                                .and_then(|bones| {
+                                    worlds.get(usize::from(bones[vertex_index])).copied()
+                                })
+                                .unwrap_or(rigid);
+                            let bound_position = transform.point([
+                                source_position.x(),
+                                source_position.y(),
+                                source_position.z(),
+                            ]);
+                            let bound_normal = transform.vector([
+                                source_normal.x(),
+                                source_normal.y(),
+                                source_normal.z(),
+                            ]);
+                            let position = add(
+                                start,
+                                add(
+                                    scale(axis, bound_position[0] + x_offset),
+                                    add(
+                                        scale(lateral, bound_position[1]),
+                                        scale(up, bound_position[2]),
+                                    ),
+                                ),
+                            );
+                            let normal = normalize_vector(add(
+                                scale(axis, bound_normal[0]),
+                                add(scale(lateral, bound_normal[1]), scale(up, bound_normal[2])),
+                            ));
+                            if position.into_iter().chain(normal).any(|value| {
+                                !value.is_finite() || value.abs() > MAX_ABS_RENDER_COORDINATE
+                            }) {
+                                return Err(RenderError::GeometryOutsideLimits);
+                            }
+                            let color = preview_color(mesh, pass, vertex_index);
+                            let texcoord = stage
+                                .zip(uv_indices)
+                                .and_then(|(stage, indices)| {
+                                    usize::try_from(indices[corner])
+                                        .ok()
+                                        .and_then(|index| stage.texture_coordinates().get(index))
+                                })
+                                .map_or([0.0, 0.0], |uv| finite_texcoord(uv.u(), uv.v()));
+                            let mapper =
+                                staged_mapper(pass, stage_index, vertex_index, &mapper_table);
+                            let index = u32::try_from(vertices.len())
+                                .map_err(|_| RenderError::GeometryTooLarge)?;
+                            vertices.push(AnimatedVertex {
+                                position,
+                                normal,
+                                color,
+                                texcoord,
+                                mapper,
+                                pivot: 0,
+                            });
+                            indices.push(index);
+                        }
+                    }
+                }
+            }
+        }
+        if vertices.is_empty() {
+            return Err(RenderError::EmptyModel);
+        }
+        Ok(Self {
+            vertices,
+            indices,
+            pivots: vec![StagedPivot {
+                parent: None,
+                translation: [0.0; 3],
+                rotation: [0.0, 0.0, 0.0, 1.0],
+            }],
+            animations: Vec::new(),
+            hidden_attachment_distance: HIDDEN_ATTACHMENT_MIN_DISTANCE,
             texture_resources,
             materials,
             draws,
@@ -384,6 +678,38 @@ impl AnimatedModel {
             bytes.extend_from_slice(&index.to_le_bytes());
         }
         bytes
+    }
+
+    /// Stages bind-pose world-space vertices for instanced MAP scenery.
+    pub(crate) fn bind_pose_vertex_bytes(&self) -> Result<Vec<u8>, RenderError> {
+        let worlds = self.pose_transforms(None, 0)?;
+        let mut bytes = Vec::with_capacity(self.vertices.len().saturating_mul(48));
+        for vertex in &self.vertices {
+            let world = worlds
+                .get(usize::try_from(vertex.pivot).map_err(|_| RenderError::InvalidHierarchy)?)
+                .copied()
+                .ok_or(RenderError::InvalidHierarchy)?;
+            let position = world.point(vertex.position);
+            let normal = world.vector(vertex.normal);
+            let texcoord = mapped_texcoord(vertex.texcoord, vertex.mapper, 0.0);
+            if position
+                .into_iter()
+                .chain(normal)
+                .chain(texcoord)
+                .any(|value| !value.is_finite() || value.abs() > MAX_ABS_RENDER_COORDINATE)
+            {
+                return Err(RenderError::GeometryOutsideLimits);
+            }
+            for value in position
+                .into_iter()
+                .chain(normal)
+                .chain(vertex.color)
+                .chain([texcoord[0], 1.0 - texcoord[1]])
+            {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        Ok(bytes)
     }
 
     /// Computes one fixed center and scale when a clip is selected.
@@ -603,7 +929,7 @@ impl StagedModel {
                     worlds
                         .get(usize::from(bones[vertex_index]))
                         .copied()
-                        .ok_or(RenderError::InvalidHierarchy)?
+                        .unwrap_or(rigid_transform)
                 } else {
                     rigid_transform
                 };
@@ -769,6 +1095,64 @@ fn bind_pose_transforms(model: &W3dModel) -> Result<Vec<Transform>, RenderError>
     Ok(worlds)
 }
 
+fn mesh_name_eq(mesh: &W3dStaticMesh, expected: &[u8]) -> bool {
+    let header = mesh.header();
+    let name = header.mesh_name_bytes();
+    let end = name
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(name.len());
+    name[..end].eq_ignore_ascii_case(expected)
+}
+
+fn mesh_bind_x_bounds(
+    model_mesh: &cic_formats::W3dModelMesh,
+    worlds: &[Transform],
+) -> Result<[f32; 2], RenderError> {
+    let mesh = model_mesh.mesh();
+    let rigid = worlds
+        .get(usize::try_from(model_mesh.pivot()).map_err(|_| RenderError::InvalidHierarchy)?)
+        .copied()
+        .ok_or(RenderError::InvalidHierarchy)?;
+    let mut minimum = f32::INFINITY;
+    let mut maximum = f32::NEG_INFINITY;
+    for (index, position) in mesh.vertices().iter().enumerate() {
+        let transform = mesh
+            .vertex_bones()
+            .and_then(|bones| worlds.get(usize::from(bones[index])).copied())
+            .unwrap_or(rigid);
+        let x = transform.point([position.x(), position.y(), position.z()])[0];
+        if !x.is_finite() {
+            return Err(RenderError::GeometryOutsideLimits);
+        }
+        minimum = minimum.min(x);
+        maximum = maximum.max(x);
+    }
+    if minimum > maximum {
+        return Err(RenderError::EmptyModel);
+    }
+    Ok([minimum, maximum])
+}
+
+fn bridge_span_layout(
+    spannable: f32,
+    span_length: f32,
+    natural_length: f32,
+) -> Result<(usize, f32, f32), RenderError> {
+    let rounded_spannable = (spannable + span_length * 0.5).max(0.0);
+    let mut span_count = 0_usize;
+    let mut repeated_length = 0.0_f32;
+    while repeated_length + span_length <= rounded_spannable && span_count < 65_536 {
+        repeated_length += span_length;
+        span_count += 1;
+    }
+    if repeated_length + span_length <= rounded_spannable {
+        return Err(RenderError::GeometryTooLarge);
+    }
+    let generated_length = natural_length + repeated_length - span_length;
+    Ok((span_count, repeated_length, generated_length))
+}
+
 fn hidden_attachment_distance(model: &StagedModel) -> f32 {
     let extent = subtract(model.maximum(), model.minimum());
     let diagonal = dot(extent, extent).sqrt();
@@ -802,6 +1186,14 @@ fn preview_color(mesh: &W3dStaticMesh, pass: Option<&W3dMaterialPass>, vertex: u
         ];
     }
     [0.72, 0.78, 0.86, 1.0]
+}
+
+fn finite_texcoord(u: f32, v: f32) -> [f32; 2] {
+    if u.is_finite() && v.is_finite() {
+        [u, v]
+    } else {
+        [0.0, 0.0]
+    }
 }
 
 fn staged_mapper(
@@ -1006,6 +1398,7 @@ fn staged_material(
         blend,
         alpha_test: shader.is_some_and(|shader| shader.alpha_test() != 0),
         depth_write: pass_index == 0 && stage_index == 0 && blend == BlendMode::Opaque,
+        two_sided: mesh_is_two_sided(mesh.header().attributes()),
     }
 }
 
@@ -1236,6 +1629,14 @@ fn dot(left: [f32; 3], right: [f32; 3]) -> f32 {
     left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
 }
 
+fn cross(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {
+    [
+        left[1] * right[2] - left[2] * right[1],
+        left[2] * right[0] - left[0] * right[2],
+        left[0] * right[1] - left[1] * right[0],
+    ]
+}
+
 fn normalize_vector(value: [f32; 3]) -> [f32; 3] {
     let length = dot(value, value).sqrt();
     if length > 0.0 {
@@ -1297,14 +1698,31 @@ fn rotate(quaternion: [f32; 4], vector: [f32; 3]) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::{
-        BlendMode, StagedMapper, Transform, mapped_texcoord, preview_blend, project_fixed_vertex,
+        BlendMode, StagedMapper, Transform, bridge_span_layout, mapped_texcoord, mesh_is_two_sided,
+        preview_blend, project_fixed_vertex,
     };
+
+    #[test]
+    fn mesh_two_sided_flag_controls_culling_policy() {
+        assert!(!mesh_is_two_sided(0));
+        assert!(mesh_is_two_sided(0x0000_2000));
+        assert!(mesh_is_two_sided(0x0000_2002));
+    }
 
     #[test]
     fn preview_blend_distinguishes_opaque_alpha_and_additive() {
         assert_eq!(preview_blend(0, 0), BlendMode::Opaque);
         assert_eq!(preview_blend(2, 3), BlendMode::Alpha);
         assert_eq!(preview_blend(1, 1), BlendMode::Additive);
+    }
+
+    #[test]
+    fn bridge_span_rounding_matches_sectional_source_layout() {
+        let (count, repeated, generated) =
+            bridge_span_layout(5.0, 2.0, 10.0).expect("bounded span layout");
+        assert_eq!(count, 3);
+        assert!((repeated - 6.0).abs() < f32::EPSILON);
+        assert!((generated - 14.0).abs() < f32::EPSILON);
     }
 
     #[test]

@@ -257,44 +257,53 @@ objects, roads, player starts, sides/teams, polygon areas, and a nested but non-
 checked stable semantic reports and deterministic capture hashes; plus local user-owned installed
 and custom-map verification records with no copied game content.
 
-### Remaining R3 gates
+### R3 gates
 
 1. **Source lighting and water convergence (WIP).** Retain the established bounded
-   `GlobalLighting` terrain/object time variants and source light order. Complete WaterSet
-   sky/environment and map-specific appearance inputs. The default legacy path now resolves the
-   standing texture, diffuse tint/alpha, blend choice, opacity, and terrain-depth shoreline;
-   continue water reflections, receiving shadows, and anti-aliasing while keeping the Modern
-   refractive branch explicit. Water remains a depth-tested forward pass over the resolved opaque scene. Its
-   completion gate requires synthetic scalar/layout tests, explicit-time captures, and repeatable
+   `GlobalLighting` terrain/object time variants and source light order. WaterSet sky/environment
+   and sibling-map inputs now resolve alongside the standing texture, diffuse tint/alpha, blend
+   choice, opacity, and terrain-depth shoreline. Modern presentation adds bounded screen-space and
+   authored-environment reflection inputs; continue receiving/casting shadows, anti-aliasing, and
+   headless explicit-time capture hashes. Water remains a depth-tested forward pass over the
+   resolved opaque scene. Its completion gate requires synthetic scalar/layout tests and repeatable
    visual comparisons against user-owned maps; the current water appearance is not a completion
    baseline.
-2. **Placed-object and world metadata boundary.** Decode established `WorldInfo`, `ObjectsList`,
-   and nested `Object` versions without constructing live objects. Retain finite XYZ placement,
+2. **Placed-object and world metadata boundary (implemented).** Established `WorldInfo`,
+   `ObjectsList`, and nested `Object` versions decode without constructing live objects. They retain finite XYZ placement,
    angle, source flags, template name, typed dictionary, waypoint fields, mirror/draw policy, and
    unknown properties under explicit limits. Emit stable reports and cross-reference diagnostics,
    but never repair, canonicalize, or execute the source data during parsing.
-3. **Road and bridge presentation.** Interpret source-established road/bridge endpoint flags on
-   object records and resolve bounded TerrainRoad/TerrainBridge definition subsets. Stage roads in
-   stable pair/source order with source textures, width, joins, corner policy, and terrain fit;
-   stage the intact bridge model and non-gameplay tower scenery through the existing W3D resource
-   path. Retain damaged/broken model and effect references for future simulation, but R3 neither
+3. **Road and bridge presentation (regular roads, bounded joins, and intact bridges implemented).** Source-established road/bridge
+   endpoint flags stage in object order. Bounded `Road` definitions now resolve regular consecutive
+   pairs into source-textured, terrain-fitted strips. Connected endpoint edges form deterministic
+   corner/junction polygons without the overreach of circular fillers; this remains a project
+   approximation rather than a claim of source curve/tee topology or UV equivalence. Continue with
+   exact curve/tee/alpha-join geometry. The bounded TerrainBridge subset now resolves the intact
+   model/scale and paired endpoints through static instancing. Stage roads in stable pair/source order with source textures, width, joins,
+   corner policy, and terrain fit;
+   continue with non-gameplay tower scenery through the existing W3D resource path. Retain
+   damaged/broken model and effect references for future simulation, but R3 neither
    selects damage states nor creates collision or repair logic.
-4. **Definition resolution and complete static scene.** Add a bounded object-definition subset
-   sufficient to select initial `W3DModelDraw` presentation states and referenced models, textures,
-   scales, shadows, and source-authored ambient visual animation. Reuse the R2 W3D material,
-   hierarchy, texture-mapper, and animation paths. Buildings, trees, rocks, props, bridges, decals,
+4. **Definition resolution and complete static scene (initial instancing implemented).** The bounded
+   object-definition subset selects default `W3DModelDraw` states, reskin inheritance, referenced
+   models, and per-draw scale. Default W3Ds reuse the R2 material/hierarchy path, standalone mesh
+   W3Ds receive a neutral renderer-only root, and placements batch stably by first model use. Ground
+   placement samples the exact staged terrain triangle and adds the authored relative Z offset.
+   Header3 two-sided flags now select culled or two-sided model pipelines. Continue with shadows,
+   additional draw modules and source-authored ambient visual
+   animation through the R2 texture-mapper and animation paths. Buildings, trees, rocks, props, bridges, decals,
    and other placed drawables use stable placement IDs, culling, batching, and explicit
    presentation time. Vegetation waving and other ambient loops must use decoded source inputs or
    an explicitly documented profile policy; they may not advance simulation or read a renderer
    clock. Missing or unsupported definitions remain visible diagnostics/placeholders.
-5. **Waypoints, player starts, sides, teams, and build lists.** Decode waypoint metadata and
-   preserve the one-based `Player_n_Start` convention as spawn candidates. Decode established
+5. **Waypoints, player starts, sides, teams, and build lists (implemented data boundary).**
+   Waypoint metadata preserves the one-based `Player_n_Start` convention as spawn candidates. Established
    `SidesList` versions, typed side/team dictionaries, ownership/alliance names, build-list
    placements, and nested player-script lists. Reports must distinguish spawn positions, side/team
    definitions, initial/build-list scenery, and dangling references. R3 does not assign human/AI
    controllers, instantiate teams, run build plans, or choose spawn slots.
-6. **Complete script and trigger ingestion without execution.** Expand `PolygonTriggers` beyond
-   the water-only view and decode established nested `PlayerScriptsList`, `ScriptList`,
+6. **Complete script and trigger ingestion without execution (script data implemented).** Expand
+   `PolygonTriggers` beyond the water-only view. Established nested `PlayerScriptsList`, `ScriptList`,
    `ScriptGroup`, `Script`, `OrCondition`, `Condition`, `ScriptAction`, and `ScriptActionFalse`
    records. Preserve names, comments, activation/difficulty flags, evaluation delays, opcode
    integers, typed parameters, source versions, and unknown values in a bounded immutable tree.
@@ -326,9 +335,19 @@ time variants, separate terrain/object sun and accent records, and optional shad
 `map-lighting` reports exact scalar bits and `map-view` shades terrain and water from the selected
 terrain lights. The complete source `WaterSet` and `WaterTransparency` field tables are bounded and
 retained, with selected transparent color and scroll driving the current forward-water pass.
-Water remains WIP pending source texture/sky integration, shadows/reflections, explicit-time
-captures, and repeatable user-owned comparisons. Blend version 8, objects, roads, definitions,
-static scenery, sides/teams/spawns, complete triggers/scripts, and custom-map closure remain open.
+Water now resolves standing, sky, and environment textures after sibling-map overrides; Modern
+presentation includes bounded screen-space/environment reflection inputs, and the viewer can freeze
+explicit presentation time. Immutable world/object, waypoint/start, side/team/build-list, and
+complete nested script data decode under independent limits with stable reports. Source-order scene
+staging separates endpoint, scenery, hidden, waypoint, and start records. Regular Road INI
+definitions now resolve first-used materials and consecutive endpoint pairs; bounded strips sample
+the maximum terrain cell height at source intervals and alpha-overlay through the G-buffer in MAP
+   order. Bounded endpoint-edge joins, default object draw/reskin resolution, stable static-model
+   instancing, exact terrain-triangle placement, and a renderer-only playable-boundary fence are now
+   integrated. Intact bridge models and source mesh culling policy are also integrated. Exact
+   curve/tee UV continuity, bridge towers/states, water shadows, headless capture hashes,
+   anti-aliasing, remaining object draw modules/ambient animation, blend version 8, complete polygon
+   triggers, and custom-map closure remain open.
 
 ## R4: WND user interface and navigable shell
 

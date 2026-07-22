@@ -8,8 +8,9 @@ pub use gltf::{GltfTextureRequest, W3dGlbError, W3dGltfBundle, pack_w3d_glb, ren
 use std::fmt::Write;
 
 use cic_formats::{
-    CsfFile, MapBlendData, MapFile, MapHeightField, MapLightingData, MapWaterData, W3dChunk,
-    W3dFile, W3dStaticMesh, W3dVector3, w3d_chunk_name,
+    CsfFile, MapBlendData, MapDictionary, MapDictionaryValue, MapFile, MapHeightField,
+    MapLightingData, MapScript, MapScriptAction, MapScriptParameterValue, MapSidesData,
+    MapWaterData, MapWorldObjects, W3dChunk, W3dFile, W3dStaticMesh, W3dVector3, w3d_chunk_name,
 };
 use cic_render::Capture;
 use cic_vfs::Vfs;
@@ -318,6 +319,300 @@ pub fn render_map_lighting(lighting: &MapLightingData) -> String {
         }
     }
     output
+}
+
+/// Formats immutable world metadata, placements, waypoints, starts, and endpoint flags.
+#[must_use]
+pub fn render_map_world_objects(world: &MapWorldObjects) -> String {
+    let mut output = String::from(
+        "world_version\tobjects_version\tobjects\tunknown_object_children\tplayer_starts\n",
+    );
+    writeln!(
+        output,
+        "{}\t{}\t{}\t{}\t{}",
+        world.world().version(),
+        world.objects_version(),
+        world.objects().len(),
+        world.unknown_object_children().len(),
+        world.player_starts().count()
+    )
+    .expect("writing to a String cannot fail");
+    render_dictionary(&mut output, "world", 0, world.world().properties());
+    output.push_str(
+        "object\tversion\tx\ty\tz\tangle\tflags\tmirror\tdont_render\twaypoint_id\twaypoint_name\tplayer_start\tname\n",
+    );
+    for object in world.objects() {
+        let position = object.position().map(float_bits);
+        let waypoint_id = object
+            .waypoint_id()
+            .map_or_else(String::new, |value| value.to_string());
+        let waypoint_name = object
+            .waypoint_name_bytes()
+            .map_or_else(String::new, escape_bytes);
+        let player_start = object
+            .player_start_number()
+            .map_or_else(String::new, |value| value.to_string());
+        writeln!(
+            output,
+            "{}\t{}\t{}\t{}\t{}\t{}\t0x{:08X}\t{}\t{}\t{}\t{}\t{}\t{}",
+            object.placement_id(),
+            object.version(),
+            position[0],
+            position[1],
+            position[2],
+            float_bits(object.angle()),
+            object.flags(),
+            u8::from(object.flags() & cic_formats::object_flags::DRAWS_IN_MIRROR != 0),
+            u8::from(object.flags() & cic_formats::object_flags::DONT_RENDER != 0),
+            waypoint_id,
+            waypoint_name,
+            player_start,
+            escape_bytes(object.name_bytes())
+        )
+        .expect("writing to a String cannot fail");
+        render_dictionary(
+            &mut output,
+            "object",
+            usize::try_from(object.placement_id()).unwrap_or(usize::MAX),
+            object.properties(),
+        );
+    }
+    output
+}
+
+/// Formats sides, teams, build lists, and the nested script tree strictly as data.
+#[must_use]
+pub fn render_map_sides(sides: &MapSidesData) -> String {
+    let script_lists = sides
+        .player_scripts()
+        .map_or(0, |scripts| scripts.lists().len());
+    let mut output = String::from("version\tsides\tteams\tplayer_script_lists\tunknown_children\n");
+    writeln!(
+        output,
+        "{}\t{}\t{}\t{}\t{}",
+        sides.version(),
+        sides.sides().len(),
+        sides.teams().len(),
+        script_lists,
+        sides.unknown_children().len()
+    )
+    .expect("writing to a String cannot fail");
+    for (side_index, side) in sides.sides().iter().enumerate() {
+        render_dictionary(&mut output, "side", side_index, side.properties());
+        for (build_index, build) in side.build_list().iter().enumerate() {
+            let position = build.position().map(float_bits);
+            writeln!(
+                output,
+                "build\t{side_index}\t{build_index}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                escape_bytes(build.building_name_bytes()),
+                escape_bytes(build.template_name_bytes()),
+                position[0],
+                position[1],
+                position[2],
+                float_bits(build.angle()),
+                build.initially_built_raw(),
+                build.rebuild_count(),
+                build.script_bytes().map_or_else(String::new, escape_bytes),
+                build.health().map_or_else(String::new, |value| value.to_string()),
+                build.whiner_raw().map_or_else(String::new, |value| value.to_string()),
+                build.unsellable_raw().map_or_else(String::new, |value| value.to_string()),
+                build.repairable_raw().map_or_else(String::new, |value| value.to_string()),
+            )
+            .expect("writing to a String cannot fail");
+        }
+    }
+    for (team_index, team) in sides.teams().iter().enumerate() {
+        render_dictionary(&mut output, "team", team_index, team);
+    }
+    if let Some(player_scripts) = sides.player_scripts() {
+        for (list_index, list) in player_scripts.lists().iter().enumerate() {
+            writeln!(
+                output,
+                "script_list\t{list_index}\t{}\t{}\t{}\t{}",
+                list.version(),
+                list.scripts().len(),
+                list.groups().len(),
+                list.unknown_children().len()
+            )
+            .expect("writing to a String cannot fail");
+            for (script_index, script) in list.scripts().iter().enumerate() {
+                render_script(&mut output, list_index, None, script_index, script);
+            }
+            for (group_index, group) in list.groups().iter().enumerate() {
+                writeln!(
+                    output,
+                    "script_group\t{list_index}\t{group_index}\t{}\t{}\t{}\t{}\t{}",
+                    group.version(),
+                    escape_bytes(group.name_bytes()),
+                    group.active_raw(),
+                    group
+                        .subroutine_raw()
+                        .map_or_else(String::new, |value| value.to_string()),
+                    group.scripts().len()
+                )
+                .expect("writing to a String cannot fail");
+                for (script_index, script) in group.scripts().iter().enumerate() {
+                    render_script(
+                        &mut output,
+                        list_index,
+                        Some(group_index),
+                        script_index,
+                        script,
+                    );
+                }
+            }
+        }
+    }
+    output
+}
+
+fn render_dictionary(output: &mut String, scope: &str, owner: usize, dictionary: &MapDictionary) {
+    for (index, entry) in dictionary.entries().iter().enumerate() {
+        let key = entry
+            .key_name_bytes()
+            .map_or_else(|| format!("unknown:0x{:06X}", entry.key_id()), escape_bytes);
+        let (kind, value) = dictionary_value(entry.value());
+        writeln!(
+            output,
+            "dict\t{scope}\t{owner}\t{index}\t0x{:06X}\t{key}\t{kind}\t{value}",
+            entry.key_id()
+        )
+        .expect("writing to a String cannot fail");
+    }
+}
+
+fn dictionary_value(value: &MapDictionaryValue) -> (&'static str, String) {
+    match value {
+        MapDictionaryValue::Bool(value) => ("bool", value.to_string()),
+        MapDictionaryValue::Int(value) => ("int", value.to_string()),
+        MapDictionaryValue::Real(value) => ("real", float_bits(*value)),
+        MapDictionaryValue::Ascii(value) => ("ascii", escape_bytes(value)),
+        MapDictionaryValue::Unicode(value) => (
+            "unicode",
+            value
+                .iter()
+                .map(|unit| format!("{unit:04X}"))
+                .collect::<Vec<_>>()
+                .join(","),
+        ),
+    }
+}
+
+fn render_script(
+    output: &mut String,
+    list: usize,
+    group: Option<usize>,
+    script_index: usize,
+    script: &MapScript,
+) {
+    let group = group.map_or_else(|| "-".to_owned(), |value| value.to_string());
+    writeln!(
+        output,
+        "script\t{list}\t{group}\t{script_index}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        script.version(),
+        escape_bytes(script.name_bytes()),
+        escape_bytes(script.comment_bytes()),
+        escape_bytes(script.condition_comment_bytes()),
+        escape_bytes(script.action_comment_bytes()),
+        script.active_raw(),
+        script.one_shot_raw(),
+        script.easy_raw(),
+        script.normal_raw(),
+        script.hard_raw(),
+        script.subroutine_raw(),
+        script.evaluation_delay_seconds().map_or_else(String::new, |value| value.to_string()),
+        script.or_conditions().len(),
+        script.actions().len(),
+        script.false_actions().len(),
+    )
+    .expect("writing to a String cannot fail");
+    for (or_index, or_condition) in script.or_conditions().iter().enumerate() {
+        for (condition_index, condition) in or_condition.conditions().iter().enumerate() {
+            writeln!(
+                output,
+                "condition\t{list}\t{group}\t{script_index}\t{or_index}\t{condition_index}\t{}\t{}\t{}",
+                condition.version(),
+                condition.opcode(),
+                condition.parameters().len()
+            )
+            .expect("writing to a String cannot fail");
+            render_parameters(output, "condition_parameter", condition.parameters());
+        }
+    }
+    for (branch, actions) in [
+        ("true", script.actions()),
+        ("false", script.false_actions()),
+    ] {
+        for (action_index, action) in actions.iter().enumerate() {
+            render_action(
+                output,
+                list,
+                &group,
+                script_index,
+                branch,
+                action_index,
+                action,
+            );
+        }
+    }
+}
+
+fn render_action(
+    output: &mut String,
+    list: usize,
+    group: &str,
+    script: usize,
+    branch: &str,
+    index: usize,
+    action: &MapScriptAction,
+) {
+    writeln!(
+        output,
+        "action\t{list}\t{group}\t{script}\t{branch}\t{index}\t{}\t{}\t{}",
+        action.version(),
+        action.opcode(),
+        action.parameters().len()
+    )
+    .expect("writing to a String cannot fail");
+    render_parameters(output, "action_parameter", action.parameters());
+}
+
+fn render_parameters(
+    output: &mut String,
+    record: &str,
+    parameters: &[cic_formats::MapScriptParameter],
+) {
+    for (index, parameter) in parameters.iter().enumerate() {
+        match parameter.value() {
+            MapScriptParameterValue::Coordinate(position) => {
+                let position = position.map(float_bits);
+                writeln!(
+                    output,
+                    "{record}\t{index}\t{}\tcoord\t{}\t{}\t{}",
+                    parameter.parameter_type(),
+                    position[0],
+                    position[1],
+                    position[2]
+                )
+                .expect("writing to a String cannot fail");
+            }
+            MapScriptParameterValue::Scalar {
+                integer,
+                real,
+                string,
+            } => {
+                writeln!(
+                    output,
+                    "{record}\t{index}\t{}\tscalar\t{}\t{}\t{}",
+                    parameter.parameter_type(),
+                    integer,
+                    float_bits(*real),
+                    escape_bytes(string)
+                )
+                .expect("writing to a String cannot fail");
+            }
+        }
+    }
 }
 
 fn render_map_blend_cells(output: &mut String, blend: &MapBlendData) {

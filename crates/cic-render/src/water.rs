@@ -165,6 +165,8 @@ impl WaterCausticSequence {
 pub struct WaterAppearance {
     caustics: Option<WaterCausticSequence>,
     surface_texture: Option<WaterSurfaceTexture>,
+    sky_texture: Option<WaterSurfaceTexture>,
+    environment_texture: Option<WaterSurfaceTexture>,
     minimum_opacity: f32,
     opaque_depth: f32,
     source_surface_rgba: Option<[f32; 4]>,
@@ -185,6 +187,8 @@ impl WaterAppearance {
         Self {
             caustics: None,
             surface_texture: None,
+            sky_texture: None,
+            environment_texture: None,
             minimum_opacity: 1.0,
             opaque_depth: 3.0,
             source_surface_rgba: None,
@@ -199,6 +203,8 @@ impl WaterAppearance {
         Self {
             caustics: Some(caustics),
             surface_texture: None,
+            sky_texture: None,
+            environment_texture: None,
             minimum_opacity: 1.0,
             opaque_depth: 3.0,
             source_surface_rgba: None,
@@ -303,6 +309,28 @@ impl WaterAppearance {
     #[must_use]
     pub const fn surface_texture(&self) -> Option<&WaterSurfaceTexture> {
         self.surface_texture.as_ref()
+    }
+
+    /// Applies resolved selected-`WaterSet` sky and water/environment textures.
+    #[must_use]
+    pub fn with_environment_textures(
+        mut self,
+        sky_texture: Option<WaterSurfaceTexture>,
+        environment_texture: Option<WaterSurfaceTexture>,
+    ) -> Self {
+        self.sky_texture = sky_texture;
+        self.environment_texture = environment_texture;
+        self
+    }
+
+    #[must_use]
+    pub const fn sky_texture(&self) -> Option<&WaterSurfaceTexture> {
+        self.sky_texture.as_ref()
+    }
+
+    #[must_use]
+    pub const fn environment_texture(&self) -> Option<&WaterSurfaceTexture> {
+        self.environment_texture.as_ref()
     }
 
     #[must_use]
@@ -508,6 +536,10 @@ mod tests {
             .with_source_surface(Some([0.1, 0.2, 0.3, 0.5]), [0.001, -0.002])
             .expect("valid source surface")
             .with_standing_surface(Some(surface), true)
+            .with_environment_textures(
+                Some(WaterSurfaceTexture::new(1, 1, vec![1, 2, 3, 255]).expect("sky")),
+                Some(WaterSurfaceTexture::new(1, 1, vec![4, 5, 6, 255]).expect("environment")),
+            )
             .with_presentation(WaterPresentationPolicy::Modern);
         assert_eq!(appearance.minimum_opacity().to_bits(), 0.8_f32.to_bits());
         assert_eq!(appearance.opaque_depth().to_bits(), 2.0_f32.to_bits());
@@ -517,6 +549,17 @@ mod tests {
             [10, 20, 30, 40]
         );
         assert!(appearance.additive_blending());
+        assert_eq!(
+            appearance.sky_texture().expect("sky").rgba(),
+            [1, 2, 3, 255]
+        );
+        assert_eq!(
+            appearance
+                .environment_texture()
+                .expect("environment")
+                .rgba(),
+            [4, 5, 6, 255]
+        );
         assert_eq!(appearance.presentation(), WaterPresentationPolicy::Modern);
         assert!(WaterSurfaceTexture::new(2, 2, vec![0; 15]).is_err());
         assert!(

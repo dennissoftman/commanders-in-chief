@@ -14,6 +14,7 @@ wgpu = { version = "30", default-features = false, features = ["std", "dx12", "m
 winit = "0.30.13"
 
 [dev-dependencies]
+naga = { version = "30", features = ["wgsl-in"] }
 
 [lints]
 workspace = true

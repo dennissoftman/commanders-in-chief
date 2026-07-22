@@ -1466,15 +1466,12 @@ fn parse_texcoords(bytes: &[u8], maximum: usize) -> Result<Vec<W3dTexCoord>, W3d
     }
     let mut reader = BinaryReader::new(bytes, "W3D texture coordinates");
     let mut coordinates = Vec::with_capacity(count);
-    for index in 0..count {
+    for _index in 0..count {
         let u = f32::from_bits(reader.read_u32_le()?);
         let v = f32::from_bits(reader.read_u32_le()?);
-        if !u.is_finite() || !v.is_finite() {
-            return Err(W3dMaterialError::NonFiniteTextureValue {
-                what: "texture coordinate",
-                index,
-            });
-        }
+        // Texture coordinates are immutable source data. Some shipped meshes contain non-finite
+        // payloads; presentation/export boundaries replace those values deterministically while
+        // the parser preserves their exact bits for diagnostics and metadata.
         coordinates.push(W3dTexCoord { u, v });
     }
     Ok(coordinates)
@@ -1960,15 +1957,9 @@ mod tests {
         let mut non_finite_uv = textured_fixture();
         let uv = payload_offset(&non_finite_uv, STAGE_TEXCOORDS_CHUNK);
         non_finite_uv[uv..uv + 4].copy_from_slice(&f32::NAN.to_le_bytes());
-        assert!(matches!(
-            decode(&non_finite_uv),
-            Err(W3dMeshError::Material(
-                W3dMaterialError::NonFiniteTextureValue {
-                    what: "texture coordinate",
-                    index: 0
-                }
-            ))
-        ));
+        let decoded = decode(&non_finite_uv).expect("non-finite UV source bits are preserved");
+        let uv = decoded.materials().passes()[0].texture_stages()[0].texture_coordinates()[0];
+        assert!(uv.u().is_nan());
 
         let mut invalid_animation = textured_fixture();
         let texture_info = payload_offset(&invalid_animation, TEXTURE_INFO_CHUNK);

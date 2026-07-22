@@ -553,6 +553,61 @@ impl StagedTerrain {
         &self.vertices
     }
 
+    /// Samples the exact staged terrain triangle beneath a world-space XY point.
+    ///
+    /// The query uses the same border offset, diagonal selection, and vertex heights as the
+    /// rendered mesh. Points outside the staged height field, and non-finite inputs, return
+    /// `None` rather than being clamped onto an unrelated edge cell.
+    #[must_use]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
+    pub fn height_at_world(&self, world: [f32; 2]) -> Option<f32> {
+        if !world.into_iter().all(f32::is_finite) || self.width < 2 || self.height < 2 {
+            return None;
+        }
+        let border = self.detail_source.height.border_size() as f32;
+        let grid_x = world[0] / TERRAIN_XY_SCALE + border;
+        let grid_y = world[1] / TERRAIN_XY_SCALE + border;
+        let maximum_x = self.width.saturating_sub(1) as f32;
+        let maximum_y = self.height.saturating_sub(1) as f32;
+        if !(0.0..=maximum_x).contains(&grid_x) || !(0.0..=maximum_y).contains(&grid_y) {
+            return None;
+        }
+
+        let x = (grid_x.floor() as u32).min(self.width - 2);
+        let y = (grid_y.floor() as u32).min(self.height - 2);
+        let u = grid_x - x as f32;
+        let v = grid_y - y as f32;
+        let width = usize::try_from(self.width).ok()?;
+        let x = usize::try_from(x).ok()?;
+        let y = usize::try_from(y).ok()?;
+        let p0 = y.checked_mul(width)?.checked_add(x)?;
+        let p1 = p0.checked_add(1)?;
+        let p3 = p0.checked_add(width)?;
+        let p2 = p3.checked_add(1)?;
+        let h0 = self.vertices.get(p0)?.position[2];
+        let h1 = self.vertices.get(p1)?.position[2];
+        let h2 = self.vertices.get(p2)?.position[2];
+        let h3 = self.vertices.get(p3)?.position[2];
+        let cell_width = width.checked_sub(1)?;
+        let cell = self.cells.get(y.checked_mul(cell_width)?.checked_add(x)?)?;
+
+        Some(if cell.flipped {
+            if u + v <= 1.0 {
+                h0 * (1.0 - u - v) + h1 * u + h3 * v
+            } else {
+                h1 * (1.0 - v) + h2 * (u + v - 1.0) + h3 * (1.0 - u)
+            }
+        } else if v >= u {
+            h0 * (1.0 - v) + h2 * u + h3 * (v - u)
+        } else {
+            h0 * (1.0 - u) + h1 * (u - v) + h2 * v
+        })
+    }
+
     #[must_use]
     pub fn indices(&self) -> &[u32] {
         &self.indices
@@ -3106,6 +3161,20 @@ mod tests {
             terrain.vertices()[9].position().map(f32::to_bits),
             [10.0_f32, 10.0, 90.0].map(f32::to_bits)
         );
+        let triangle = terrain.indices()[..3]
+            .iter()
+            .map(|index| terrain.vertices()[*index as usize].position())
+            .collect::<Vec<_>>();
+        let centroid = [
+            triangle.iter().map(|point| point[0]).sum::<f32>() / 3.0,
+            triangle.iter().map(|point| point[1]).sum::<f32>() / 3.0,
+        ];
+        let expected_height = triangle.iter().map(|point| point[2]).sum::<f32>() / 3.0;
+        let sampled_height = terrain
+            .height_at_world(centroid)
+            .expect("triangle centroid is inside terrain");
+        assert!((sampled_height - expected_height).abs() < 0.000_1);
+        assert_eq!(terrain.height_at_world([-10_000.0, -10_000.0]), None);
         assert_eq!((terrain.texture_width(), terrain.texture_height()), (56, 8));
         assert_eq!(terrain.custom_edge_cell_count(), 0);
         assert!(terrain.cells()[5].primary().is_some());

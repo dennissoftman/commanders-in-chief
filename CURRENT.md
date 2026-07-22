@@ -6,11 +6,23 @@ R3 now owns complete bounded MAP ingestion and pre-simulation scene presentation
 alone. The established terrain gate includes water-only polygon decoding, stable lake/river
 staging, a hybrid-deferred viewer with forward water, source caustic/transparency inputs, Modern
 macro variation, horizon-safe GPU page composition, persistent LRU residency, complete mip chains,
-and anisotropic sampling. Water remains visibly work in progress. The next design sequence is
-source lighting and water convergence, immutable object/world decoding, road and bridge staging,
-bounded object-definition resolution, complete static scenery with explicit-time ambient animation,
-and lossless sides/teams/spawns/scripts ingestion. Scripts must be inspectable in R3 but cannot be
-executed until the deterministic simulation boundary begins in R5. After R3 closes, R4 will add
+and anisotropic sampling. Water remains visibly work in progress. Immutable world/object and
+sides/teams/build-list/script data now decode under explicit limits, and source-order scene staging
+classifies endpoints, scenery, waypoints, and player starts without constructing live objects.
+Bounded `Road` definitions now resolve regular Point1/Point2 pairs into terrain-fitted textured
+strips with deterministic endpoint-edge corner/junction fillers in `map-view`. Bounded initial
+Object draw definitions resolve default W3D models, including standalone meshes, and render
+placements composed from the exact rendered terrain triangle plus verbatim authored Z offsets
+through stable GPU instance batches. Header3 two-sided flags now select model culling policy, and
+bounded intact bridge models now stitch and deform named left/span/right sections between paired
+terrain-sampled endpoints. An explicit legacy-preview W3D policy recovers missing optional meshes,
+bad one-past-end hierarchy references, and non-finite UV presentation without weakening strict
+composition. The primary playable boundary is
+visible as a terrain-following translucent fence whose top clears the map's highest terrain. The
+next design sequence is source curve/tee UV continuity, bridge towers/states, explicit-time ambient animation,
+polygon-area closure, and final water convergence. Scripts
+are inspectable in R3 but cannot be executed until the deterministic simulation boundary begins in
+R5. After R3 closes, R4 will add
 bounded WND/UI ingestion and a navigable `wgpu` main-menu/skirmish demo so map compatibility can be
 inspected through the intended shell before simulation exists. Its Options path will use bounded
 post-parse WND patches—not hardcoded window-name rendering—to add modern window mode, resolution,
@@ -335,22 +347,32 @@ refresh-rate, and UI-scale controls with transactional confirmation/rollback.
   bit-identical Direct3D 8 multipass blending.
 - The installed Zero Hour Alpine Assault overlay uses unsupported `BlendTileData` version 8; the
   installed Generals version-7 map remains the verified terrain presentation artifact.
-- Source standing-water texture/color/blend/opacity values now drive the default legacy path, but
-  WaterSet sky/environment textures, map-embedded overrides, shadow receiving/casting, SSR or
-  planar probes, and anti-aliasing remain open. Water is not accepted as the final R3 visual
-  baseline until explicit-time captures and repeatable user-owned comparisons pass.
-- `WorldInfo`, complete `ObjectsList`/`Object` records, road and bridge endpoints, object draw
-  definitions, static scenery placement, waypoint/player-start metadata, `SidesList`, teams, build
-  lists, non-water polygon semantics, and the nested player-script tree remain opaque. Their R3
-  boundary is immutable inspection and presentation only; runtime activation and script execution
-  belong to R5.
+- Source standing-water texture/color/blend/opacity and WaterSet sky/environment textures now drive
+  the selected appearance, including sibling `Map.ini` overrides. Modern water has bounded
+  screen-space/environment reflection inputs and `map-view --time` freezes presentation time, but
+  real shadow receiving/casting, anti-aliasing, headless explicit-time capture hashes, and
+  repeatable user-owned comparisons remain open.
+- `WorldInfo`, complete `ObjectsList`/`Object` records, waypoint/player-start metadata,
+  `SidesList`, teams, build lists, and the nested player-script tree now have bounded immutable
+  decoders and stable reports. Source-order staging classifies road/bridge endpoints, scenery,
+  hidden records, waypoints, and player starts. Regular `Road` definitions now resolve source
+  texture/width inputs and render terrain-fitted strips plus bounded endpoint-edge join polygons in
+  stable MAP order. Initial W3D draw states and reskins now resolve to static model instances whose
+  ground placement includes the MAP border, exact rendered triangle, and authored relative Z, and standalone mesh W3Ds receive
+  a neutral renderer-only root. The boundary fence is
+  renderer-only. Intact TerrainBridge models and Header3-driven static culling are implemented;
+  exact source curve/tee UV insertion, bridge towers/states, explicit-time default-breeze tree
+  animation (without script execution), and
+  non-water polygon semantics remain open.
 
 ## Next verified step
 
-Complete the source-lighting/water presentation gate with WaterSet sky/environment resolution,
-map-embedded water overrides, explicit-time synthetic captures, and repeatable user-owned visual
-comparisons. Then open the immutable `WorldInfo`/`ObjectsList` gate that unlocks roads, bridges,
-buildings, trees, props, waypoints, and player-start inspection. Continue through the ordered R3
-gates in `ROADMAP.md`; decode the complete map-script tree only as data, with all execution deferred
-to R5. R4 then consumes the completed R3 map catalog and spawn previews for its main-menu,
-skirmish-options, and map-selection UI demo.
+Complete source curve/tee UV continuity and TerrainBridge tower/state presentation, then extend the implemented
+static instance path with explicit-time default `BreezeInfo` tree sway and remaining draw modules;
+decoded `SET_TREE_SWAY` stays data-only until R5. In parallel,
+close water
+with real scene shadows, headless explicit-time capture
+hashes, anti-aliasing, and repeatable user-owned comparisons. Complete non-water polygon semantics;
+keep the decoded script tree data-only, with all execution deferred to R5. R4 then consumes the
+completed R3 map catalog and spawn previews for its main-menu, skirmish-options, and map-selection
+UI demo.

@@ -43,11 +43,31 @@ notices, and permanent links are recorded in `docs/provenance/map.md`.
   retained as references where available but are not activated.
 - The presentation resolver selects only initial drawable states and assets. It reuses the R2 W3D
   material, hierarchy, animation, mapper, and texture paths for buildings, trees, rocks, props,
-  bridges, decals, and other placed geometry. Unsupported definitions produce stable diagnostics
-  and visible placeholders rather than disappearing silently.
+  bridges, decals, and other placed geometry. The initial implemented subset accepts default
+  `W3DModelDraw` models, reskin ancestry, and per-draw scale. Validated standalone mesh W3Ds receive
+  a neutral renderer-only identity root, and supported placements batch stably by first model use.
+  Existing definitions with no default visual draw are treated as non-visual data; missing or
+  malformed drawable resources produce stable diagnostics. Visible placeholders remain future
+  presentation work.
+- Grounded static placement adds authored relative Z to the exact staged terrain triangle at the
+  placement XY coordinate verbatim, including negative offsets, border offset, and diagonal
+  choice. It does not clamp or add a renderer epsilon, and it does not use a
+  whole-cell maximum, which can float objects on slopes, and it preserves deliberately stacked or
+  elevated placements.
+- Static mesh backface policy comes from the decoded W3D Header3 two-sided flag; the renderer
+  keeps explicit culled and two-sided pipelines rather than applying one global policy.
+- Road endpoint-edge polygons are a bounded project presentation approximation. Exact source
+  curve/tee topology and UV insertion remain an explicit compatibility task rather than being
+  inferred from the endpoint flags.
+- The primary playable boundary may be visualized by a renderer-only translucent fence whose base
+  follows terrain and whose common top clears the MAP's greatest height. It conveys the persisted
+  extent but does not create collision, navigation, or simulation reachability.
 - Source-authored ambient visual animation, including vegetation waving, W3D clips, texture
   mappers, and animated textures, is presentation state sampled from explicit time. It cannot read
-  or mutate simulation state and is not authoritative.
+  or mutate simulation state and is not authoritative. `W3DTreeDraw` owns tree resources and
+  interaction/topple fields, while global `BreezeInfo` owns ordinary sway. R3 may use the
+  source-default breeze as an explicit `ZeroHourLegacy` presentation input; a decoded
+  `SET_TREE_SWAY` action remains inert until R5 executes scripts.
 - `GlobalLighting` supplies separate immutable terrain/object lighting inputs. Water remains a
   forward transmissive pass and is explicitly WIP until source appearance, lighting, shadows,
   reflections, shoreline behavior, and visual comparisons satisfy the R3 completion gate.
