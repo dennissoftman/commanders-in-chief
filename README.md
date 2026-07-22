@@ -130,5 +130,20 @@ Installed profiles resolve bounded source caustic frames and water-transparency
 depth into renderer-neutral appearance inputs. The shader projects the subtle animation onto the
 underwater bed and combines it with depth absorption and shallow shoreline effects.
 
+Water remains a work-in-progress presentation path. R3 is designed to continue through source
+`GlobalLighting` and water appearance, immutable `WorldInfo`/`ObjectsList` placement data, roads and
+bridges, initial object draw definitions, and all resolvable buildings, trees, props, decals, and
+other static terrain scenery. Source-authored vegetation sway and other ambient visual animation
+will use explicit presentation time. R3 will also decode waypoints and `Player_n_Start` candidates,
+sides, teams, build lists, polygon areas, and the complete nested MAP script tree for stable
+inspection. It will not activate players, construct gameplay objects, or execute scripts; those
+operations begin at the deterministic R5 simulation boundary. R4 is the intervening WND/UI
+milestone: a custom retained compatibility layer and `wgpu` renderer will load user-owned menu
+layouts, mapped images, fonts, and CSF text, then navigate from the main menu into skirmish setup
+and map selection with R3 previews and spawn markers without launching a match. A bounded
+declarative WND patch layer will augment the Options layout with modern window mode, resolution,
+refresh-rate, and UI-scale controls while preserving the user-owned WND bytes; apply/confirm and
+timeout rollback remain non-simulating presentation behavior.
+
 See [CURRENT.md](CURRENT.md) for the active objective and [ROADMAP.md](ROADMAP.md) for
 completion gates.

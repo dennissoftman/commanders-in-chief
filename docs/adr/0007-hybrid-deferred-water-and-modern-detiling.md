@@ -59,7 +59,9 @@ background bake.
 
 Water can evolve toward screen-space reflection, planar probes, clustered lights, and additional
 source appearance overrides without coupling format parsing to GPU resources or recreating the
-original engine. The current reflection is a bounded sky approximation; source `WaterSet`
-colors/textures, time-of-day and map-specific overrides, map-authored lighting, shadows, SSR, and
-planar reflection probes are explicit future additions. Headless `map-render` remains the
-deterministic terrain-only completion artifact for now.
+original engine. The current reflection is a bounded sky approximation and the whole water result
+is explicitly WIP; source `WaterSet` colors/textures, time-of-day and map-specific overrides,
+map-authored lighting, shadows, SSR, and planar reflection probes are required R3 design gates, not
+optional polish. Headless `map-render` remains the deterministic terrain-only completion artifact
+for now. ADR 0009 expands R3 to complete MAP ingestion and scene presentation while preserving this
+ADR's narrow water/render-graph boundary.

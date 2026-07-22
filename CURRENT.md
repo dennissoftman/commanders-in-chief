@@ -2,13 +2,19 @@
 
 ## Objective
 
-The R3 terrain presentation gate now includes a bounded water-only MAP boundary, stable lake and
-river staging, a modern hybrid-deferred viewer with depth-aware forward water, bounded source
-caustic animation and transparency inputs, and deterministic Modern-profile macro variation. The
-terrain viewer has horizon-safe 16/32-texel GPU page composition, persistent LRU residency,
-complete GPU-generated mip chains, and anisotropic sampling without camera-driven CPU texture
-bakes. Keep scripts and object loading deferred while presentation work moves to bounded source
-lighting inputs and modern reflection/shadow quality.
+R3 now owns complete bounded MAP ingestion and pre-simulation scene presentation, not terrain
+alone. The established terrain gate includes water-only polygon decoding, stable lake/river
+staging, a hybrid-deferred viewer with forward water, source caustic/transparency inputs, Modern
+macro variation, horizon-safe GPU page composition, persistent LRU residency, complete mip chains,
+and anisotropic sampling. Water remains visibly work in progress. The next design sequence is
+source lighting and water convergence, immutable object/world decoding, road and bridge staging,
+bounded object-definition resolution, complete static scenery with explicit-time ambient animation,
+and lossless sides/teams/spawns/scripts ingestion. Scripts must be inspectable in R3 but cannot be
+executed until the deterministic simulation boundary begins in R5. After R3 closes, R4 will add
+bounded WND/UI ingestion and a navigable `wgpu` main-menu/skirmish demo so map compatibility can be
+inspected through the intended shell before simulation exists. Its Options path will use bounded
+post-parse WND patches—not hardcoded window-name rendering—to add modern window mode, resolution,
+refresh-rate, and UI-scale controls with transactional confirmation/rollback.
 
 ## Implemented foundation
 
@@ -266,10 +272,19 @@ lighting inputs and modern reflection/shadow quality.
   as a presentation preview rather than source-equivalent lighting.
 - Source `WaterSet` colors/textures, time-of-day appearance, and map-specific overrides are not
   decoded yet; global/default `WaterTransparency` opacity and opaque depth are decoded. SSR, planar
-  reflection probes, and shadows remain later render-quality work.
+  reflection probes, and shadows remain later render-quality work. Current water is explicitly WIP
+  and is not accepted as the final R3 visual baseline.
+- `WorldInfo`, complete `ObjectsList`/`Object` records, road and bridge endpoints, object draw
+  definitions, static scenery placement, waypoint/player-start metadata, `SidesList`, teams, build
+  lists, non-water polygon semantics, and the nested player-script tree remain opaque. Their R3
+  boundary is immutable inspection and presentation only; runtime activation and script execution
+  belong to R5.
 
 ## Next verified step
 
 Decode bounded `GlobalLighting` and remaining source water-set appearance into renderer-neutral
-inputs, then add modern shadowing and reflection quality without moving transmissive water into the
-opaque G-buffer. Scripts and general object loading remain explicitly deferred.
+inputs and use them to improve the WIP forward-water result. Then open the immutable
+`WorldInfo`/`ObjectsList` gate that unlocks roads, bridges, buildings, trees, props, waypoints, and
+player-start inspection. Continue through the ordered R3 gates in `ROADMAP.md`; decode the complete
+map-script tree only as data, with all execution deferred to R5. R4 then consumes the completed R3
+map catalog and spawn previews for its main-menu, skirmish-options, and map-selection UI demo.

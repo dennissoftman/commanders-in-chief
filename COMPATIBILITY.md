@@ -50,7 +50,34 @@ observable behavior.
 | Renderer | Textured explicit-animation-frame capture | verified | Checked synthetic SHA-256 + installed infantry frame smoke |
 | Resources | Generals install profile and Steam discovery | verified | Installed Steam export + synthetic `--game-dir` test |
 | Resources | Zero Hour base/delta profile | verified | Installed layered `--zh` exports |
-| MAP | Chunk inventory | unknown | Not started |
-| Simulation | Fixed 30 Hz tick kernel | unknown | Not started |
-| Profiles | `ZeroHourLegacy` policy set | unknown | Not started |
-| Profiles | `Modern` policy set | unknown | Not started |
+| MAP | `CkMp` chunk inventory and unknown payload preservation | verified | Original synthetic fixture + installed RefPack MAP closure |
+| MAP | `EAR\0` RefPack wrapper | verified | Synthetic back-reference/negative tests + installed MAP decompression |
+| MAP | `HeightMapData` versions 1 through 4 | verified | Original fixture/version tests + installed version-4 map |
+| MAP | `BlendTileData` versions 6 and 7 | verified | Original version-7 fixture + installed version-6/version-7 maps |
+| MAP | `BlendTileData` version 8 | unknown | Observed in a user-owned Zero Hour map; layout not guessed |
+| MAP | Terrain INI resolution and layered terrain staging | verified | Synthetic capture hashes + installed 14-class terrain smoke |
+| MAP | Water/river `PolygonTriggers` versions 2 and 3 | verified | Synthetic truncation/triangulation tests + installed lake/empty-marker smokes |
+| MAP | Water transparency and source caustic inputs | verified | Synthetic limits + installed scalar/frame observations; final appearance remains WIP |
+| MAP | Final water appearance quality | unknown | Explicit R3 WIP: source `WaterSet`, lighting, shadows, reflections, and comparisons remain open |
+| MAP | `GlobalLighting` | unknown | Source-established design gate; decoder not started |
+| MAP | `WorldInfo` and `ObjectsList` placements | unknown | Source-established ADR-0009 gate; decoder not started |
+| MAP | Roads and bridges | unknown | Source-established object flags/INI definitions; staging not started |
+| MAP | Object draw-definition resolution and static scenery | unknown | Planned initial-presentation subset; no gameplay modules |
+| MAP | Waypoints and `Player_n_Start` spawn candidates | unknown | Source-established ADR-0009 gate; decoder not started |
+| MAP | `SidesList`, teams, and build lists | unknown | Source-established versions 1 through 3; decoder not started |
+| MAP | Complete polygon-area semantics | unknown | Water-only projection implemented; general areas not started |
+| MAP | Nested player-script tree | unknown | Source-established non-executing R3 data gate; decoder not started |
+| MAP viewer | Complete terrain scene with roads, static objects, and ambient animation | unknown | Planned R3 integration gate |
+| WND | File/layout blocks, nested windows, fields, and unknown preservation | unknown | Source-established R4 gate; decoder not started |
+| WND | Complete classic status/style and gadget vocabulary | unknown | Source-established R4 gate; immutable control definitions not started |
+| WND | Versioned post-parse patch overlays with provenance | unknown | Planned project-owned R4 format; no source WND mutation |
+| UI resources | Mapped images, explicit fonts, CSF labels, cursors, and transitions | unknown | Planned bounded R4 resource-resolution gate |
+| UI runtime | Retained controls, focus/input, menu stack, and safe callback routing | unknown | Planned `cic-ui`; arbitrary callback execution forbidden |
+| UI renderer | Custom deterministic `wgpu` WND presentation | unknown | ADR 0010; text backend compatibility review pending |
+| UI shell | Working main-menu navigation | unknown | Planned user-owned Main Menu completion artifact |
+| UI shell | Modern resolution and refresh-rate Settings path | unknown | Planned patched Options WND + injected mode-catalog/rollback tests |
+| UI shell | Skirmish/map selection with R3 preview and spawn candidates | unknown | Planned non-simulating R4 compatibility harness |
+| Simulation | Fixed 30 Hz tick kernel and MAP-script runtime | unknown | Planned R5; not started |
+| Gameplay | Navigation and build-harvest-combat slice | unknown | Planned R6; not started |
+| Profiles | Legacy terrain UV/diagonal presentation policy | verified | Synthetic hashes + installed terrain smokes |
+| Profiles | Modern terrain macro-variation policy | implemented | Deterministic full/streamed byte-equivalence tests |

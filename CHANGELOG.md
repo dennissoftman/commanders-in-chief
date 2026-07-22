@@ -4,6 +4,19 @@ All notable user-visible changes are recorded here.
 
 ## Unreleased
 
+### Changed
+
+- Expanded the R3 design from terrain-only presentation to complete bounded MAP ingestion and a
+  non-simulating terrain scene: source lighting and WIP water, object/world records, roads and
+  bridges, static scenery and ambient animation, waypoints/player starts, sides/teams/build lists,
+  polygon areas, and lossless map scripts. ADR 0009 keeps all runtime activation and script
+  execution behind the future deterministic R5 simulation boundary.
+- Inserted an R4 WND/UI compatibility milestone before simulation. The design selects a custom
+  retained WND model and `wgpu` renderer, bounded UI resource loading, safe menu callback routing,
+  a versioned post-parse WND patch layer, modern resolution/refresh-rate settings with confirmed
+  apply/rollback, and a navigable main-menu/skirmish/map-selection demo using R3 map previews and
+  spawn candidates.
+
 ### Fixed
 
 - Headless terrain and map-render capture tests now skip when the host exposes no graphics adapter,

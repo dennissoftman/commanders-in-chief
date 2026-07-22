@@ -33,6 +33,28 @@
   - `Generals/Code/GameEngine/Source/GameLogic/Map/PolygonTrigger.cpp`
   - `Core/GameEngine/Include/GameClient/Water.h`
   - `Core/GameEngine/Source/GameClient/Water.cpp`
+- Planned object, waypoint, road, bridge, and world-metadata boundaries:
+  - `Core/GameEngine/Include/Common/MapObject.h`
+  - `Core/GameEngine/Source/GameClient/MapUtil.cpp`
+  - `Core/GameEngine/Include/GameClient/TerrainRoads.h`
+  - `Core/GameEngine/Source/Common/INI/INITerrainRoad.cpp`
+  - `Core/GameEngine/Source/GameClient/Terrain/TerrainRoads.cpp`
+  - `Generals/Code/GameEngineDevice/Include/W3DDevice/GameClient/W3DRoadBuffer.h`
+  - `Generals/Code/GameEngineDevice/Source/W3DDevice/GameClient/W3DRoadBuffer.cpp`
+  - `Generals/Code/Tools/WorldBuilder/src/WHeightMapEdit.cpp`
+- Planned side, team, build-list, and player-script boundary:
+  - `Generals/Code/GameEngine/Include/GameLogic/SidesList.h`
+  - `Generals/Code/GameEngine/Source/GameLogic/Map/SidesList.cpp`
+  - `Generals/Code/GameEngine/Include/Common/Team.h`
+  - `Generals/Code/GameEngine/Source/Common/RTS/Team.cpp`
+- Planned nested script-data boundary:
+  - `Generals/Code/GameEngine/Include/GameLogic/Scripts.h`
+  - `Generals/Code/GameEngine/Source/GameLogic/ScriptEngine/Scripts.cpp`
+  - `Generals/Code/GameEngine/Include/GameLogic/ScriptConditions.h`
+  - `Generals/Code/GameEngine/Include/GameLogic/ScriptActions.h`
+- Planned global-lighting boundary:
+  - `Generals/Code/Tools/WorldBuilder/include/GlobalLightOptions.h`
+  - `Generals/Code/Tools/WorldBuilder/src/GlobalLightOptions.cpp`
 - Cached-stream and RefPack compression path:
   - `Core/Libraries/Source/Compression/Compression.h`
   - `Core/Libraries/Source/Compression/CompressionManager.cpp`
@@ -57,6 +79,17 @@
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Generals/Code/GameEngine/Source/GameLogic/Map/PolygonTrigger.cpp>
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/GameEngine/Include/GameClient/Water.h>
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/GameEngine/Source/GameClient/Water.cpp>
+  - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/GameEngine/Include/Common/MapObject.h>
+  - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/GameEngine/Source/GameClient/MapUtil.cpp>
+  - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/GameEngine/Include/GameClient/TerrainRoads.h>
+  - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/GameEngine/Source/Common/INI/INITerrainRoad.cpp>
+  - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Generals/Code/GameEngineDevice/Source/W3DDevice/GameClient/W3DRoadBuffer.cpp>
+  - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Generals/Code/Tools/WorldBuilder/src/WHeightMapEdit.cpp>
+  - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Generals/Code/GameEngine/Include/GameLogic/SidesList.h>
+  - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Generals/Code/GameEngine/Source/GameLogic/Map/SidesList.cpp>
+  - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Generals/Code/GameEngine/Include/GameLogic/Scripts.h>
+  - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Generals/Code/GameEngine/Source/GameLogic/ScriptEngine/Scripts.cpp>
+  - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Generals/Code/Tools/WorldBuilder/src/GlobalLightOptions.cpp>
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/Libraries/Source/Compression/Compression.h>
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/Libraries/Source/Compression/CompressionManager.cpp>
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/Libraries/Source/Compression/EAC/refdecode.cpp>
@@ -96,6 +129,26 @@ procedural wave normal, thickness absorption, refraction, Fresnel response, shor
 and Modern macro variation are original implementation and are not derived from the legacy water
 renderer. Caustic illumination is likewise project-authored, but samples caller-owned animation
 frames rather than inventing a procedural pattern or copying legacy fixed-function equations.
+
+For the planned ADR-0009 gates, the pinned WorldBuilder writer establishes top-level `WorldInfo`,
+`ObjectsList`, `PolygonTriggers`, `GlobalLighting`, and `SidesList` output. `MapUtil.cpp` establishes
+nested `Object` location, angle, flags, name, later-version typed dictionary data, waypoint
+collection, and one-based `Player_n_Start` recognition. `MapObject.h` establishes distinct road and
+bridge endpoint, corner, join, mirror, and no-draw flags. The TerrainRoad declarations and INI
+reader establish road texture/width inputs and bridge model/scale/state/tower references. These
+facts support a future immutable placement and presentation view; no implementation is claimed yet.
+
+`SidesList.cpp` establishes versions 1 through 3, ordered side dictionaries and build lists,
+version-2 team dictionaries, version-3 build-list extensions, and nested `PlayerScriptsList` data.
+`Scripts.cpp` establishes the `PlayerScriptsList` -> `ScriptList` -> `ScriptGroup` -> `Script`
+nesting, OR/AND condition records, true/false action lists, typed parameters, source flags/comments,
+and versioned evaluation delay. ADR 0009 requires the project to preserve these records as bounded
+data in R3 without calling the upstream runtime validation/repair or opcode-dispatch behavior.
+
+The WorldBuilder lighting writer establishes `GlobalLighting` version 3; related global-light
+editor data distinguishes terrain from terrain-object ambient/diffuse/vector inputs and ordered
+sun/accent lights across time-of-day variants. Exact field layout still requires its own bounded
+semantic gate and synthetic fixture before implementation claims are added to this document.
 
 The pinned renderer also establishes that file-stored cliff mappings apply only within one terrain
 texture class, that the legacy fallback stretches UVs only beyond explicit 1.5/2.0/2.4 thresholds

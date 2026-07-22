@@ -41,4 +41,6 @@ Unknown chunks remain round-trippable evidence and cannot trigger speculative re
 object inventories require separate label-aware gates. Renderer ingestion can consume validated
 height and blend values without owning parsing or compatibility policy. Version-1 maps remain
 inspectable, while visible compatibility behavior stays deferred until user-owned observations
-support a policy.
+support a policy. ADR 0009 defines the ordered label-aware gates for the remaining complete MAP
+scene, including objects, roads, scenario metadata, and scripts, without changing this inventory
+boundary.
