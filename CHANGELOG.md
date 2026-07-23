@@ -5,6 +5,19 @@ land under the active milestone heading.
 
 ## R4: WND user interface and navigable shell (active)
 
+### Added
+
+- Added an original synthetic `BIG4` fixture and truncation-at-every-prefix tests alongside the
+  existing `BIGF` coverage, and a bounded `big` libFuzzer target, closing an R1 acceptance-test gap
+  where BIG4 had no automated coverage and BIG archives had no fuzz target.
+
+### Fixed
+
+- Repaired the `map` libFuzzer target, which no longer compiled after `MapLimits` gained polygon
+  and water-trigger fields during R3; fuzzing was not part of the workspace test suite so the
+  regression was silent.
+- Corrected the R2 milestone doc's stale W3D chunk-identifier count (73 to 77).
+
 ### Changed
 
 - Closed R3 and advanced the active objective to R4's bounded WND inventory/layout decoder and

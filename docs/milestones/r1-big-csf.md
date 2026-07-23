@@ -30,12 +30,18 @@ installed Steam Generals archives. Mixed-endian fields, slash-normalized paths, 
 none/`L225`/`L231` directory trailers are verified. The bounded CSF decoder, lossless
 record IR, original fixture, deterministic report, and synthetic BIG-to-CSF CLI artifact
 are implemented and verified against the installed Generals CSF. A 30-second AddressSanitizer
-libFuzzer smoke run completed 4,077,155 CSF inputs without a finding. BIG4 retail
-verification remains open.
+libFuzzer smoke run completed 4,077,155 CSF inputs without a finding. `BIG4` now has an
+original synthetic fixture exercising the same valid-parse and every-truncated-prefix
+acceptance criteria as `BIGF`, and a bounded `big` libFuzzer target exists alongside the
+`csf`, `map`, and `water_ini` targets. BIG4 retail verification remains open; the synthetic
+coverage only confirms the corroborating-source structural assumption, not retail bytes.
 
 ## Completion evidence
 
-- Evidence-backed `BIGF`/`BIG4` indexing with explicit limits and synthetic fixture.
+- Evidence-backed `BIGF`/`BIG4` indexing with explicit limits and synthetic fixtures for
+  both signatures, including truncation-at-every-prefix coverage for each.
+- A bounded `big` libFuzzer target exists at `fuzz/fuzz_targets/big.rs`, closing the R1
+  acceptance criterion that previously had no BIG-side fuzz coverage.
 - BIG duplicate-name history with deterministic last-entry-wins resolution.
 - Mixed directory/BIG manifests through `cic-inspect`.
 - Evidence-backed CSF version 3 decoding with raw names, complemented UTF-16, optional

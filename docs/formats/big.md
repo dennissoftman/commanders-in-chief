@@ -103,3 +103,10 @@ losing compatibility.
 `crates/cic-vfs/tests/fixtures/minimal.big.hex` describes a 69-byte original fixture with
 two backslash-separated member names and an `L231` plus zero-word trailer. Tests verify
 that the public paths use `/` separators without committing copyrighted game content.
+
+`crates/cic-vfs/tests/fixtures/minimal.big4.hex` is the byte-identical fixture with the
+`BIG4` signature substituted for `BIGF`, verifying that both header variants dispatch
+through the same mixed-endian parse and pass identical valid-parse and
+truncated-every-prefix acceptance tests. It does not independently confirm BIG4's field
+order or endianness against retail data; see the open item in
+`docs/milestones/r1-big-csf.md`.

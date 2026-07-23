@@ -30,7 +30,7 @@ ADR 0004.
 exact-bit geometry reports, a Blender-importable synthetic GLB, headless renderer hashes/captures,
 and installed-resource window smokes that retain no retail content.
 
-**Progress:** The recursive inventory, 73-name identifier table, original nested fixture,
+**Progress:** The recursive inventory, 77-name identifier table, original nested fixture,
 and `cic-inspect w3d` report are complete. A 113,980-byte installed W3D closes exactly into
 525 records. Header3 versions 3.0 through 4.2, vertices, normals, and triangles now decode
 into immutable renderer-neutral values with exact count/size and vertex-index validation.
@@ -105,7 +105,7 @@ remains explicitly excluded until broader image comparisons exist.
 ## Completion evidence
 
 - Bounded W3D chunk-tree inventory with opaque unknown payload preservation, stable
-  slash-separated tree paths, and 73 known chunk names.
+  slash-separated tree paths, and 77 known chunk names.
 - Deterministic `cic-inspect w3d` reports through loose-directory or BIG mounts.
 - Original nested W3D fixture and synthetic BIG-to-W3D CLI completion artifact.
 - A 113,980-byte installed Steam Generals W3D parses exactly into 525 stable inventory

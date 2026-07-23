@@ -10,7 +10,15 @@ cargo-fuzz = true
 
 [dependencies]
 cic-formats = { path = "../crates/cic-formats" }
+cic-vfs = { path = "../crates/cic-vfs" }
 libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "big"
+path = "fuzz_targets/big.rs"
+test = false
+doc = false
+bench = false
 
 [[bin]]
 name = "csf"
