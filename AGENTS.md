@@ -43,14 +43,22 @@ These rules apply to every contribution, including LLM-generated work.
 
 ## Change protocol
 
-- Read `CURRENT.md` before starting work and update it when the verified next step moves.
-- Every roadmap change defines scope, exclusions, inputs, outputs, owning crate,
+- Read `CURRENT.md` and the active milestone charter in `docs/milestones/` before starting
+  work; update them when the verified next step moves.
+- Every fact has exactly one documentation home. Milestone charters, progress, and
+  completion evidence live in `docs/milestones/<milestone>.md`. `ROADMAP.md` is a status
+  index and carries no progress prose. `CURRENT.md` holds only the active objective,
+  current status, and the next verified step. User-visible completed work goes to
+  `CHANGELOG.md` under the active milestone heading; permanent design choices go to
+  `docs/adr/`. Link between these files instead of duplicating content.
+- Every milestone charter defines scope, exclusions, inputs, outputs, owning crate,
   acceptance tests, determinism constraints, documentation, and a completion artifact.
+- On milestone completion: set the status and date in the milestone file and the
+  `ROADMAP.md` index, retitle the changelog's active section to that milestone, open a new
+  active section, and point `CURRENT.md` at the next milestone.
 - Add or update synthetic fixtures and negative tests with every parser.
 - Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
   and `cargo test --workspace` before declaring work complete.
-- Record user-visible completed work in `CHANGELOG.md`; record permanent design choices
-  in `docs/adr/`.
 
 ## Forbidden shortcuts
 
