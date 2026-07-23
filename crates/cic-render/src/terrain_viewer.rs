@@ -42,6 +42,8 @@ const WINDOW_HEIGHT: u32 = 800;
 const CAMERA_UNIFORM_BYTES: u64 = 304;
 const SHADOW_UNIFORM_BYTES: u64 = 80;
 const SHADOW_MAP_EXTENT: u32 = 2_048;
+/// Hardware MSAA sample count for the opaque G-buffer geometry pass.
+const GBUFFER_SAMPLE_COUNT: u32 = 4;
 const MAX_FRAME_SECONDS: f32 = 0.1;
 const CAMERA_VERTICAL_FOV: f32 = std::f32::consts::PI / 3.0;
 const TERRAIN_CELL_WORLD_SIZE: f32 = 10.0;
@@ -843,10 +845,12 @@ struct TerrainViewerGpu {
     lighting_pipeline: wgpu::RenderPipeline,
     composite_pipeline: wgpu::RenderPipeline,
     water_pipeline: wgpu::RenderPipeline,
+    depth_resolve_pipeline: wgpu::RenderPipeline,
     wireframe_pipelines: Option<WireframePipelines>,
     lighting_layout: wgpu::BindGroupLayout,
     composite_layout: wgpu::BindGroupLayout,
     water_layout: wgpu::BindGroupLayout,
+    depth_resolve_layout: wgpu::BindGroupLayout,
     _texture: wgpu::Texture,
     _edge_texture: wgpu::Texture,
     camera_uniform: wgpu::Buffer,
@@ -1197,15 +1201,24 @@ struct DeferredTargets {
     _world: wgpu::Texture,
     _scene: wgpu::Texture,
     _shadow: wgpu::Texture,
+    _albedo_ms: wgpu::Texture,
+    _normal_ms: wgpu::Texture,
+    _world_ms: wgpu::Texture,
+    _depth_ms: wgpu::Texture,
     depth: wgpu::Texture,
     shadow_view: wgpu::TextureView,
     albedo_view: wgpu::TextureView,
     normal_view: wgpu::TextureView,
     world_view: wgpu::TextureView,
     scene_view: wgpu::TextureView,
+    albedo_ms_view: wgpu::TextureView,
+    normal_ms_view: wgpu::TextureView,
+    world_ms_view: wgpu::TextureView,
+    depth_ms_view: wgpu::TextureView,
     lighting_bind_group: wgpu::BindGroup,
     composite_bind_group: wgpu::BindGroup,
     water_bind_group: wgpu::BindGroup,
+    depth_resolve_bind_group: wgpu::BindGroup,
 }
 
 #[derive(Clone, Copy)]
@@ -1213,6 +1226,7 @@ struct DeferredTargetResources<'a> {
     lighting_layout: &'a wgpu::BindGroupLayout,
     composite_layout: &'a wgpu::BindGroupLayout,
     water_layout: &'a wgpu::BindGroupLayout,
+    depth_resolve_layout: &'a wgpu::BindGroupLayout,
     camera_uniform: &'a wgpu::Buffer,
     shadow_uniform: &'a wgpu::Buffer,
     water_appearance: &'a WaterAppearanceGpu,
@@ -2039,6 +2053,7 @@ impl TerrainViewerGpu {
         let lighting_layout = create_lighting_layout(&device);
         let composite_layout = create_composite_layout(&device);
         let water_layout = create_water_layout(&device);
+        let depth_resolve_layout = create_depth_resolve_layout(&device);
         let boundary_layout = create_boundary_layout(&device);
         let shadow_layout = create_shadow_layout(&device);
         let material_layout = create_material_layout(&device);
@@ -2178,6 +2193,8 @@ impl TerrainViewerGpu {
             config.format,
             "cic-render deferred composite pipeline",
         );
+        let depth_resolve_pipeline =
+            create_depth_resolve_pipeline(&device, &deferred_shader, &depth_resolve_layout);
         let water_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cic-render modern water shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("water_viewer.wgsl").into()),
@@ -2452,6 +2469,7 @@ impl TerrainViewerGpu {
                 lighting_layout: &lighting_layout,
                 composite_layout: &composite_layout,
                 water_layout: &water_layout,
+                depth_resolve_layout: &depth_resolve_layout,
                 camera_uniform: &camera_uniform,
                 shadow_uniform: &shadow_uniform,
                 water_appearance: &water_appearance,
@@ -2472,10 +2490,12 @@ impl TerrainViewerGpu {
             lighting_pipeline,
             composite_pipeline,
             water_pipeline,
+            depth_resolve_pipeline,
             wireframe_pipelines,
             lighting_layout,
             composite_layout,
             water_layout,
+            depth_resolve_layout,
             _texture: texture,
             _edge_texture: edge_texture,
             camera_uniform,
@@ -2530,6 +2550,7 @@ impl TerrainViewerGpu {
                 lighting_layout: &self.lighting_layout,
                 composite_layout: &self.composite_layout,
                 water_layout: &self.water_layout,
+                depth_resolve_layout: &self.depth_resolve_layout,
                 camera_uniform: &self.camera_uniform,
                 shadow_uniform: &self.shadow_uniform,
                 water_appearance: &self.water_appearance,
@@ -2613,6 +2634,7 @@ impl TerrainViewerGpu {
             .deferred
             .depth
             .create_view(&wgpu::TextureViewDescriptor::default());
+        let depth_ms_view = &self.deferred.depth_ms_view;
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -2670,21 +2692,24 @@ impl TerrainViewerGpu {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("cic-render terrain G-buffer pass"),
                 color_attachments: &[
-                    Some(clear_attachment(
+                    Some(clear_attachment_resolved(
+                        &self.deferred.albedo_ms_view,
                         &self.deferred.albedo_view,
                         wgpu::Color::TRANSPARENT,
                     )),
-                    Some(clear_attachment(
+                    Some(clear_attachment_resolved(
+                        &self.deferred.normal_ms_view,
                         &self.deferred.normal_view,
                         wgpu::Color::TRANSPARENT,
                     )),
-                    Some(clear_attachment(
+                    Some(clear_attachment_resolved(
+                        &self.deferred.world_ms_view,
                         &self.deferred.world_view,
                         wgpu::Color::TRANSPARENT,
                     )),
                 ],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &depth_view,
+                    view: depth_ms_view,
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(1.0),
                         store: wgpu::StoreOp::Store,
@@ -2758,6 +2783,29 @@ impl TerrainViewerGpu {
                     }
                 }
             }
+        }
+        {
+            // wgpu has no automatic depth resolve, so the multisampled G-buffer depth is
+            // manually resolved into the single-sample depth texture that the boundary,
+            // overlay, and water passes below reuse for depth testing against the terrain.
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("cic-render G-buffer depth resolve pass"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.depth_resolve_pipeline);
+            pass.set_bind_group(0, &self.deferred.depth_resolve_bind_group, &[]);
+            pass.draw(0..3, 0..1);
         }
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -3034,7 +3082,15 @@ fn create_static_scenery_pipeline(
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),
-        multisample: wgpu::MultisampleState::default(),
+        multisample: wgpu::MultisampleState {
+            count: GBUFFER_SAMPLE_COUNT,
+            // Alpha-tested cutout foliage (`discard`d in the shared fragment shader) gets
+            // its per-leaf silhouette antialiased by treating output alpha as sample
+            // coverage. Only meaningful for the non-blended opaque/overlay variants;
+            // pipelines with real translucency already resolve their edges via blending.
+            alpha_to_coverage_enabled: blend.is_none(),
+            ..Default::default()
+        },
         multiview_mask: None,
         cache: None,
     })
@@ -3391,7 +3447,10 @@ fn create_terrain_pipeline(
             stencil: wgpu::StencilState::default(),
             bias: options.depth_bias,
         }),
-        multisample: wgpu::MultisampleState::default(),
+        multisample: wgpu::MultisampleState {
+            count: GBUFFER_SAMPLE_COUNT,
+            ..Default::default()
+        },
         multiview_mask: None,
         cache: None,
     })
@@ -3741,6 +3800,61 @@ fn create_fullscreen_pipeline(
     })
 }
 
+fn create_depth_resolve_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("cic-render depth resolve layout"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 7,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Depth,
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: true,
+            },
+            count: None,
+        }],
+    })
+}
+
+fn create_depth_resolve_pipeline(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    layout: &wgpu::BindGroupLayout,
+) -> wgpu::RenderPipeline {
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("cic-render depth resolve pipeline layout"),
+        bind_group_layouts: &[Some(layout)],
+        immediate_size: 0,
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("cic-render depth resolve pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("fullscreen_vertex"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("depth_resolve_fragment"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[],
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Always),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
 fn create_water_pipeline(
     device: &wgpu::Device,
     shader: &wgpu::ShaderModule,
@@ -3844,6 +3958,25 @@ impl DeferredTargets {
             wgpu::TextureFormat::Rgba16Float,
             "lit scene color",
         );
+        let albedo_ms = render_texture_multisampled(
+            device,
+            size,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            "G-buffer albedo MSAA",
+        );
+        let normal_ms = render_texture_multisampled(
+            device,
+            size,
+            wgpu::TextureFormat::Rgba16Float,
+            "G-buffer normal MSAA",
+        );
+        let world_ms = render_texture_multisampled(
+            device,
+            size,
+            wgpu::TextureFormat::Rgba16Float,
+            "G-buffer world MSAA",
+        );
+        let depth_ms = create_depth_multisampled(device, size);
         let shadow = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("cic-render primary directional shadow map"),
             size: wgpu::Extent3d {
@@ -3863,6 +3996,10 @@ impl DeferredTargets {
         let normal_view = normal.create_view(&wgpu::TextureViewDescriptor::default());
         let world_view = world.create_view(&wgpu::TextureViewDescriptor::default());
         let scene_view = scene.create_view(&wgpu::TextureViewDescriptor::default());
+        let albedo_ms_view = albedo_ms.create_view(&wgpu::TextureViewDescriptor::default());
+        let normal_ms_view = normal_ms.create_view(&wgpu::TextureViewDescriptor::default());
+        let world_ms_view = world_ms.create_view(&wgpu::TextureViewDescriptor::default());
+        let depth_ms_view = depth_ms.create_view(&wgpu::TextureViewDescriptor::default());
         let shadow_view = shadow.create_view(&wgpu::TextureViewDescriptor::default());
         let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("cic-render primary directional shadow sampler"),
@@ -3969,21 +4106,38 @@ impl DeferredTargets {
                 },
             ],
         });
+        let depth_resolve_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("cic-render depth resolve bind group"),
+            layout: resources.depth_resolve_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 7,
+                resource: wgpu::BindingResource::TextureView(&depth_ms_view),
+            }],
+        });
         Self {
             _albedo: albedo,
             _normal: normal,
             _world: world,
             _scene: scene,
             _shadow: shadow,
+            _albedo_ms: albedo_ms,
+            _normal_ms: normal_ms,
+            _world_ms: world_ms,
+            _depth_ms: depth_ms,
             depth,
             shadow_view,
             albedo_view,
             normal_view,
             world_view,
             scene_view,
+            albedo_ms_view,
+            normal_ms_view,
+            world_ms_view,
+            depth_ms_view,
             lighting_bind_group,
             composite_bind_group,
             water_bind_group,
+            depth_resolve_bind_group,
         }
     }
 }
@@ -4010,6 +4164,50 @@ fn render_texture(
     })
 }
 
+/// A multisampled G-buffer color attachment; only ever read via an automatic
+/// end-of-pass resolve into a single-sample `render_texture`, never sampled directly.
+fn render_texture_multisampled(
+    device: &wgpu::Device,
+    size: PhysicalSize<u32>,
+    format: wgpu::TextureFormat,
+    label: &str,
+) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width: size.width,
+            height: size.height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: GBUFFER_SAMPLE_COUNT,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    })
+}
+
+/// The multisampled depth buffer used while rasterizing the G-buffer pass. WGPU has no
+/// automatic depth resolve, so `depth_resolve_fragment` reads this via `textureLoad` and
+/// writes the single-sample `create_depth` texture that the later forward passes reuse.
+fn create_depth_multisampled(device: &wgpu::Device, size: PhysicalSize<u32>) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("cic-render terrain viewer depth MSAA"),
+        size: wgpu::Extent3d {
+            width: size.width.max(1),
+            height: size.height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: GBUFFER_SAMPLE_COUNT,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Depth32Float,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    })
+}
+
 fn texture_binding(binding: u32, view: &wgpu::TextureView) -> wgpu::BindGroupEntry<'_> {
     wgpu::BindGroupEntry {
         binding,
@@ -4028,6 +4226,25 @@ fn clear_attachment(
         ops: wgpu::Operations {
             load: wgpu::LoadOp::Clear(color),
             store: wgpu::StoreOp::Store,
+        },
+    }
+}
+
+/// A multisampled G-buffer color attachment that resolves into `resolve_target` at the
+/// end of the pass; the raw multisample data itself is discarded since only the resolved,
+/// single-sample texture is ever read afterward.
+fn clear_attachment_resolved<'a>(
+    view: &'a wgpu::TextureView,
+    resolve_target: &'a wgpu::TextureView,
+    color: wgpu::Color,
+) -> wgpu::RenderPassColorAttachment<'a> {
+    wgpu::RenderPassColorAttachment {
+        view,
+        depth_slice: None,
+        resolve_target: Some(resolve_target),
+        ops: wgpu::Operations {
+            load: wgpu::LoadOp::Clear(color),
+            store: wgpu::StoreOp::Discard,
         },
     }
 }
@@ -4255,9 +4472,10 @@ fn ray_distance_for_view_depth(
 mod tests {
     use super::{
         ROAD_DEPTH_BIAS, SOURCE_ROAD_MIP_LEVELS, TerrainCamera, TerrainInput,
-        create_composite_layout, create_fullscreen_pipeline, create_lighting_layout, gray_mip,
-        look_to, multiply_matrix, orthographic, perspective, ray_distance_for_view_depth,
-        shadow_uniform_bytes, source_road_mips, terrain_color_targets, terrain_viewer_title,
+        create_composite_layout, create_depth_resolve_layout, create_depth_resolve_pipeline,
+        create_fullscreen_pipeline, create_lighting_layout, gray_mip, look_to, multiply_matrix,
+        orthographic, perspective, ray_distance_for_view_depth, shadow_uniform_bytes,
+        source_road_mips, terrain_color_targets, terrain_viewer_title,
     };
 
     #[test]
@@ -4296,6 +4514,9 @@ mod tests {
             wgpu::TextureFormat::Rgba8Unorm,
             "deferred composite layout regression",
         );
+        let depth_resolve = create_depth_resolve_layout(&renderer.device);
+        let _depth_resolve_pipeline =
+            create_depth_resolve_pipeline(&renderer.device, &shader, &depth_resolve);
     }
 
     #[test]
