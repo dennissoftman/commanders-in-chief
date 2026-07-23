@@ -238,7 +238,10 @@ dispatch, truncation at every field, explicit count/string/recursion/allocation 
 preservation, stable file-order reports, original negative fixtures, and unresolved-reference
 diagnostics. Presentation gates additionally require deterministic synthetic scene/capture hashes,
 explicit animation and camera time, stable instance/draw ordering, missing-resource fallbacks, and
-local installed/custom-map smokes that retain no retail data.
+local installed/custom-map smokes that retain no retail data. Every source-derived constructor
+default, modeled function input branch/output class, and persisted format field must be linked from
+a pinned-source test matrix to an executable synthetic test; deliberately unmodeled runtime state
+must be named as an exclusion instead of receiving guessed defaults.
 
 **Determinism:** MAP file order is authoritative. Dictionary, side, team, build-list, waypoint,
 road, object, trigger, script-group, script, condition, action, and parameter order is retained.
@@ -273,20 +276,21 @@ and custom-map verification records with no copied game content.
    angle, source flags, template name, typed dictionary, waypoint fields, mirror/draw policy, and
    unknown properties under explicit limits. Emit stable reports and cross-reference diagnostics,
    but never repair, canonicalize, or execute the source data during parsing.
-3. **Road and bridge presentation (regular roads, bounded joins, and intact bridges implemented).** Source-established road/bridge
-   endpoint flags stage in object order. Bounded `Road` definitions now resolve regular consecutive
-   pairs into source-textured, terrain-fitted strips. Connected endpoint edges form deterministic
-   corner/junction polygons without the overreach of circular fillers; this remains a project
-   approximation rather than a claim of source curve/tee topology or UV equivalence. Continue with
-   exact curve/tee/alpha-join geometry. The bounded TerrainBridge subset now resolves the intact
-   model/scale and paired endpoints through static instancing. Stage roads in stable pair/source order with source textures, width, joins,
-   corner policy, and terrain fit;
-   continue with non-gameplay tower scenery through the existing W3D resource path. Retain
+3. **Road and bridge presentation (source road topology and intact bridges implemented).**
+   Source-established road/bridge endpoint flags stage in object order. Bounded `Road` definitions
+   resolve regular consecutive pairs into source-textured, terrain-fitted strips. A stable topology
+   pass trims connected approaches and inserts source-radius curves/miters, tee/Y/slanted/four-way
+   atlas pieces, and explicit cross-material alpha caps. Cross-material contacts reproduce the
+   source clipped-width cap and road-type stacking adjustment. Road textures use the source
+   three-level mip budget. The bounded TerrainBridge subset resolves the intact model/scale and
+   paired endpoints through static instancing. Continue with non-gameplay tower scenery through
+   the existing W3D resource path. Retain
    damaged/broken model and effect references for future simulation, but R3 neither
    selects damage states nor creates collision or repair logic.
 4. **Definition resolution and complete static scene (initial instancing implemented).** The bounded
-   object-definition subset selects default `W3DModelDraw` states, reskin inheritance, referenced
-   models, and per-draw scale. Default W3Ds reuse the R2 material/hierarchy path, standalone mesh
+   object-definition subset uses `End`-delimited draw modules and selects either explicit default
+   states or the source-equivalent first `ConditionState = NONE`, plus reskin inheritance,
+   referenced models, and per-draw scale. Default W3Ds reuse the R2 material/hierarchy path, standalone mesh
    W3Ds receive a neutral renderer-only root, and placements batch stably by first model use. Ground
    placement samples the exact staged terrain triangle and adds the authored relative Z offset.
    Header3 two-sided flags now select culled or two-sided model pipelines. Continue with shadows,
@@ -312,8 +316,8 @@ and custom-map verification records with no copied game content.
 7. **Scene integration and R3 closure.** Present all resolved opaque scenery through the existing
    G-buffer, then ordered alpha/additive scenery and forward water. Add modern shadow quality and
    bounded reflection quality after source lighting and object geometry are available. Establish
-   the observed `BlendTileData` version-8 boundary from pinned source/owned observations, decide the
-   version-1 height compatibility policy explicitly, and cover source-established preview/auxiliary
+   Retain the established `BlendTileData` version-8 corrected cliff stride, decide the version-1
+   height compatibility policy explicitly, and cover source-established preview/auxiliary
    MAP metadata before claiming complete variant support. Verify one dense installed map and one
    original custom scene for load closure, spawn/team/script reporting, road continuity, object
    placement, ambient animation, water quality, stable capture output, and graceful diagnostics for
@@ -323,12 +327,14 @@ and custom-map verification records with no copied game content.
 chunks with exact closure and opaque payload preservation. A separate semantic decoder accepts
 `HeightMapData` versions 1 through 4, validates dimensions, border, boundaries, and exact row-major
 sample cardinality, and retains the stored version-1 grid pending an explicit compatibility policy.
-`BlendTileData` versions 6 and 7 decode bounded planes and source-ordered terrain, edge, blend, and
-cliff tables. Bounded `EAR\0` RefPack decompression, Terrain INI resolution, deterministic layered
+`BlendTileData` versions 6 through 8 decode bounded planes and source-ordered terrain, edge, blend,
+and cliff tables, including the version-7 legacy and version-8 corrected cliff strides. Bounded
+`EAR\0` RefPack decompression, Terrain INI resolution, deterministic layered
 terrain capture, custom edges, legacy/modern policies, and the interactive viewer are established.
 The viewer uses a persistent bounded GPU-composed virtual-texture cache with stable page tables,
 LRU residency, bordered 16/32-pixel pages, compute-generated mip chains, trilinear filtering, and
-anisotropy over the guaranteed 8-pixel fallback. Water-only `PolygonTriggers`, lake/river staging,
+anisotropy over the guaranteed 8-pixel fallback. Water-only `PolygonTriggers` versions 2 through 4,
+including bounded version-4 layer names, lake/river staging,
 global transparency scalars, optional source caustic frames, hybrid-deferred composition, and
 Modern de-tiling are implemented. `GlobalLighting` versions 1 through 3 now retain four ordered
 time variants, separate terrain/object sun and accent records, and optional shadow color;
@@ -339,15 +345,16 @@ Water now resolves standing, sky, and environment textures after sibling-map ove
 presentation includes bounded screen-space/environment reflection inputs, and the viewer can freeze
 explicit presentation time. Immutable world/object, waypoint/start, side/team/build-list, and
 complete nested script data decode under independent limits with stable reports. Source-order scene
-staging separates endpoint, scenery, hidden, waypoint, and start records. Regular Road INI
-definitions now resolve first-used materials and consecutive endpoint pairs; bounded strips sample
-the maximum terrain cell height at source intervals and alpha-overlay through the G-buffer in MAP
-   order. Bounded endpoint-edge joins, default object draw/reskin resolution, stable static-model
-   instancing, exact terrain-triangle placement, and a renderer-only playable-boundary fence are now
-   integrated. Intact bridge models and source mesh culling policy are also integrated. Exact
-   curve/tee UV continuity, bridge towers/states, water shadows, headless capture hashes,
-   anti-aliasing, remaining object draw modules/ambient animation, blend version 8, complete polygon
-   triggers, and custom-map closure remain open.
+staging separates endpoint, scenery, hidden, waypoint, and start records. Road INI definitions
+resolve first-used materials and consecutive endpoint pairs; bounded strips sample the maximum
+terrain cell height at source intervals. A stable topology pass applies source curve/miter
+traversal, atlas-specific junctions, clipped-width cross-material caps, and road-type stacking.
+The viewer retains the source three-level road mip budget, adds renderer-only depth bias, and offers
+optional full-scene wireframe on M. `End`-delimited default/initial-NONE object draw resolution,
+stable static-model instancing, exact terrain-triangle placement, a renderer-only playable-boundary
+fence, intact bridges, and source mesh culling are integrated. Bridge towers/states, water shadows,
+headless capture hashes, anti-aliasing, remaining object draw modules/ambient animation, complete
+polygon triggers, and custom-map closure remain open.
 
 ## R4: WND user interface and navigable shell
 

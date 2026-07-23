@@ -1,4 +1,4 @@
-//! Bounded `BlendTileData` version-6 and version-7 decoding.
+//! Bounded `BlendTileData` version-6 through version-8 decoding.
 //!
 //! The field order and compatibility behavior are derived from `WorldHeightMap.cpp`,
 //! `WHeightMapEdit.cpp`, `WorldHeightMap.h`, and `TileData.h` in `GeneralsGameCode` revision
@@ -14,7 +14,7 @@ use crate::{MapChunk, MapFile, MapHeightField, MapLimits};
 
 const BLEND_TILE_LABEL: &[u8] = b"BlendTileData";
 const MINIMUM_BLEND_TILE_VERSION: u16 = 6;
-const MAXIMUM_BLEND_TILE_VERSION: u16 = 7;
+const MAXIMUM_BLEND_TILE_VERSION: u16 = 8;
 const RECORD_FLAG: u32 = 0x7ADA_0000;
 const DERIVED_CLIFF_HEIGHT_DELTA: u8 = 16;
 
@@ -416,7 +416,7 @@ impl From<BinaryError> for MapBlendError {
     }
 }
 
-/// Decodes the unique version-6 or version-7 `BlendTileData` payload against its height grid.
+/// Decodes the unique version-6 through version-8 `BlendTileData` payload against its height grid.
 ///
 /// # Errors
 ///
@@ -448,10 +448,11 @@ pub fn decode_map_blend(
     let blend_indices = read_i16_plane(&mut reader, cell_count)?;
     let extra_blend_indices = read_i16_plane(&mut reader, cell_count)?;
     let cliff_info_indices = read_i16_plane(&mut reader, cell_count)?;
-    let (cliff_flags, cliff_flag_stride) = if chunk.version() == 7 {
-        read_version_seven_cliff_flags(&mut reader, height.width(), height.height())?
-    } else {
-        derive_version_six_cliff_flags(height)?
+    let (cliff_flags, cliff_flag_stride) = match chunk.version() {
+        6 => derive_version_six_cliff_flags(height)?,
+        7 => read_stored_cliff_flags(&mut reader, height.width(), height.height(), true)?,
+        8 => read_stored_cliff_flags(&mut reader, height.width(), height.height(), false)?,
+        _ => return Err(MapBlendError::UnsupportedVersion(chunk.version())),
     };
 
     let bitmap_tile_count = read_limited_count(
@@ -556,22 +557,27 @@ fn read_i16_plane(reader: &mut BinaryReader<'_>, count: usize) -> Result<Vec<i16
     Ok(plane)
 }
 
-fn read_version_seven_cliff_flags(
+fn read_stored_cliff_flags(
     reader: &mut BinaryReader<'_>,
     width: u32,
     height: u32,
+    legacy_short_stride: bool,
 ) -> Result<(Vec<u8>, usize), MapBlendError> {
     let width = usize::try_from(width).map_err(|_| MapBlendError::SizeOverflow("cliff width"))?;
     let height =
         usize::try_from(height).map_err(|_| MapBlendError::SizeOverflow("cliff height"))?;
-    let stored_stride = width
-        .checked_add(1)
-        .ok_or(MapBlendError::SizeOverflow("stored cliff stride"))?
-        / 8;
     let normalized_stride = width
         .checked_add(7)
         .ok_or(MapBlendError::SizeOverflow("cliff stride"))?
         / 8;
+    let stored_stride = if legacy_short_stride {
+        width
+            .checked_add(1)
+            .ok_or(MapBlendError::SizeOverflow("stored cliff stride"))?
+            / 8
+    } else {
+        normalized_stride
+    };
     let stored_length = stored_stride
         .checked_mul(height)
         .ok_or(MapBlendError::SizeOverflow("stored cliff bitmap"))?;
@@ -842,14 +848,22 @@ fn enforce_limit(what: &'static str, actual: usize, maximum: usize) -> Result<()
 mod tests {
     use cic_core::{BinaryError, BinaryReader};
 
-    use super::{MapBlendError, RECORD_FLAG, decode_map_blend, read_version_seven_cliff_flags};
+    use super::{MapBlendError, RECORD_FLAG, decode_map_blend, read_stored_cliff_flags};
     use crate::{MapLimits, decode_map_height, parse_map};
 
     const BLEND_CHUNK_OFFSET: usize = 98;
     const BLEND_PAYLOAD_OFFSET: usize = 108;
     const BLEND_PAYLOAD_LENGTH: usize = 255;
+    const HEIGHT_SAMPLE_OFFSET: usize = 82;
     const VERSION_SEVEN_CLIFF_OFFSET: usize = BLEND_PAYLOAD_OFFSET + 4 + 16 * 2 * 4;
+    const BITMAP_TILE_COUNT_OFFSET: usize = VERSION_SEVEN_CLIFF_OFFSET + 2;
+    const BLENDED_TILE_COUNT_OFFSET: usize = BITMAP_TILE_COUNT_OFFSET + 4;
     const CLIFF_INFO_COUNT_OFFSET: usize = VERSION_SEVEN_CLIFF_OFFSET + 2 + 8;
+    const TEXTURE_CLASS_COUNT_OFFSET: usize = CLIFF_INFO_COUNT_OFFSET + 4;
+    const TERRAIN_CLASS_OFFSET: usize = TEXTURE_CLASS_COUNT_OFFSET + 4;
+    const EDGE_TILE_COUNT_OFFSET: usize = TERRAIN_CLASS_OFFSET + 4 * 4 + 2 + 4;
+    const EDGE_TEXTURE_CLASS_COUNT_OFFSET: usize = EDGE_TILE_COUNT_OFFSET + 4;
+    const EDGE_CLASS_OFFSET: usize = EDGE_TEXTURE_CLASS_COUNT_OFFSET + 4;
     const CLIFF_INFO_RECORD_BYTES: usize = 4 + 8 * 4 + 2;
 
     fn fixture() -> Vec<u8> {
@@ -876,6 +890,12 @@ mod tests {
                 .expect("fixture length")
                 .to_le_bytes(),
         );
+        bytes
+    }
+
+    fn version_eight_fixture() -> Vec<u8> {
+        let mut bytes = fixture();
+        bytes[BLEND_CHUNK_OFFSET + 4..BLEND_CHUNK_OFFSET + 6].copy_from_slice(&8_u16.to_le_bytes());
         bytes
     }
 
@@ -967,8 +987,63 @@ mod tests {
     }
 
     #[test]
+    fn version_six_cliff_threshold_is_exact_at_sixteen_height_units() {
+        for (delta, expected) in [(15_u8, false), (16, true)] {
+            let mut bytes = version_six_fixture();
+            bytes[HEIGHT_SAMPLE_OFFSET..HEIGHT_SAMPLE_OFFSET + 16].fill(0);
+            bytes[HEIGHT_SAMPLE_OFFSET + 1] = delta;
+            let blend = decode(&bytes, MapLimits::default()).expect("version-six threshold");
+            assert_eq!(blend.is_cliff(0, 0), Some(expected), "delta {delta}");
+            assert_eq!(blend.is_cliff(7, 0), Some(false));
+            assert_eq!(blend.is_cliff(0, 1), Some(false));
+        }
+    }
+
+    #[test]
+    fn version_eight_uses_the_corrected_cliff_bitmap_stride() {
+        let blend = decode(&version_eight_fixture(), MapLimits::default())
+            .expect("valid version-eight blend data");
+        assert_eq!(blend.version(), 8);
+        assert_eq!(blend.cliff_flag_stride(), 1);
+        assert_eq!(blend.cliff_flags(), [1, 128]);
+
+        let mut reader = BinaryReader::new(&[0x01, 0x20, 0x02, 0x10], "version-eight flags");
+        let (flags, stride) =
+            read_stored_cliff_flags(&mut reader, 14, 2, false).expect("corrected stride");
+        assert_eq!(stride, 2);
+        assert_eq!(flags, [0x01, 0x20, 0x02, 0x10]);
+        assert_eq!(reader.remaining(), 0);
+    }
+
+    #[test]
+    fn v7_and_v8_cliff_strides_cover_every_byte_boundary() {
+        for width in 1_u32..=32 {
+            let normalized_stride = usize::try_from(width.div_ceil(8)).expect("stride");
+            let legacy_stride = usize::try_from((width + 1) / 8).expect("legacy stride");
+            for (legacy, stored_stride) in [(true, legacy_stride), (false, normalized_stride)] {
+                let stored = (0..stored_stride * 3)
+                    .map(|index| u8::try_from(index + 1).expect("test byte"))
+                    .collect::<Vec<_>>();
+                let mut reader = BinaryReader::new(&stored, "cliff stride matrix");
+                let (normalized, stride) =
+                    read_stored_cliff_flags(&mut reader, width, 3, legacy).expect("cliff flags");
+                assert_eq!(stride, normalized_stride, "width {width}, legacy {legacy}");
+                assert_eq!(normalized.len(), normalized_stride * 3);
+                assert_eq!(reader.remaining(), 0);
+                for row in 0..3 {
+                    let source = &stored[row * stored_stride..(row + 1) * stored_stride];
+                    let target =
+                        &normalized[row * normalized_stride..(row + 1) * normalized_stride];
+                    assert_eq!(&target[..stored_stride], source);
+                    assert!(target[stored_stride..].iter().all(|byte| *byte == 0));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn every_truncated_blend_payload_returns_an_error() {
-        for original in [fixture(), version_six_fixture()] {
+        for original in [fixture(), version_six_fixture(), version_eight_fixture()] {
             let payload_length = original.len() - BLEND_PAYLOAD_OFFSET;
             for length in 0..payload_length {
                 let mut bytes = original[..BLEND_PAYLOAD_OFFSET + length].to_vec();
@@ -989,7 +1064,7 @@ mod tests {
     #[test]
     fn narrow_version_seven_cliff_rows_normalize_to_zero_bits() {
         let mut reader = BinaryReader::new(&[], "narrow cliff flags");
-        let (flags, stride) = read_version_seven_cliff_flags(&mut reader, 6, 2)
+        let (flags, stride) = read_stored_cliff_flags(&mut reader, 6, 2, true)
             .expect("legacy zero-byte rows normalize");
         assert_eq!(stride, 1);
         assert_eq!(flags, [0, 0]);
@@ -1013,8 +1088,122 @@ mod tests {
     }
 
     #[test]
+    fn rejects_missing_duplicate_and_trailing_blend_chunks() {
+        let missing = &fixture()[..BLEND_CHUNK_OFFSET];
+        assert_eq!(
+            decode(missing, MapLimits::default()),
+            Err(MapBlendError::MissingBlendData)
+        );
+
+        let mut duplicate = fixture();
+        duplicate.extend_from_within(BLEND_CHUNK_OFFSET..);
+        assert_eq!(
+            decode(&duplicate, MapLimits::default()),
+            Err(MapBlendError::DuplicateBlendData)
+        );
+
+        let mut trailing = fixture();
+        trailing.push(0xAA);
+        trailing[BLEND_CHUNK_OFFSET + 6..BLEND_CHUNK_OFFSET + 10].copy_from_slice(
+            &i32::try_from(BLEND_PAYLOAD_LENGTH + 1)
+                .expect("fixture length")
+                .to_le_bytes(),
+        );
+        assert_eq!(
+            decode(&trailing, MapLimits::default()),
+            Err(MapBlendError::TrailingBytes(1))
+        );
+    }
+
+    #[test]
+    fn count_and_texture_class_structure_errors_are_field_specific() {
+        for (offset, field) in [
+            (BITMAP_TILE_COUNT_OFFSET, "bitmap tile count"),
+            (BLENDED_TILE_COUNT_OFFSET, "blended tile count"),
+            (TEXTURE_CLASS_COUNT_OFFSET, "texture class count"),
+        ] {
+            let mut negative = fixture();
+            negative[offset..offset + 4].copy_from_slice(&(-1_i32).to_le_bytes());
+            assert_eq!(
+                decode(&negative, MapLimits::default()),
+                Err(MapBlendError::NegativeValue { field, value: -1 })
+            );
+
+            let mut zero = fixture();
+            zero[offset..offset + 4].copy_from_slice(&0_i32.to_le_bytes());
+            assert_eq!(
+                decode(&zero, MapLimits::default()),
+                Err(MapBlendError::ZeroCount(field))
+            );
+        }
+
+        let mut zero_width = fixture();
+        zero_width[TERRAIN_CLASS_OFFSET + 8..TERRAIN_CLASS_OFFSET + 12]
+            .copy_from_slice(&0_i32.to_le_bytes());
+        assert_eq!(
+            decode(&zero_width, MapLimits::default()),
+            Err(MapBlendError::ZeroCount("texture class width"))
+        );
+
+        let mut terrain_range = fixture();
+        terrain_range[TERRAIN_CLASS_OFFSET..TERRAIN_CLASS_OFFSET + 4]
+            .copy_from_slice(&3_i32.to_le_bytes());
+        assert!(matches!(
+            decode(&terrain_range, MapLimits::default()),
+            Err(MapBlendError::TextureRange { edge: false, .. })
+        ));
+
+        let mut edge_range = fixture();
+        edge_range[EDGE_CLASS_OFFSET..EDGE_CLASS_OFFSET + 4].copy_from_slice(&2_i32.to_le_bytes());
+        assert!(matches!(
+            decode(&edge_range, MapLimits::default()),
+            Err(MapBlendError::TextureRange { edge: true, .. })
+        ));
+    }
+
+    #[test]
+    fn every_blend_table_limit_is_enforced() {
+        let cases = [
+            MapLimits {
+                maximum_bitmap_tiles: 3,
+                ..MapLimits::default()
+            },
+            MapLimits {
+                maximum_blended_tiles: 1,
+                ..MapLimits::default()
+            },
+            MapLimits {
+                maximum_cliff_records: 1,
+                ..MapLimits::default()
+            },
+            MapLimits {
+                maximum_texture_classes: 0,
+                ..MapLimits::default()
+            },
+            MapLimits {
+                maximum_edge_tiles: 1,
+                ..MapLimits::default()
+            },
+            MapLimits {
+                maximum_texture_name_bytes: 3,
+                ..MapLimits::default()
+            },
+            MapLimits {
+                maximum_texture_name_bytes: 4,
+                ..MapLimits::default()
+            },
+        ];
+        for limits in cases {
+            assert!(matches!(
+                decode(&fixture(), limits),
+                Err(MapBlendError::Binary(BinaryError::LimitExceeded { .. }))
+            ));
+        }
+    }
+
+    #[test]
     fn rejects_version_counts_limits_flags_and_nonfinite_uvs() {
-        for version in [5_u16, 8] {
+        for version in [5_u16, 9] {
             let mut unsupported = fixture();
             unsupported[BLEND_CHUNK_OFFSET + 4..BLEND_CHUNK_OFFSET + 6]
                 .copy_from_slice(&version.to_le_bytes());
@@ -1034,20 +1223,6 @@ mod tests {
                 expected: 16
             })
         );
-
-        assert!(matches!(
-            decode(
-                &fixture(),
-                MapLimits {
-                    maximum_bitmap_tiles: 3,
-                    ..MapLimits::default()
-                }
-            ),
-            Err(MapBlendError::Binary(BinaryError::LimitExceeded {
-                what: "bitmap tile count",
-                ..
-            }))
-        ));
 
         let mut flag = fixture();
         let flag_offset = flag

@@ -7,7 +7,8 @@
 //! are derived from `W3DModelDraw.cpp`, `W3DModelDraw.h`, and `INI.cpp` in `GeneralsGameCode`
 //! revision `9f7abb866f5afd446db14149979e744c7216baaf`, licensed under GPL-3.0-or-later
 //! with Electronic Arts Section 7 terms. Full notices are recorded in
-//! `docs/provenance/map.md`. Indentation-based extraction and resource limits are project-authored.
+//! `docs/provenance/map.md`. The bounded non-executing extraction state machine and resource
+//! limits are project-authored.
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -112,11 +113,12 @@ struct ActiveObject {
 
 #[derive(Debug)]
 struct ActiveDraw {
-    indent: usize,
     module: Vec<u8>,
     model: Option<Vec<u8>>,
     scale: f32,
-    default_condition_indent: Option<usize>,
+    in_condition_state: bool,
+    select_condition_state: bool,
+    saw_initial_condition_state: bool,
 }
 
 /// Structured object-definition decoding failure.
@@ -212,10 +214,11 @@ impl Error for ObjectIniError {}
 
 /// Extracts default W3D model presentation from object definitions without executing behavior.
 ///
-/// Object bodies contain heterogeneous modules with independent `End` tokens. The source INI
-/// convention uses indentation for those nested declarations, so this narrow decoder uses bounded
-/// indentation columns to isolate W3D draw/default-state fields and ignores all gameplay fields.
-/// Provider overlay and reskin resolution remain caller policy.
+/// Object bodies contain heterogeneous modules with independent `End` tokens, and shipped draw
+/// fields may use the same indentation as their `Draw` declaration. This narrow decoder therefore
+/// tracks draw and condition-state `End` tokens, accepts either `DefaultConditionState` or the
+/// source-equivalent first `ConditionState = NONE`, and ignores all gameplay fields. Provider
+/// overlay and reskin resolution remain caller policy.
 ///
 /// # Errors
 ///
@@ -273,8 +276,18 @@ pub fn parse_object_ini(
         if active_object.is_none() {
             continue;
         }
+        if line.eq_ignore_ascii_case(b"End") && active_draw.is_some() {
+            if let Some(draw) = active_draw.as_mut() {
+                if draw.in_condition_state {
+                    draw.in_condition_state = false;
+                    draw.select_condition_state = false;
+                } else {
+                    finish_draw(&mut active_object, &mut active_draw);
+                }
+            }
+            continue;
+        }
         if indent == 0 && line.eq_ignore_ascii_case(b"End") {
-            finish_draw(&mut active_object, &mut active_draw);
             finish_object(
                 &mut definitions,
                 &mut active_object,
@@ -283,13 +296,8 @@ pub fn parse_object_ini(
             )?;
             continue;
         }
-        if active_draw
-            .as_ref()
-            .is_some_and(|draw| indent <= draw.indent)
-        {
-            finish_draw(&mut active_object, &mut active_draw);
-        }
         if field_eq(line, b"Draw") {
+            finish_draw(&mut active_object, &mut active_draw);
             let value = field_value(line).unwrap_or_default();
             let module = value
                 .split(u8::is_ascii_whitespace)
@@ -310,11 +318,12 @@ pub fn parse_object_ini(
                     });
                 }
                 active_draw = Some(ActiveDraw {
-                    indent,
                     module: module.to_vec(),
                     model: None,
                     scale: 1.0,
-                    default_condition_indent: None,
+                    in_condition_state: false,
+                    select_condition_state: false,
+                    saw_initial_condition_state: false,
                 });
             }
             continue;
@@ -322,17 +331,26 @@ pub fn parse_object_ini(
         let Some(draw) = active_draw.as_mut() else {
             continue;
         };
-        if draw
-            .default_condition_indent
-            .is_some_and(|condition_indent| indent <= condition_indent)
-        {
-            draw.default_condition_indent = None;
-        }
-        if token_eq(line, b"DefaultConditionState") && indent > draw.indent {
-            draw.default_condition_indent = Some(indent);
+        if token_eq(line, b"DefaultConditionState") {
+            draw.in_condition_state = true;
+            draw.select_condition_state = true;
+            draw.saw_initial_condition_state = true;
             continue;
         }
-        if draw.default_condition_indent.is_some() && field_eq(line, b"Model") {
+        if field_eq(line, b"ConditionState") {
+            let conditions = field_value(line).unwrap_or_default();
+            draw.in_condition_state = true;
+            draw.select_condition_state = !draw.saw_initial_condition_state
+                && (conditions.is_empty() || conditions.eq_ignore_ascii_case(b"NONE"));
+            draw.saw_initial_condition_state = true;
+            continue;
+        }
+        if field_eq(line, b"AliasConditionState") || field_eq(line, b"TransitionState") {
+            draw.in_condition_state = true;
+            draw.select_condition_state = false;
+            continue;
+        }
+        if draw.in_condition_state && draw.select_condition_state && field_eq(line, b"Model") {
             let value = field_value(line).unwrap_or_default();
             if !value.is_empty() && !value.eq_ignore_ascii_case(b"NONE") {
                 enforce_value_limit(value, line_number, "Model", limits.max_model_bytes)?;
@@ -340,7 +358,7 @@ pub fn parse_object_ini(
             }
             continue;
         }
-        if field_eq(line, b"Scale") && indent > draw.indent {
+        if field_eq(line, b"Scale") && !draw.in_condition_state {
             let value = field_value(line).unwrap_or_default();
             let scale = std::str::from_utf8(value)
                 .ok()
@@ -506,6 +524,32 @@ mod tests {
     use super::{ObjectIniError, ObjectIniLimits, parse_object_ini};
 
     #[test]
+    fn constructor_defaults_and_implicit_draw_scale_are_exact() {
+        assert_eq!(
+            ObjectIniLimits::default(),
+            ObjectIniLimits {
+                max_file_bytes: 8 * 1_024 * 1_024,
+                max_lines: 250_000,
+                max_line_bytes: 8_192,
+                max_definitions: 32_768,
+                max_draws: 131_072,
+                max_name_bytes: 255,
+                max_module_bytes: 255,
+                max_model_bytes: 1_024,
+            }
+        );
+        let parsed = parse_object_ini(
+            b"Object Defaulted\nDraw = W3DModelDraw Tag\nDefaultConditionState\nModel = DefaultModel\nEnd\nEnd\nEnd\n",
+            ObjectIniLimits::default(),
+        )
+        .expect("default scale");
+        assert_eq!(
+            parsed.definitions()[0].draws()[0].scale().to_bits(),
+            1.0_f32.to_bits()
+        );
+    }
+
+    #[test]
     fn extracts_multiple_default_models_and_reskins_without_behavior_execution() {
         let bytes = b"Object SyntheticBuilding\n  Behavior = SomeGameplayModule Tag\n    Value = Ignored\n  End\n  Draw = W3DModelDraw MainDraw\n    DefaultConditionState\n      Model = SyntheticHouse\n    End\n    ConditionState = DAMAGED\n      Model = SyntheticHouseDamaged\n    End\n  End\n  Draw = W3DTreeDraw Crown\n    Scale = 1.25\n    DefaultConditionState\n      Model = SyntheticCrown\n    End\n  End\nEnd\nObjectReskin SyntheticVariant SyntheticBuilding\nEnd\n";
         let parsed = parse_object_ini(bytes, ObjectIniLimits::default()).expect("object INI");
@@ -523,12 +567,92 @@ mod tests {
     }
 
     #[test]
-    fn rejects_nonfinite_or_nonpositive_draw_scale() {
-        let bytes = b"Object Synthetic\n  Draw = W3DModelDraw Tag\n    Scale = NaN\nEnd\n";
+    fn accepts_end_delimited_flat_draw_fields_and_initial_none_condition() {
+        let bytes = b"Object SyntheticSupply\n  Draw = W3DSupplyDraw ModuleTag_Visual\n  Scale = 1.5\n  ConditionState = NONE\n    Model = SyntheticSupplyFull\n  End\n  ConditionState = DAMAGED\n    Model = SyntheticSupplyDamaged\n  End\n  End\nEnd\n";
+        let parsed = parse_object_ini(bytes, ObjectIniLimits::default()).expect("object INI");
+        let draws = parsed.definitions()[0].draws();
+        assert_eq!(draws.len(), 1);
+        assert_eq!(draws[0].model_bytes(), b"SyntheticSupplyFull");
+        assert_eq!(draws[0].scale().to_bits(), 1.5_f32.to_bits());
+    }
+
+    #[test]
+    fn condition_state_inputs_select_only_source_default_presentation() {
+        let bytes = b"\
+Object ExplicitDefault
+ Draw = W3DModelDraw Tag
+  DefaultConditionState
+   Model = Explicit
+  End
+  ConditionState = NONE
+   Model = LaterNone
+  End
+  AliasConditionState = DAMAGED
+   Model = Alias
+  End
+  TransitionState = IDLE DAMAGED
+   Model = Transition
+  End
+ End
+End
+Object InitialEmpty
+ Draw = W3DTreeDraw Tag
+  ConditionState =
+   Model = EmptyConditions
+  End
+ End
+End
+Object NonDefaultFirst
+ Draw = W3DSupplyDraw Tag
+  ConditionState = DAMAGED
+   Model = Damaged
+  End
+  ConditionState = NONE
+   Model = TooLate
+  End
+ End
+End
+Object NoneModel
+ Draw = W3DModelDraw Tag
+  DefaultConditionState
+   Model = NONE
+  End
+ End
+End
+Object IgnoredModule
+ Draw = SomeGameplayModule Tag
+  DefaultConditionState
+   Model = NotRendererFacing
+  End
+ End
+End
+";
+        let parsed = parse_object_ini(bytes, ObjectIniLimits::default()).expect("condition states");
+        assert_eq!(parsed.definitions().len(), 5);
         assert_eq!(
-            parse_object_ini(bytes, ObjectIniLimits::default()),
-            Err(ObjectIniError::InvalidScale { line: 3 })
+            parsed.definitions()[0].draws()[0].model_bytes(),
+            b"Explicit"
         );
+        assert_eq!(
+            parsed.definitions()[1].draws()[0].model_bytes(),
+            b"EmptyConditions"
+        );
+        assert!(parsed.definitions()[2].draws().is_empty());
+        assert!(parsed.definitions()[3].draws().is_empty());
+        assert!(parsed.definitions()[4].draws().is_empty());
+    }
+
+    #[test]
+    fn rejects_nonfinite_or_nonpositive_draw_scale() {
+        for value in ["NaN", "inf", "-inf", "0", "-1", "not-a-number"] {
+            let bytes =
+                format!("Object Synthetic\n  Draw = W3DModelDraw Tag\n    Scale = {value}\nEnd\n");
+            assert_eq!(
+                parse_object_ini(bytes.as_bytes(), ObjectIniLimits::default()),
+                Err(ObjectIniError::InvalidScale { line: 3 }),
+                "{value}"
+            );
+        }
     }
 
     #[test]
@@ -542,5 +666,82 @@ mod tests {
             parse_object_ini(bytes, limits),
             Err(ObjectIniError::ValueTooLong { field: "Model", .. })
         ));
+    }
+
+    #[test]
+    fn enforces_every_object_structure_limit_before_retention() {
+        let default = ObjectIniLimits::default();
+        let cases = [
+            (
+                b"Object A\nEnd\n".as_slice(),
+                ObjectIniLimits {
+                    max_file_bytes: 12,
+                    ..default
+                },
+                "file",
+            ),
+            (
+                b"Object A\nEnd\n".as_slice(),
+                ObjectIniLimits {
+                    max_lines: 1,
+                    ..default
+                },
+                "lines",
+            ),
+            (
+                b"Object Long\nEnd\n".as_slice(),
+                ObjectIniLimits {
+                    max_line_bytes: 6,
+                    ..default
+                },
+                "line bytes",
+            ),
+            (
+                b"Object A\nEnd\n".as_slice(),
+                ObjectIniLimits {
+                    max_definitions: 0,
+                    ..default
+                },
+                "definitions",
+            ),
+            (
+                b"Object A\nDraw = W3DModelDraw Tag\nEnd\nEnd\n".as_slice(),
+                ObjectIniLimits {
+                    max_draws: 0,
+                    ..default
+                },
+                "draws",
+            ),
+            (
+                b"Object Long\nEnd\n".as_slice(),
+                ObjectIniLimits {
+                    max_name_bytes: 3,
+                    ..default
+                },
+                "name",
+            ),
+            (
+                b"Object A\nDraw = W3DModelDraw Tag\nEnd\nEnd\n".as_slice(),
+                ObjectIniLimits {
+                    max_module_bytes: 3,
+                    ..default
+                },
+                "module",
+            ),
+        ];
+        for (bytes, limits, label) in cases {
+            assert!(
+                parse_object_ini(bytes, limits).is_err(),
+                "{label} limit unexpectedly accepted"
+            );
+        }
+        assert_eq!(
+            parse_object_ini(b"Object\n", default),
+            Err(ObjectIniError::MissingObjectName { line: 1 })
+        );
+        assert_eq!(
+            parse_object_ini(b"ObjectReskin Variant\n", default),
+            Err(ObjectIniError::MissingReskinBase { line: 1 })
+        );
     }
 }

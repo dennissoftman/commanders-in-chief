@@ -13,6 +13,7 @@
   - `Core/GameEngineDevice/Source/W3DDevice/GameClient/WorldHeightMap.cpp`
   - `Core/GameEngineDevice/Include/W3DDevice/GameClient/WorldHeightMap.h`
   - `Generals/Code/Tools/WorldBuilder/src/WHeightMapEdit.cpp`
+  - `GeneralsMD/Code/Tools/WorldBuilder/src/WHeightMapEdit.cpp`
 - Blend, edge, texture-class, and cliff record declarations:
   - `Core/GameEngineDevice/Include/W3DDevice/GameClient/TileData.h`
 - Terrain staging, packed tiles, procedural alpha, and texture-class image resolution:
@@ -31,6 +32,8 @@
 - Water polygon input and appearance declarations:
   - `Generals/Code/GameEngine/Include/GameLogic/PolygonTrigger.h`
   - `Generals/Code/GameEngine/Source/GameLogic/Map/PolygonTrigger.cpp`
+  - `GeneralsMD/Code/GameEngine/Include/GameLogic/PolygonTrigger.h`
+  - `GeneralsMD/Code/GameEngine/Source/GameLogic/Map/PolygonTrigger.cpp`
   - `Core/GameEngine/Include/GameClient/Water.h`
   - `Core/GameEngine/Source/GameClient/Water.cpp`
   - `Core/GameEngine/Source/Common/INI/INIWater.cpp`
@@ -47,9 +50,27 @@
   - `GeneralsMD/Code/GameEngineDevice/Source/W3DDevice/GameClient/W3DBridgeBuffer.cpp`
   - `Generals/Code/Tools/WorldBuilder/src/WHeightMapEdit.cpp`
 - Initial object draw-definition boundary:
-  - `Generals/Code/GameEngineDevice/Source/W3DDevice/GameClient/Module/W3DModelDraw.cpp`
-  - `Generals/Code/GameEngineDevice/Include/W3DDevice/GameClient/Module/W3DModelDraw.h`
+  - `Core/GameEngineDevice/Source/W3DDevice/GameClient/Drawable/Draw/W3DModelDraw.cpp`
+  - `Core/GameEngineDevice/Include/W3DDevice/GameClient/Module/W3DModelDraw.h`
   - `Core/GameEngine/Source/Common/INI/INI.cpp`
+
+At the pinned revision, `W3DRoadBuffer::loadRoads` builds ordinary segments first, then inserts
+three-/four-way intersections, connected curves, and explicit cross-type joins. Curves use 1.5 or
+0.5 road-width radii and 30-degree subdivision; small or authored angled turns miter. Dedicated
+curve, tee, four-way, Y, slanted-tee, and alpha-join regions come from the road texture atlas. The
+project implementation preserves those topology and atlas-selection rules in bounded immutable
+vectors, then commits geometry in stable MAP order instead of mutating fixed-size Direct3D buffers.
+`W3DRoadBuffer::loadTexture` requests exactly three texture mip levels, enables best mip filtering,
+and repeats both texture axes. Its terrain-fitted quads use `MAP_HEIGHT_SCALE / 8` as their height
+lift. Curve construction reverses the left-hand endpoint traversal before applying the same
+clockwise 30-degree subdivision used on right turns. The project preserves those presentation facts;
+its additional GPU depth bias and optional polygon-line wireframe are original renderer diagnostics,
+not claims about the legacy rasterizer.
+
+`W3DModelDrawModuleData::parseConditionState` also establishes that a default state may be written
+as `DefaultConditionState` or as the first `ConditionState = NONE`. Shipped modules are delimited by
+`End` tokens and do not require child fields to be indented farther than `Draw`; the project parser
+therefore uses a bounded state machine rather than indentation to close draw modules.
 - Tree draw and ambient breeze boundary:
   - `Core/GameEngineDevice/Source/W3DDevice/GameClient/Drawable/Draw/W3DTreeDraw.cpp`
   - `Core/GameEngineDevice/Source/W3DDevice/GameClient/W3DTreeBuffer.cpp`
@@ -79,6 +100,7 @@
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/GameEngineDevice/Source/W3DDevice/GameClient/WorldHeightMap.cpp>
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/GameEngineDevice/Include/W3DDevice/GameClient/WorldHeightMap.h>
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Generals/Code/Tools/WorldBuilder/src/WHeightMapEdit.cpp>
+  - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/GeneralsMD/Code/Tools/WorldBuilder/src/WHeightMapEdit.cpp>
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/GameEngineDevice/Include/W3DDevice/GameClient/TileData.h>
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/GameEngineDevice/Source/W3DDevice/GameClient/HeightMap.cpp>
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/GameEngineDevice/Source/W3DDevice/GameClient/TerrainTex.cpp>
@@ -90,6 +112,8 @@
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Generals/Code/GameEngine/Source/Common/TerrainTypes.cpp>
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Generals/Code/GameEngine/Include/GameLogic/PolygonTrigger.h>
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Generals/Code/GameEngine/Source/GameLogic/Map/PolygonTrigger.cpp>
+  - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/GeneralsMD/Code/GameEngine/Include/GameLogic/PolygonTrigger.h>
+  - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/GeneralsMD/Code/GameEngine/Source/GameLogic/Map/PolygonTrigger.cpp>
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/GameEngine/Include/GameClient/Water.h>
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/GameEngine/Source/GameClient/Water.cpp>
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/GameEngine/Source/Common/INI/INIWater.cpp>
@@ -100,6 +124,8 @@
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/GameEngine/Include/GameClient/TerrainRoads.h>
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/GameEngine/Source/Common/INI/INITerrainRoad.cpp>
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Generals/Code/GameEngineDevice/Source/W3DDevice/GameClient/W3DRoadBuffer.cpp>
+  - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/GameEngineDevice/Source/W3DDevice/GameClient/Drawable/Draw/W3DModelDraw.cpp>
+  - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/GameEngineDevice/Include/W3DDevice/GameClient/Module/W3DModelDraw.h>
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Generals/Code/Tools/WorldBuilder/src/WHeightMapEdit.cpp>
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Generals/Code/GameEngine/Include/GameLogic/SidesList.h>
   - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Generals/Code/GameEngine/Source/GameLogic/Map/SidesList.cpp>
@@ -122,13 +148,15 @@ row-major byte samples, and the 5/10-unit versioned grid spacing. Version-4 boun
 read as signed integers without a nonnegative check; the project therefore preserves them as
 signed metadata while continuing to require nonnegative allocation dimensions and counts.
 
-The pinned blend reader and declarations establish versions 6 and 7's four signed 16-bit cell
+The pinned blend reader and declarations establish versions 6 through 8's four signed 16-bit cell
 planes, tile/table counts, terrain and edge texture-class records, blend selectors and
 `0x7ADA0000` sentinel, and cliff tile/UV/flag records. Version 6 contains no cliff bitmap and calls
 the source height-based derivation: four-corner height range greater than 9.8 world units. With the
 source 0.625 height scale, integer stored samples are cliffs at a delta of 16 or greater. Version 7
 stores a legacy `(width + 1) / 8` cliff-bitmap row stride, which the project normalizes into a
 zero-filled conventional stride while preserving all available bits and raw signed indices.
+Version 8 preserves the remaining payload order and corrects the stored stride to
+`(width + 7) / 8`.
 
 The terrain renderer sources establish 10 world units per grid sample, 0.625 world units per
 height byte, four quadrant indices per 64-by-64 source tile, bottom-origin texture-class tile rows,
@@ -141,8 +169,9 @@ foreground coordinates. The project's camera-centered region size, refresh thres
 directional preview light are original implementation policy rather than copied source behavior.
 
 The pinned polygon-trigger reader establishes a signed trigger count, 16-bit byte-string length,
-trigger ID, version-2 water byte, version-3 river byte and river-start integer, signed point count,
-and integer XYZ triples. The project uses only this schema. Its hybrid-deferred render graph,
+trigger ID, version-2 water byte, version-3 river byte and river-start integer, version-4 bounded
+WorldBuilder layer-name byte string, signed point count, and integer XYZ triples. The project uses
+only this schema. Its hybrid-deferred render graph,
 procedural wave normal, thickness absorption, refraction, Fresnel response, shoreline treatment,
 and Modern macro variation are original implementation and are not derived from the legacy water
 renderer. Caustic illumination is likewise project-authored, but samples caller-owned animation
@@ -157,9 +186,10 @@ reader establish road texture/width inputs and bridge model/scale/state/tower re
 facts support the immutable placement view and endpoint staging implemented here. The regular-road
 gate additionally follows `W3DRoadBuffer.cpp` for consecutive Point1/Point2 pairing, the product of
 road width and in-texture width, terrain-cell tessellation, maximum supporting height, small
-height offset, and regular-segment UV scale. Complex source curve, tee, cross-type join, stacking,
-and cloud/noise lighting are not claimed yet. Connected-endpoint polygon fills are project-authored
-from the staged strip edges and make no source-equivalence claim. `W3DBridgeBuffer.cpp` establishes
+height offset, regular-segment UV scale, handed curve traversal, atlas junction selection, repeated
+addressing, and three-level road texture mip budget. Road depth bias and polygon-line wireframe are
+project-authored modern renderer policy. Cloud/noise lighting is not claimed yet.
+`W3DBridgeBuffer.cpp` establishes
 that bridge marker Z is rebuilt as terrain plus `BRIDGE_FLOAT_AMT` (`0.25`), and establishes the
 `BRIDGE_LEFT`/`BRIDGE_SPAN`/`BRIDGE_RIGHT` section lookup, rounded span repetition, X offsets, and
 endpoint-axis deformation used by the intact bridge preview. Texture/material staging is native to
@@ -175,11 +205,14 @@ an explicit compatibility policy rather than hidden script execution.
 
 `W3DModelDraw.cpp`/`.h` and the generic INI reader establish top-level `Object`/`ObjectReskin`
 declarations, draw-module naming, `DefaultConditionState` model selection, and per-draw `Scale`.
-The bounded indentation-based subset, reskin ancestry resolution, stable first-use GPU instancing,
-and neutral identity root/HLOD wrapper for validated standalone meshes are project-authored. The
+The bounded `End`-delimited parser, reskin ancestry resolution, stable first-use GPU instancing, and
+neutral identity root/HLOD wrapper for validated standalone meshes are project-authored. The
 renderer-only placement composition samples the exact already-staged terrain triangle, including
 the height-field border and selected diagonal, then adds the persisted relative Z offset verbatim;
 there is no clamp or renderer epsilon, and this is not an upstream gameplay or construction policy.
+The modeled source-derived defaults, input branches, binary structures, and road output primitives
+are cross-referenced to executable tests in
+[`docs/testing/source-derived-map-scene.md`](../testing/source-derived-map-scene.md).
 
 The height reader establishes signed version-4 boundary coordinates and the terrain sources
 establish their relationship to the height grid. The translucent fence, terrain-following base,

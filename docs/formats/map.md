@@ -3,7 +3,7 @@
 - Status: container, terrain/water, world/object, and sides/script data boundaries implemented;
   complete R3 MAP semantics and scene presentation planned by ADR 0009; water presentation WIP
 - Owning crate: `cic-formats`
-- Last updated: 2026-07-22
+- Last updated: 2026-07-23
 
 ## Evidence
 
@@ -13,7 +13,7 @@ ten-byte chunk header, native little-endian fields, payload-length meaning, and 
 behavior. The cached input stream, compression manager, and RefPack decoder establish the
 `EAR\0` wrapper used by installed MAP resources. `MapReaderWriterInfo.h`, `WorldHeightMap.cpp`,
 `WorldHeightMap.h`, `TileData.h`, and the WorldBuilder writer establish `HeightMapData` versions 1
-through 4 and `BlendTileData` versions 6 and 7. The WorldBuilder writer, `MapUtil`, `MapObject`,
+through 4 and `BlendTileData` versions 6 through 8. The WorldBuilder writer, `MapUtil`, `MapObject`,
 `SidesList`, script, terrain-road, and global-light sources additionally establish the planned R3
 object, road/bridge, waypoint/start, side/team, script-tree, and lighting boundaries. Exact source
 and licensing details are in `docs/provenance/map.md`.
@@ -99,7 +99,7 @@ version-1 compatibility downsampling step in some loading paths; that transform 
 deferred until runtime observations establish which compatibility policy each consumer needs. The
 opaque inventory still preserves the complete original payload.
 
-## `BlendTileData` versions 6 and 7
+## `BlendTileData` versions 6 through 8
 
 The blend payload is interpreted only after `HeightMapData`, because its signed cell count must
 equal the validated height sample count. Four row-major signed 16-bit planes follow: tile, blend,
@@ -110,7 +110,9 @@ its four neighboring height samples. The source rule is a range greater than 9.8
 stored heights scale by 0.625, making the exact byte-height threshold 16. The last row and column
 remain clear. Version 7 instead stores a bitmap with legacy row stride `(width + 1) / 8`. The
 decoder copies each stored row into a zeroed conventional `ceil(width / 8)` stride, so unavailable
-right-edge bits are deterministically clear. Bit `x % 8` of byte `x / 8` identifies a cliff cell.
+right-edge bits are deterministically clear. Version 8 keeps the same field order and stores the
+bitmap with the corrected `(width + 7) / 8` row stride. Bit `x % 8` of byte `x / 8` identifies a
+cliff cell.
 
 The remaining fields are source-ordered tables:
 
@@ -212,9 +214,8 @@ semantic decoder creates renderer or simulation resources.
 
 ### Terrain-version and auxiliary metadata closure
 
-R3 completion includes source-backed research and a bounded decoder for the observed
-`BlendTileData` version 8 rather than treating the Zero Hour variant as permanently outside the
-terrain milestone. It also requires an explicit profile policy for version-1 height resampling and
+R3 now includes the source-backed bounded decoder for the observed `BlendTileData` version 8
+corrected cliff stride. Completion still requires an explicit profile policy for version-1 height resampling and
 established semantic views for presentation/inspection metadata such as map preview data and any
 remaining WorldBuilder auxiliary chunk used by supported maps. Unknown or unobserved versions still
 remain opaque; compatibility claims are version-specific and no nearby layout is inferred.
@@ -254,13 +255,15 @@ Point1 records load textures.
 
 The renderer pairs a Point1 only with the immediately following Point2, matching the established
 map-object walk. It tessellates the regular strip at terrain-cell intervals, samples bounded points
-across its physical width, places each column above the maximum supporting height, applies the
-established regular-sheet UV scale, and submits alpha overlays in MAP order. Missing pairs,
-definitions, textures, invalid widths, and zero-length segments remain stable diagnostics. Corner,
-tight-corner, and join flags now group connected endpoints into deterministic polygons built from
-the physical strip edges. This bounded project-authored fill avoids oversized circular overreach,
-but does not claim the source curve/tee topology or texture mapping. Exact curve/tee/alpha-join
-insertion remains open. Consecutive bridge endpoints now use the source-specific endpoint height
+across its physical width, places each column above the maximum supporting height, and applies the
+established regular-sheet UV scale. A stable pre-tessellation topology pass groups exact endpoints
+by source road material, trims approaches, chooses source-radius 30-degree curves or miters, and
+inserts source-atlas tee, Y, slanted-tee, four-way, and cross-material alpha-join pieces. Mixed
+materials use the source clipped endpoint width and road-type stacking adjustment so alpha caps do
+not project rectangular atlas regions across the intersected road. Road textures repeat and retain
+the source three-level mip budget; a renderer-only depth bias complements the source height lift
+without changing staged coordinates. Missing pairs, definitions, textures, invalid widths, and
+zero-length segments remain stable diagnostics. Consecutive bridge endpoints now use the source-specific endpoint height
 of terrain plus `0.25`; bridge endpoint marker Z is not an authored scenery offset. The renderer
 selects the configured model's `BRIDGE_LEFT`, optional `BRIDGE_SPAN`, and optional `BRIDGE_RIGHT`
 subobjects, rounds the repeat count from the available length, and deforms their X/Y/Z basis onto
@@ -292,8 +295,9 @@ selection, runtime teams, and initial live objects.
 
 ### Polygon areas and scripts
 
-The current decoder projects only water/river records from `PolygonTriggers`. R3 will add a complete
-immutable polygon-area view for established versions while retaining the existing water projection.
+The current decoder projects only water/river records from `PolygonTriggers` versions 2 through 4.
+Version 4's additional bounded WorldBuilder layer name is retained. R3 will add a complete immutable
+polygon-area view for established versions while retaining the existing water projection.
 General trigger names, IDs, points, and flags become inspectable and cross-referenceable, but they
 do not register callbacks or spatial gameplay queries.
 
@@ -394,14 +398,15 @@ playable extent only: it does not create collision, pathing, or simulation state
   raw opcodes, typed parameters, and no execution.
 - A future scenario report will add complete polygon areas and cross-reference diagnostics without
   runtime validation or repair.
-- `map-view` integrates source lighting and WIP water, regular roads with bounded joins, initial
-  instanced static drawables, intact bridges, and the playable-boundary fence. Remaining draw modules,
-  explicit-time ambient animation, shadows, and reflection closure remain open.
+- `map-view` integrates source lighting and WIP water, source-topology roads, initial instanced
+  static drawables, intact bridges, and the playable-boundary fence. M toggles full-scene wireframe
+  when polygon-line rasterization is available. Remaining draw modules, explicit-time ambient
+  animation, shadows, and reflection closure remain open.
 
 Lighting/water inputs, object/world decoding, endpoint staging, sides/teams/spawns, and nested script
-data are implemented, as are regular roads/bounded joins and initial object-definition/static-scene
-instancing. Remaining order is exact curve/tee continuity and bridge towers/states, additional object draw and
-ambient-animation coverage, complete polygons, then integrated scene closure. Each step adds its
+data are implemented, as are source-topology roads and initial object-definition/static-scene
+instancing. Remaining order is bridge towers/states, additional object draw and ambient-animation
+coverage, complete polygons, then integrated scene closure. Each step adds its
 own synthetic fixture, negative tests, stable report, documentation, and completion artifact.
 
 ## Synthetic fixture
@@ -416,8 +421,9 @@ RefPack literal, overlapping copy, high-distance copy, invalid-reference, and ou
 `crates/cic-formats/tests/fixtures/blend.map.hex` is also original project data. Its eight-by-two
 height grid is paired with version-7 tile planes, a two-row cliff bitmap, terrain and edge texture
 classes, one blend record, and one cliff record. Tests reject every truncated semantic prefix,
-unsupported versions, invalid counts/ranges/sentinels/UVs, and configured limit excess. A
-synthetic BIG-backed CLI test verifies stable semantic reporting.
+unsupported versions, invalid counts/ranges/sentinels/UVs, and configured limit excess. Additional
+synthetic coverage exercises a version-8 width where its corrected cliff stride differs from
+version 7. A synthetic BIG-backed CLI test verifies stable semantic reporting.
 
 Project-authored in-memory MAP builders exercise all established world/object dictionary kinds,
 waypoints/player starts, endpoint flags, unknown nested chunks, every truncated object prefix, and
@@ -427,12 +433,11 @@ parameters, truncation, non-finite values, and independent tree limits. No retai
 
 ## Remaining exclusions and open questions
 
-- Blend versions other than 6 and 7 remain opaque in the current implementation. The observed
-  version 8 is an R3 completion gate; unobserved versions are never guessed.
-- Object placement, sides/teams/build lists, nested scripts, and sibling-map water overrides are
-  decoded. Non-water polygon-trigger semantics remain opaque. Regular road definitions and strips
-  are implemented; road join/curve geometry, bridge and object definitions, static-scenery
-  rendering, real water shadows, and final capture convergence remain WIP.
+- Blend versions other than 6 through 8 remain opaque; unobserved versions are never guessed.
+- Object placement, sides/teams/build lists, nested scripts, sibling-map water overrides, source
+  road topology, initial object draw definitions, intact bridges, and static-scenery rendering are
+  implemented. Non-water polygon-trigger semantics, bridge towers/states, real water shadows, and
+  final capture convergence remain WIP.
 - Version-1 compatibility resampling is not applied.
 - No unobserved version or compression wrapper is assumed to share an established layout.
 - Exact legacy fixed-function custom-edge multipass equations remain outside the established
