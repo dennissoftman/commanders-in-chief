@@ -131,17 +131,21 @@ cargo run -p cic-tools -- map-sides "maps/synthetic/synthetic.map"
 The first command derives `synthetic.png`; the terrain render derives `synthetic-terrain.png`.
 Explicit output paths and directory/BIG mounts remain supported. `map-view` opens a perspective
 flyover: WASD moves, Space/Ctrl changes altitude, Shift boosts, right-drag looks, the wheel moves
-forward/back, R resets, and Escape closes. Terrain rendering defaults to the source-compatible
+forward/back, R resets, M toggles full-scene wireframe where the GPU supports polygon-line mode,
+and Escape closes. Terrain rendering defaults to the source-compatible
 `--terrain-policy legacy`; `modern` keeps stored cliff mappings, disables implicit steep-slope
 retiling, and adds world-anchored macro variation. `--time <seconds>` freezes presentation time for
 repeatable interactive comparison. Custom edge classes render through a separately
 indexed overlay pass. Consecutive road endpoints resolve bounded `Road` definitions and source
-textures into terrain-fitted regular strips with bounded endpoint-edge corner/junction fillers.
+textures into terrain-fitted strips with legacy-radius curves/miters and dedicated atlas
+tee/Y/slanted/four-way junctions plus authored cross-material alpha joins. Road textures retain the
+source three-level mip budget, and a renderer-only depth bias complements the source height lift to
+prevent distant terrain/road depth contention without changing staged world geometry.
 Paired bridge endpoints resolve bounded intact bridge model/scale fields through the same static
-instance path.
-Placed `Object`/`ObjectReskin` definitions resolve default W3D draw states and scale into stable GPU
-instance batches; standalone mesh W3Ds receive a neutral renderer-only root, and ground placements
-sample the exact rendered terrain triangle and add the MAP-authored relative Z offset verbatim,
+instance path. Placed `Object`/`ObjectReskin` definitions resolve `End`-delimited default or
+initial-NONE W3D draw states and scale into stable GPU instance batches; standalone mesh W3Ds
+receive a neutral renderer-only root, and ground placements sample the exact rendered terrain
+triangle and add the MAP-authored relative Z offset verbatim,
 without clamping or an added epsilon. W3D Header3 two-sided flags select static culling. A translucent
 renderer-only fence follows the primary playable boundary and clears the map's highest cliff. The
 viewer resolves terrain and static scenery through a G-buffer, alpha-overlays roads, then draws

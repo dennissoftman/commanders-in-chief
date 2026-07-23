@@ -10,8 +10,10 @@ and anisotropic sampling. Water remains visibly work in progress. Immutable worl
 sides/teams/build-list/script data now decode under explicit limits, and source-order scene staging
 classifies endpoints, scenery, waypoints, and player starts without constructing live objects.
 Bounded `Road` definitions now resolve regular Point1/Point2 pairs into terrain-fitted textured
-strips with deterministic endpoint-edge corner/junction fillers in `map-view`. Bounded initial
-Object draw definitions resolve default W3D models, including standalone meshes, and render
+strips after a stable topology pass inserts legacy-radius curves/miters, dedicated atlas
+tee/Y/slanted/four-way junctions, and authored cross-material alpha caps in `map-view`. Bounded
+initial Object draw definitions resolve `End`-delimited default/initial-NONE W3D models, including
+standalone meshes, and render
 placements composed from the exact rendered terrain triangle plus verbatim authored Z offsets
 through stable GPU instance batches. Header3 two-sided flags now select model culling policy, and
 bounded intact bridge models now stitch and deform named left/span/right sections between paired
@@ -19,7 +21,14 @@ terrain-sampled endpoints. An explicit legacy-preview W3D policy recovers missin
 bad one-past-end hierarchy references, and non-finite UV presentation without weakening strict
 composition. The primary playable boundary is
 visible as a terrain-following translucent fence whose top clears the map's highest terrain. The
-next design sequence is source curve/tee UV continuity, bridge towers/states, explicit-time ambient animation,
+viewer now exposes optional full-scene wireframe on M, limits road textures to the source three mip
+levels, and applies project-authored render depth bias after the source height lift so distant roads
+remain inspectable without changing immutable placement geometry. The
+source-derived MAP scene boundary now has a pinned-source executable test matrix covering every
+modeled constructor/default, function input/output branch, binary structure field, version boundary,
+limit, road topology, and atlas primitive; deliberately unmodeled legacy runtime state is recorded
+as an exclusion rather than assigned speculative values. The
+next design sequence is bridge towers/states, explicit-time ambient animation,
 polygon-area closure, and final water convergence. Scripts
 are inspectable in R3 but cannot be executed until the deterministic simulation boundary begins in
 R5. After R3 closes, R4 will add
@@ -172,11 +181,12 @@ refresh-rate, and UI-scale controls with transactional confirmation/rollback.
 - `cic-inspect map` and `map-height --report` produce stable VFS-backed reports; `map-height`
   writes exact row-major samples as a deterministic 8-bit grayscale PNG by default. The original
   synthetic MAP and BIG completion artifact pass, including version dispatch and negative tests.
-- `BlendTileData` versions 6 and 7 decode into bounded immutable signed tile-index planes, terrain
+- `BlendTileData` versions 6 through 8 decode into bounded immutable signed tile-index planes, terrain
   and edge texture classes, blend selector records, and finite cliff UV records. Version 6 derives
   cliff flags from neighboring heights using the source threshold; version 7 normalizes its stored
-  short-stride bitmap. Source-compatible zero cliff-info counts retain raw zero and produce an
-  empty table. `cic-inspect map-blend` preserves stable source order and exact UV bits.
+  short-stride bitmap; version 8 reads the corrected conventional row stride. Source-compatible zero
+  cliff-info counts retain raw zero and produce an empty table. `cic-inspect map-blend` preserves
+  stable source order and exact UV bits.
 - One user-owned installed RefPack MAP closed at 1,781,076 decompressed bytes as 46 symbols and 8
   chunks; its version-4 380-by-400 height field validated 152,000 samples. Its version-7 blend
   payload validated the same 152,000 cells, 204 bitmap tiles, 7,772 blend table entries, 14 terrain
@@ -216,10 +226,10 @@ refresh-rate, and UI-scale controls with transactional confirmation/rollback.
 - Terrain, custom-edge, and nested-detail pipelines cull clockwise back faces from the established
   counter-clockwise height-field winding. Synthetic headless capture hashes remain unchanged;
   water remains a separately ordered material rather than inheriting terrain culling policy.
-- `PolygonTriggers` versions 2 and 3 now have a bounded water-only decoder that retains stable
-  water/river flags, identifiers, names, seam indices, and integer points while skipping general
-  trigger semantics and allocations for non-water points. Degenerate markers are preserved and
-  safely produce no renderer geometry.
+- `PolygonTriggers` versions 2 through 4 now have a bounded water-only decoder that retains stable
+  water/river flags, identifiers, names, version-4 WorldBuilder layer names, seam indices, and
+  integer points while skipping general trigger semantics and allocations for non-water points.
+  Degenerate markers are preserved and safely produce no renderer geometry.
 - River staging uses the stored seam index exactly as the source renderer does: one bank advances
   through the perimeter while the other retreats with bounded wraparound, producing stable paired
   cross-sections instead of pairing adjacent points on the same bank. Invalid seam metadata safely
@@ -341,12 +351,13 @@ refresh-rate, and UI-scale controls with transactional confirmation/rollback.
   until user-owned observations justify an explicit compatibility policy.
 - MAP wrappers other than the source-established and installed-verified `EAR\0` RefPack form remain
   unsupported rather than guessed.
-- Blend payload versions other than 6 and 7 remain opaque. Version 7's source-defined short
+- Blend payload versions other than 6 through 8 remain opaque. Version 7's source-defined short
   cliff-row stride is normalized with unavailable right-edge flag bits cleared.
 - The custom-edge preview preserves source atlas selection and separate geometry but does not claim
   bit-identical Direct3D 8 multipass blending.
-- The installed Zero Hour Alpine Assault overlay uses unsupported `BlendTileData` version 8; the
-  installed Generals version-7 map remains the verified terrain presentation artifact.
+- The installed Zero Hour Alpine Assault overlay validated `BlendTileData` version 8 at 380 by 400
+  cells with a corrected 48-byte cliff stride. Its optimized `map-view` smoke remained live for 30
+  seconds and staged 198 scenery instances across 70 models without missing or invalid resources.
 - Source standing-water texture/color/blend/opacity and WaterSet sky/environment textures now drive
   the selected appearance, including sibling `Map.ini` overrides. Modern water has bounded
   screen-space/environment reflection inputs and `map-view --time` freezes presentation time, but
@@ -356,18 +367,21 @@ refresh-rate, and UI-scale controls with transactional confirmation/rollback.
   `SidesList`, teams, build lists, and the nested player-script tree now have bounded immutable
   decoders and stable reports. Source-order staging classifies road/bridge endpoints, scenery,
   hidden records, waypoints, and player starts. Regular `Road` definitions now resolve source
-  texture/width inputs and render terrain-fitted strips plus bounded endpoint-edge join polygons in
-  stable MAP order. Initial W3D draw states and reskins now resolve to static model instances whose
-  ground placement includes the MAP border, exact rendered triangle, and authored relative Z, and standalone mesh W3Ds receive
-  a neutral renderer-only root. The boundary fence is
-  renderer-only. Intact TerrainBridge models and Header3-driven static culling are implemented;
-  exact source curve/tee UV insertion, bridge towers/states, explicit-time default-breeze tree
-  animation (without script execution), and
-  non-water polygon semantics remain open.
+  texture/width inputs and render terrain-fitted strips plus bounded source-atlas curve, miter,
+  tee, Y, slanted-tee, four-way, and explicit cross-material alpha-join geometry in stable MAP
+  order. Initial W3D draw states and reskins now resolve `End`-delimited default or initial-NONE
+  states to static model instances whose ground placement includes the MAP border, exact rendered
+  triangle, and authored relative Z; standalone mesh W3Ds receive a neutral renderer-only root. The
+  boundary fence is renderer-only. Intact TerrainBridge models and Header3-driven static culling
+  are implemented; bridge towers/states, explicit-time default-breeze tree animation (without
+  script execution), and non-water polygon semantics remain open.
+  The installed Alpine Assault completion run staged 678 road draws with zero road diagnostics and
+  592 scenery instances across 74 models; its greatest emitted road-triangle edge was an ordinary
+  75.519-unit edge on a 52-unit-wide DirtRoad strip rather than inserted junction geometry.
 
 ## Next verified step
 
-Complete source curve/tee UV continuity and TerrainBridge tower/state presentation, then extend the implemented
+Complete TerrainBridge tower/state presentation, then extend the implemented
 static instance path with explicit-time default `BreezeInfo` tree sway and remaining draw modules;
 decoded `SET_TREE_SWAY` stays data-only until R5. In parallel,
 close water

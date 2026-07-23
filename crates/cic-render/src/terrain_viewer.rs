@@ -7,6 +7,10 @@
 //! project preview remains only as an explicit fallback for maps without that chunk. A fixed-page
 //! cache composes nested 16/32-texel screen-space detail on the GPU over the stable 8-texel
 //! background. Camera motion changes only residency metadata; it never launches CPU texture bakes.
+//! Road texture mip count follows `W3DRoadBuffer.cpp` in `GeneralsGameCode` revision
+//! `9f7abb866f5afd446db14149979e744c7216baaf`, licensed under GPL-3.0-or-later with Electronic
+//! Arts Section 7 terms. Polygon-line diagnostics and depth bias are project-authored modern GPU
+//! policy; see `docs/provenance/map.md`.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -41,11 +45,18 @@ const TERRAIN_CELL_WORLD_SIZE: f32 = 10.0;
 const DETAIL_SCREEN_OVERSAMPLE: f32 = 1.75;
 const DETAIL_FADE_START_RATIO: f32 = 0.78;
 const CAMERA_VELOCITY_RESPONSE: f32 = 8.0;
+const SOURCE_ROAD_MIP_LEVELS: usize = 3;
+const ROAD_DEPTH_BIAS: wgpu::DepthBiasState = wgpu::DepthBiasState {
+    constant: -2,
+    slope_scale: -1.0,
+    clamp: 0.0,
+};
 
 /// Opens a perspective terrain viewer with keyboard flight and right-drag mouse look.
 ///
 /// W/S move forward/back, A/D strafe, Space/Ctrl move vertically, Shift boosts speed, right mouse
-/// drag looks around, the wheel moves along the view direction, R resets, and Escape closes.
+/// drag looks around, the wheel moves along the view direction, R resets, M toggles wireframe when
+/// supported by the adapter, and Escape closes.
 ///
 /// # Errors
 ///
@@ -264,6 +275,7 @@ struct TerrainViewerApplication {
     previous_frame: Instant,
     presentation_seconds: f32,
     fixed_frame: Option<MapPresentationFrame>,
+    wireframe: bool,
     error: Option<ViewerError>,
 }
 
@@ -305,17 +317,18 @@ impl TerrainViewerApplication {
             previous_frame: Instant::now(),
             presentation_seconds: fixed_frame.map_or(0.0, MapPresentationFrame::seconds),
             fixed_frame,
+            wireframe: false,
             error: None,
         })
     }
 
+    fn window_title(&self, wireframe_available: bool) -> String {
+        terrain_viewer_title(&self.title, self.wireframe, wireframe_available)
+    }
+
     fn initialize(&mut self, event_loop: &ActiveEventLoop) -> Result<(), ViewerError> {
-        let title = format!(
-            "{} | WASD fly, Space/Ctrl vertical, Shift boost, RMB look, wheel move, R reset, Esc close",
-            self.title
-        );
         let attributes = Window::default_attributes()
-            .with_title(title)
+            .with_title(self.window_title(true))
             .with_inner_size(LogicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT));
         let window = Arc::new(
             event_loop
@@ -340,6 +353,7 @@ impl TerrainViewerApplication {
                 lighting: self.lighting,
             },
         ))?;
+        window.set_title(&self.window_title(gpu.wireframe_available()));
         self.window = Some(window);
         self.gpu = Some(gpu);
         self.previous_frame = Instant::now();
@@ -414,6 +428,17 @@ impl ApplicationHandler for TerrainViewerApplication {
                     match code {
                         KeyCode::Escape => event_loop.exit(),
                         KeyCode::KeyR => self.camera = self.initial_camera,
+                        KeyCode::KeyM
+                            if self
+                                .gpu
+                                .as_ref()
+                                .is_some_and(TerrainViewerGpu::wireframe_available) =>
+                        {
+                            self.wireframe = !self.wireframe;
+                            if let Some(window) = &self.window {
+                                window.set_title(&self.window_title(true));
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -462,7 +487,7 @@ impl ApplicationHandler for TerrainViewerApplication {
                 self.camera.update(self.input, seconds);
                 let result = self.refresh_detail().and_then(|()| {
                     self.gpu.as_mut().map_or(Ok(()), |gpu| {
-                        gpu.render(self.camera, self.presentation_seconds)
+                        gpu.render(self.camera, self.presentation_seconds, self.wireframe)
                     })
                 });
                 if let Err(error) = result {
@@ -478,6 +503,18 @@ impl ApplicationHandler for TerrainViewerApplication {
             window.request_redraw();
         }
     }
+}
+
+fn terrain_viewer_title(title: &str, wireframe: bool, wireframe_available: bool) -> String {
+    let mode = if wireframe { " [wireframe]" } else { "" };
+    let wireframe_help = if wireframe_available {
+        "M wireframe, "
+    } else {
+        ""
+    };
+    format!(
+        "{title}{mode} | WASD fly, Space/Ctrl vertical, Shift boost, RMB look, wheel move, R reset, {wireframe_help}Esc close"
+    )
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -787,6 +824,7 @@ struct TerrainViewerGpu {
     lighting_pipeline: wgpu::RenderPipeline,
     composite_pipeline: wgpu::RenderPipeline,
     water_pipeline: wgpu::RenderPipeline,
+    wireframe_pipelines: Option<WireframePipelines>,
     lighting_layout: wgpu::BindGroupLayout,
     composite_layout: wgpu::BindGroupLayout,
     water_layout: wgpu::BindGroupLayout,
@@ -810,6 +848,15 @@ struct TerrainViewerGpu {
     deferred: DeferredTargets,
     config: wgpu::SurfaceConfiguration,
     window: Arc<Window>,
+}
+
+struct WireframePipelines {
+    terrain: wgpu::RenderPipeline,
+    edge: wgpu::RenderPipeline,
+    road: wgpu::RenderPipeline,
+    scenery: StaticSceneryPipelines,
+    boundary: wgpu::RenderPipeline,
+    water: wgpu::RenderPipeline,
 }
 
 struct TerrainViewerScene<'a> {
@@ -1672,7 +1719,7 @@ fn create_road_gpu(
     let mut bind_groups = Vec::with_capacity(roads.materials().len());
     for material in roads.materials() {
         let source = material.texture();
-        let mips = generate_srgb_mips(source.width(), source.height(), source.rgba())?;
+        let mips = source_road_mips(source.width(), source.height(), source.rgba())?;
         let texture = upload_mipmapped_terrain_texture(
             device,
             queue,
@@ -1741,6 +1788,16 @@ fn create_road_gpu(
         )?,
         draws,
     }))
+}
+
+fn source_road_mips(
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+) -> Result<Vec<TerrainMipLevel>, ViewerError> {
+    let mut mips = generate_srgb_mips(width, height, rgba)?;
+    mips.truncate(SOURCE_ROAD_MIP_LEVELS.saturating_sub(1));
+    Ok(mips)
 }
 
 fn create_boundary_gpu(
@@ -1880,9 +1937,17 @@ impl TerrainViewerGpu {
             })
             .await
             .map_err(RenderError::RequestAdapter)?;
+        let wireframe_available = adapter
+            .features()
+            .contains(wgpu::Features::POLYGON_MODE_LINE);
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("cic-render terrain viewer device"),
+                required_features: if wireframe_available {
+                    wgpu::Features::POLYGON_MODE_LINE
+                } else {
+                    wgpu::Features::empty()
+                },
                 ..Default::default()
             })
             .await
@@ -1914,18 +1979,26 @@ impl TerrainViewerGpu {
             &shader,
             &pipeline_layout,
             "cic-render terrain viewer pipeline",
-            None,
-            true,
-            true,
+            TerrainPipelineOptions {
+                blend: None,
+                depth_write: true,
+                write_geometry: true,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                depth_bias: wgpu::DepthBiasState::default(),
+            },
         );
         let edge_pipeline = create_terrain_pipeline(
             &device,
             &shader,
             &pipeline_layout,
             "cic-render terrain viewer edge pipeline",
-            Some(wgpu::BlendState::ALPHA_BLENDING),
-            false,
-            false,
+            TerrainPipelineOptions {
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                depth_write: false,
+                write_geometry: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                depth_bias: wgpu::DepthBiasState::default(),
+            },
         );
         let road_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cic-render road viewer shader"),
@@ -1936,9 +2009,13 @@ impl TerrainViewerGpu {
             &road_shader,
             &pipeline_layout,
             "cic-render terrain-fitted road pipeline",
-            Some(wgpu::BlendState::ALPHA_BLENDING),
-            false,
-            false,
+            TerrainPipelineOptions {
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                depth_write: false,
+                write_geometry: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                depth_bias: ROAD_DEPTH_BIAS,
+            },
         );
         let boundary_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cic-render boundary fence shader"),
@@ -1955,6 +2032,8 @@ impl TerrainViewerGpu {
             &boundary_shader,
             &boundary_pipeline_layout,
             config.format,
+            "cic-render boundary fence pipeline",
+            wgpu::PolygonMode::Fill,
         );
         let static_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cic-render static scenery shader"),
@@ -1966,8 +2045,12 @@ impl TerrainViewerGpu {
                 bind_group_layouts: &[Some(&material_layout), Some(&boundary_layout)],
                 immediate_size: 0,
             });
-        let static_pipelines =
-            create_static_scenery_pipelines(&device, &static_shader, &static_pipeline_layout);
+        let static_pipelines = create_static_scenery_pipelines(
+            &device,
+            &static_shader,
+            &static_pipeline_layout,
+            wgpu::PolygonMode::Fill,
+        );
         let deferred_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cic-render deferred resolve shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("terrain_deferred.wgsl").into()),
@@ -1998,7 +2081,73 @@ impl TerrainViewerGpu {
             &water_layout,
             config.format,
             scene.water_appearance.additive_blending(),
+            "cic-render forward water pipeline",
+            wgpu::PolygonMode::Fill,
         );
+        let wireframe_pipelines = wireframe_available.then(|| WireframePipelines {
+            terrain: create_terrain_pipeline(
+                &device,
+                &shader,
+                &pipeline_layout,
+                "cic-render terrain wireframe pipeline",
+                TerrainPipelineOptions {
+                    blend: None,
+                    depth_write: true,
+                    write_geometry: true,
+                    polygon_mode: wgpu::PolygonMode::Line,
+                    depth_bias: wgpu::DepthBiasState::default(),
+                },
+            ),
+            edge: create_terrain_pipeline(
+                &device,
+                &shader,
+                &pipeline_layout,
+                "cic-render terrain edge wireframe pipeline",
+                TerrainPipelineOptions {
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    depth_write: false,
+                    write_geometry: false,
+                    polygon_mode: wgpu::PolygonMode::Line,
+                    depth_bias: wgpu::DepthBiasState::default(),
+                },
+            ),
+            road: create_terrain_pipeline(
+                &device,
+                &road_shader,
+                &pipeline_layout,
+                "cic-render road wireframe pipeline",
+                TerrainPipelineOptions {
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    depth_write: false,
+                    write_geometry: false,
+                    polygon_mode: wgpu::PolygonMode::Line,
+                    depth_bias: ROAD_DEPTH_BIAS,
+                },
+            ),
+            scenery: create_static_scenery_pipelines(
+                &device,
+                &static_shader,
+                &static_pipeline_layout,
+                wgpu::PolygonMode::Line,
+            ),
+            boundary: create_boundary_pipeline(
+                &device,
+                &boundary_shader,
+                &boundary_pipeline_layout,
+                config.format,
+                "cic-render boundary wireframe pipeline",
+                wgpu::PolygonMode::Line,
+            ),
+            water: create_water_pipeline(
+                &device,
+                &water_shader,
+                &water_layout,
+                config.format,
+                scene.water_appearance.additive_blending(),
+                "cic-render water wireframe pipeline",
+                wgpu::PolygonMode::Line,
+            ),
+        });
 
         let texture_mips = generate_srgb_mips(
             terrain.texture_width(),
@@ -2194,6 +2343,7 @@ impl TerrainViewerGpu {
             lighting_pipeline,
             composite_pipeline,
             water_pipeline,
+            wireframe_pipelines,
             lighting_layout,
             composite_layout,
             water_layout,
@@ -2218,6 +2368,10 @@ impl TerrainViewerGpu {
             config,
             window,
         })
+    }
+
+    fn wireframe_available(&self) -> bool {
+        self.wireframe_pipelines.is_some()
     }
 
     fn update_virtual_residency(
@@ -2252,6 +2406,7 @@ impl TerrainViewerGpu {
         &mut self,
         camera: TerrainCamera,
         presentation_seconds: f32,
+        wireframe: bool,
     ) -> Result<(), ViewerError> {
         if self.window.inner_size().width == 0 || self.window.inner_size().height == 0 {
             return Ok(());
@@ -2323,6 +2478,9 @@ impl TerrainViewerGpu {
                 label: Some("cic-render terrain viewer encoder"),
             });
         self.virtual_terrain.encode(&mut encoder);
+        let wireframe_pipelines = wireframe
+            .then_some(self.wireframe_pipelines.as_ref())
+            .flatten();
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("cic-render terrain G-buffer pass"),
@@ -2352,19 +2510,25 @@ impl TerrainViewerGpu {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&self.pipeline);
+            pass.set_pipeline(
+                wireframe_pipelines.map_or(&self.pipeline, |pipelines| &pipelines.terrain),
+            );
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..self.index_count, 0, 0..1);
             if let Some(edge_index_buffer) = &self.edge_index_buffer {
-                pass.set_pipeline(&self.edge_pipeline);
+                pass.set_pipeline(
+                    wireframe_pipelines.map_or(&self.edge_pipeline, |pipelines| &pipelines.edge),
+                );
                 pass.set_bind_group(0, &self.edge_bind_group, &[]);
                 pass.set_index_buffer(edge_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..self.edge_index_count, 0, 0..1);
             }
             if let Some(roads) = &self.roads {
-                pass.set_pipeline(&self.road_pipeline);
+                pass.set_pipeline(
+                    wireframe_pipelines.map_or(&self.road_pipeline, |pipelines| &pipelines.road),
+                );
                 pass.set_vertex_buffer(0, roads.vertex_buffer.slice(..));
                 pass.set_index_buffer(roads.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 for draw in &roads.draws {
@@ -2397,7 +2561,9 @@ impl TerrainViewerGpu {
                             .first_index
                             .checked_add(draw.index_count)
                             .ok_or(RenderError::GeometryTooLarge)?;
-                        pass.set_pipeline(self.static_pipelines.get(
+                        let scenery_pipelines = wireframe_pipelines
+                            .map_or(&self.static_pipelines, |pipelines| &pipelines.scenery);
+                        pass.set_pipeline(scenery_pipelines.get(
                             material.blend,
                             material.depth_write,
                             material.two_sided,
@@ -2454,7 +2620,10 @@ impl TerrainViewerGpu {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&self.boundary_pipeline);
+            pass.set_pipeline(
+                wireframe_pipelines
+                    .map_or(&self.boundary_pipeline, |pipelines| &pipelines.boundary),
+            );
             pass.set_bind_group(0, &boundary.bind_group, &[]);
             pass.set_vertex_buffer(0, boundary.vertex_buffer.slice(..));
             pass.set_index_buffer(boundary.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
@@ -2476,7 +2645,9 @@ impl TerrainViewerGpu {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&self.water_pipeline);
+            pass.set_pipeline(
+                wireframe_pipelines.map_or(&self.water_pipeline, |pipelines| &pipelines.water),
+            );
             pass.set_bind_group(0, &self.deferred.water_bind_group, &[]);
             pass.set_vertex_buffer(0, water.vertex_buffer.slice(..));
             pass.set_index_buffer(water.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
@@ -2512,6 +2683,7 @@ fn create_static_scenery_pipelines(
     device: &wgpu::Device,
     shader: &wgpu::ShaderModule,
     layout: &wgpu::PipelineLayout,
+    polygon_mode: wgpu::PolygonMode,
 ) -> StaticSceneryPipelines {
     StaticSceneryPipelines {
         opaque: create_static_scenery_pipeline_pair(
@@ -2521,6 +2693,7 @@ fn create_static_scenery_pipelines(
             "cic-render static scenery opaque pipeline",
             None,
             true,
+            polygon_mode,
         ),
         overlay: create_static_scenery_pipeline_pair(
             device,
@@ -2529,6 +2702,7 @@ fn create_static_scenery_pipelines(
             "cic-render static scenery overlay pipeline",
             None,
             false,
+            polygon_mode,
         ),
         alpha: create_static_scenery_pipeline_pair(
             device,
@@ -2537,6 +2711,7 @@ fn create_static_scenery_pipelines(
             "cic-render static scenery alpha pipeline",
             Some(wgpu::BlendState::ALPHA_BLENDING),
             false,
+            polygon_mode,
         ),
         additive: create_static_scenery_pipeline_pair(
             device,
@@ -2545,6 +2720,7 @@ fn create_static_scenery_pipelines(
             "cic-render static scenery additive pipeline",
             Some(static_additive_blend()),
             false,
+            polygon_mode,
         ),
         multiply: create_static_scenery_pipeline_pair(
             device,
@@ -2553,6 +2729,7 @@ fn create_static_scenery_pipelines(
             "cic-render static scenery multiply pipeline",
             Some(static_multiply_blend()),
             false,
+            polygon_mode,
         ),
     }
 }
@@ -2566,6 +2743,7 @@ fn create_static_scenery_pipeline(
     blend: Option<wgpu::BlendState>,
     depth_write: bool,
     two_sided: bool,
+    polygon_mode: wgpu::PolygonMode,
 ) -> wgpu::RenderPipeline {
     let targets = terrain_color_targets(blend, true);
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -2633,6 +2811,7 @@ fn create_static_scenery_pipeline(
         }),
         primitive: wgpu::PrimitiveState {
             cull_mode: (!two_sided).then_some(wgpu::Face::Back),
+            polygon_mode,
             ..Default::default()
         },
         depth_stencil: Some(wgpu::DepthStencilState {
@@ -2656,6 +2835,7 @@ fn create_static_scenery_pipeline_pair(
     label: &str,
     blend: Option<wgpu::BlendState>,
     depth_write: bool,
+    polygon_mode: wgpu::PolygonMode,
 ) -> [wgpu::RenderPipeline; 2] {
     [
         create_static_scenery_pipeline(
@@ -2666,6 +2846,7 @@ fn create_static_scenery_pipeline_pair(
             blend,
             depth_write,
             false,
+            polygon_mode,
         ),
         create_static_scenery_pipeline(
             device,
@@ -2675,6 +2856,7 @@ fn create_static_scenery_pipeline_pair(
             blend,
             depth_write,
             true,
+            polygon_mode,
         ),
     ]
 }
@@ -2714,9 +2896,11 @@ fn create_boundary_pipeline(
     shader: &wgpu::ShaderModule,
     layout: &wgpu::PipelineLayout,
     format: wgpu::TextureFormat,
+    label: &str,
+    polygon_mode: wgpu::PolygonMode,
 ) -> wgpu::RenderPipeline {
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("cic-render boundary fence pipeline"),
+        label: Some(label),
         layout: Some(layout),
         vertex: wgpu::VertexState {
             module: shader,
@@ -2751,6 +2935,7 @@ fn create_boundary_pipeline(
         }),
         primitive: wgpu::PrimitiveState {
             cull_mode: None,
+            polygon_mode,
             ..Default::default()
         },
         depth_stencil: Some(wgpu::DepthStencilState {
@@ -2928,16 +3113,23 @@ fn integer_texture_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct TerrainPipelineOptions {
+    blend: Option<wgpu::BlendState>,
+    depth_write: bool,
+    write_geometry: bool,
+    polygon_mode: wgpu::PolygonMode,
+    depth_bias: wgpu::DepthBiasState,
+}
+
 fn create_terrain_pipeline(
     device: &wgpu::Device,
     shader: &wgpu::ShaderModule,
     layout: &wgpu::PipelineLayout,
     label: &str,
-    blend: Option<wgpu::BlendState>,
-    depth_write: bool,
-    write_geometry: bool,
+    options: TerrainPipelineOptions,
 ) -> wgpu::RenderPipeline {
-    let targets = terrain_color_targets(blend, write_geometry);
+    let targets = terrain_color_targets(options.blend, options.write_geometry);
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(label),
         layout: Some(layout),
@@ -2976,14 +3168,15 @@ fn create_terrain_pipeline(
         primitive: wgpu::PrimitiveState {
             front_face: wgpu::FrontFace::Ccw,
             cull_mode: Some(wgpu::Face::Back),
+            polygon_mode: options.polygon_mode,
             ..Default::default()
         },
         depth_stencil: Some(wgpu::DepthStencilState {
             format: wgpu::TextureFormat::Depth32Float,
-            depth_write_enabled: Some(depth_write),
+            depth_write_enabled: Some(options.depth_write),
             depth_compare: Some(wgpu::CompareFunction::LessEqual),
             stencil: wgpu::StencilState::default(),
-            bias: wgpu::DepthBiasState::default(),
+            bias: options.depth_bias,
         }),
         multisample: wgpu::MultisampleState::default(),
         multiview_mask: None,
@@ -3164,6 +3357,8 @@ fn create_water_pipeline(
     water_layout: &wgpu::BindGroupLayout,
     format: wgpu::TextureFormat,
     additive_blending: bool,
+    label: &str,
+    polygon_mode: wgpu::PolygonMode,
 ) -> wgpu::RenderPipeline {
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("cic-render forward water pipeline layout"),
@@ -3171,7 +3366,7 @@ fn create_water_pipeline(
         immediate_size: 0,
     });
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("cic-render forward water pipeline"),
+        label: Some(label),
         layout: Some(&layout),
         vertex: wgpu::VertexState {
             module: shader,
@@ -3210,6 +3405,7 @@ fn create_water_pipeline(
         }),
         primitive: wgpu::PrimitiveState {
             cull_mode: None,
+            polygon_mode,
             ..Default::default()
         },
         depth_stencil: Some(wgpu::DepthStencilState {
@@ -3550,9 +3746,97 @@ fn ray_distance_for_view_depth(
 #[cfg(test)]
 mod tests {
     use super::{
-        TerrainCamera, TerrainInput, gray_mip, look_to, multiply_matrix, perspective,
-        ray_distance_for_view_depth, terrain_color_targets,
+        ROAD_DEPTH_BIAS, SOURCE_ROAD_MIP_LEVELS, TerrainCamera, TerrainInput, gray_mip, look_to,
+        multiply_matrix, perspective, ray_distance_for_view_depth, source_road_mips,
+        terrain_color_targets, terrain_viewer_title,
     };
+
+    #[test]
+    fn road_texture_inputs_keep_at_most_three_total_levels() {
+        assert_eq!(SOURCE_ROAD_MIP_LEVELS, 3);
+        for (width, height, expected) in [
+            (1, 1, &[][..]),
+            (2, 1, &[(1, 1)][..]),
+            (3, 2, &[(1, 1)][..]),
+            (4, 4, &[(2, 2), (1, 1)][..]),
+            (8, 4, &[(4, 2), (2, 1)][..]),
+            (8, 8, &[(4, 4), (2, 2)][..]),
+        ] {
+            let pixels = vec![255; width as usize * height as usize * 4];
+            let mips = source_road_mips(width, height, &pixels).expect("road mips");
+            let dimensions = mips
+                .iter()
+                .map(|mip| (mip.width, mip.height))
+                .collect::<Vec<_>>();
+            assert_eq!(dimensions, expected, "{width}x{height}");
+            assert!(mips.iter().all(|mip| !mip.rgba.is_empty()));
+        }
+
+        assert!(source_road_mips(2, 2, &[255; 15]).is_err());
+        assert!(source_road_mips(0, 2, &[]).is_err());
+    }
+
+    #[test]
+    fn viewer_diagnostic_defaults_and_title_inputs_are_exact() {
+        assert_eq!(ROAD_DEPTH_BIAS.constant, -2);
+        assert_eq!(ROAD_DEPTH_BIAS.slope_scale.to_bits(), (-1.0_f32).to_bits());
+        assert_eq!(ROAD_DEPTH_BIAS.clamp.to_bits(), 0.0_f32.to_bits());
+        assert_eq!(
+            terrain_viewer_title("map", false, false),
+            "map | WASD fly, Space/Ctrl vertical, Shift boost, RMB look, wheel move, R reset, Esc close"
+        );
+        assert_eq!(
+            terrain_viewer_title("map", false, true),
+            "map | WASD fly, Space/Ctrl vertical, Shift boost, RMB look, wheel move, R reset, M wireframe, Esc close"
+        );
+        assert_eq!(
+            terrain_viewer_title("map", true, false),
+            "map [wireframe] | WASD fly, Space/Ctrl vertical, Shift boost, RMB look, wheel move, R reset, Esc close"
+        );
+        assert_eq!(
+            terrain_viewer_title("map", true, true),
+            "map [wireframe] | WASD fly, Space/Ctrl vertical, Shift boost, RMB look, wheel move, R reset, M wireframe, Esc close"
+        );
+    }
+
+    #[test]
+    fn terrain_input_constructor_and_every_key_transition_are_exact() {
+        use winit::keyboard::KeyCode;
+
+        let mut input = TerrainInput::default();
+        assert_eq!(input, TerrainInput(0));
+        let mappings = [
+            (KeyCode::KeyW, TerrainInput::FORWARD),
+            (KeyCode::KeyS, TerrainInput::BACKWARD),
+            (KeyCode::KeyA, TerrainInput::LEFT),
+            (KeyCode::KeyD, TerrainInput::RIGHT),
+            (KeyCode::Space, TerrainInput::UP),
+            (KeyCode::ControlLeft, TerrainInput::DOWN),
+            (KeyCode::ControlRight, TerrainInput::DOWN),
+            (KeyCode::ShiftLeft, TerrainInput::BOOST),
+            (KeyCode::ShiftRight, TerrainInput::BOOST),
+        ];
+        for (key, mask) in mappings {
+            input = TerrainInput::default();
+            input.set(key, true);
+            assert_eq!(input, TerrainInput(mask), "{key:?} press");
+            assert!(input.active(mask));
+            input.set(key, false);
+            assert_eq!(input, TerrainInput::default(), "{key:?} release");
+        }
+
+        input.set(KeyCode::KeyW, true);
+        input.set(KeyCode::KeyS, true);
+        assert_eq!(
+            input,
+            TerrainInput(TerrainInput::FORWARD | TerrainInput::BACKWARD)
+        );
+        input.set(KeyCode::KeyM, true);
+        assert_eq!(
+            input,
+            TerrainInput(TerrainInput::FORWARD | TerrainInput::BACKWARD)
+        );
+    }
 
     #[test]
     fn edge_blending_writes_only_albedo() {

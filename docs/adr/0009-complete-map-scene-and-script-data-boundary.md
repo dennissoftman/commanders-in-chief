@@ -56,9 +56,15 @@ notices, and permanent links are recorded in `docs/provenance/map.md`.
   elevated placements.
 - Static mesh backface policy comes from the decoded W3D Header3 two-sided flag; the renderer
   keeps explicit culled and two-sided pipelines rather than applying one global policy.
-- Road endpoint-edge polygons are a bounded project presentation approximation. Exact source
-  curve/tee topology and UV insertion remain an explicit compatibility task rather than being
-  inferred from the endpoint flags.
+- Road presentation uses a bounded immutable topology pass before terrain tessellation. It groups
+  exact shared endpoints by road material, trims approaches, selects source-radius 30-degree
+  curves or miters, and inserts source-atlas tee, Y, slanted-tee, and four-way meshes. Different
+  materials never share a generic junction fill; only authored open `ROAD_JOIN` endpoints receive
+  the source-atlas cross-material alpha cap.
+- Road textures retain the source three-level mip budget rather than allowing the complete atlas to
+  collapse into a distant average. The source terrain lift remains part of immutable staging; an
+  additional renderer-only depth bias is presentation policy and does not alter persisted or staged
+  world coordinates. Optional polygon-line wireframe is likewise a diagnostic renderer mode.
 - The primary playable boundary may be visualized by a renderer-only translucent fence whose base
   follows terrain and whose common top clears the MAP's greatest height. It conveys the persisted
   extent but does not create collision, navigation, or simulation reachability.

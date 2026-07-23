@@ -6,6 +6,13 @@ All notable user-visible changes are recorded here.
 
 ### Added
 
+- Added a pinned-source MAP scene compatibility matrix and exhaustive synthetic tests for every
+  currently modeled constructor/default, parser input branch, format structure and limit, blend
+  version/stride boundary, water trigger version/filter, road diagnostic/topology/atlas output,
+  road mip shape, viewer input transition, and wireframe/depth-bias diagnostic value.
+- Added source-backed Zero Hour MAP compatibility for `BlendTileData` version 8's corrected cliff
+  bitmap stride and `PolygonTriggers` version 4's bounded WorldBuilder layer name. Synthetic tests
+  cover the stride delta, truncation, limits, and unsupported neighboring versions.
 - Added bounded immutable `WorldInfo`, `ObjectsList`, `SidesList`, build-list, team, and complete
   nested player-script decoders. Stable `map-objects` and `map-sides` reports expose exact scalar
   bits, typed dictionaries, endpoint flags, spawn candidates, and raw script opcodes/parameters
@@ -25,6 +32,8 @@ All notable user-visible changes are recorded here.
   consecutive endpoints. `BRIDGE_LEFT`/`BRIDGE_SPAN`/`BRIDGE_RIGHT` sections repeat and deform onto
   the terrain-sampled sloped axis; damage, repair, collision, towers, and state selection remain
   deferred.
+- Added an on-demand full-scene wireframe diagnostic to `map-view` on M when the selected GPU
+  exposes polygon-line rasterization. Unsupported adapters continue with the normal renderer.
 - Added bounded initial Object draw-definition decoding, reskin inheritance, default W3D model and
   scale selection, standalone static-mesh composition, and GPU-instanced static scenery in
   `map-view`. Placements sample the exact rendered terrain triangle, including MAP border and
@@ -34,6 +43,10 @@ All notable user-visible changes are recorded here.
   its global top clears the map's highest terrain sample without changing pathing or simulation.
 
 ### Changed
+
+- Restored the source road texture's three-level mip budget and handed curve traversal, and added a
+  renderer-only road depth bias on top of the legacy terrain lift. This avoids whole-atlas distant
+  mip collapse and reduces road/terrain Z-fighting without mutating staged road coordinates.
 
 - Documented the repository-wide Zero Hour layering invariant: enumerate and mount Generals first,
   apply Zero Hour second and mods last; replacement resources use the winner while cumulative
@@ -50,6 +63,15 @@ All notable user-visible changes are recorded here.
   spawn candidates.
 
 ### Fixed
+
+- Road and railroad intersections no longer stretch each approach texture across a generic shared
+  fan. A deterministic topology pass now trims connected strips and uses legacy curve/miter and
+  tee/Y/slanted/four-way atlas geometry. Different materials stay isolated unless an open endpoint
+  explicitly requests the legacy alpha-join cap.
+- Initial map objects whose W3D draw fields are aligned with their `Draw` declaration now render.
+  The bounded parser follows `End`-delimited modules and recognizes the source-equivalent first
+  `ConditionState = NONE`, restoring supply docks/stashes, command centers, and similarly authored
+  campaign structures without constructing gameplay objects.
 
 - `map-view` now uses an explicit legacy-preview W3D recovery policy for damaged shipped assets:
   missing optional HLOD meshes are skipped, invalid one-past-end HLOD/skin references fall back to
@@ -200,10 +222,10 @@ All notable user-visible changes are recorded here.
   allocation, and sample-cardinality checks plus stable row-major `cic-inspect map-height` output.
 - Added deterministic 8-bit grayscale PNG export to `cic-inspect map-height --png` with exact
   stored sample order and no color-space transform.
-- Added bounded immutable `BlendTileData` version-6/7 tile planes, version-6 source-equivalent
-  height-derived cliff flags, version-7 legacy cliff-bitmap normalization, terrain and edge texture
-  classes, blend records, and cliff UV records, plus a stable VFS-backed `cic-inspect map-blend`
-  report.
+- Added bounded immutable `BlendTileData` version-6/7/8 tile planes, version-6 source-equivalent
+  height-derived cliff flags, version-7 legacy cliff-bitmap normalization, version-8 corrected
+  cliff rows, terrain and edge texture classes, blend records, and cliff UV records, plus a stable
+  VFS-backed `cic-inspect map-blend` report.
 - Added an original versioned MAP fixture, negative parser tests, a synthetic BIG-backed completion
   artifact, and a bounded MAP fuzz target.
 - `cic-inspect map-height` now writes a basename-derived grayscale PNG by default; `--report`

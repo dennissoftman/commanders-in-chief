@@ -1,4 +1,4 @@
-//! Bounded water-only decoding from MAP `PolygonTriggers` versions 2 and 3.
+//! Bounded water-only decoding from MAP `PolygonTriggers` versions 2 through 4.
 //!
 //! The field order and water/river flags are derived from `PolygonTrigger.cpp` and
 //! `PolygonTrigger.h` in `GeneralsGameCode` revision
@@ -31,6 +31,7 @@ impl MapWaterPoint {
 pub struct MapWaterArea {
     source_index: u32,
     name: Vec<u8>,
+    layer_name: Vec<u8>,
     trigger_id: i32,
     river: bool,
     river_start: i32,
@@ -47,6 +48,11 @@ impl MapWaterArea {
     #[must_use]
     pub fn name_bytes(&self) -> &[u8] {
         &self.name
+    }
+    /// Returns the source `WorldBuilder` layer-name bytes, empty before version 4.
+    #[must_use]
+    pub fn layer_name_bytes(&self) -> &[u8] {
+        &self.layer_name
     }
     /// Returns the source trigger identifier.
     #[must_use]
@@ -158,7 +164,7 @@ impl From<BinaryError> for MapWaterError {
 /// malformed, over a configured limit, or does not close exactly.
 pub fn decode_map_water(map: &MapFile, limits: MapLimits) -> Result<MapWaterData, MapWaterError> {
     let chunk = water_chunk(map)?;
-    if !(2..=3).contains(&chunk.version()) {
+    if !(2..=4).contains(&chunk.version()) {
         return Err(MapWaterError::UnsupportedVersion(chunk.version()));
     }
     let mut reader = BinaryReader::new(
@@ -181,6 +187,17 @@ pub fn decode_map_water(map: &MapFile, limits: MapLimits) -> Result<MapWaterData
             limits.maximum_trigger_name_bytes,
         )?;
         let name = reader.read_exact(name_length)?.to_vec();
+        let layer_name = if chunk.version() >= 4 {
+            let length = usize::from(reader.read_u16_le()?);
+            enforce_limit(
+                "MAP polygon trigger layer name length",
+                length,
+                limits.maximum_trigger_name_bytes,
+            )?;
+            reader.read_exact(length)?.to_vec()
+        } else {
+            Vec::new()
+        };
         let trigger_id = read_i32(&mut reader)?;
         let is_water = reader.read_u8()? != 0;
         let (river, river_start) = if chunk.version() >= 3 {
@@ -229,6 +246,7 @@ pub fn decode_map_water(map: &MapFile, limits: MapLimits) -> Result<MapWaterData
         areas.push(MapWaterArea {
             source_index,
             name,
+            layer_name,
             trigger_id,
             river,
             river_start,
@@ -286,6 +304,8 @@ fn enforce_limit(what: &'static str, actual: usize, maximum: usize) -> Result<()
 
 #[cfg(test)]
 mod tests {
+    use cic_core::BinaryError;
+
     use super::{MapWaterError, decode_map_water};
     use crate::{MapLimits, parse_map};
 
@@ -307,10 +327,26 @@ mod tests {
     }
 
     fn payload(version: u16) -> Vec<u8> {
+        payload_with_names(version, b"river", b"Water")
+    }
+
+    fn payload_with_names(version: u16, name: &[u8], layer_name: &[u8]) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&1_i32.to_le_bytes());
-        bytes.extend_from_slice(&5_u16.to_le_bytes());
-        bytes.extend_from_slice(b"river");
+        bytes.extend_from_slice(
+            &u16::try_from(name.len())
+                .expect("test name length")
+                .to_le_bytes(),
+        );
+        bytes.extend_from_slice(name);
+        if version >= 4 {
+            bytes.extend_from_slice(
+                &u16::try_from(layer_name.len())
+                    .expect("test layer length")
+                    .to_le_bytes(),
+            );
+            bytes.extend_from_slice(layer_name);
+        }
         bytes.extend_from_slice(&9_i32.to_le_bytes());
         bytes.push(1);
         if version >= 3 {
@@ -326,9 +362,14 @@ mod tests {
         bytes
     }
 
+    fn decode(bytes: &[u8], limits: MapLimits) -> Result<super::MapWaterData, MapWaterError> {
+        let parsed = parse_map(bytes, "water.map", limits).expect("inventory");
+        decode_map_water(&parsed, limits)
+    }
+
     #[test]
     fn retains_water_and_dispatches_versions() {
-        for version in [2, 3] {
+        for version in [2, 3, 4] {
             let map = parse_map(
                 &map(version, &payload(version)),
                 "water.map",
@@ -339,16 +380,77 @@ mod tests {
             assert_eq!(water.version(), version);
             assert_eq!(water.source_trigger_count(), 1);
             assert_eq!(water.areas()[0].points()[2].coordinates(), [20, 0, 5]);
-            assert_eq!(water.areas()[0].is_river(), version == 3);
+            assert_eq!(water.areas()[0].is_river(), version >= 3);
+            assert_eq!(
+                water.areas()[0].layer_name_bytes(),
+                if version == 4 {
+                    b"Water".as_slice()
+                } else {
+                    b"".as_slice()
+                }
+            );
         }
     }
 
     #[test]
+    fn version_defaults_and_v4_structure_match_the_source_reader() {
+        let version_two = decode(&map(2, &payload(2)), MapLimits::default()).expect("version two");
+        let area = &version_two.areas()[0];
+        assert!(!area.is_river());
+        assert_eq!(area.river_start(), 0);
+        assert!(area.layer_name_bytes().is_empty());
+
+        let version_three =
+            decode(&map(3, &payload(3)), MapLimits::default()).expect("version three");
+        assert!(version_three.areas()[0].layer_name_bytes().is_empty());
+
+        let version_four_payload = payload(4);
+        assert_eq!(
+            version_four_payload.len(),
+            payload(3).len() + 2 + b"Water".len()
+        );
+        let version_four =
+            decode(&map(4, &version_four_payload), MapLimits::default()).expect("version four");
+        let area = &version_four.areas()[0];
+        assert_eq!(area.source_index(), 0);
+        assert_eq!(area.name_bytes(), b"river");
+        assert_eq!(area.layer_name_bytes(), b"Water");
+        assert_eq!(area.trigger_id(), 9);
+        assert!(area.is_river());
+        assert_eq!(area.river_start(), 1);
+        assert_eq!(
+            area.points()
+                .iter()
+                .map(|point| point.coordinates())
+                .collect::<Vec<_>>(),
+            [[0, 0, 5], [0, 10, 5], [20, 0, 5], [20, 10, 5]]
+        );
+    }
+
+    #[test]
+    fn nonwater_records_are_skipped_without_renumbering_water_sources() {
+        let source = payload(4);
+        let record = &source[4..];
+        let mut nonwater = record.to_vec();
+        nonwater[18] = 0;
+        let mut two_records = 2_i32.to_le_bytes().to_vec();
+        two_records.extend_from_slice(&nonwater);
+        two_records.extend_from_slice(record);
+
+        let water =
+            decode(&map(4, &two_records), MapLimits::default()).expect("mixed polygon triggers");
+        assert_eq!(water.source_trigger_count(), 2);
+        assert_eq!(water.areas().len(), 1);
+        assert_eq!(water.areas()[0].source_index(), 1);
+        assert_eq!(water.areas()[0].name_bytes(), b"river");
+    }
+
+    #[test]
     fn rejects_every_truncated_payload_and_unestablished_version() {
-        let complete = payload(3);
+        let complete = payload(4);
         for length in 0..complete.len() {
             let parsed = parse_map(
-                &map(3, &complete[..length]),
+                &map(4, &complete[..length]),
                 "truncated.map",
                 MapLimits::default(),
             )
@@ -362,6 +464,62 @@ mod tests {
         assert_eq!(
             decode_map_water(&parsed, MapLimits::default()),
             Err(MapWaterError::UnsupportedVersion(1))
+        );
+        let parsed = parse_map(&map(5, &[]), "v5.map", MapLimits::default()).expect("inventory");
+        assert_eq!(
+            decode_map_water(&parsed, MapLimits::default()),
+            Err(MapWaterError::UnsupportedVersion(5))
+        );
+    }
+
+    #[test]
+    fn rejects_missing_duplicate_negative_and_trailing_structures() {
+        let mut missing = map(4, &payload(4));
+        missing[9] = b'X';
+        let parsed =
+            parse_map(&missing, "missing.map", MapLimits::default()).expect("other inventory");
+        assert_eq!(
+            decode_map_water(&parsed, MapLimits::default()),
+            Err(MapWaterError::MissingPolygonTriggers)
+        );
+
+        let mut duplicate = map(4, &payload(4));
+        let chunk_offset = 4 + 4 + 1 + b"PolygonTriggers".len() + 4;
+        duplicate.extend_from_within(chunk_offset..);
+        assert_eq!(
+            decode(&duplicate, MapLimits::default()),
+            Err(MapWaterError::DuplicatePolygonTriggers)
+        );
+
+        let mut negative_count = payload(4);
+        negative_count[..4].copy_from_slice(&(-1_i32).to_le_bytes());
+        assert_eq!(
+            decode(&map(4, &negative_count), MapLimits::default()),
+            Err(MapWaterError::NegativeValue {
+                field: "trigger count",
+                value: -1
+            })
+        );
+
+        let mut negative_points = payload(4);
+        negative_points[28..32].copy_from_slice(&(-1_i32).to_le_bytes());
+        assert_eq!(
+            decode(&map(4, &negative_points), MapLimits::default()),
+            Err(MapWaterError::NegativeValue {
+                field: "point count",
+                value: -1
+            })
+        );
+
+        let mut trailing = map(4, &payload(4));
+        trailing.push(0xAA);
+        let payload_length_offset = chunk_offset + 6;
+        let new_length = i32::try_from(payload(4).len() + 1).expect("payload length");
+        trailing[payload_length_offset..payload_length_offset + 4]
+            .copy_from_slice(&new_length.to_le_bytes());
+        assert_eq!(
+            decode(&trailing, MapLimits::default()),
+            Err(MapWaterError::TrailingBytes(1))
         );
     }
 
@@ -380,6 +538,47 @@ mod tests {
             )
             .is_err()
         );
+        for (limits, what) in [
+            (
+                MapLimits {
+                    maximum_trigger_name_bytes: 4,
+                    ..MapLimits::default()
+                },
+                "name/layer",
+            ),
+            (
+                MapLimits {
+                    maximum_polygon_points: 3,
+                    ..MapLimits::default()
+                },
+                "points",
+            ),
+            (
+                MapLimits {
+                    maximum_water_points: 3,
+                    ..MapLimits::default()
+                },
+                "retained points",
+            ),
+        ] {
+            assert!(
+                matches!(
+                    decode(&map(4, &payload(4)), limits),
+                    Err(MapWaterError::Binary(BinaryError::LimitExceeded { .. }))
+                ),
+                "{what} limit unexpectedly accepted"
+            );
+        }
+        assert!(matches!(
+            decode(
+                &map(4, &payload_with_names(4, b"road", b"Water")),
+                MapLimits {
+                    maximum_trigger_name_bytes: 4,
+                    ..MapLimits::default()
+                }
+            ),
+            Err(MapWaterError::Binary(BinaryError::LimitExceeded { .. }))
+        ));
         let mut degenerate = complete;
         degenerate[21..25].copy_from_slice(&0_i32.to_le_bytes());
         degenerate.truncate(25);
