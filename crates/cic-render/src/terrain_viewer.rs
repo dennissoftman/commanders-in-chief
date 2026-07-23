@@ -4265,7 +4265,9 @@ mod tests {
         let renderer = match pollster::block_on(crate::HeadlessRenderer::new()) {
             Ok(renderer) => renderer,
             Err(crate::RenderError::RequestAdapter(error)) => {
-                eprintln!("skipping deferred pipeline layout check without a headless adapter: {error}");
+                eprintln!(
+                    "skipping deferred pipeline layout check without a headless adapter: {error}"
+                );
                 return;
             }
             Err(error) => panic!("initializing headless renderer: {error}"),
