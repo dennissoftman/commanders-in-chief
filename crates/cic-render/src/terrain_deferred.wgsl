@@ -104,50 +104,59 @@ fn lighting_fragment(input: FullscreenOutput) -> @location(0) vec4<f32> {
 @group(1) @binding(0) var scene_color: texture_2d<f32>;
 @group(1) @binding(1) var scene_sampler: sampler;
 
-fn luma(color: vec3<f32>) -> f32 {
-    return dot(color, vec3<f32>(0.299, 0.587, 0.114));
+fn reinhard(hdr: vec3<f32>) -> vec3<f32> {
+    return hdr / (vec3<f32>(1.0) + hdr);
 }
+
+// A contrast-adaptive sharpen in the spirit of AMD FidelityFX CAS: it boosts an unsharp-mask
+// style detail term by an amount that scales down toward zero both near luminance extremes
+// (avoids blooming/crushing) and at genuinely hard edges (avoids ringing on the very silhouette
+// edges MSAA already resolved), so it only restores softer mid-contrast detail lost to mip/
+// texture filtering — real MSAA has already handled geometric edge aliasing by this point.
+const SHARPEN_STRENGTH: f32 = 0.6;
 
 @fragment
 fn composite_fragment(input: FullscreenOutput) -> @location(0) vec4<f32> {
     let inverse_viewport = 1.0 / light_camera.viewport.xy;
     let uv = (input.position.xy + vec2<f32>(0.5)) * inverse_viewport;
-    let center = textureSampleLevel(scene_color, scene_sampler, uv, 0.0).rgb;
-    let north = textureSampleLevel(
+    let center = reinhard(textureSampleLevel(scene_color, scene_sampler, uv, 0.0).rgb);
+    let north = reinhard(textureSampleLevel(
         scene_color,
         scene_sampler,
         uv + vec2<f32>(0.0, -inverse_viewport.y),
         0.0
-    ).rgb;
-    let south = textureSampleLevel(
+    ).rgb);
+    let south = reinhard(textureSampleLevel(
         scene_color,
         scene_sampler,
         uv + vec2<f32>(0.0, inverse_viewport.y),
         0.0
-    ).rgb;
-    let west = textureSampleLevel(
+    ).rgb);
+    let west = reinhard(textureSampleLevel(
         scene_color,
         scene_sampler,
         uv + vec2<f32>(-inverse_viewport.x, 0.0),
         0.0
-    ).rgb;
-    let east = textureSampleLevel(
+    ).rgb);
+    let east = reinhard(textureSampleLevel(
         scene_color,
         scene_sampler,
         uv + vec2<f32>(inverse_viewport.x, 0.0),
         0.0
-    ).rgb;
-    let center_luma = luma(center);
-    let minimum_luma = min(center_luma, min(min(luma(north), luma(south)), min(luma(west), luma(east))));
-    let maximum_luma = max(center_luma, max(max(luma(north), luma(south)), max(luma(west), luma(east))));
-    let contrast = maximum_luma - minimum_luma;
-    let edge_strength = smoothstep(
-        max(0.0312, maximum_luma * 0.125),
-        max(0.0625, maximum_luma * 0.25),
-        contrast
-    );
-    let neighbors = (north + south + west + east) * 0.25;
-    let hdr = mix(center, neighbors, edge_strength * 0.75);
-    let mapped = hdr / (vec3<f32>(1.0) + hdr);
-    return vec4<f32>(mapped, 1.0);
+    ).rgb);
+    let minimum = min(center, min(min(north, south), min(west, east)));
+    let maximum = max(center, max(max(north, south), max(west, east)));
+    let peak = min(minimum, vec3<f32>(1.0) - maximum) / max(maximum, vec3<f32>(0.001));
+    let amplitude = sqrt(clamp(peak, vec3<f32>(0.0), vec3<f32>(1.0))) * SHARPEN_STRENGTH;
+    let neighbor_average = (north + south + west + east) * 0.25;
+    let sharpened = center + (center - neighbor_average) * amplitude;
+    return vec4<f32>(clamp(sharpened, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+}
+
+@group(0) @binding(7) var gbuffer_depth_ms: texture_depth_multisampled_2d;
+
+@fragment
+fn depth_resolve_fragment(input: FullscreenOutput) -> @builtin(frag_depth) f32 {
+    let pixel = vec2<i32>(input.position.xy);
+    return textureLoad(gbuffer_depth_ms, pixel, 0);
 }
