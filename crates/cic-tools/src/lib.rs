@@ -10,8 +10,8 @@ use std::fmt::Write;
 use cic_formats::{
     CsfFile, MapBlendData, MapDictionary, MapDictionaryValue, MapFile, MapHeightField,
     MapLightingData, MapPolygonData, MapScript, MapScriptAction, MapScriptParameterValue,
-    MapSidesData, MapWaterData, MapWorldObjects, W3dChunk, W3dFile, W3dStaticMesh, W3dVector3,
-    w3d_chunk_name,
+    MapSidesData, MapWaterData, MapWorldObjects, OptionsIni, W3dChunk, W3dFile, W3dStaticMesh,
+    W3dVector3, w3d_chunk_name,
 };
 use cic_render::Capture;
 use cic_vfs::Vfs;
@@ -78,6 +78,132 @@ pub fn render_csf(csf: &CsfFile) -> String {
         }
     }
     output
+}
+
+/// Formats a decoded `Options.ini` as a deterministic `field\tvalue` report, followed by any
+/// unrecognized fields as diagnostics. Fields absent from the file are omitted rather than shown
+/// as empty, so the report only lists what was actually read.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn render_options_ini(options: &OptionsIni) -> String {
+    let mut output = String::from("field\tvalue\n");
+    if let Some((width, height)) = options.resolution() {
+        writeln!(output, "Resolution\t{width} {height}").expect("writing to a String cannot fail");
+    }
+    if let Some(raw) = options.antialiasing_raw() {
+        let samples = options.antialiasing_msaa_samples().unwrap_or(0);
+        writeln!(output, "AntiAliasing\t{raw} ({samples}x MSAA)")
+            .expect("writing to a String cannot fail");
+    }
+    write_option(&mut output, "Gamma", options.gamma());
+    write_option(&mut output, "MusicVolume", options.music_volume());
+    write_option(&mut output, "SFXVolume", options.sfx_volume());
+    write_option(&mut output, "SFX3DVolume", options.sfx3d_volume());
+    write_option(&mut output, "VoiceVolume", options.voice_volume());
+    write_option(&mut output, "ScrollFactor", options.scroll_factor());
+    write_option(
+        &mut output,
+        "MaxParticleCount",
+        options.max_particle_count(),
+    );
+    write_option(&mut output, "TextureReduction", options.texture_reduction());
+    write_option(
+        &mut output,
+        "CampaignDifficulty",
+        options.campaign_difficulty(),
+    );
+    write_option(&mut output, "FirewallBehavior", options.firewall_behavior());
+    write_option(
+        &mut output,
+        "FirewallPortOverride",
+        options.firewall_port_override(),
+    );
+    write_option_bytes(&mut output, "IPAddress", options.ip_address_bytes());
+    write_option_bytes(
+        &mut output,
+        "GameSpyIPAddress",
+        options.gamespy_ip_address_bytes(),
+    );
+    write_option_bytes(
+        &mut output,
+        "IdealStaticGameLOD",
+        options.ideal_static_game_lod_bytes(),
+    );
+    write_option_bytes(
+        &mut output,
+        "StaticGameLOD",
+        options.static_game_lod_bytes(),
+    );
+    write_option(&mut output, "LanguageFilter", options.language_filter());
+    write_option(&mut output, "SendDelay", options.send_delay());
+    write_option(
+        &mut output,
+        "UseAlternateMouse",
+        options.use_alternate_mouse(),
+    );
+    write_option(
+        &mut output,
+        "DrawScrollAnchor",
+        options.draw_scroll_anchor(),
+    );
+    write_option(
+        &mut output,
+        "MoveScrollAnchor",
+        options.move_scroll_anchor(),
+    );
+    write_option(
+        &mut output,
+        "BuildingOcclusion",
+        options.building_occlusion(),
+    );
+    write_option(&mut output, "DynamicLOD", options.dynamic_lod());
+    write_option(&mut output, "ExtraAnimations", options.extra_animations());
+    write_option(&mut output, "HeatEffects", options.heat_effects());
+    write_option(&mut output, "Retaliation", options.retaliation());
+    write_option(
+        &mut output,
+        "ShowSoftWaterEdge",
+        options.show_soft_water_edge(),
+    );
+    write_option(&mut output, "ShowTrees", options.show_trees());
+    write_option(&mut output, "UseCloudMap", options.use_cloud_map());
+    write_option(
+        &mut output,
+        "UseDoubleClickAttackMove",
+        options.use_double_click_attack_move(),
+    );
+    write_option(&mut output, "UseLightMap", options.use_light_map());
+    write_option(&mut output, "UseShadowDecals", options.use_shadow_decals());
+    write_option(
+        &mut output,
+        "UseShadowVolumes",
+        options.use_shadow_volumes(),
+    );
+
+    output.push_str("diagnostic_line\tunrecognized_field\n");
+    for diagnostic in options.diagnostics() {
+        writeln!(
+            output,
+            "{}\t{}",
+            diagnostic.line(),
+            escape_bytes(diagnostic.field_bytes())
+        )
+        .expect("writing to a String cannot fail");
+    }
+    output
+}
+
+fn write_option(output: &mut String, field: &str, value: Option<impl std::fmt::Display>) {
+    if let Some(value) = value {
+        writeln!(output, "{field}\t{value}").expect("writing to a String cannot fail");
+    }
+}
+
+fn write_option_bytes(output: &mut String, field: &str, value: Option<&[u8]>) {
+    if let Some(value) = value {
+        writeln!(output, "{field}\t{}", escape_bytes(value))
+            .expect("writing to a String cannot fail");
+    }
 }
 
 /// Formats a MAP symbol table and top-level chunk stream as a stable inventory.
