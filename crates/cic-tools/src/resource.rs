@@ -299,6 +299,8 @@ impl Error for MountProfileError {
 pub struct StoredLocations {
     pub generals: Option<PathBuf>,
     pub zero_hour: Option<PathBuf>,
+    pub generals_options_ini: Option<PathBuf>,
+    pub zero_hour_options_ini: Option<PathBuf>,
 }
 
 impl StoredLocations {
@@ -329,6 +331,8 @@ impl StoredLocations {
                 "version" if value == "1" => {}
                 "generals_dir" => result.generals = nonempty_path(value),
                 "zero_hour_dir" => result.zero_hour = nonempty_path(value),
+                "generals_options_ini" => result.generals_options_ini = nonempty_path(value),
+                "zero_hour_options_ini" => result.zero_hour_options_ini = nonempty_path(value),
                 _ => {
                     return Err(ResourceError::InvalidConfig {
                         line: line_number + 1,
@@ -354,7 +358,13 @@ impl StoredLocations {
         })?;
         let generals = config_value(self.generals.as_deref())?;
         let zero_hour = config_value(self.zero_hour.as_deref())?;
-        let text = format!("version=1\ngenerals_dir={generals}\nzero_hour_dir={zero_hour}\n");
+        let generals_options_ini = config_value(self.generals_options_ini.as_deref())?;
+        let zero_hour_options_ini = config_value(self.zero_hour_options_ini.as_deref())?;
+        let text = format!(
+            "version=1\ngenerals_dir={generals}\nzero_hour_dir={zero_hour}\n\
+             generals_options_ini={generals_options_ini}\n\
+             zero_hour_options_ini={zero_hour_options_ini}\n"
+        );
         let temporary = path.with_extension("tmp");
         fs::write(&temporary, text).map_err(|error| ResourceError::Io {
             path: temporary.clone(),
@@ -466,6 +476,52 @@ pub fn resolve_archives(
         archives.extend(edition_archives(GameEdition::ZeroHour, kind, &root)?);
     }
     Ok(archives)
+}
+
+/// Resolves the per-user `Options.ini` path for one edition.
+///
+/// Precedence, highest first: `explicit_options_ini` (an explicit `--options-ini` flag),
+/// the `CIC_OPTIONS_INI` environment variable, the edition's persisted
+/// [`StoredLocations`] field, then auto-discovery beneath the platform Documents directory
+/// (for example `Documents/Command and Conquer Generals Data/Options.ini`). Unlike installed-game
+/// discovery there is no Steam manifest equivalent for this per-user preferences file.
+///
+/// # Errors
+///
+/// Returns an error when configuration cannot be read, or no candidate path resolves to an
+/// existing file.
+pub fn resolve_options_ini_path(
+    edition: GameEdition,
+    explicit_options_ini: Option<&Path>,
+) -> Result<PathBuf, ResourceError> {
+    let stored = StoredLocations::load(&config_path()?)?;
+    let stored_options_ini = match edition {
+        GameEdition::Generals => stored.generals_options_ini,
+        GameEdition::ZeroHour => stored.zero_hour_options_ini,
+    };
+    let path = explicit_options_ini
+        .map(Path::to_path_buf)
+        .or_else(|| env::var_os("CIC_OPTIONS_INI").map(PathBuf::from))
+        .or(stored_options_ini)
+        .or_else(|| discover_options_ini(edition))
+        .ok_or(ResourceError::OptionsIniNotFound(edition))?;
+    if !path.is_file() {
+        return Err(ResourceError::OptionsIniNotFound(edition));
+    }
+    Ok(path)
+}
+
+/// Finds one edition's `Options.ini` beneath a per-user Documents directory.
+#[must_use]
+pub fn discover_options_ini(edition: GameEdition) -> Option<PathBuf> {
+    let data_directory = match edition {
+        GameEdition::Generals => "Command and Conquer Generals Data",
+        GameEdition::ZeroHour => "Command and Conquer Generals Zero Hour Data",
+    };
+    documents_roots().into_iter().find_map(|root| {
+        let path = root.join(data_directory).join("Options.ini");
+        path.is_file().then_some(path)
+    })
 }
 
 /// Finds Steam installations by validated archive sentinels.
@@ -714,6 +770,55 @@ fn steam_roots() -> Vec<PathBuf> {
     roots.into_iter().collect()
 }
 
+/// Candidate per-user Documents directories, in preference order (earlier entries win ties in
+/// [`discover_options_ini`]).
+///
+/// On Windows the "Personal" shell folder is read from the registry so a redirected Documents
+/// location (for example a OneDrive-backed Documents folder) is honored, not just the default
+/// `%USERPROFILE%\Documents` path.
+fn documents_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(path) = env::var_os("CIC_DOCUMENTS_ROOT") {
+        push_unique_root(&mut roots, PathBuf::from(path));
+    }
+    #[cfg(windows)]
+    {
+        if let Ok(output) = Command::new("reg.exe")
+            .args([
+                "query",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders",
+                "/v",
+                "Personal",
+            ])
+            .output()
+            && output.status.success()
+        {
+            let text = String::from_utf8_lossy(&output.stdout);
+            if let Some(line) = text.lines().find(|line| line.contains("Personal"))
+                && let Some(path) = line.split("REG_SZ").nth(1)
+            {
+                push_unique_root(&mut roots, PathBuf::from(path.trim()));
+            }
+        }
+        if let Some(path) = env::var_os("USERPROFILE") {
+            push_unique_root(&mut roots, PathBuf::from(path).join("Documents"));
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        if let Some(path) = env::var_os("HOME") {
+            push_unique_root(&mut roots, PathBuf::from(path).join("Documents"));
+        }
+    }
+    roots
+}
+
+fn push_unique_root(roots: &mut Vec<PathBuf>, path: PathBuf) {
+    if !roots.contains(&path) {
+        roots.push(path);
+    }
+}
+
 fn quoted_fields(line: &str) -> Vec<String> {
     let mut fields = Vec::new();
     let mut remaining = line;
@@ -766,6 +871,7 @@ pub enum ResourceError {
     InvalidConfigPath(PathBuf),
     NonUtf8Path(PathBuf),
     InstallationNotFound(GameEdition),
+    OptionsIniNotFound(GameEdition),
     InvalidInstallation {
         edition: GameEdition,
         path: PathBuf,
@@ -800,6 +906,10 @@ impl Display for ResourceError {
             Self::InstallationNotFound(edition) => write!(
                 formatter,
                 "{edition} installation not found; use --game-dir or cic-inspect config set"
+            ),
+            Self::OptionsIniNotFound(edition) => write!(
+                formatter,
+                "{edition} Options.ini not found; use --options-ini, CIC_OPTIONS_INI, or cic-inspect config set"
             ),
             Self::InvalidInstallation { edition, path } => write!(
                 formatter,
@@ -868,12 +978,16 @@ mod tests {
         let first = StoredLocations {
             generals: Some(PathBuf::from("generals")),
             zero_hour: None,
+            generals_options_ini: None,
+            zero_hour_options_ini: None,
         };
         first.save(&path).expect("save initial config");
         assert_eq!(StoredLocations::load(&path).expect("load config"), first);
         let second = StoredLocations {
             generals: Some(PathBuf::from("new-generals")),
             zero_hour: Some(PathBuf::from("zero-hour")),
+            generals_options_ini: Some(PathBuf::from("generals/Options.ini")),
+            zero_hour_options_ini: Some(PathBuf::from("zero-hour/Options.ini")),
         };
         second.save(&path).expect("replace config");
         assert_eq!(StoredLocations::load(&path).expect("reload config"), second);

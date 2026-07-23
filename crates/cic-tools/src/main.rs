@@ -9,12 +9,12 @@ use std::process::ExitCode;
 use cic_formats::{
     BridgeDefinition, BridgeTowerSlot, CsfLimits, MapLightingError, MapLimits, MapScenarioError,
     MapScenarioLimits, MapWaterError, ObjectDefinition, ObjectDrawKind, ObjectIniLimits,
-    RoadDefinition, RoadIniLimits, TerrainIniLimits, W3dFile, W3dLimits, W3dMeshLimits,
-    W3dModelDecodePolicy, W3dSceneLimits, WaterIniLimits, compose_static_w3d_model,
+    OptionsIniLimits, RoadDefinition, RoadIniLimits, TerrainIniLimits, W3dFile, W3dLimits,
+    W3dMeshLimits, W3dModelDecodePolicy, W3dSceneLimits, WaterIniLimits, compose_static_w3d_model,
     decode_map_blend, decode_map_height, decode_map_lighting, decode_map_polygons,
     decode_map_sides, decode_map_water, decode_map_world_objects, decode_static_mesh,
-    decode_w3d_model_set_with_policy, parse_csf, parse_map, parse_object_ini, parse_road_ini,
-    parse_terrain_ini, parse_w3d, parse_water_ini, w3d_model_hierarchy_name,
+    decode_w3d_model_set_with_policy, parse_csf, parse_map, parse_object_ini, parse_options_ini,
+    parse_road_ini, parse_terrain_ini, parse_w3d, parse_water_ini, w3d_model_hierarchy_name,
 };
 use cic_render::{
     AnimatedModel, BridgeTowerPlacement, HeadlessRenderer, MapPresentationFrame, ModelFrame,
@@ -28,20 +28,22 @@ use cic_render::{
 };
 use cic_tools::resource::{
     GameEdition, MountProfile, MountProfileLimits, ResourceKind, StoredLocations, config_path,
-    discover_steam_locations, resolve_archives, validate_installation,
+    discover_options_ini, discover_steam_locations, resolve_archives, resolve_options_ini_path,
+    validate_installation,
 };
 use cic_tools::{
     GltfTextureRequest, encode_capture_png, encode_map_height_png, pack_w3d_glb, render_csf,
     render_manifest, render_map, render_map_blend, render_map_height, render_map_lighting,
-    render_map_polygons, render_map_sides, render_map_water, render_map_world_objects, render_w3d,
-    render_w3d_gltf, render_w3d_mesh,
+    render_map_polygons, render_map_sides, render_map_water, render_map_world_objects,
+    render_options_ini, render_w3d, render_w3d_gltf, render_w3d_mesh,
 };
 use cic_vfs::{BigLimits, Vfs, VirtualPath};
 
 const USAGE: &str = "Usage:\n\
   cic-inspect [--zh] [--game-dir <path>] [--profile <profile>] [--mod <mount>]... <command> ...\n\
   cic-inspect config show\n\
-  cic-inspect config set <generals-dir|zero-hour-dir> <path>\n\
+  cic-inspect config set <generals-dir|zero-hour-dir|generals-options-ini|zero-hour-options-ini> <path>\n\
+  cic-inspect [--zh] [--options-ini <path>] options\n\
   cic-inspect manifest <mount> [<mount> ...]\n\
   cic-inspect csf <virtual-path> <mount> [<mount> ...]\n\
   cic-inspect map <virtual-path> <mount> [<mount> ...]\n\
@@ -81,6 +83,7 @@ struct CliOptions {
     edition: GameEdition,
     edition_explicit: bool,
     game_dir: Option<PathBuf>,
+    options_ini: Option<PathBuf>,
     profile: Option<PathBuf>,
     mods: Vec<PathBuf>,
 }
@@ -110,6 +113,12 @@ fn run(arguments: impl IntoIterator<Item = String>) -> Result<String, Box<dyn Er
     let command = arguments.next().ok_or("missing command")?;
     match command.as_str() {
         "config" => configure(arguments),
+        "options" => {
+            if arguments.next().is_some() {
+                return Err("options takes no arguments".into());
+            }
+            report_options_ini(&options)
+        }
         "manifest" => {
             let mounts = arguments.collect::<Vec<_>>();
             let vfs = mount_all("manifest", &mounts, &options, ResourceKind::Manifest)?;
@@ -206,6 +215,7 @@ where
         edition: GameEdition::Generals,
         edition_explicit: false,
         game_dir: None,
+        options_ini: None,
         profile: None,
         mods: Vec::new(),
     };
@@ -220,6 +230,12 @@ where
                 arguments.next();
                 options.game_dir = Some(PathBuf::from(
                     arguments.next().ok_or("--game-dir requires a path")?,
+                ));
+            }
+            "--options-ini" => {
+                arguments.next();
+                options.options_ini = Some(PathBuf::from(
+                    arguments.next().ok_or("--options-ini requires a path")?,
                 ));
             }
             "--profile" => {
@@ -1921,6 +1937,27 @@ fn collect_model_files(
     Ok(files)
 }
 
+fn report_options_ini(options: &CliOptions) -> Result<String, Box<dyn Error>> {
+    let path = resolve_options_ini_path(options.edition, options.options_ini.as_deref())?;
+    let limits = OptionsIniLimits::default();
+    let bytes = fs::read(&path)?;
+    if bytes.len() > limits.max_file_bytes {
+        return Err(format!(
+            "{} is {} bytes; limit is {}",
+            path.display(),
+            bytes.len(),
+            limits.max_file_bytes
+        )
+        .into());
+    }
+    let parsed = parse_options_ini(&bytes, limits)?;
+    Ok(format!(
+        "path\t{}\n{}",
+        path.display(),
+        render_options_ini(&parsed)
+    ))
+}
+
 fn configure(mut arguments: impl Iterator<Item = String>) -> Result<String, Box<dyn Error>> {
     let action = arguments.next().ok_or("config requires show or set")?;
     let path = config_path()?;
@@ -1932,12 +1969,24 @@ fn configure(mut arguments: impl Iterator<Item = String>) -> Result<String, Box<
             let stored = StoredLocations::load(&path)?;
             let discovered = discover_steam_locations();
             Ok(format!(
-                "config\t{}\nstored-generals\t{}\nstored-zero-hour\t{}\ndetected-generals\t{}\ndetected-zero-hour\t{}\n",
+                "config\t{}\n\
+                 stored-generals\t{}\n\
+                 stored-zero-hour\t{}\n\
+                 stored-generals-options-ini\t{}\n\
+                 stored-zero-hour-options-ini\t{}\n\
+                 detected-generals\t{}\n\
+                 detected-zero-hour\t{}\n\
+                 detected-generals-options-ini\t{}\n\
+                 detected-zero-hour-options-ini\t{}\n",
                 path.display(),
                 display_path(stored.generals.as_deref()),
                 display_path(stored.zero_hour.as_deref()),
+                display_path(stored.generals_options_ini.as_deref()),
+                display_path(stored.zero_hour_options_ini.as_deref()),
                 display_path(discovered.generals.as_deref()),
-                display_path(discovered.zero_hour.as_deref())
+                display_path(discovered.zero_hour.as_deref()),
+                display_path(discover_options_ini(GameEdition::Generals).as_deref()),
+                display_path(discover_options_ini(GameEdition::ZeroHour).as_deref())
             ))
         }
         "set" => {
@@ -1955,6 +2004,18 @@ fn configure(mut arguments: impl Iterator<Item = String>) -> Result<String, Box<
                 "zero-hour-dir" => {
                     validate_installation(GameEdition::ZeroHour, &value)?;
                     stored.zero_hour = Some(value);
+                }
+                "generals-options-ini" => {
+                    if !value.is_file() {
+                        return Err(format!("not a file: {}", value.display()).into());
+                    }
+                    stored.generals_options_ini = Some(value);
+                }
+                "zero-hour-options-ini" => {
+                    if !value.is_file() {
+                        return Err(format!("not a file: {}", value.display()).into());
+                    }
+                    stored.zero_hour_options_ini = Some(value);
                 }
                 _ => return Err(format!("unknown config key {key:?}").into()),
             }

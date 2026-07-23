@@ -7,6 +7,7 @@ mod map_lighting;
 mod map_scenario;
 mod map_water;
 mod object_ini;
+mod options_ini;
 mod refpack;
 mod road_ini;
 mod terrain_ini;
@@ -42,6 +43,9 @@ pub use map_water::{
 pub use object_ini::{
     ObjectDefinition, ObjectDrawKind, ObjectIni, ObjectIniError, ObjectIniLimits, ObjectModelDraw,
     parse_object_ini,
+};
+pub use options_ini::{
+    OptionsIni, OptionsIniDiagnostic, OptionsIniError, OptionsIniLimits, parse_options_ini,
 };
 pub use refpack::RefPackError;
 pub use road_ini::{
