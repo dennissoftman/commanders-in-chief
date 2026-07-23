@@ -7,6 +7,16 @@ land under the active milestone heading.
 
 ### Changed
 
+- Changed `terrain_ini.rs`, `water_ini.rs`, `road_ini.rs`, and `object_ini.rs` (owned by R3) so an
+  unrecognized field name inside a block they otherwise decode is never silently dropped. Each
+  narrow INI decoder now retains every such field as a non-fatal diagnostic
+  (`TerrainIniDiagnostic`, `WaterIniDiagnostic`, `RoadIniDiagnostic`, `ObjectIniDiagnostic`,
+  exposed via a new `diagnostics()` accessor on `TerrainIni`/`WaterIni`/`RoadIni`/`ObjectIni`), so
+  an unsupported or genuinely missing field stays discoverable instead of disappearing silently.
+  Already-recognized fields keep their exact prior behavior; entirely unrelated INI blocks and
+  `object_ini`'s intentionally out-of-scope gameplay modules (`Behavior`, `Body`, and similar)
+  remain excluded as before, since that boundary is architectural, not a dropped field.
+
 - Closed R3 and advanced the active objective to R4's bounded WND inventory/layout decoder and
   synthetic headless menu vertical slice. Version-1 height presentation now explicitly retains its
   native stored grid; source-editor preview/auxiliary chunks remain opaque and R4 previews are

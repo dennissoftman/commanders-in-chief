@@ -117,12 +117,45 @@ impl ObjectDefinition {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ObjectIni {
     definitions: Vec<ObjectDefinition>,
+    diagnostics: Vec<ObjectIniDiagnostic>,
 }
 
 impl ObjectIni {
     #[must_use]
     pub fn definitions(&self) -> &[ObjectDefinition] {
         &self.definitions
+    }
+
+    /// Returns every field name inside a `Draw` module's body that this decoder does not
+    /// recognize, in source order. These never fail parsing; they exist so an unsupported or
+    /// missing renderer-facing field stays discoverable instead of disappearing silently. This
+    /// does not cover gameplay modules other than `Draw` (`Behavior`, `Body`, and similar), which
+    /// remain an intentional, documented architectural exclusion rather than a gap.
+    #[must_use]
+    pub fn diagnostics(&self) -> &[ObjectIniDiagnostic] {
+        &self.diagnostics
+    }
+}
+
+/// One field name inside a `Draw` module's body that this decoder does not specifically
+/// recognize.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectIniDiagnostic {
+    line: usize,
+    field: Vec<u8>,
+}
+
+impl ObjectIniDiagnostic {
+    /// Returns the one-based source line the field appeared on.
+    #[must_use]
+    pub const fn line(&self) -> usize {
+        self.line
+    }
+
+    /// Returns the unrecognized field name (or bare token) exactly as spelled in the source.
+    #[must_use]
+    pub fn field_bytes(&self) -> &[u8] {
+        &self.field
     }
 }
 
@@ -241,8 +274,12 @@ impl Error for ObjectIniError {}
 /// Object bodies contain heterogeneous modules with independent `End` tokens, and shipped draw
 /// fields may use the same indentation as their `Draw` declaration. This narrow decoder therefore
 /// tracks draw and condition-state `End` tokens, accepts either `DefaultConditionState` or the
-/// source-equivalent first `ConditionState = NONE`, and ignores all gameplay fields. Provider
-/// overlay and reskin resolution remain caller policy.
+/// source-equivalent first `ConditionState = NONE`, and ignores gameplay modules other than
+/// `Draw` (`Behavior`, `Body`, and similar) as an intentional, documented architectural exclusion:
+/// this decoder does not own gameplay/simulation semantics. Within a `Draw` module's own body,
+/// field names outside the recognized renderer-facing vocabulary are not silently dropped; they
+/// are retained as an [`ObjectIniDiagnostic`] on the returned value so an unsupported or missing
+/// field stays discoverable. Provider overlay and reskin resolution remain caller policy.
 ///
 /// # Errors
 ///
@@ -259,6 +296,7 @@ pub fn parse_object_ini(
         });
     }
     let mut definitions = Vec::new();
+    let mut diagnostics = Vec::new();
     let mut active_object = None;
     let mut active_draw = None;
     let mut draw_count = 0_usize;
@@ -418,6 +456,25 @@ pub fn parse_object_ini(
                 .filter(|value| value.is_finite() && *value > 0.0)
                 .ok_or(ObjectIniError::InvalidScale { line: line_number })?;
             draw.scale = scale;
+            continue;
+        }
+        // Nothing above matched. A known field name whose current context didn't apply it
+        // (e.g. `Model` in a non-selected condition state) is not a gap and is not reported;
+        // only a field name outside the known draw-body vocabulary is diagnosed.
+        match field_name(line) {
+            Some(field) if !is_known_draw_field(field) => {
+                diagnostics.push(ObjectIniDiagnostic {
+                    line: line_number,
+                    field: field.to_vec(),
+                });
+            }
+            None => {
+                diagnostics.push(ObjectIniDiagnostic {
+                    line: line_number,
+                    field: line.to_vec(),
+                });
+            }
+            _ => {}
         }
     }
     finish_draw(&mut active_object, &mut active_draw);
@@ -427,7 +484,10 @@ pub fn parse_object_ini(
         limits.max_lines,
         limits.max_definitions,
     )?;
-    Ok(ObjectIni { definitions })
+    Ok(ObjectIni {
+        definitions,
+        diagnostics,
+    })
 }
 
 fn parse_object_header(
@@ -531,6 +591,28 @@ fn field_value(line: &[u8]) -> Option<&[u8]> {
     Some(trim_ascii(&line[equals + 1..]))
 }
 
+fn field_name(line: &[u8]) -> Option<&[u8]> {
+    let equals = line.iter().position(|byte| *byte == b'=')?;
+    Some(trim_ascii(&line[..equals]))
+}
+
+/// Draw-body field names this decoder specifically recognizes (whether or not the current draw
+/// kind or condition-state context happens to apply them). Anything else inside a `Draw` body is
+/// reported as an [`ObjectIniDiagnostic`] instead of being silently dropped.
+fn is_known_draw_field(field: &[u8]) -> bool {
+    [
+        b"ConditionState".as_slice(),
+        b"AliasConditionState".as_slice(),
+        b"TransitionState".as_slice(),
+        b"Model".as_slice(),
+        b"ModelName".as_slice(),
+        b"TextureName".as_slice(),
+        b"Scale".as_slice(),
+    ]
+    .iter()
+    .any(|candidate| field.eq_ignore_ascii_case(candidate))
+}
+
 fn token_eq(line: &[u8], expected: &[u8]) -> bool {
     line.len() >= expected.len()
         && line[..expected.len()].eq_ignore_ascii_case(expected)
@@ -620,6 +702,11 @@ mod tests {
             parsed.definitions()[1].reskin_of_bytes(),
             Some(b"SyntheticBuilding".as_slice())
         );
+        // The `Behavior` module (and its nested `Value` field) is an intentional, documented
+        // architectural exclusion — this decoder does not own gameplay modules at all, so it
+        // must not be reported as an unrecognized *field* the way an unsupported Draw-body field
+        // would be.
+        assert!(parsed.diagnostics().is_empty());
     }
 
     #[test]
@@ -642,6 +729,13 @@ End
             draw.texture_bytes(),
             Some(b"SyntheticTreeTexture.tga".as_slice())
         );
+        // MoveOutwardTime/DoTopple are real W3DTreeDraw fields this decoder doesn't apply yet;
+        // they must be retained as diagnostics, not silently dropped.
+        assert_eq!(parsed.diagnostics().len(), 2);
+        assert_eq!(parsed.diagnostics()[0].line(), 5);
+        assert_eq!(parsed.diagnostics()[0].field_bytes(), b"MoveOutwardTime");
+        assert_eq!(parsed.diagnostics()[1].line(), 6);
+        assert_eq!(parsed.diagnostics()[1].field_bytes(), b"DoTopple");
 
         let limits = ObjectIniLimits {
             max_texture_bytes: 3,

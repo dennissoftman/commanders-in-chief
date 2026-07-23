@@ -166,6 +166,7 @@ impl WaterTransparencyIni {
 pub struct WaterIni {
     sets: [Option<WaterSetIni>; 4],
     transparency: WaterTransparencyIni,
+    diagnostics: Vec<WaterIniDiagnostic>,
 }
 
 impl WaterIni {
@@ -182,6 +183,36 @@ impl WaterIni {
     #[must_use]
     pub const fn transparency(&self) -> &WaterTransparencyIni {
         &self.transparency
+    }
+
+    /// Returns every field name inside a `WaterSet`/`WaterTransparency` block that this decoder
+    /// does not recognize, in source order. These never fail parsing; they exist so an
+    /// unsupported or missing field stays discoverable instead of disappearing silently.
+    #[must_use]
+    pub fn diagnostics(&self) -> &[WaterIniDiagnostic] {
+        &self.diagnostics
+    }
+}
+
+/// One field name inside a `WaterSet`/`WaterTransparency` block that this decoder does not
+/// specifically recognize.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaterIniDiagnostic {
+    line: usize,
+    field: Vec<u8>,
+}
+
+impl WaterIniDiagnostic {
+    /// Returns the one-based source line the field appeared on.
+    #[must_use]
+    pub const fn line(&self) -> usize {
+        self.line
+    }
+
+    /// Returns the unrecognized field name exactly as spelled in the source.
+    #[must_use]
+    pub fn field_bytes(&self) -> &[u8] {
+        &self.field
     }
 }
 
@@ -343,13 +374,18 @@ enum WaterHeader {
 
 /// Decodes all source-established `WaterSet` and `WaterTransparency` fields.
 ///
-/// Repeated blocks and fields use stable file-order last-field-wins semantics. Unrelated blocks
-/// are ignored as complete units.
+/// Repeated blocks and fields use stable file-order last-field-wins semantics. Blocks unrelated
+/// to water (any header other than `WaterSet`/`WaterTransparency`) are ignored as complete units,
+/// since this narrow decoder does not own the rest of the INI vocabulary. Within a recognized
+/// `WaterSet`/`WaterTransparency` block, every field name is inspected: recognized fields are
+/// applied, and anything else is retained as a [`WaterIniDiagnostic`] on the returned value
+/// rather than silently dropped.
 ///
 /// # Errors
 ///
 /// Returns a structured error for resource-limit excess, malformed block closure, invalid names,
 /// non-finite/out-of-range scalars, malformed colors, integers, booleans, or strings.
+#[allow(clippy::too_many_lines)]
 pub fn parse_water_ini(bytes: &[u8], limits: WaterIniLimits) -> Result<WaterIni, WaterIniError> {
     if bytes.len() > limits.max_file_bytes {
         return Err(WaterIniError::FileTooLarge {
@@ -360,6 +396,7 @@ pub fn parse_water_ini(bytes: &[u8], limits: WaterIniLimits) -> Result<WaterIni,
     let mut result = WaterIni::default();
     let mut block = Block::None;
     let mut definitions = 0_usize;
+    let mut diagnostics = Vec::new();
     for (zero_based_line, raw_line) in bytes.split(|byte| *byte == b'\n').enumerate() {
         let line_number = zero_based_line
             .checked_add(1)
@@ -437,11 +474,12 @@ pub fn parse_water_ini(bytes: &[u8], limits: WaterIniLimits) -> Result<WaterIni,
                     value,
                     line_number,
                     limits,
+                    &mut diagnostics,
                 )?;
             }
             Block::Set { index, .. } => {
                 let set = result.sets[index].get_or_insert_with(WaterSetIni::default);
-                parse_set_field(set, field, value, line_number, limits)?;
+                parse_set_field(set, field, value, line_number, limits, &mut diagnostics)?;
             }
             Block::None | Block::Other => {}
         }
@@ -449,7 +487,10 @@ pub fn parse_water_ini(bytes: &[u8], limits: WaterIniLimits) -> Result<WaterIni,
     match block {
         Block::Transparency { line } => Err(WaterIniError::UnterminatedWaterTransparency { line }),
         Block::Set { line, .. } => Err(WaterIniError::UnterminatedWaterSet { line }),
-        Block::None | Block::Other => Ok(result),
+        Block::None | Block::Other => {
+            result.diagnostics = diagnostics;
+            Ok(result)
+        }
     }
 }
 
@@ -503,6 +544,7 @@ fn parse_set_field(
     value: &[u8],
     line: usize,
     limits: WaterIniLimits,
+    diagnostics: &mut Vec<WaterIniDiagnostic>,
 ) -> Result<(), WaterIniError> {
     if field.eq_ignore_ascii_case(b"SkyTexture") {
         set.sky_texture = Some(parse_string(value, line, limits)?);
@@ -528,6 +570,11 @@ fn parse_set_field(
         set.sky_texels_per_unit = Some(parse_bounded_scalar(value, line)?);
     } else if field.eq_ignore_ascii_case(b"WaterRepeatCount") {
         set.water_repeat_count = Some(parse_repeat_count(value, line)?);
+    } else {
+        diagnostics.push(WaterIniDiagnostic {
+            line,
+            field: field.to_vec(),
+        });
     }
     Ok(())
 }
@@ -538,6 +585,7 @@ fn parse_transparency_field(
     value: &[u8],
     line: usize,
     limits: WaterIniLimits,
+    diagnostics: &mut Vec<WaterIniDiagnostic>,
 ) -> Result<(), WaterIniError> {
     if field.eq_ignore_ascii_case(b"TransparentWaterMinOpacity") {
         let value = parse_number(value, line)?;
@@ -560,6 +608,7 @@ fn parse_transparency_field(
     } else if field.eq_ignore_ascii_case(b"AdditiveBlending") {
         transparency.additive_blending = Some(parse_bool(value, line)?);
     } else {
+        let mut recognized = false;
         for (index, name) in [
             b"SkyboxTextureN".as_slice(),
             b"SkyboxTextureE".as_slice(),
@@ -572,8 +621,15 @@ fn parse_transparency_field(
         {
             if field.eq_ignore_ascii_case(name) {
                 transparency.skybox_textures[index] = Some(parse_string(value, line, limits)?);
+                recognized = true;
                 break;
             }
+        }
+        if !recognized {
+            diagnostics.push(WaterIniDiagnostic {
+                line,
+                field: field.to_vec(),
+            });
         }
     }
     Ok(())
@@ -788,6 +844,36 @@ mod tests {
             parsed.transparency().skybox_textures()[4].as_deref(),
             Some(b"top.tga".as_slice())
         );
+    }
+
+    #[test]
+    fn diagnoses_unrecognized_fields_inside_water_blocks_without_dropping_data() {
+        let parsed = parse_water_ini(
+            b"Other\n Value = nope\nEnd\n\
+              WaterSet MORNING\n SkyTexture = sky.tga\n Ripple = 3\nEnd\n\
+              WaterTransparency\n TransparentWaterMinOpacity = 0.5\n Shimmer = yes\nEnd\n",
+            WaterIniLimits::default(),
+        )
+        .expect("water INI");
+        assert_eq!(
+            parsed
+                .water_set(MapTimeOfDay::Morning)
+                .expect("morning set")
+                .sky_texture_bytes(),
+            Some(b"sky.tga".as_slice())
+        );
+        assert_eq!(
+            parsed.transparency().minimum_opacity().map(f32::to_bits),
+            Some(0.5_f32.to_bits())
+        );
+        // The unrelated "Other" block is ignored as a complete unit (not a WaterSet/
+        // WaterTransparency field), so it produces no diagnostic; only field names inside a
+        // recognized water block are surfaced.
+        assert_eq!(parsed.diagnostics().len(), 2);
+        assert_eq!(parsed.diagnostics()[0].line(), 6);
+        assert_eq!(parsed.diagnostics()[0].field_bytes(), b"Ripple");
+        assert_eq!(parsed.diagnostics()[1].line(), 10);
+        assert_eq!(parsed.diagnostics()[1].field_bytes(), b"Shimmer");
     }
 
     #[test]
