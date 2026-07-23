@@ -188,5 +188,6 @@ declarative WND patch layer will augment the Options layout with modern window m
 refresh-rate, and UI-scale controls while preserving the user-owned WND bytes; apply/confirm and
 timeout rollback remain non-simulating presentation behavior.
 
-See [CURRENT.md](CURRENT.md) for the active objective and [ROADMAP.md](ROADMAP.md) for
-completion gates.
+See [CURRENT.md](CURRENT.md) for the active objective, [ROADMAP.md](ROADMAP.md) for the
+milestone status index, and `docs/milestones/` for each milestone's full charter, progress,
+and completion evidence.

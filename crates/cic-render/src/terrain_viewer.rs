@@ -4262,7 +4262,16 @@ mod tests {
 
     #[test]
     fn deferred_pipeline_layouts_match_every_shader_binding() {
-        let renderer = pollster::block_on(crate::HeadlessRenderer::new()).expect("headless device");
+        let renderer = match pollster::block_on(crate::HeadlessRenderer::new()) {
+            Ok(renderer) => renderer,
+            Err(crate::RenderError::RequestAdapter(error)) => {
+                eprintln!(
+                    "skipping deferred pipeline layout check without a headless adapter: {error}"
+                );
+                return;
+            }
+            Err(error) => panic!("initializing headless renderer: {error}"),
+        };
         let shader = renderer
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
