@@ -11,7 +11,7 @@ use cic_formats::{
     CsfFile, MapBlendData, MapDictionary, MapDictionaryValue, MapFile, MapHeightField,
     MapLightingData, MapPolygonData, MapScript, MapScriptAction, MapScriptParameterValue,
     MapSidesData, MapWaterData, MapWorldObjects, W3dChunk, W3dFile, W3dStaticMesh, W3dVector3,
-    w3d_chunk_name,
+    WndDiagnosticKind, WndDocument, WndWindow, w3d_chunk_name,
 };
 use cic_render::Capture;
 use cic_vfs::Vfs;
@@ -879,6 +879,115 @@ fn fixed_name(bytes: &[u8; 16]) -> &[u8] {
         .position(|byte| *byte == 0)
         .unwrap_or(bytes.len());
     &bytes[..length]
+}
+
+/// Formats a decoded WND document as a stable, source-order inventory report.
+///
+/// Every row is tagged by kind in its first column (`top_level_field`, `window`,
+/// `window_field`, `diagnostic`) so the hierarchy and every generically retained field or
+/// non-fatal diagnostic are all visible from one report, in source order.
+#[must_use]
+pub fn render_wnd(document: &WndDocument) -> String {
+    let mut output = format!("file_version\t{}\n", document.file_version());
+    if let Some(layout) = document.layout() {
+        writeln!(output, "layout_init\t{}", layout.init().unwrap_or("(none)"))
+            .expect("writing to a String cannot fail");
+        writeln!(
+            output,
+            "layout_update\t{}",
+            layout.update().unwrap_or("(none)")
+        )
+        .expect("writing to a String cannot fail");
+        writeln!(
+            output,
+            "layout_shutdown\t{}",
+            layout.shutdown().unwrap_or("(none)")
+        )
+        .expect("writing to a String cannot fail");
+    }
+    output.push_str("top_level_field\tname\tvalue\tline\n");
+    for field in document.top_level_fields() {
+        writeln!(
+            output,
+            "top_level_field\t{}\t{}\t{}",
+            field.name(),
+            field.raw_value(),
+            field.line()
+        )
+        .expect("writing to a String cannot fail");
+    }
+    output.push_str(
+        "window\tpath\tdepth\tid\twindow_type\tupper_left_x\tupper_left_y\tbottom_right_x\tbottom_right_y\tcreation_width\tcreation_height\n",
+    );
+    output.push_str("window_field\tpath\tname\tvalue\tline\n");
+    let mut path = Vec::new();
+    for (index, window) in document.windows().iter().enumerate() {
+        path.push(index);
+        render_wnd_window(&mut output, window, &mut path);
+        path.pop();
+    }
+    output.push_str("diagnostic\tline\twindow_id\tkind\tdetail\n");
+    for diagnostic in document.diagnostics() {
+        let window_id = diagnostic
+            .window_id()
+            .map_or_else(|| "-".to_owned(), |id| id.to_string());
+        let (kind, detail) = match diagnostic.kind() {
+            WndDiagnosticKind::UnknownField { name } => ("unknown_field", name.to_string()),
+            WndDiagnosticKind::UnrecognizedValue { field, value } => {
+                ("unrecognized_value", format!("{field}={value}"))
+            }
+        };
+        writeln!(
+            output,
+            "diagnostic\t{}\t{window_id}\t{kind}\t{detail}",
+            diagnostic.line()
+        )
+        .expect("writing to a String cannot fail");
+    }
+    output
+}
+
+fn render_wnd_window(output: &mut String, window: &WndWindow, path: &mut Vec<usize>) {
+    let path_text = path
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join("/");
+    let rect = window.rect();
+    let (upper_left_x, upper_left_y) = rect.upper_left();
+    let (bottom_right_x, bottom_right_y) = rect.bottom_right();
+    let (creation_width, creation_height) = rect.creation_resolution();
+    writeln!(
+        output,
+        "window\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        path_text,
+        path.len() - 1,
+        window.id(),
+        window.window_type(),
+        upper_left_x,
+        upper_left_y,
+        bottom_right_x,
+        bottom_right_y,
+        creation_width,
+        creation_height
+    )
+    .expect("writing to a String cannot fail");
+    for field in window.fields() {
+        writeln!(
+            output,
+            "window_field\t{}\t{}\t{}\t{}",
+            path_text,
+            field.name(),
+            field.raw_value(),
+            field.line()
+        )
+        .expect("writing to a String cannot fail");
+    }
+    for (index, child) in window.children().iter().enumerate() {
+        path.push(index);
+        render_wnd_window(output, child, path);
+        path.pop();
+    }
 }
 
 fn render_w3d_level(output: &mut String, chunks: &[W3dChunk], path: &mut Vec<usize>) {

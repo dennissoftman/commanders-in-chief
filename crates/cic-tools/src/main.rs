@@ -10,16 +10,16 @@ use cic_formats::{
     BridgeDefinition, BridgeTowerSlot, CsfLimits, MapLightingError, MapLimits, MapScenarioError,
     MapScenarioLimits, MapWaterError, ObjectDefinition, ObjectDrawKind, ObjectIniLimits,
     RoadDefinition, RoadIniLimits, TerrainIniLimits, W3dFile, W3dLimits, W3dMeshLimits,
-    W3dModelDecodePolicy, W3dSceneLimits, WaterIniLimits, compose_static_w3d_model,
+    W3dModelDecodePolicy, W3dSceneLimits, WaterIniLimits, WndLimits, compose_static_w3d_model,
     decode_map_blend, decode_map_height, decode_map_lighting, decode_map_polygons,
     decode_map_sides, decode_map_water, decode_map_world_objects, decode_static_mesh,
     decode_w3d_model_set_with_policy, parse_csf, parse_map, parse_object_ini, parse_road_ini,
-    parse_terrain_ini, parse_w3d, parse_water_ini, w3d_model_hierarchy_name,
+    parse_terrain_ini, parse_w3d, parse_water_ini, parse_wnd, w3d_model_hierarchy_name,
 };
 use cic_render::{
     AnimatedModel, BridgeTowerPlacement, HeadlessRenderer, MapPresentationFrame, ModelFrame,
     StagedBoundaryFence, StagedMapOverlays, StagedMapScene, StagedRoads, StagedStaticScenery,
-    StagedStaticSceneryModel, StagedTerrain, StagedWater, StaticSceneryDiagnostic,
+    StagedStaticSceneryModel, StagedTerrain, StagedWater, StagedWndScene, StaticSceneryDiagnostic,
     StaticSceneryDiagnosticKind, StaticSceneryInstance, TerrainCompatibilityPolicy,
     TerrainLighting, TerrainStagingOptions, TextureId, TextureResourceManager,
     TreeSwayPresentation, WaterAppearance, WaterCausticSequence, WaterPresentationPolicy,
@@ -34,7 +34,7 @@ use cic_tools::{
     GltfTextureRequest, encode_capture_png, encode_map_height_png, pack_w3d_glb, render_csf,
     render_manifest, render_map, render_map_blend, render_map_height, render_map_lighting,
     render_map_polygons, render_map_sides, render_map_water, render_map_world_objects, render_w3d,
-    render_w3d_gltf, render_w3d_mesh,
+    render_w3d_gltf, render_w3d_mesh, render_wnd,
 };
 use cic_vfs::{BigLimits, Vfs, VirtualPath};
 
@@ -59,6 +59,8 @@ const USAGE: &str = "Usage:\n\
   cic-inspect w3d-view <virtual-path> [<mount> ...]\n\
   cic-inspect w3d-render [--animation <index>] [--frame <frame>] [--time <seconds>] [--rotation <radians>] <virtual-path> [<output.ppm>] [<mount> ...]\n\
   cic-inspect w3d-export [--gltf] <virtual-path> [<output.glb|output.gltf>] [<mount> ...]\n\
+  cic-inspect wnd <virtual-path> <mount> [<mount> ...]\n\
+  cic-inspect wnd-render <virtual-path> [<output.ppm>] [<mount> ...]\n\
 Each mount is a directory or BIG archive. Mounts are applied from left to right; later mounts override earlier mounts.";
 
 const MAX_ENCODED_IMAGE_BYTES: usize = 256 * 1_024 * 1_024;
@@ -104,6 +106,7 @@ fn main() -> ExitCode {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn run(arguments: impl IntoIterator<Item = String>) -> Result<String, Box<dyn Error>> {
     let mut arguments = arguments.into_iter().peekable();
     let options = parse_cli_options(&mut arguments)?;
@@ -192,6 +195,20 @@ fn run(arguments: impl IntoIterator<Item = String>) -> Result<String, Box<dyn Er
         "w3d-render" => render_model_capture(&mut arguments, &options),
         "w3d-view" => view_model(&mut arguments, &options),
         "w3d-export" => export_model(&mut arguments, &options),
+        "wnd" => {
+            let resource_name = arguments.next().ok_or("wnd requires a virtual path")?;
+            let mounts = arguments.collect::<Vec<_>>();
+            let vfs = mount_all("wnd", &mounts, &options, ResourceKind::Wnd)?;
+            let resource_path = VirtualPath::new(&resource_name)?;
+            let entry = vfs
+                .resolve(&resource_path)
+                .ok_or_else(|| format!("resource not found: {resource_path}"))?;
+            let limits = WndLimits::default();
+            let bytes = entry.read(limits.maximum_file_bytes)?;
+            let document = parse_wnd(&bytes, limits)?;
+            Ok(render_wnd(&document))
+        }
+        "wnd-render" => render_wnd_capture(&mut arguments, &options),
         _ => Err(format!("unknown command {command:?}").into()),
     }
 }
@@ -1760,10 +1777,62 @@ where
     ))
 }
 
+/// Parses one WND document, stages every window rectangle, and writes a surface-free capture.
+fn render_wnd_capture<I>(
+    arguments: &mut std::iter::Peekable<I>,
+    options: &CliOptions,
+) -> Result<String, Box<dyn Error>>
+where
+    I: Iterator<Item = String>,
+{
+    let resource_name = arguments
+        .next()
+        .ok_or("wnd-render requires a virtual path")?;
+    let resource_path = VirtualPath::new(&resource_name)?;
+    let remaining = arguments.collect::<Vec<_>>();
+    let (output_path, mounts) = if remaining.first().is_some_and(|candidate| {
+        Path::new(candidate)
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("ppm"))
+    }) {
+        (PathBuf::from(&remaining[0]), remaining[1..].to_vec())
+    } else {
+        (default_render_path(&resource_path)?, remaining)
+    };
+    if !output_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("ppm"))
+    {
+        return Err("WND render capture requires a .ppm output path".into());
+    }
+    let vfs = mount_all("wnd-render", &mounts, options, ResourceKind::Wnd)?;
+    let entry = vfs
+        .resolve(&resource_path)
+        .ok_or_else(|| format!("resource not found: {resource_path}"))?;
+    let limits = WndLimits::default();
+    let bytes = entry.read(limits.maximum_file_bytes)?;
+    let document = parse_wnd(&bytes, limits)?;
+    let scene = StagedWndScene::from_document(&document)?;
+    let renderer = pollster::block_on(HeadlessRenderer::new())?;
+    let capture = renderer.capture_wnd_scene(&scene, [0.05, 0.05, 0.08, 1.0])?;
+    fs::write(&output_path, capture.ppm())?;
+    let [width, height] = scene.canvas();
+    Ok(format!(
+        "adapter\t{}\ncanvas_width\t{width}\ncanvas_height\t{height}\nwindows\t{}\nvertices\t{}\nindices\t{}\nrgba_sha256\t{}\nwrote\t{}\n",
+        renderer.adapter_info().name,
+        scene.window_count(),
+        scene.vertices().len(),
+        scene.indices().len(),
+        capture.sha256(),
+        output_path.display()
+    ))
+}
+
 fn default_render_path(resource_path: &VirtualPath) -> Result<PathBuf, Box<dyn Error>> {
     let stem = Path::new(resource_path.as_str())
         .file_stem()
-        .ok_or("W3D resource path has no file name")?;
+        .ok_or("render resource path has no file name")?;
     Ok(PathBuf::from(stem).with_extension("ppm"))
 }
 

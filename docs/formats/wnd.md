@@ -1,9 +1,10 @@
 # WND Layout and R4 UI Compatibility Plan
 
-- Status: source-established design; implementation not started
+- Status: Gate 1 (bounded WND inventory and hierarchy decode) implemented; retained `cic-ui`
+  state, resource resolution, and typed per-gadget fields (Gate 2+) not started
 - Owning crates: `cic-formats` for syntax/immutable values, planned `cic-ui` for retained state,
   `cic-render` for GPU presentation
-- Last updated: 2026-07-22
+- Last updated: 2026-07-23
 
 ## Evidence and boundary
 
@@ -45,14 +46,40 @@ WINDOW
 END
 ```
 
-The exact lexical grammar, comments/quoting, default-record set, and version differences require an
-original synthetic fixture before implementation. The parser will preserve source byte strings and
-unknown records while exposing normalized known tokens. It will not reproduce the source reader's
-assertion, truncation, or unknown-token skipping behavior.
+The lexical grammar is now confirmed directly from `winCreateFromScript` and `parseLayoutBlock` in
+`GameWindowManagerScript.cpp`: there is no comment syntax; `;` is a hard statement terminator (a
+dedicated "read until semicolon" scan collapses whitespace runs and trims), not a comment marker;
+structural keywords (`WINDOW`, `CHILD`, `END`, `ENDALLCHILDREN`, `WINDOWTYPE`, `FILE_VERSION`,
+`SCREENRECT`, `STARTLAYOUTBLOCK`, `ENDLAYOUTBLOCK`) are matched case-sensitively while `STATUS`/
+`STYLE` names are matched case-insensitively; names are double-quote-delimited with no escape
+handling; numbers are plain decimal; and colors are four separate decimal R/G/B/A tokens, never a
+packed hex literal. `SCREENRECT` is one semicolon-terminated record whose `UPPERLEFT`/
+`BOTTOMRIGHT`/`CREATIONRESOLUTION` sub-labels and numeric pairs are tokenized together. The layout
+block is mandatory only for `FILE_VERSION >= 2`; version 1 documents default all three callback
+names to the literal source string `"[None]"`. The `<optional default visual records>` placeholder
+is not one construct: it is several independently keyworded, order-free top-level statements in the
+same flat parse loop as `WINDOW` — `ENABLEDCOLOR`, `DISABLEDCOLOR`, `HILITECOLOR`, `SELECTEDCOLOR`,
+`TEXTCOLOR`, `BACKGROUNDCOLOR` (a color value or the literal `TRANSPARENT`) and `FONT` (the real
+source stubs this field: the value is read and discarded, marked `@todo`).
+
+The bounded decoder (`crates/cic-formats/src/wnd.rs`) preserves the complete `WINDOW`/`CHILD`
+hierarchy with `WINDOWTYPE` and `SCREENRECT` typed; every other field, at both the top level and
+inside a window, is retained generically as an ordered `(name, raw value, line)` record and is
+**never dropped**, whether or not its name is recognized. This is a deliberate divergence from this
+crate's other text/INI decoders, which silently ignore unrecognized fields — a dropped field can
+hide a missing or unsupported feature with no way to notice. Unrecognized top-level keywords and
+out-of-vocabulary `WINDOWTYPE` values are additionally surfaced as a non-fatal `WndDiagnostic` so
+gaps stay discoverable. Full per-gadget typed field decode (fonts, state colors/borders, draw-data
+arrays, header templates, gadget-specific `DATA`) is deliberately excluded from this first gate and
+is named here as future work, not a silent gap: it belongs to the next slice alongside
+mapped-image/font/CSF resource resolution.
 
 Window rectangles are stored with a creation resolution. Child positions become parent-relative in
 the retained hierarchy. The immutable value keeps stored coordinates and creation resolution
-exactly; scaling happens only in the UI presentation policy.
+exactly; scaling happens only in the UI presentation policy. The renderer-only
+`StagedWndScene`/`capture_wnd_scene` proof-of-pipeline capture (`crates/cic-render/src/wnd_scene.rs`)
+treats every rectangle as absolute (not parent-relative) for now, deferring correct parent-relative
+positioning to the retained UI runtime gate.
 
 ## Established status and style vocabulary
 
@@ -226,17 +253,23 @@ color/faction/team selection, and start-position assignment. Start validates req
 and emits a stable launch description; it cannot construct teams, run scripts, or start a match
 before R5.
 
-## Planned reports and artifacts
+## Reports and artifacts
 
-- `cic-inspect wnd` reports file/layout metadata, hierarchy, rectangles, flags, fields, gadget data,
-  callback names, and unknowns in source order.
-- `cic-inspect wnd-patch` reports target/preconditions, operations, resulting hierarchy, per-field
-  provenance, and stable incompatibility diagnostics without writing a patched retail WND.
-- `cic-inspect ui-resources` reports resolved/missing images, fonts, labels, transitions, and
-  provenance without embedding retail data.
-- `cic-inspect ui-render` emits a deterministic synthetic PNG/hash for an explicit layout,
+- `cic-inspect wnd` (implemented) reports file/layout metadata, the complete `WINDOW`/`CHILD`
+  hierarchy with rectangles, every generically retained field in source order, and every non-fatal
+  diagnostic. Gate 2's typed gadget/state/callback fields are not yet broken out individually.
+- `cic-inspect wnd-render` (implemented, Gate 1 proof-of-pipeline only) stages every window
+  rectangle as a flat colored quad in source order and writes a surface-free deterministic PPM
+  capture plus an RGBA SHA-256 hash. It has no images, text, gadget visuals, or scaling policy; it
+  exists to prove the immutable decoded value can drive a renderer capture, not to preview a real
+  menu.
+- `cic-inspect wnd-patch` (planned) reports target/preconditions, operations, resulting hierarchy,
+  per-field provenance, and stable incompatibility diagnostics without writing a patched retail WND.
+- `cic-inspect ui-resources` (planned) reports resolved/missing images, fonts, labels, transitions,
+  and provenance without embedding retail data.
+- `cic-inspect ui-render` (planned) emits a deterministic synthetic PNG/hash for an explicit layout,
   viewport, scale policy, locale, font set, time, and input/state snapshot.
-- `cic-inspect ui-demo` launches the interactive main-menu/skirmish compatibility harness.
+- `cic-inspect ui-demo` (planned) launches the interactive main-menu/skirmish compatibility harness.
 
 The checked-in completion artifact is entirely original. Installed verification records aggregate
 layout/control/resource counts and navigation success only; no retail screenshots or assets are
