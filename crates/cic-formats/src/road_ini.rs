@@ -188,6 +188,7 @@ impl RoadDefinition {
 pub struct RoadIni {
     definitions: Vec<RoadDefinition>,
     bridges: Vec<BridgeDefinition>,
+    diagnostics: Vec<RoadIniDiagnostic>,
 }
 
 impl RoadIni {
@@ -199,6 +200,36 @@ impl RoadIni {
     #[must_use]
     pub fn bridges(&self) -> &[BridgeDefinition] {
         &self.bridges
+    }
+
+    /// Returns every field name inside a `Road`/`Bridge` block that this decoder does not
+    /// recognize, in source order. These never fail parsing; they exist so an unsupported or
+    /// missing field stays discoverable instead of disappearing silently.
+    #[must_use]
+    pub fn diagnostics(&self) -> &[RoadIniDiagnostic] {
+        &self.diagnostics
+    }
+}
+
+/// One field name inside a `Road`/`Bridge` block that this decoder does not specifically
+/// recognize.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoadIniDiagnostic {
+    line: usize,
+    field: Vec<u8>,
+}
+
+impl RoadIniDiagnostic {
+    /// Returns the one-based source line the field appeared on.
+    #[must_use]
+    pub const fn line(&self) -> usize {
+        self.line
+    }
+
+    /// Returns the unrecognized field name exactly as spelled in the source.
+    #[must_use]
+    pub fn field_bytes(&self) -> &[u8] {
+        &self.field
     }
 }
 
@@ -348,9 +379,10 @@ struct ActiveBridge {
 
 /// Decodes the renderer-facing subset of `Road` blocks and ignores unrelated INI blocks.
 ///
-/// Unknown fields inside a road are ignored. Repeated known fields use source parse order, so the
-/// last occurrence in that declaration wins. This function does not resolve provider overlays or
-/// texture resources.
+/// Fields inside a `Road`/`Bridge` block that this decoder does not recognize are retained as a
+/// [`RoadIniDiagnostic`] rather than dropped, so an unsupported or missing field stays
+/// discoverable. Repeated known fields use source parse order, so the last occurrence in that
+/// declaration wins. This function does not resolve provider overlays or texture resources.
 ///
 /// # Errors
 ///
@@ -366,6 +398,7 @@ pub fn parse_road_ini(bytes: &[u8], limits: RoadIniLimits) -> Result<RoadIni, Ro
     }
     let mut definitions = Vec::new();
     let mut bridges = Vec::new();
+    let mut diagnostics = Vec::new();
     let mut active = None;
     let mut active_bridge = None;
     for (zero_based_line, raw_line) in bytes.split(|byte| *byte == b'\n').enumerate() {
@@ -493,6 +526,11 @@ pub fn parse_road_ini(bytes: &[u8], limits: RoadIniLimits) -> Result<RoadIni, Ro
                 road.road_width = read_real(value, line_number, "RoadWidth")?;
             } else if field.eq_ignore_ascii_case(b"RoadWidthInTexture") {
                 road.road_width_in_texture = read_real(value, line_number, "RoadWidthInTexture")?;
+            } else {
+                diagnostics.push(RoadIniDiagnostic {
+                    line: line_number,
+                    field: field.to_vec(),
+                });
             }
         } else if let Some(bridge) = active_bridge.as_mut() {
             if field.eq_ignore_ascii_case(b"BridgeModelName") {
@@ -581,6 +619,11 @@ pub fn parse_road_ini(bytes: &[u8], limits: RoadIniLimits) -> Result<RoadIni, Ro
                 )?);
             } else if field.eq_ignore_ascii_case(b"BridgeScale") {
                 bridge.bridge_scale = Some(read_real(value, line_number, "BridgeScale")?);
+            } else {
+                diagnostics.push(RoadIniDiagnostic {
+                    line: line_number,
+                    field: field.to_vec(),
+                });
             }
         }
     }
@@ -593,6 +636,7 @@ pub fn parse_road_ini(bytes: &[u8], limits: RoadIniLimits) -> Result<RoadIni, Ro
     Ok(RoadIni {
         definitions,
         bridges,
+        diagnostics,
     })
 }
 
@@ -705,6 +749,9 @@ mod tests {
             bridge.tower_object_name_bytes(BridgeTowerSlot::ToRight),
             Some(b"TowerTR".as_slice())
         );
+        assert_eq!(ini.diagnostics().len(), 1);
+        assert_eq!(ini.diagnostics()[0].line(), 21);
+        assert_eq!(ini.diagnostics()[0].field_bytes(), b"Unknown");
 
         let inherited = parse_road_ini(
             b"Bridge DefaultBridge\n BridgeScale = 2\n BridgeModelName = default.w3d\n BridgeModelNameDamaged = default_damaged.w3d\n TextureBroken = default_broken.tga\n TowerObjectNameFromLeft = DefaultTower\nEnd\nBridge Child\n TowerObjectNameToRight = ChildTower\nEnd\n",

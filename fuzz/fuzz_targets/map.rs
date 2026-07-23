@@ -20,6 +20,11 @@ fuzz_target!(|bytes: &[u8]| {
         maximum_cliff_records: 4_096,
         maximum_texture_classes: 256,
         maximum_texture_name_bytes: 1_024,
+        maximum_polygon_triggers: 1_024,
+        maximum_polygon_points: 1_024,
+        maximum_polygon_total_points: 16_384,
+        maximum_water_points: 16_384,
+        maximum_trigger_name_bytes: 1_024,
     };
     if let Ok(map) = parse_map(bytes, "fuzz.map", limits) {
         if let Ok(height) = decode_map_height(&map, limits) {

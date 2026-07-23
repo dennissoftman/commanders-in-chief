@@ -21,8 +21,28 @@ land under the active milestone heading.
   existing `HeadlessRenderer` boundary to a deterministic PPM plus RGBA SHA-256 hash. It has no
   images, text, gadget visuals, or scaling policy yet; it proves the immutable decoded value can
   drive a renderer capture ahead of the retained UI runtime.
+- Added an original synthetic `BIG4` fixture and truncation-at-every-prefix tests alongside the
+  existing `BIGF` coverage, and a bounded `big` libFuzzer target, closing an R1 acceptance-test gap
+  where BIG4 had no automated coverage and BIG archives had no fuzz target.
+
+### Fixed
+
+- Repaired the `map` libFuzzer target, which no longer compiled after `MapLimits` gained polygon
+  and water-trigger fields during R3; fuzzing was not part of the workspace test suite so the
+  regression was silent.
+- Corrected the R2 milestone doc's stale W3D chunk-identifier count (73 to 77).
 
 ### Changed
+
+- Changed `terrain_ini.rs`, `water_ini.rs`, `road_ini.rs`, and `object_ini.rs` (owned by R3) so an
+  unrecognized field name inside a block they otherwise decode is never silently dropped. Each
+  narrow INI decoder now retains every such field as a non-fatal diagnostic
+  (`TerrainIniDiagnostic`, `WaterIniDiagnostic`, `RoadIniDiagnostic`, `ObjectIniDiagnostic`,
+  exposed via a new `diagnostics()` accessor on `TerrainIni`/`WaterIni`/`RoadIni`/`ObjectIni`), so
+  an unsupported or genuinely missing field stays discoverable instead of disappearing silently.
+  Already-recognized fields keep their exact prior behavior; entirely unrelated INI blocks and
+  `object_ini`'s intentionally out-of-scope gameplay modules (`Behavior`, `Body`, and similar)
+  remain excluded as before, since that boundary is architectural, not a dropped field.
 
 - Closed R3 and advanced the active objective to R4's bounded WND inventory/layout decoder and
   synthetic headless menu vertical slice. Version-1 height presentation now explicitly retains its
