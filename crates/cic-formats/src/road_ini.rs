@@ -38,11 +38,64 @@ impl Default for RoadIniLimits {
     }
 }
 
-/// One source-ordered intact-bridge presentation definition.
+/// Source bridge body states whose assets are retained without activating damage simulation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BridgeBodyState {
+    Pristine,
+    Damaged,
+    ReallyDamaged,
+    Broken,
+}
+
+impl BridgeBodyState {
+    const fn index(self) -> usize {
+        match self {
+            Self::Pristine => 0,
+            Self::Damaged => 1,
+            Self::ReallyDamaged => 2,
+            Self::Broken => 3,
+        }
+    }
+}
+
+/// Stable source order for the four optional bridge-tower object templates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BridgeTowerSlot {
+    FromLeft,
+    FromRight,
+    ToLeft,
+    ToRight,
+}
+
+impl BridgeTowerSlot {
+    pub const ALL: [Self; 4] = [Self::FromLeft, Self::FromRight, Self::ToLeft, Self::ToRight];
+
+    #[must_use]
+    pub const fn index(self) -> usize {
+        match self {
+            Self::FromLeft => 0,
+            Self::FromRight => 1,
+            Self::ToLeft => 2,
+            Self::ToRight => 3,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+struct BridgeStateAssets {
+    model: Option<Vec<u8>>,
+    texture: Option<Vec<u8>>,
+}
+
+/// One source-ordered bridge presentation definition.
+///
+/// Damage-state assets are immutable references only. R3 always selects [`BridgeBodyState::Pristine`]
+/// and does not create bridge logic, damage transitions, collision, or repair behavior.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BridgeDefinition {
     name: Vec<u8>,
-    model: Option<Vec<u8>>,
+    states: [BridgeStateAssets; 4],
+    tower_objects: [Option<Vec<u8>>; 4],
     bridge_scale: Option<f32>,
 }
 
@@ -54,7 +107,22 @@ impl BridgeDefinition {
 
     #[must_use]
     pub fn model_bytes(&self) -> Option<&[u8]> {
-        self.model.as_deref()
+        self.state_model_bytes(BridgeBodyState::Pristine)
+    }
+
+    #[must_use]
+    pub fn state_model_bytes(&self, state: BridgeBodyState) -> Option<&[u8]> {
+        self.states[state.index()].model.as_deref()
+    }
+
+    #[must_use]
+    pub fn state_texture_bytes(&self, state: BridgeBodyState) -> Option<&[u8]> {
+        self.states[state.index()].texture.as_deref()
+    }
+
+    #[must_use]
+    pub fn tower_object_name_bytes(&self, slot: BridgeTowerSlot) -> Option<&[u8]> {
+        self.tower_objects[slot.index()].as_deref()
     }
 
     #[must_use]
@@ -67,7 +135,18 @@ impl BridgeDefinition {
     pub fn inherit_missing(&self, default_bridge: &Self) -> Self {
         Self {
             name: self.name.clone(),
-            model: self.model.clone().or_else(|| default_bridge.model.clone()),
+            states: std::array::from_fn(|index| BridgeStateAssets {
+                model: self.states[index]
+                    .model
+                    .clone()
+                    .or_else(|| default_bridge.states[index].model.clone()),
+                texture: self.states[index]
+                    .texture
+                    .clone()
+                    .or_else(|| default_bridge.states[index].texture.clone()),
+            }),
+            // The source `newBridge` inheritance path does not copy tower object names.
+            tower_objects: self.tower_objects.clone(),
             bridge_scale: self.bridge_scale.or(default_bridge.bridge_scale),
         }
     }
@@ -262,7 +341,8 @@ struct ActiveRoad {
 struct ActiveBridge {
     line: usize,
     name: Vec<u8>,
-    model: Option<Vec<u8>>,
+    states: [BridgeStateAssets; 4],
+    tower_objects: [Option<Vec<u8>>; 4],
     bridge_scale: Option<f32>,
 }
 
@@ -362,7 +442,8 @@ pub fn parse_road_ini(bytes: &[u8], limits: RoadIniLimits) -> Result<RoadIni, Ro
             active_bridge = Some(ActiveBridge {
                 line: line_number,
                 name: name.to_vec(),
-                model: None,
+                states: std::array::from_fn(|_| BridgeStateAssets::default()),
+                tower_objects: std::array::from_fn(|_| None),
                 bridge_scale: None,
             });
             continue;
@@ -387,7 +468,8 @@ pub fn parse_road_ini(bytes: &[u8], limits: RoadIniLimits) -> Result<RoadIni, Ro
             } else if let Some(bridge) = active_bridge.take() {
                 bridges.push(BridgeDefinition {
                     name: bridge.name,
-                    model: bridge.model,
+                    states: bridge.states,
+                    tower_objects: bridge.tower_objects,
                     bridge_scale: bridge.bridge_scale,
                 });
             }
@@ -414,11 +496,88 @@ pub fn parse_road_ini(bytes: &[u8], limits: RoadIniLimits) -> Result<RoadIni, Ro
             }
         } else if let Some(bridge) = active_bridge.as_mut() {
             if field.eq_ignore_ascii_case(b"BridgeModelName") {
-                bridge.model = Some(read_string(
+                bridge.states[BridgeBodyState::Pristine.index()].model = Some(read_string(
                     value,
                     line_number,
                     "BridgeModelName",
                     limits.max_model_bytes,
+                )?);
+            } else if field.eq_ignore_ascii_case(b"Texture") {
+                bridge.states[BridgeBodyState::Pristine.index()].texture = Some(read_string(
+                    value,
+                    line_number,
+                    "Texture",
+                    limits.max_texture_bytes,
+                )?);
+            } else if field.eq_ignore_ascii_case(b"BridgeModelNameDamaged") {
+                bridge.states[BridgeBodyState::Damaged.index()].model = Some(read_string(
+                    value,
+                    line_number,
+                    "BridgeModelNameDamaged",
+                    limits.max_model_bytes,
+                )?);
+            } else if field.eq_ignore_ascii_case(b"TextureDamaged") {
+                bridge.states[BridgeBodyState::Damaged.index()].texture = Some(read_string(
+                    value,
+                    line_number,
+                    "TextureDamaged",
+                    limits.max_texture_bytes,
+                )?);
+            } else if field.eq_ignore_ascii_case(b"BridgeModelNameReallyDamaged") {
+                bridge.states[BridgeBodyState::ReallyDamaged.index()].model = Some(read_string(
+                    value,
+                    line_number,
+                    "BridgeModelNameReallyDamaged",
+                    limits.max_model_bytes,
+                )?);
+            } else if field.eq_ignore_ascii_case(b"TextureReallyDamaged") {
+                bridge.states[BridgeBodyState::ReallyDamaged.index()].texture = Some(read_string(
+                    value,
+                    line_number,
+                    "TextureReallyDamaged",
+                    limits.max_texture_bytes,
+                )?);
+            } else if field.eq_ignore_ascii_case(b"BridgeModelNameBroken") {
+                bridge.states[BridgeBodyState::Broken.index()].model = Some(read_string(
+                    value,
+                    line_number,
+                    "BridgeModelNameBroken",
+                    limits.max_model_bytes,
+                )?);
+            } else if field.eq_ignore_ascii_case(b"TextureBroken") {
+                bridge.states[BridgeBodyState::Broken.index()].texture = Some(read_string(
+                    value,
+                    line_number,
+                    "TextureBroken",
+                    limits.max_texture_bytes,
+                )?);
+            } else if field.eq_ignore_ascii_case(b"TowerObjectNameFromLeft") {
+                bridge.tower_objects[BridgeTowerSlot::FromLeft.index()] = Some(read_string(
+                    value,
+                    line_number,
+                    "TowerObjectNameFromLeft",
+                    limits.max_name_bytes,
+                )?);
+            } else if field.eq_ignore_ascii_case(b"TowerObjectNameFromRight") {
+                bridge.tower_objects[BridgeTowerSlot::FromRight.index()] = Some(read_string(
+                    value,
+                    line_number,
+                    "TowerObjectNameFromRight",
+                    limits.max_name_bytes,
+                )?);
+            } else if field.eq_ignore_ascii_case(b"TowerObjectNameToLeft") {
+                bridge.tower_objects[BridgeTowerSlot::ToLeft.index()] = Some(read_string(
+                    value,
+                    line_number,
+                    "TowerObjectNameToLeft",
+                    limits.max_name_bytes,
+                )?);
+            } else if field.eq_ignore_ascii_case(b"TowerObjectNameToRight") {
+                bridge.tower_objects[BridgeTowerSlot::ToRight.index()] = Some(read_string(
+                    value,
+                    line_number,
+                    "TowerObjectNameToRight",
+                    limits.max_name_bytes,
                 )?);
             } else if field.eq_ignore_ascii_case(b"BridgeScale") {
                 bridge.bridge_scale = Some(read_real(value, line_number, "BridgeScale")?);
@@ -504,12 +663,12 @@ fn unquote(value: &[u8]) -> &[u8] {
 
 #[cfg(test)]
 mod tests {
-    use super::{RoadIniError, RoadIniLimits, parse_road_ini};
+    use super::{BridgeBodyState, BridgeTowerSlot, RoadIniError, RoadIniLimits, parse_road_ini};
 
     #[test]
     fn decodes_road_and_bridge_fields_in_source_order() {
         let ini = parse_road_ini(
-            b"Bridge SyntheticBridge\n BridgeScale = 1.25\n BridgeModelName = synthetic_bridge.w3d\n BridgeModelNameDamaged = data-only.w3d\nEnd\nRoad DirtRoad\n Texture = old.tga\n RoadWidth = 30\n RoadWidthInTexture = 1.25\n Texture = \"road.dds\"\n Unknown = retained-elsewhere\nEnd\n",
+            b"Bridge SyntheticBridge\n BridgeScale = 1.25\n BridgeModelName = synthetic_bridge.w3d\n Texture = bridge.tga\n BridgeModelNameDamaged = damaged.w3d\n TextureDamaged = damaged.tga\n BridgeModelNameReallyDamaged = really_damaged.w3d\n TextureReallyDamaged = really_damaged.tga\n BridgeModelNameBroken = broken.w3d\n TextureBroken = broken.tga\n TowerObjectNameFromLeft = TowerFL\n TowerObjectNameFromRight = TowerFR\n TowerObjectNameToLeft = TowerTL\n TowerObjectNameToRight = TowerTR\nEnd\nRoad DirtRoad\n Texture = old.tga\n RoadWidth = 30\n RoadWidthInTexture = 1.25\n Texture = \"road.dds\"\n Unknown = retained-elsewhere\nEnd\n",
             RoadIniLimits::default(),
         )
         .expect("road INI");
@@ -526,15 +685,52 @@ mod tests {
             Some(b"synthetic_bridge.w3d".as_slice())
         );
         assert_eq!(bridge.bridge_scale().to_bits(), 1.25_f32.to_bits());
+        assert_eq!(
+            bridge.state_model_bytes(BridgeBodyState::Damaged),
+            Some(b"damaged.w3d".as_slice())
+        );
+        assert_eq!(
+            bridge.state_texture_bytes(BridgeBodyState::ReallyDamaged),
+            Some(b"really_damaged.tga".as_slice())
+        );
+        assert_eq!(
+            bridge.state_model_bytes(BridgeBodyState::Broken),
+            Some(b"broken.w3d".as_slice())
+        );
+        assert_eq!(
+            bridge.tower_object_name_bytes(BridgeTowerSlot::FromLeft),
+            Some(b"TowerFL".as_slice())
+        );
+        assert_eq!(
+            bridge.tower_object_name_bytes(BridgeTowerSlot::ToRight),
+            Some(b"TowerTR".as_slice())
+        );
 
         let inherited = parse_road_ini(
-            b"Bridge DefaultBridge\n BridgeScale = 2\n BridgeModelName = default.w3d\nEnd\nBridge Child\nEnd\n",
+            b"Bridge DefaultBridge\n BridgeScale = 2\n BridgeModelName = default.w3d\n BridgeModelNameDamaged = default_damaged.w3d\n TextureBroken = default_broken.tga\n TowerObjectNameFromLeft = DefaultTower\nEnd\nBridge Child\n TowerObjectNameToRight = ChildTower\nEnd\n",
             RoadIniLimits::default(),
         )
         .expect("bridge defaults");
         let child = inherited.bridges()[1].inherit_missing(&inherited.bridges()[0]);
         assert_eq!(child.model_bytes(), Some(b"default.w3d".as_slice()));
         assert_eq!(child.bridge_scale().to_bits(), 2.0_f32.to_bits());
+        assert_eq!(
+            child.state_model_bytes(BridgeBodyState::Damaged),
+            Some(b"default_damaged.w3d".as_slice())
+        );
+        assert_eq!(
+            child.state_texture_bytes(BridgeBodyState::Broken),
+            Some(b"default_broken.tga".as_slice())
+        );
+        assert_eq!(
+            child.tower_object_name_bytes(BridgeTowerSlot::FromLeft),
+            None,
+            "source default-bridge inheritance does not copy tower names"
+        );
+        assert_eq!(
+            child.tower_object_name_bytes(BridgeTowerSlot::ToRight),
+            Some(b"ChildTower".as_slice())
+        );
     }
 
     #[test]
@@ -561,6 +757,52 @@ mod tests {
         assert!(matches!(
             parse_road_ini(b"Road A\nEnd\n", limits),
             Err(RoadIniError::TooManyDefinitions { .. })
+        ));
+    }
+
+    #[test]
+    fn bridge_state_and_tower_references_share_explicit_string_limits() {
+        let cases = [
+            (
+                b"Bridge A\n BridgeModelNameDamaged = Four\nEnd\n".as_slice(),
+                RoadIniLimits {
+                    max_model_bytes: 3,
+                    ..RoadIniLimits::default()
+                },
+                "BridgeModelNameDamaged",
+            ),
+            (
+                b"Bridge A\n TextureBroken = Four\nEnd\n".as_slice(),
+                RoadIniLimits {
+                    max_texture_bytes: 3,
+                    ..RoadIniLimits::default()
+                },
+                "TextureBroken",
+            ),
+            (
+                b"Bridge A\n TowerObjectNameFromLeft = Four\nEnd\n".as_slice(),
+                RoadIniLimits {
+                    max_name_bytes: 3,
+                    ..RoadIniLimits::default()
+                },
+                "TowerObjectNameFromLeft",
+            ),
+        ];
+        for (bytes, limits, expected_field) in cases {
+            assert!(matches!(
+                parse_road_ini(bytes, limits),
+                Err(RoadIniError::ValueTooLong { field, .. }) if field == expected_field
+            ));
+        }
+        assert!(matches!(
+            parse_road_ini(
+                b"Bridge A\n TowerObjectNameToRight =\nEnd\n",
+                RoadIniLimits::default()
+            ),
+            Err(RoadIniError::MissingValue {
+                field: "TowerObjectNameToRight",
+                ..
+            })
         ));
     }
 }

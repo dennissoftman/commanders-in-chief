@@ -32,13 +32,16 @@ use crate::viewer::{
     GpuResourceManager, ViewerError, create_depth, create_material_layout, nonzero_size,
 };
 use crate::{
-    MapPresentationFrame, RenderError, StagedBoundaryFence, StagedRoads, StagedStaticScenery,
-    StagedTerrain, StagedWater, TerrainLighting, WaterAppearance, WaterPresentationPolicy,
+    MapPresentationFrame, RenderError, StagedBoundaryFence, StagedMapOverlays, StagedRoads,
+    StagedStaticScenery, StagedTerrain, StagedWater, TerrainLighting, WaterAppearance,
+    WaterPresentationPolicy,
 };
 
 const WINDOW_WIDTH: u32 = 1_280;
 const WINDOW_HEIGHT: u32 = 800;
 const CAMERA_UNIFORM_BYTES: u64 = 304;
+const SHADOW_UNIFORM_BYTES: u64 = 80;
+const SHADOW_MAP_EXTENT: u32 = 2_048;
 const MAX_FRAME_SECONDS: f32 = 0.1;
 const CAMERA_VERTICAL_FOV: f32 = std::f32::consts::PI / 3.0;
 const TERRAIN_CELL_WORLD_SIZE: f32 = 10.0;
@@ -72,6 +75,7 @@ pub fn run_terrain_viewer(
         terrain,
         StagedRoads::empty(),
         StagedBoundaryFence::empty(),
+        StagedMapOverlays::empty(),
         StagedStaticScenery::empty(),
         water,
         water_appearance,
@@ -98,6 +102,7 @@ pub fn run_terrain_viewer_with_roads(
         terrain,
         roads,
         StagedBoundaryFence::empty(),
+        StagedMapOverlays::empty(),
         StagedStaticScenery::empty(),
         water,
         water_appearance,
@@ -117,6 +122,7 @@ pub fn run_terrain_viewer_with_map(
     terrain: StagedTerrain,
     roads: StagedRoads,
     boundary: StagedBoundaryFence,
+    overlays: StagedMapOverlays,
     scenery: StagedStaticScenery,
     water: StagedWater,
     water_appearance: WaterAppearance,
@@ -127,6 +133,7 @@ pub fn run_terrain_viewer_with_map(
         terrain,
         roads,
         boundary,
+        overlays,
         scenery,
         water,
         water_appearance,
@@ -155,6 +162,7 @@ pub fn run_terrain_viewer_at_time(
         terrain,
         StagedRoads::empty(),
         StagedBoundaryFence::empty(),
+        StagedMapOverlays::empty(),
         StagedStaticScenery::empty(),
         water,
         water_appearance,
@@ -182,6 +190,7 @@ pub fn run_terrain_viewer_with_roads_at_time(
         terrain,
         roads,
         StagedBoundaryFence::empty(),
+        StagedMapOverlays::empty(),
         StagedStaticScenery::empty(),
         water,
         water_appearance,
@@ -201,6 +210,7 @@ pub fn run_terrain_viewer_with_map_at_time(
     terrain: StagedTerrain,
     roads: StagedRoads,
     boundary: StagedBoundaryFence,
+    overlays: StagedMapOverlays,
     scenery: StagedStaticScenery,
     water: StagedWater,
     water_appearance: WaterAppearance,
@@ -212,6 +222,7 @@ pub fn run_terrain_viewer_with_map_at_time(
         terrain,
         roads,
         boundary,
+        overlays,
         scenery,
         water,
         water_appearance,
@@ -226,6 +237,7 @@ fn run_terrain_viewer_inner(
     terrain: StagedTerrain,
     roads: StagedRoads,
     boundary: StagedBoundaryFence,
+    overlays: StagedMapOverlays,
     scenery: StagedStaticScenery,
     water: StagedWater,
     water_appearance: WaterAppearance,
@@ -240,6 +252,7 @@ fn run_terrain_viewer_inner(
         terrain,
         roads,
         boundary,
+        overlays,
         scenery,
         water,
         water_appearance,
@@ -258,6 +271,7 @@ struct TerrainViewerApplication {
     terrain: Arc<StagedTerrain>,
     roads: StagedRoads,
     boundary: StagedBoundaryFence,
+    overlays: StagedMapOverlays,
     scenery: StagedStaticScenery,
     water: StagedWater,
     water_appearance: WaterAppearance,
@@ -285,6 +299,7 @@ impl TerrainViewerApplication {
         terrain: StagedTerrain,
         roads: StagedRoads,
         boundary: StagedBoundaryFence,
+        overlays: StagedMapOverlays,
         scenery: StagedStaticScenery,
         water: StagedWater,
         water_appearance: WaterAppearance,
@@ -300,6 +315,7 @@ impl TerrainViewerApplication {
             terrain,
             roads,
             boundary,
+            overlays,
             scenery,
             water,
             water_appearance,
@@ -343,6 +359,7 @@ impl TerrainViewerApplication {
                 terrain: &self.terrain,
                 roads: &self.roads,
                 boundary: &self.boundary,
+                overlays: &self.overlays,
                 scenery: &self.scenery,
                 requests: &self.detail_requests,
                 page_view: self
@@ -820,6 +837,8 @@ struct TerrainViewerGpu {
     edge_pipeline: wgpu::RenderPipeline,
     road_pipeline: wgpu::RenderPipeline,
     static_pipelines: StaticSceneryPipelines,
+    terrain_shadow_pipeline: wgpu::RenderPipeline,
+    scenery_shadow_pipeline: wgpu::RenderPipeline,
     boundary_pipeline: wgpu::RenderPipeline,
     lighting_pipeline: wgpu::RenderPipeline,
     composite_pipeline: wgpu::RenderPipeline,
@@ -831,6 +850,9 @@ struct TerrainViewerGpu {
     _texture: wgpu::Texture,
     _edge_texture: wgpu::Texture,
     camera_uniform: wgpu::Buffer,
+    shadow_uniform: wgpu::Buffer,
+    shadow_bind_group: wgpu::BindGroup,
+    shadow_matrix: [[f32; 4]; 4],
     bind_group: wgpu::BindGroup,
     edge_bind_group: wgpu::BindGroup,
     vertex_buffer: wgpu::Buffer,
@@ -842,6 +864,7 @@ struct TerrainViewerGpu {
     roads: Option<RoadGpu>,
     scenery: Option<StaticSceneryGpu>,
     boundary: Option<BoundaryGpu>,
+    overlays: Option<BoundaryGpu>,
     water: Option<WaterGpu>,
     water_appearance: WaterAppearanceGpu,
     lighting: TerrainLighting,
@@ -864,6 +887,7 @@ struct TerrainViewerScene<'a> {
     roads: &'a StagedRoads,
     scenery: &'a StagedStaticScenery,
     boundary: &'a StagedBoundaryFence,
+    overlays: &'a StagedMapOverlays,
     requests: &'a [TerrainDetailRequest],
     page_view: VirtualPageView,
     water: &'a StagedWater,
@@ -1172,7 +1196,9 @@ struct DeferredTargets {
     _normal: wgpu::Texture,
     _world: wgpu::Texture,
     _scene: wgpu::Texture,
+    _shadow: wgpu::Texture,
     depth: wgpu::Texture,
+    shadow_view: wgpu::TextureView,
     albedo_view: wgpu::TextureView,
     normal_view: wgpu::TextureView,
     world_view: wgpu::TextureView,
@@ -1180,6 +1206,16 @@ struct DeferredTargets {
     lighting_bind_group: wgpu::BindGroup,
     composite_bind_group: wgpu::BindGroup,
     water_bind_group: wgpu::BindGroup,
+}
+
+#[derive(Clone, Copy)]
+struct DeferredTargetResources<'a> {
+    lighting_layout: &'a wgpu::BindGroupLayout,
+    composite_layout: &'a wgpu::BindGroupLayout,
+    water_layout: &'a wgpu::BindGroupLayout,
+    camera_uniform: &'a wgpu::Buffer,
+    shadow_uniform: &'a wgpu::Buffer,
+    water_appearance: &'a WaterAppearanceGpu,
 }
 
 struct VirtualTerrainGpu {
@@ -1839,6 +1875,45 @@ fn create_boundary_gpu(
     }))
 }
 
+fn create_map_overlay_gpu(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    layout: &wgpu::BindGroupLayout,
+    camera_uniform: &wgpu::Buffer,
+    overlays: &StagedMapOverlays,
+) -> Result<Option<BoundaryGpu>, ViewerError> {
+    if overlays.indices().is_empty() {
+        return Ok(None);
+    }
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("cic-render MAP diagnostic overlay bind group"),
+        layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: camera_uniform.as_entire_binding(),
+        }],
+    });
+    Ok(Some(BoundaryGpu {
+        bind_group,
+        vertex_buffer: upload_buffer(
+            device,
+            queue,
+            "cic-render MAP diagnostic overlay vertices",
+            &overlays.vertex_bytes(),
+            wgpu::BufferUsages::VERTEX,
+        )?,
+        index_buffer: upload_buffer(
+            device,
+            queue,
+            "cic-render MAP diagnostic overlay indices",
+            &overlays.index_bytes(),
+            wgpu::BufferUsages::INDEX,
+        )?,
+        index_count: u32::try_from(overlays.indices().len())
+            .map_err(|_| RenderError::GeometryTooLarge)?,
+    }))
+}
+
 fn create_static_scenery_gpu(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -1916,6 +1991,7 @@ impl TerrainViewerGpu {
             terrain,
             roads,
             boundary,
+            overlays,
             scenery,
             requests,
             page_view,
@@ -1964,6 +2040,7 @@ impl TerrainViewerGpu {
         let composite_layout = create_composite_layout(&device);
         let water_layout = create_water_layout(&device);
         let boundary_layout = create_boundary_layout(&device);
+        let shadow_layout = create_shadow_layout(&device);
         let material_layout = create_material_layout(&device);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cic-render terrain viewer shader"),
@@ -2050,6 +2127,36 @@ impl TerrainViewerGpu {
             &static_shader,
             &static_pipeline_layout,
             wgpu::PolygonMode::Fill,
+        );
+        let terrain_shadow_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("cic-render terrain shadow shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("terrain_shadow.wgsl").into()),
+        });
+        let scenery_shadow_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("cic-render scenery shadow shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("scene_shadow.wgsl").into()),
+        });
+        let terrain_shadow_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("cic-render terrain shadow pipeline layout"),
+                bind_group_layouts: &[Some(&shadow_layout)],
+                immediate_size: 0,
+            });
+        let scenery_shadow_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("cic-render scenery shadow pipeline layout"),
+                bind_group_layouts: &[Some(&material_layout), Some(&shadow_layout)],
+                immediate_size: 0,
+            });
+        let terrain_shadow_pipeline = create_terrain_shadow_pipeline(
+            &device,
+            &terrain_shadow_shader,
+            &terrain_shadow_pipeline_layout,
+        );
+        let scenery_shadow_pipeline = create_scenery_shadow_pipeline(
+            &device,
+            &scenery_shadow_shader,
+            &scenery_shadow_pipeline_layout,
         );
         let deferred_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cic-render deferred resolve shader"),
@@ -2180,6 +2287,21 @@ impl TerrainViewerGpu {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let shadow_matrix = scene_shadow_matrix(terrain, lighting);
+        let shadow_uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cic-render scene shadow camera"),
+            size: SHADOW_UNIFORM_BYTES,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let shadow_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("cic-render scene shadow bind group"),
+            layout: &shadow_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: shadow_uniform.as_entire_binding(),
+            }],
+        });
         let virtual_terrain =
             VirtualTerrainGpu::new(&device, &queue, terrain, requests, page_view)?;
         let roads = create_road_gpu(
@@ -2192,6 +2314,8 @@ impl TerrainViewerGpu {
         )?;
         let boundary =
             create_boundary_gpu(&device, &queue, &boundary_layout, &camera_uniform, boundary)?;
+        let overlays =
+            create_map_overlay_gpu(&device, &queue, &boundary_layout, &camera_uniform, overlays)?;
         let scenery = create_static_scenery_gpu(
             &device,
             &queue,
@@ -2324,11 +2448,14 @@ impl TerrainViewerGpu {
         let deferred = DeferredTargets::new(
             &device,
             size,
-            &lighting_layout,
-            &composite_layout,
-            &water_layout,
-            &camera_uniform,
-            &water_appearance,
+            DeferredTargetResources {
+                lighting_layout: &lighting_layout,
+                composite_layout: &composite_layout,
+                water_layout: &water_layout,
+                camera_uniform: &camera_uniform,
+                shadow_uniform: &shadow_uniform,
+                water_appearance: &water_appearance,
+            },
         );
         Ok(Self {
             _instance: instance,
@@ -2339,6 +2466,8 @@ impl TerrainViewerGpu {
             edge_pipeline,
             road_pipeline,
             static_pipelines,
+            terrain_shadow_pipeline,
+            scenery_shadow_pipeline,
             boundary_pipeline,
             lighting_pipeline,
             composite_pipeline,
@@ -2350,6 +2479,9 @@ impl TerrainViewerGpu {
             _texture: texture,
             _edge_texture: edge_texture,
             camera_uniform,
+            shadow_uniform,
+            shadow_bind_group,
+            shadow_matrix,
             bind_group,
             edge_bind_group,
             vertex_buffer,
@@ -2361,6 +2493,7 @@ impl TerrainViewerGpu {
             roads,
             scenery,
             boundary,
+            overlays,
             water,
             water_appearance,
             lighting,
@@ -2393,11 +2526,14 @@ impl TerrainViewerGpu {
         self.deferred = DeferredTargets::new(
             &self.device,
             size,
-            &self.lighting_layout,
-            &self.composite_layout,
-            &self.water_layout,
-            &self.camera_uniform,
-            &self.water_appearance,
+            DeferredTargetResources {
+                lighting_layout: &self.lighting_layout,
+                composite_layout: &self.composite_layout,
+                water_layout: &self.water_layout,
+                camera_uniform: &self.camera_uniform,
+                shadow_uniform: &self.shadow_uniform,
+                water_appearance: &self.water_appearance,
+            },
         );
     }
 
@@ -2465,6 +2601,11 @@ impl TerrainViewerGpu {
                 lighting: self.lighting,
             }),
         );
+        self.queue.write_buffer(
+            &self.shadow_uniform,
+            0,
+            &shadow_uniform_bytes(self.shadow_matrix, presentation_seconds),
+        );
         let view = surface_texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -2478,6 +2619,50 @@ impl TerrainViewerGpu {
                 label: Some("cic-render terrain viewer encoder"),
             });
         self.virtual_terrain.encode(&mut encoder);
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("cic-render primary directional shadow pass"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.deferred.shadow_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.terrain_shadow_pipeline);
+            pass.set_bind_group(0, &self.shadow_bind_group, &[]);
+            pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..self.index_count, 0, 0..1);
+            if let Some(scenery) = &self.scenery {
+                pass.set_pipeline(&self.scenery_shadow_pipeline);
+                pass.set_bind_group(1, &self.shadow_bind_group, &[]);
+                for model in &scenery.models {
+                    pass.set_vertex_buffer(0, model.vertex_buffer.slice(..));
+                    pass.set_vertex_buffer(1, model.instance_buffer.slice(..));
+                    pass.set_index_buffer(model.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    for draw in &model.draws {
+                        let material = model
+                            .resources
+                            .materials
+                            .get(draw.material)
+                            .ok_or(RenderError::InvalidMaterial)?;
+                        let end = draw
+                            .first_index
+                            .checked_add(draw.index_count)
+                            .ok_or(RenderError::GeometryTooLarge)?;
+                        pass.set_bind_group(0, &material.bind_group, &[]);
+                        pass.draw_indexed(draw.first_index..end, 0, 0..model.instance_count);
+                    }
+                }
+            }
+        }
         let wireframe_pipelines = wireframe
             .then_some(self.wireframe_pipelines.as_ref())
             .flatten();
@@ -2604,9 +2789,9 @@ impl TerrainViewerGpu {
             pass.set_bind_group(1, &self.deferred.composite_bind_group, &[]);
             pass.draw(0..3, 0..1);
         }
-        if let Some(boundary) = &self.boundary {
+        if self.boundary.is_some() || self.overlays.is_some() {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("cic-render forward boundary fence pass"),
+                label: Some("cic-render forward MAP diagnostics pass"),
                 color_attachments: &[Some(load_attachment(&view))],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &depth_view,
@@ -2624,10 +2809,12 @@ impl TerrainViewerGpu {
                 wireframe_pipelines
                     .map_or(&self.boundary_pipeline, |pipelines| &pipelines.boundary),
             );
-            pass.set_bind_group(0, &boundary.bind_group, &[]);
-            pass.set_vertex_buffer(0, boundary.vertex_buffer.slice(..));
-            pass.set_index_buffer(boundary.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..boundary.index_count, 0, 0..1);
+            for geometry in [&self.boundary, &self.overlays].into_iter().flatten() {
+                pass.set_bind_group(0, &geometry.bind_group, &[]);
+                pass.set_vertex_buffer(0, geometry.vertex_buffer.slice(..));
+                pass.set_index_buffer(geometry.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..geometry.index_count, 0, 0..1);
+            }
         }
         if let Some(water) = &self.water {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -2673,6 +2860,22 @@ fn create_boundary_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
                 ty: wgpu::BufferBindingType::Uniform,
                 has_dynamic_offset: false,
                 min_binding_size: wgpu::BufferSize::new(CAMERA_UNIFORM_BYTES),
+            },
+            count: None,
+        }],
+    })
+}
+
+fn create_shadow_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("cic-render scene shadow layout"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: wgpu::BufferSize::new(SHADOW_UNIFORM_BYTES),
             },
             count: None,
         }],
@@ -2781,7 +2984,7 @@ fn create_static_scenery_pipeline(
                     ],
                 }),
                 Some(wgpu::VertexBufferLayout {
-                    array_stride: 48,
+                    array_stride: 80,
                     step_mode: wgpu::VertexStepMode::Instance,
                     attributes: &[
                         wgpu::VertexAttribute {
@@ -2798,6 +3001,16 @@ fn create_static_scenery_pipeline(
                             format: wgpu::VertexFormat::Float32x4,
                             offset: 32,
                             shader_location: 6,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x4,
+                            offset: 48,
+                            shader_location: 7,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x4,
+                            offset: 64,
+                            shader_location: 8,
                         },
                     ],
                 }),
@@ -3229,6 +3442,9 @@ fn create_lighting_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
                 },
                 count: None,
             },
+            depth_texture_layout_entry(4),
+            comparison_sampler_layout_entry(5),
+            shadow_matrix_layout_entry(6),
         ],
     })
 }
@@ -3236,7 +3452,15 @@ fn create_lighting_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
 fn create_composite_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("cic-render deferred composite layout"),
-        entries: &[texture_layout_entry(0, false)],
+        entries: &[
+            texture_layout_entry(0, true),
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
     })
 }
 
@@ -3293,8 +3517,174 @@ fn create_water_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 count: None,
             },
+            depth_texture_layout_entry(11),
+            comparison_sampler_layout_entry(12),
+            shadow_matrix_layout_entry(13),
         ],
     })
+}
+
+fn create_terrain_shadow_pipeline(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    layout: &wgpu::PipelineLayout,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("cic-render terrain shadow pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("terrain_shadow"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[Some(wgpu::VertexBufferLayout {
+                array_stride: 32,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &[wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x3,
+                    offset: 0,
+                    shader_location: 0,
+                }],
+            })],
+        },
+        fragment: None,
+        primitive: wgpu::PrimitiveState {
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: Some(wgpu::Face::Back),
+            ..Default::default()
+        },
+        depth_stencil: Some(shadow_depth_state()),
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+fn create_scenery_shadow_pipeline(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    layout: &wgpu::PipelineLayout,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("cic-render scenery shadow pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("scenery_shadow"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[
+                Some(wgpu::VertexBufferLayout {
+                    array_stride: 48,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x3,
+                            offset: 0,
+                            shader_location: 0,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x2,
+                            offset: 40,
+                            shader_location: 3,
+                        },
+                    ],
+                }),
+                Some(wgpu::VertexBufferLayout {
+                    array_stride: 80,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &[
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x4,
+                            offset: 0,
+                            shader_location: 4,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x4,
+                            offset: 16,
+                            shader_location: 5,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x4,
+                            offset: 32,
+                            shader_location: 6,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x4,
+                            offset: 48,
+                            shader_location: 7,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x4,
+                            offset: 64,
+                            shader_location: 8,
+                        },
+                    ],
+                }),
+            ],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("scenery_shadow_fragment"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[],
+        }),
+        primitive: wgpu::PrimitiveState {
+            cull_mode: None,
+            ..Default::default()
+        },
+        depth_stencil: Some(shadow_depth_state()),
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+fn shadow_depth_state() -> wgpu::DepthStencilState {
+    wgpu::DepthStencilState {
+        format: wgpu::TextureFormat::Depth32Float,
+        depth_write_enabled: Some(true),
+        depth_compare: Some(wgpu::CompareFunction::LessEqual),
+        stencil: wgpu::StencilState::default(),
+        bias: wgpu::DepthBiasState {
+            constant: 2,
+            slope_scale: 2.0,
+            clamp: 0.0,
+        },
+    }
+}
+
+fn depth_texture_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Depth,
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
+fn comparison_sampler_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+        count: None,
+    }
+}
+
+fn shadow_matrix_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: wgpu::BufferSize::new(SHADOW_UNIFORM_BYTES),
+        },
+        count: None,
+    }
 }
 
 fn texture_layout_entry(binding: u32, filterable: bool) -> wgpu::BindGroupLayoutEntry {
@@ -3422,14 +3812,13 @@ fn create_water_pipeline(
 }
 
 impl DeferredTargets {
+    // Keeping all attachments and bind groups in one constructor makes their matching
+    // resize-time recreation auditable.
+    #[allow(clippy::too_many_lines)]
     fn new(
         device: &wgpu::Device,
         size: PhysicalSize<u32>,
-        lighting_layout: &wgpu::BindGroupLayout,
-        composite_layout: &wgpu::BindGroupLayout,
-        water_layout: &wgpu::BindGroupLayout,
-        camera_uniform: &wgpu::Buffer,
-        water_appearance: &WaterAppearanceGpu,
+        resources: DeferredTargetResources<'_>,
     ) -> Self {
         let albedo = render_texture(
             device,
@@ -3455,61 +3844,128 @@ impl DeferredTargets {
             wgpu::TextureFormat::Rgba16Float,
             "lit scene color",
         );
+        let shadow = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("cic-render primary directional shadow map"),
+            size: wgpu::Extent3d {
+                width: SHADOW_MAP_EXTENT,
+                height: SHADOW_MAP_EXTENT,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
         let depth = create_depth(device, size);
         let albedo_view = albedo.create_view(&wgpu::TextureViewDescriptor::default());
         let normal_view = normal.create_view(&wgpu::TextureViewDescriptor::default());
         let world_view = world.create_view(&wgpu::TextureViewDescriptor::default());
         let scene_view = scene.create_view(&wgpu::TextureViewDescriptor::default());
+        let shadow_view = shadow.create_view(&wgpu::TextureViewDescriptor::default());
+        let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("cic-render primary directional shadow sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
         let lighting_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("cic-render deferred lighting bind group"),
-            layout: lighting_layout,
+            layout: resources.lighting_layout,
             entries: &[
                 texture_binding(0, &albedo_view),
                 texture_binding(1, &normal_view),
                 texture_binding(2, &world_view),
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: camera_uniform.as_entire_binding(),
+                    resource: resources.camera_uniform.as_entire_binding(),
+                },
+                texture_binding(4, &shadow_view),
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Sampler(&shadow_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: resources.shadow_uniform.as_entire_binding(),
                 },
             ],
         });
         let composite_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("cic-render deferred composite bind group"),
-            layout: composite_layout,
-            entries: &[texture_binding(0, &scene_view)],
+            layout: resources.composite_layout,
+            entries: &[
+                texture_binding(0, &scene_view),
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&device.create_sampler(
+                        &wgpu::SamplerDescriptor {
+                            label: Some("cic-render deferred antialiasing sampler"),
+                            address_mode_u: wgpu::AddressMode::ClampToEdge,
+                            address_mode_v: wgpu::AddressMode::ClampToEdge,
+                            mag_filter: wgpu::FilterMode::Linear,
+                            min_filter: wgpu::FilterMode::Linear,
+                            ..Default::default()
+                        },
+                    )),
+                },
+            ],
         });
         let water_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("cic-render forward water bind group"),
-            layout: water_layout,
+            layout: resources.water_layout,
             entries: &[
                 texture_binding(0, &scene_view),
                 texture_binding(1, &world_view),
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: camera_uniform.as_entire_binding(),
+                    resource: resources.camera_uniform.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&water_appearance.caustic_view),
+                    resource: wgpu::BindingResource::TextureView(
+                        &resources.water_appearance.caustic_view,
+                    ),
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
-                    resource: wgpu::BindingResource::Sampler(&water_appearance.caustic_sampler),
+                    resource: wgpu::BindingResource::Sampler(
+                        &resources.water_appearance.caustic_sampler,
+                    ),
                 },
-                texture_binding(5, &water_appearance.surface_view),
+                texture_binding(5, &resources.water_appearance.surface_view),
                 wgpu::BindGroupEntry {
                     binding: 6,
-                    resource: wgpu::BindingResource::Sampler(&water_appearance.surface_sampler),
+                    resource: wgpu::BindingResource::Sampler(
+                        &resources.water_appearance.surface_sampler,
+                    ),
                 },
-                texture_binding(7, &water_appearance.sky_view),
+                texture_binding(7, &resources.water_appearance.sky_view),
                 wgpu::BindGroupEntry {
                     binding: 8,
-                    resource: wgpu::BindingResource::Sampler(&water_appearance.sky_sampler),
+                    resource: wgpu::BindingResource::Sampler(
+                        &resources.water_appearance.sky_sampler,
+                    ),
                 },
-                texture_binding(9, &water_appearance.environment_view),
+                texture_binding(9, &resources.water_appearance.environment_view),
                 wgpu::BindGroupEntry {
                     binding: 10,
-                    resource: wgpu::BindingResource::Sampler(&water_appearance.environment_sampler),
+                    resource: wgpu::BindingResource::Sampler(
+                        &resources.water_appearance.environment_sampler,
+                    ),
+                },
+                texture_binding(11, &shadow_view),
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: wgpu::BindingResource::Sampler(&shadow_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 13,
+                    resource: resources.shadow_uniform.as_entire_binding(),
                 },
             ],
         });
@@ -3518,7 +3974,9 @@ impl DeferredTargets {
             _normal: normal,
             _world: world,
             _scene: scene,
+            _shadow: shadow,
             depth,
+            shadow_view,
             albedo_view,
             normal_view,
             world_view,
@@ -3596,6 +4054,41 @@ fn perspective(field_of_view: f32, aspect: f32, near: f32, far: f32) -> [[f32; 4
     ]
 }
 
+fn orthographic(radius: f32, near: f32, far: f32) -> [[f32; 4]; 4] {
+    [
+        [1.0 / radius, 0.0, 0.0, 0.0],
+        [0.0, 1.0 / radius, 0.0, 0.0],
+        [0.0, 0.0, 1.0 / (near - far), 0.0],
+        [0.0, 0.0, near / (near - far), 1.0],
+    ]
+}
+
+fn scene_shadow_matrix(terrain: &StagedTerrain, lighting: TerrainLighting) -> [[f32; 4]; 4] {
+    let (minimum, maximum) = terrain.bounds();
+    let center = [
+        (minimum[0] + maximum[0]) * 0.5,
+        (minimum[1] + maximum[1]) * 0.5,
+        (minimum[2] + maximum[2]) * 0.5,
+    ];
+    let extent = subtract(maximum, minimum);
+    let radius = (dot(extent, extent).sqrt() * 0.5).max(100.0);
+    let mut forward = lighting.lights()[0].source_direction();
+    if dot(forward, forward) <= f32::EPSILON {
+        forward = [0.45, 0.35, -0.82];
+    }
+    forward = normalize(forward);
+    let position = subtract(center, scale_vector(forward, radius * 2.0));
+    let up = if forward[2].abs() > 0.95 {
+        [0.0, 1.0, 0.0]
+    } else {
+        [0.0, 0.0, 1.0]
+    };
+    multiply_matrix(
+        orthographic(radius, 0.1, radius * 4.0),
+        look_to(position, forward, up),
+    )
+}
+
 fn look_to(position: [f32; 3], forward: [f32; 3], up: [f32; 3]) -> [[f32; 4]; 4] {
     let forward = normalize(forward);
     let right = normalize(cross(forward, up));
@@ -3623,6 +4116,17 @@ fn multiply_matrix(left: [[f32; 4]; 4], right: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
         }
     }
     result
+}
+
+fn shadow_uniform_bytes(matrix: [[f32; 4]; 4], time: f32) -> [u8; 80] {
+    let mut bytes = [0; 80];
+    for (target, value) in bytes
+        .chunks_exact_mut(4)
+        .zip(matrix.into_iter().flatten().chain([time, 0.0, 0.0, 0.0]))
+    {
+        target.copy_from_slice(&value.to_le_bytes());
+    }
+    bytes
 }
 
 #[derive(Clone, Copy)]
@@ -3701,6 +4205,10 @@ fn subtract(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {
     [left[0] - right[0], left[1] - right[1], left[2] - right[2]]
 }
 
+fn scale_vector(value: [f32; 3], scale: f32) -> [f32; 3] {
+    [value[0] * scale, value[1] * scale, value[2] * scale]
+}
+
 fn add_scaled(target: &mut [f32; 3], direction: [f32; 3], scale: f32) {
     for axis in 0..3 {
         target[axis] += direction[axis] * scale;
@@ -3746,10 +4254,40 @@ fn ray_distance_for_view_depth(
 #[cfg(test)]
 mod tests {
     use super::{
-        ROAD_DEPTH_BIAS, SOURCE_ROAD_MIP_LEVELS, TerrainCamera, TerrainInput, gray_mip, look_to,
-        multiply_matrix, perspective, ray_distance_for_view_depth, source_road_mips,
-        terrain_color_targets, terrain_viewer_title,
+        ROAD_DEPTH_BIAS, SOURCE_ROAD_MIP_LEVELS, TerrainCamera, TerrainInput,
+        create_composite_layout, create_fullscreen_pipeline, create_lighting_layout, gray_mip,
+        look_to, multiply_matrix, orthographic, perspective, ray_distance_for_view_depth,
+        shadow_uniform_bytes, source_road_mips, terrain_color_targets, terrain_viewer_title,
     };
+
+    #[test]
+    fn deferred_pipeline_layouts_match_every_shader_binding() {
+        let renderer = pollster::block_on(crate::HeadlessRenderer::new()).expect("headless device");
+        let shader = renderer
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("deferred layout regression shader"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("terrain_deferred.wgsl").into()),
+            });
+        let lighting = create_lighting_layout(&renderer.device);
+        let composite = create_composite_layout(&renderer.device);
+        let _lighting_pipeline = create_fullscreen_pipeline(
+            &renderer.device,
+            &shader,
+            &[&lighting],
+            "lighting_fragment",
+            wgpu::TextureFormat::Rgba16Float,
+            "deferred lighting layout regression",
+        );
+        let _composite_pipeline = create_fullscreen_pipeline(
+            &renderer.device,
+            &shader,
+            &[&lighting, &composite],
+            "composite_fragment",
+            wgpu::TextureFormat::Rgba8Unorm,
+            "deferred composite layout regression",
+        );
+    }
 
     #[test]
     fn road_texture_inputs_keep_at_most_three_total_levels() {
@@ -3796,6 +4334,18 @@ mod tests {
         assert_eq!(
             terrain_viewer_title("map", true, true),
             "map [wireframe] | WASD fly, Space/Ctrl vertical, Shift boost, RMB look, wheel move, R reset, M wireframe, Esc close"
+        );
+    }
+
+    #[test]
+    fn shadow_projection_and_explicit_time_uniform_are_stably_packed() {
+        let projection = orthographic(400.0, 0.1, 1_600.0);
+        assert!(projection.into_iter().flatten().all(f32::is_finite));
+        let bytes = shadow_uniform_bytes(projection, 2.5);
+        assert_eq!(bytes.len(), 80);
+        assert_eq!(
+            u32::from_le_bytes(bytes[64..68].try_into().expect("time bytes")),
+            2.5_f32.to_bits()
         );
     }
 

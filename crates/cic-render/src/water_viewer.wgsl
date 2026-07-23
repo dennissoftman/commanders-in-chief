@@ -15,6 +15,11 @@ struct Camera {
     terrain_lights: array<DirectionalLight, 3>,
 }
 
+struct ShadowCamera {
+    view_projection: mat4x4<f32>,
+    time: vec4<f32>,
+}
+
 struct WaterVertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) world_position: vec3<f32>,
@@ -31,6 +36,9 @@ struct WaterVertexOutput {
 @group(0) @binding(8) var water_sky_sampler: sampler;
 @group(0) @binding(9) var water_environment_texture: texture_2d<f32>;
 @group(0) @binding(10) var water_environment_sampler: sampler;
+@group(0) @binding(11) var primary_shadow: texture_depth_2d;
+@group(0) @binding(12) var primary_shadow_sampler: sampler_comparison;
+@group(0) @binding(13) var<uniform> shadow_camera: ShadowCamera;
 
 @vertex
 fn water_vertex(@location(0) position: vec3<f32>) -> WaterVertexOutput {
@@ -58,12 +66,39 @@ fn sampled_caustic(position: vec2<f32>, time: f32) -> f32 {
     return smoothstep(0.28, 0.47, sample);
 }
 
+fn shadow_visibility(world_position: vec3<f32>) -> f32 {
+    let clip = shadow_camera.view_projection * vec4<f32>(world_position, 1.0);
+    if clip.w <= 0.0 {
+        return 1.0;
+    }
+    let projected = clip.xyz / clip.w;
+    let uv = projected.xy * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5);
+    if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0))
+        || projected.z < 0.0 || projected.z > 1.0 {
+        return 1.0;
+    }
+    let texel = 1.0 / vec2<f32>(textureDimensions(primary_shadow));
+    var visible = 0.0;
+    for (var y = -1; y <= 1; y += 1) {
+        for (var x = -1; x <= 1; x += 1) {
+            visible += textureSampleCompare(
+                primary_shadow,
+                primary_shadow_sampler,
+                uv + vec2<f32>(f32(x), f32(y)) * texel,
+                projected.z - 0.0015
+            );
+        }
+    }
+    return mix(0.45, 1.0, visible / 9.0);
+}
+
 @fragment
 fn water_fragment(input: WaterVertexOutput) -> @location(0) vec4<f32> {
     let dimensions = vec2<i32>(textureDimensions(opaque_scene));
     let pixel = clamp(vec2<i32>(input.position.xy), vec2<i32>(0), dimensions - vec2<i32>(1));
     let source_scroll = camera.water_motion.xy * camera.camera_position_time.w * 1000.0;
     let normal = wave_normal(input.world_position.xy + source_scroll, camera.camera_position_time.w);
+    let surface_shadow = shadow_visibility(input.world_position);
     let refract_offset = vec2<i32>(round(normal.xy * 5.0));
     let refract_pixel = clamp(pixel + refract_offset, vec2<i32>(0), dimensions - vec2<i32>(1));
     let refracted_scene = textureLoad(opaque_scene, refract_pixel, 0).rgb;
@@ -97,7 +132,10 @@ fn water_fragment(input: WaterVertexOutput) -> @location(0) vec4<f32> {
             0.0,
             1.0
         );
-        return vec4<f32>(surface.rgb * source_surface.rgb, alpha);
+        return vec4<f32>(
+            surface.rgb * source_surface.rgb * mix(0.72, 1.0, surface_shadow),
+            alpha
+        );
     }
     let transmittance = exp(-vec3<f32>(0.060, 0.032, 0.022) * thickness);
     let shallow_color = mix(
@@ -136,10 +174,11 @@ fn water_fragment(input: WaterVertexOutput) -> @location(0) vec4<f32> {
         let light = camera.terrain_lights[index];
         let direction_length = length(light.source_direction.xyz);
         if (direction_length > 0.00001) {
+            let visibility = select(1.0, surface_shadow, index == 0);
             let light_direction = -light.source_direction.xyz / direction_length;
             let reflected_light = reflect(-light_direction, normal);
             let response = pow(max(dot(reflected_light, view_direction), 0.0), 180.0);
-            highlight += light.diffuse.rgb * response * 1.25;
+            highlight += light.diffuse.rgb * response * 1.25 * visibility;
         }
     }
     let reflected_view = reflect(-view_direction, normal);
@@ -161,7 +200,8 @@ fn water_fragment(input: WaterVertexOutput) -> @location(0) vec4<f32> {
     let screen_reflection = textureLoad(opaque_scene, reflected_pixel, 0).rgb;
     let sky_reflection = mix(preview_sky, authored_sky, 0.65);
     let bounded_reflection = mix(sky_reflection, screen_reflection, 0.22);
-    var color = mix(transmission, bounded_reflection, fresnel) + highlight;
+    var color = mix(transmission, bounded_reflection, fresnel)
+        * mix(0.78, 1.0, surface_shadow) + highlight;
     let shore_haze = 1.0 - smoothstep(0.2, 2.8, thickness);
     let shore_crest = smoothstep(0.08, 0.45, thickness)
         * (1.0 - smoothstep(1.35, 2.8, thickness));

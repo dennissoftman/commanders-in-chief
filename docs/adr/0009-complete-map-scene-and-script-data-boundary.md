@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-07-22
+- R3 closure recorded: 2026-07-23
 
 ## Context
 
@@ -75,8 +76,20 @@ notices, and permanent links are recorded in `docs/provenance/map.md`.
   source-default breeze as an explicit `ZeroHourLegacy` presentation input; a decoded
   `SET_TREE_SWAY` action remains inert until R5 executes scripts.
 - `GlobalLighting` supplies separate immutable terrain/object lighting inputs. Water remains a
-  forward transmissive pass and is explicitly WIP until source appearance, lighting, shadows,
-  reflections, shoreline behavior, and visual comparisons satisfy the R3 completion gate.
+  forward transmissive pass; it shares the primary directional shadow map with opaque scenery and
+  is followed by bounded edge-aware post-process anti-aliasing.
+- `HeightMapData` version 1 remains an immutable native stored grid in both presentation profiles.
+  The parser does not hide a legacy downsampling transform. A future historically exact derived
+  view must be an explicit versioned compatibility policy and cannot replace the retained samples.
+- Source-editor preview and auxiliary chunks that are not needed to construct the pre-simulation
+  scene remain available through the opaque MAP inventory. R4 map selection derives its preview
+  from deterministic `map-render` output; it neither decodes nor redistributes cached retail
+  thumbnails.
+- Headless scene completion uses a deterministic fixed-isometric overview. Terrain is the existing
+  GPU capture; roads, water, and placement markers are composited in authoritative source order,
+  and tree markers sample explicit-time sway. The interactive viewer remains the detailed visual
+  reference; the overview is an integration and regression artifact, not a pixel-equivalent
+  replacement for it.
 - R3 decodes the complete established script tree, including groups, scripts, OR/AND conditions,
   true/false actions, typed parameters, comments, activation/difficulty flags, and delays. It does
   not dispatch opcodes, evaluate conditions, schedule timers, or apply side effects.
@@ -93,9 +106,10 @@ use explicit VFS mount order. Diagnostic captures use explicit camera, animation
 and seed inputs. No parser or report may depend on randomized map iteration, locale, host time, or
 filesystem enumeration order.
 
-R3 completes only when an original synthetic scene exercises terrain, water, lighting, roads,
-objects, player starts, sides/teams, polygon areas, and nested scripts; stable reports and capture
-hashes are checked; and user-owned installed/custom-map smokes retain no retail data.
+R3 completion is represented by the original synthetic fixture family and pinned executable matrix
+covering terrain, water, lighting, roads, objects, player starts, sides/teams, polygon areas, and
+nested scripts, plus the deterministic full-scene overview. User-owned installed smokes retain
+only aggregate counts and hashes and never retain captures or retail data.
 
 ## Consequences
 

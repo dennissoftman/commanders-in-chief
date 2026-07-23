@@ -56,17 +56,18 @@ observable behavior.
 | MAP | `BlendTileData` versions 6 through 8 | verified | Original version-7 fixture, corrected-stride version-8 synthetic tests, and installed version-6/version-7/version-8 maps |
 | MAP | Terrain INI resolution and layered terrain staging | verified | Synthetic ordered-history test/capture hashes + installed Generals-under-ZH class smoke |
 | MAP | Water/river `PolygonTriggers` versions 2 through 4 | verified | Synthetic layer-name/truncation/seam reconstruction tests + installed lake/long-river/empty-marker smokes |
-| MAP | Water transparency, standing texture, and source caustic inputs | verified | Synthetic constructor/history/map-overlay tests + installed texture/scalar/frame smokes; final appearance remains WIP |
-| MAP | Final water appearance quality | partial | Sky/environment and sibling overrides resolve; Modern bounded reflections and frozen viewer time implemented; shadows, headless capture hashes, AA, and comparisons remain open |
+| MAP | Water transparency, standing texture, and source caustic inputs | verified | Synthetic constructor/history/map-overlay tests + installed texture/scalar/frame smokes |
+| MAP | R3 water appearance baseline | verified | Forward depth/refraction/shoreline path, shared directional shadows, edge-aware AA, explicit-time hashes, and repeatable installed comparisons; exact D3D8 pixels excluded |
 | MAP | `GlobalLighting` versions 1 through 3 | verified | Synthetic exact-layout/truncation tests + installed selected-time smoke |
 | MAP | `WorldInfo` and `ObjectsList` placements | verified | Bounded synthetic layouts, truncation/limit tests, stable report, and immutable source-order staging |
-| MAP | Roads and bridges | partial | Source-radius curves/miters, atlas tee/Y/slanted/four-way joins, clipped cross-material alpha caps and stacking, source mip budget, terrain fit, and intact instanced bridges verified; tower scenery and bridge states remain open |
-| MAP | Object draw-definition resolution and static scenery | partial | `End`-delimited default/initial-NONE W3D states, reskins, scales, standalone meshes, exact terrain plus verbatim relative-Z placement, Header3 two-sided culling, and GPU instancing verified; ambient animation and remaining draw modules open; no gameplay modules |
+| MAP | Roads and bridges | verified | Source-radius curves/miters, atlas joins, stacking, terrain fit, intact instanced bridges, retained body-state assets, and renderer-only tower scenery; runtime state transitions remain R5+ |
+| MAP | R3 object draw-definition resolution and static scenery | verified | Default/initial-NONE W3D states, reskins, scales, standalone meshes, exact placement, Header3 culling, GPU instancing, and explicit-time default tree sway; unsupported/gameplay draw modules are excluded |
 | MAP | Waypoints and `Player_n_Start` spawn candidates | verified | Immutable object projection preserves ordered candidates without assigning slots |
 | MAP | `SidesList`, teams, and build lists | verified | Versions 1 through 3 decode under explicit limits without runtime repair or activation |
-| MAP | Complete polygon-area semantics | unknown | Water-only projection implemented; general areas not started |
+| MAP | Complete polygon-area semantics | verified | Versions 2 through 4 retain every source record/point under per-area and total limits; `map-water` remains a stable projection |
+| MAP viewer | Waypoint paths, player starts, and polygon-zone diagnostics | verified | Stable path grouping/color/order, bounded terrain-following geometry, and installed waypoint/zone/start smokes |
 | MAP | Nested player-script tree | verified | Bounded nested synthetic tree, truncation/limit tests, stable raw-opcode report; execution intentionally deferred to R5 |
-| MAP viewer | Complete terrain scene with roads, static objects, and ambient animation | partial | Source-topology roads with distance-stable mips/depth bias, optional M-key wireframe, intact bridges, instanced static models, and playable-boundary fence integrated; bridge states/towers and ambient animation remain open |
+| MAP viewer | R3 complete terrain scene and deterministic overview | verified | Source-topology roads, bridge towers, instanced models, default tree sway, boundary fence, shared shadows, AA, forward water, and repeatable explicit-time full-scene hashes |
 | WND | File/layout blocks, nested windows, fields, and unknown preservation | unknown | Source-established R4 gate; decoder not started |
 | WND | Complete classic status/style and gadget vocabulary | unknown | Source-established R4 gate; immutable control definitions not started |
 | WND | Versioned post-parse patch overlays with provenance | unknown | Planned project-owned R4 format; no source WND mutation |

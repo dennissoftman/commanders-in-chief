@@ -200,8 +200,8 @@ remains explicitly excluded until broader image comparisons exist.
 
 ## R3: Complete MAP ingestion and terrain-scene presentation
 
-**Status:** In progress. Terrain height/blend presentation is established; water presentation is
-explicitly work in progress.
+**Status:** Complete (2026-07-23). Bounded MAP ingestion, non-simulating scene presentation, and
+deterministic overview capture are established.
 
 **Scope:** Boundedly decode and retain every source-established MAP section needed to inspect a
 map and construct its complete pre-simulation scene. This includes terrain, texture blends,
@@ -255,47 +255,48 @@ never affect reports or captures.
 its source revision and notices, exact limits, version table, synthetic fixture, negative tests,
 report schema, and completion evidence.
 
-**Completion artifact:** An original synthetic scene MAP spanning terrain, water, lighting,
-objects, roads, player starts, sides/teams, polygon areas, and a nested but non-executed script tree;
-checked stable semantic reports and deterministic capture hashes; plus local user-owned installed
-and custom-map verification records with no copied game content.
+**Completion artifact:** The original synthetic MAP/INI/W3D fixture family spans terrain, water,
+lighting, objects, roads, player starts, sides/teams, polygon areas, and a nested but non-executed
+script tree. The pinned executable matrix ties those fixtures to checked reports and deterministic
+scene captures; local user-owned verification retains only aggregate diagnostics and hashes.
 
 ### R3 gates
 
-1. **Source lighting and water convergence (WIP).** Retain the established bounded
+1. **Source lighting and water convergence (complete).** Retain the established bounded
    `GlobalLighting` terrain/object time variants and source light order. WaterSet sky/environment
    and sibling-map inputs now resolve alongside the standing texture, diffuse tint/alpha, blend
    choice, opacity, and terrain-depth shoreline. Modern presentation adds bounded screen-space and
-   authored-environment reflection inputs; continue receiving/casting shadows, anti-aliasing, and
-   headless explicit-time capture hashes. Water remains a depth-tested forward pass over the
-   resolved opaque scene. Its completion gate requires synthetic scalar/layout tests and repeatable
-   visual comparisons against user-owned maps; the current water appearance is not a completion
-   baseline.
+   authored-environment reflection inputs. Water is a depth-tested forward pass over the resolved
+   opaque scene, samples the shared directional shadow map, and is followed by bounded edge-aware
+   anti-aliasing. Explicit-time full-scene hashes and repeatable user-owned comparisons close the
+   integration gate without claiming exact Direct3D 8 pixel equivalence.
 2. **Placed-object and world metadata boundary (implemented).** Established `WorldInfo`,
    `ObjectsList`, and nested `Object` versions decode without constructing live objects. They retain finite XYZ placement,
    angle, source flags, template name, typed dictionary, waypoint fields, mirror/draw policy, and
    unknown properties under explicit limits. Emit stable reports and cross-reference diagnostics,
    but never repair, canonicalize, or execute the source data during parsing.
-3. **Road and bridge presentation (source road topology and intact bridges implemented).**
+3. **Road and bridge presentation (source road topology, intact bridges, and tower scenery
+   implemented).**
    Source-established road/bridge endpoint flags stage in object order. Bounded `Road` definitions
    resolve regular consecutive pairs into source-textured, terrain-fitted strips. A stable topology
    pass trims connected approaches and inserts source-radius curves/miters, tee/Y/slanted/four-way
    atlas pieces, and explicit cross-material alpha caps. Cross-material contacts reproduce the
    source clipped-width cap and road-type stacking adjustment. Road textures use the source
-   three-level mip budget. The bounded TerrainBridge subset resolves the intact model/scale and
-   paired endpoints through static instancing. Continue with non-gameplay tower scenery through
-   the existing W3D resource path. Retain
-   damaged/broken model and effect references for future simulation, but R3 neither
-   selects damage states nor creates collision or repair logic.
-4. **Definition resolution and complete static scene (initial instancing implemented).** The bounded
+   three-level mip budget. The bounded TerrainBridge subset resolves the pristine model/scale and
+   paired endpoints through static instancing. It retains damaged/really-damaged/broken model and
+   texture references, resolves the four optional tower object templates through the existing
+   bounded object/W3D path, and presents those towers in stable source slot order. Transition
+   effects remain future simulation inputs; R3 never selects a damage state or creates targetable
+   towers, collision, repair, sounds, or effects.
+4. **Definition resolution and complete static scene (R3 subset complete).** The bounded
    object-definition subset uses `End`-delimited draw modules and selects either explicit default
    states or the source-equivalent first `ConditionState = NONE`, plus reskin inheritance,
    referenced models, and per-draw scale. Default W3Ds reuse the R2 material/hierarchy path, standalone mesh
    W3Ds receive a neutral renderer-only root, and placements batch stably by first model use. Ground
    placement samples the exact staged terrain triangle and adds the authored relative Z offset.
-   Header3 two-sided flags now select culled or two-sided model pipelines. Continue with shadows,
-   additional draw modules and source-authored ambient visual
-   animation through the R2 texture-mapper and animation paths. Buildings, trees, rocks, props, bridges, decals,
+   Header3 two-sided flags select culled or two-sided model pipelines. `W3DTreeDraw` resources use
+   explicit-time source-default `BreezeInfo` sway without executing `SET_TREE_SWAY`. Buildings,
+   trees, rocks, props, bridges, decals,
    and other placed drawables use stable placement IDs, culling, batching, and explicit
    presentation time. Vegetation waving and other ambient loops must use decoded source inputs or
    an explicitly documented profile policy; they may not advance simulation or read a renderer
@@ -306,22 +307,22 @@ and custom-map verification records with no copied game content.
    placements, and nested player-script lists. Reports must distinguish spawn positions, side/team
    definitions, initial/build-list scenery, and dangling references. R3 does not assign human/AI
    controllers, instantiate teams, run build plans, or choose spawn slots.
-6. **Complete script and trigger ingestion without execution (script data implemented).** Expand
-   `PolygonTriggers` beyond the water-only view. Established nested `PlayerScriptsList`, `ScriptList`,
+6. **Complete script and trigger ingestion without execution (complete).** All established
+   `PolygonTriggers` records are retained in source order and the water-only projection remains
+   available. Established nested `PlayerScriptsList`, `ScriptList`,
    `ScriptGroup`, `Script`, `OrCondition`, `Condition`, `ScriptAction`, and `ScriptActionFalse`
    records. Preserve names, comments, activation/difficulty flags, evaluation delays, opcode
    integers, typed parameters, source versions, and unknown values in a bounded immutable tree.
    Stable reports and optional reference diagnostics are allowed; opcode dispatch, condition
    evaluation, timers, side effects, and compatibility rewrites belong to R5.
-7. **Scene integration and R3 closure.** Present all resolved opaque scenery through the existing
-   G-buffer, then ordered alpha/additive scenery and forward water. Add modern shadow quality and
-   bounded reflection quality after source lighting and object geometry are available. Establish
-   Retain the established `BlendTileData` version-8 corrected cliff stride, decide the version-1
-   height compatibility policy explicitly, and cover source-established preview/auxiliary
-   MAP metadata before claiming complete variant support. Verify one dense installed map and one
-   original custom scene for load closure, spawn/team/script reporting, road continuity, object
-   placement, ambient animation, water quality, stable capture output, and graceful diagnostics for
-   unsupported resources.
+7. **Scene integration and R3 closure (complete).** Present all resolved opaque scenery through the existing
+   G-buffer, then ordered alpha/additive scenery and forward water. The viewer adds a shared primary
+   directional shadow map and edge-aware anti-aliasing; `map-render --time` emits a deterministic
+   full-scene overview. Both profiles retain version-1 height data at its native stored grid.
+   Source-editor preview/auxiliary chunks remain opaque because they are not scene inputs; R4
+   generates previews from the completed renderer. Dense installed and original synthetic fixtures
+   verify closure, reporting, continuity, placement, ambient animation, water, stable output, and
+   graceful diagnostics.
 
 **Progress:** The initial source-backed gate inventories the `CkMp` symbol table and top-level
 chunks with exact closure and opaque payload preservation. A separate semantic decoder accepts
@@ -352,14 +353,16 @@ traversal, atlas-specific junctions, clipped-width cross-material caps, and road
 The viewer retains the source three-level road mip budget, adds renderer-only depth bias, and offers
 optional full-scene wireframe on M. `End`-delimited default/initial-NONE object draw resolution,
 stable static-model instancing, exact terrain-triangle placement, a renderer-only playable-boundary
-fence, intact bridges, and source mesh culling are integrated. Bridge towers/states, water shadows,
-headless capture hashes, anti-aliasing, remaining object draw modules/ambient animation, complete
-polygon triggers, and custom-map closure remain open.
+fence, intact bridges with retained state assets and tower scenery, and source mesh culling are
+integrated. Complete polygon retention/reporting, explicit-time default-breeze tree sway, shared
+terrain/scenery/water shadows, edge-aware anti-aliasing, and deterministic full-scene overview
+capture close R3. Unsupported draw modules remain visible diagnostics and gameplay-bearing modules
+remain excluded rather than blocking this presentation milestone.
 
 ## R4: WND user interface and navigable shell
 
-**Status:** Planned. Begins after R3 produces the complete non-simulating MAP scene and scenario
-description.
+**Status:** Active. R3 produced the complete non-simulating MAP scene and scenario description;
+the first vertical slice is bounded WND inventory/layout decoding plus a synthetic headless menu.
 
 **Scope:** Boundedly decode the complete source-established WND grammar and the UI definition
 resources required by it, then present those values through a retained, non-gameplay UI runtime.

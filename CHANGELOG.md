@@ -6,6 +6,23 @@ All notable user-visible changes are recorded here.
 
 ### Added
 
+- Added bounded renderer-only MAP diagnostics to `map-view` and `map-render`: larger per-player
+  start beacons, ordinary waypoint beacons, named waypoint-path ribbons, and source-ordered
+  translucent polygon perimeter walls. Named paths receive deterministic distinct colors and
+  connect members in stored waypoint-ID order while following the staged terrain; shared waypoints
+  may participate in multiple paths. Marker and zone bases sample the staged terrain, water areas
+  use a distinct blue treatment, and no overlay creates simulation state or executes callbacks.
+- Added complete bounded `PolygonTriggers` version 2 through 4 retention and the stable
+  `map-polygons` report. The existing water report remains a filtered compatibility projection;
+  per-area and total retained-point ceilings have independent negative tests.
+- Added bounded `W3DTreeDraw` resource parsing and explicit-time source-default `BreezeInfo` tree
+  sway. Stable placement IDs select deterministic sway families and randomness without executing
+  the decoded `SET_TREE_SWAY` script action.
+- Added a shared 2048-square primary directional shadow map for terrain, alpha-tested scenery, and
+  forward water, plus edge-aware post-process anti-aliasing.
+- Expanded `map-render --time` into a deterministic fixed-isometric full-scene overview containing
+  terrain, source-ordered roads and water, scenery markers, and animated tree markers, with scene
+  counts and an RGBA SHA-256 diagnostic.
 - Added a pinned-source MAP scene compatibility matrix and exhaustive synthetic tests for every
   currently modeled constructor/default, parser input branch, format structure and limit, blend
   version/stride boundary, water trigger version/filter, road diagnostic/topology/atlas output,
@@ -28,10 +45,11 @@ All notable user-visible changes are recorded here.
   intervals, follow maximum underlying height, and alpha-overlay in stable MAP order. Missing
   definitions/textures remain explicit diagnostics. Connected endpoints now receive bounded
   edge-derived corner/junction polygons instead of oversized circular fillers.
-- Added bounded intact `Bridge` model/scale decoding and source-style bridge presentation from
-  consecutive endpoints. `BRIDGE_LEFT`/`BRIDGE_SPAN`/`BRIDGE_RIGHT` sections repeat and deform onto
-  the terrain-sampled sloped axis; damage, repair, collision, towers, and state selection remain
-  deferred.
+- Added bounded `Bridge` model/scale, four body-state model/texture pairs, and four tower-template
+  references. Consecutive endpoints deform pristine `BRIDGE_LEFT`/`BRIDGE_SPAN`/`BRIDGE_RIGHT`
+  sections onto the terrain-sampled sloped axis, and optional towers resolve through the existing
+  object/W3D path at source corners and facing. Towers are renderer-only scenery; damage selection,
+  transition effects, repair, collision, and targetable tower behavior remain deferred.
 - Added an on-demand full-scene wireframe diagnostic to `map-view` on M when the selected GPU
   exposes polygon-line rasterization. Unsupported adapters continue with the normal renderer.
 - Added bounded initial Object draw-definition decoding, reskin inheritance, default W3D model and
@@ -44,6 +62,10 @@ All notable user-visible changes are recorded here.
 
 ### Changed
 
+- Closed R3 and advanced the active objective to R4's bounded WND inventory/layout decoder and
+  synthetic headless menu vertical slice. Version-1 height presentation now explicitly retains its
+  native stored grid; source-editor preview/auxiliary chunks remain opaque and R4 previews are
+  generated from `map-render`.
 - Restored the source road texture's three-level mip budget and handed curve traversal, and added a
   renderer-only road depth bias on top of the legacy terrain lift. This avoids whole-atlas distant
   mip collapse and reduces road/terrain Z-fighting without mutating staged road coordinates.
@@ -52,7 +74,7 @@ All notable user-visible changes are recorded here.
   apply Zero Hour second and mods last; replacement resources use the winner while cumulative
   definition formats parse the complete provider history in order.
 - Expanded the R3 design from terrain-only presentation to complete bounded MAP ingestion and a
-  non-simulating terrain scene: source lighting and WIP water, object/world records, roads and
+  non-simulating terrain scene: source lighting and water, object/world records, roads and
   bridges, static scenery and ambient animation, waypoints/player starts, sides/teams/build lists,
   polygon areas, and lossless map scripts. ADR 0009 keeps all runtime activation and script
   execution behind the future deterministic R5 simulation boundary.
@@ -64,6 +86,10 @@ All notable user-visible changes are recorded here.
 
 ### Fixed
 
+- Fixed three `wgpu` validation failures in the new shadow/AA path: shadow resources now belong to
+  the deferred-lighting layout rather than the terrain virtual-texture layout, the HDR scene input
+  is declared filterable for the AA sampler, and the terrain shadow pass uses its own group-zero
+  camera layout. A GPU regression test now constructs both deferred pipelines directly.
 - Road and railroad intersections no longer stretch each approach texture across a generic shared
   fan. A deterministic topology pass now trims connected strips and uses legacy curve/miter and
   tee/Y/slanted/four-way atlas geometry. Different materials stay isolated unless an open endpoint

@@ -1,4 +1,4 @@
-//! Bounded water-only decoding from MAP `PolygonTriggers` versions 2 through 4.
+//! Bounded semantic decoding of MAP `PolygonTriggers` versions 2 through 4.
 //!
 //! The field order and water/river flags are derived from `PolygonTrigger.cpp` and
 //! `PolygonTrigger.h` in `GeneralsGameCode` revision
@@ -14,11 +14,11 @@ use crate::{MapChunk, MapFile, MapLimits};
 
 const POLYGON_TRIGGERS_LABEL: &[u8] = b"PolygonTriggers";
 
-/// One integer world-space point retained from a water trigger.
+/// One integer world-space point retained from a polygon trigger.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MapWaterPoint([i32; 3]);
+pub struct MapPolygonPoint([i32; 3]);
 
-impl MapWaterPoint {
+impl MapPolygonPoint {
     /// Returns the source `(x, y, z)` coordinates.
     #[must_use]
     pub const fn coordinates(self) -> [i32; 3] {
@@ -26,7 +26,76 @@ impl MapWaterPoint {
     }
 }
 
-/// One immutable water footprint retained without general script-trigger semantics.
+/// Backward-compatible point name used by the water projection.
+pub type MapWaterPoint = MapPolygonPoint;
+
+/// One complete immutable polygon record retained without runtime registration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MapPolygonArea {
+    source_index: u32,
+    name: Vec<u8>,
+    layer_name: Vec<u8>,
+    trigger_id: i32,
+    water: bool,
+    river: bool,
+    river_start: i32,
+    points: Vec<MapPolygonPoint>,
+}
+
+impl MapPolygonArea {
+    #[must_use]
+    pub const fn source_index(&self) -> u32 {
+        self.source_index
+    }
+    #[must_use]
+    pub fn name_bytes(&self) -> &[u8] {
+        &self.name
+    }
+    #[must_use]
+    pub fn layer_name_bytes(&self) -> &[u8] {
+        &self.layer_name
+    }
+    #[must_use]
+    pub const fn trigger_id(&self) -> i32 {
+        self.trigger_id
+    }
+    #[must_use]
+    pub const fn is_water(&self) -> bool {
+        self.water
+    }
+    #[must_use]
+    pub const fn is_river(&self) -> bool {
+        self.river
+    }
+    #[must_use]
+    pub const fn river_start(&self) -> i32 {
+        self.river_start
+    }
+    #[must_use]
+    pub fn points(&self) -> &[MapPolygonPoint] {
+        &self.points
+    }
+}
+
+/// Complete source-ordered polygon records from one MAP.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MapPolygonData {
+    version: u16,
+    areas: Vec<MapPolygonArea>,
+}
+
+impl MapPolygonData {
+    #[must_use]
+    pub const fn version(&self) -> u16 {
+        self.version
+    }
+    #[must_use]
+    pub fn areas(&self) -> &[MapPolygonArea] {
+        &self.areas
+    }
+}
+
+/// One immutable water footprint projected from a complete polygon record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MapWaterArea {
     source_index: u32,
@@ -35,7 +104,7 @@ pub struct MapWaterArea {
     trigger_id: i32,
     river: bool,
     river_start: i32,
-    points: Vec<MapWaterPoint>,
+    points: Vec<MapPolygonPoint>,
 }
 
 impl MapWaterArea {
@@ -102,9 +171,9 @@ impl MapWaterData {
     }
 }
 
-/// A structured water-only semantic failure.
+/// A structured polygon semantic failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MapWaterError {
+pub enum MapPolygonError {
     /// A bounded binary read failed.
     Binary(BinaryError),
     /// The chunk is absent.
@@ -119,7 +188,7 @@ pub enum MapWaterError {
     TrailingBytes(usize),
 }
 
-impl Display for MapWaterError {
+impl Display for MapPolygonError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Binary(error) => Display::fmt(error, f),
@@ -138,7 +207,7 @@ impl Display for MapWaterError {
     }
 }
 
-impl Error for MapWaterError {
+impl Error for MapPolygonError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Binary(error) => Some(error),
@@ -147,25 +216,31 @@ impl Error for MapWaterError {
     }
 }
 
-impl From<BinaryError> for MapWaterError {
+impl From<BinaryError> for MapPolygonError {
     fn from(error: BinaryError) -> Self {
         Self::Binary(error)
     }
 }
 
-/// Decodes only water-typed records from the unique `PolygonTriggers` chunk.
+/// Backward-compatible error name for the water projection.
+pub type MapWaterError = MapPolygonError;
+
+/// Decodes every record from the unique `PolygonTriggers` chunk.
 ///
-/// General trigger semantics, scripts, and object loading are intentionally excluded. Non-water
-/// records are bounded and skipped so the retained value stays renderer-neutral and water-only.
+/// Records remain immutable inspection data. This function does not register trigger areas,
+/// evaluate containment, resolve names, or connect polygons to scripts.
 ///
 /// # Errors
 ///
-/// Returns [`MapWaterError`] when the chunk is missing, duplicated, unsupported, truncated,
+/// Returns [`MapPolygonError`] when the chunk is missing, duplicated, unsupported, truncated,
 /// malformed, over a configured limit, or does not close exactly.
-pub fn decode_map_water(map: &MapFile, limits: MapLimits) -> Result<MapWaterData, MapWaterError> {
-    let chunk = water_chunk(map)?;
+pub fn decode_map_polygons(
+    map: &MapFile,
+    limits: MapLimits,
+) -> Result<MapPolygonData, MapPolygonError> {
+    let chunk = polygon_chunk(map)?;
     if !(2..=4).contains(&chunk.version()) {
-        return Err(MapWaterError::UnsupportedVersion(chunk.version()));
+        return Err(MapPolygonError::UnsupportedVersion(chunk.version()));
     }
     let mut reader = BinaryReader::new(
         chunk.data(),
@@ -211,43 +286,32 @@ pub fn decode_map_water(map: &MapFile, limits: MapLimits) -> Result<MapWaterData
             point_count as usize,
             limits.maximum_polygon_points,
         )?;
-        if !is_water {
-            let byte_count =
-                (point_count as usize)
-                    .checked_mul(12)
-                    .ok_or(BinaryError::LimitExceeded {
-                        what: "MAP skipped polygon point bytes",
-                        actual: usize::MAX,
-                        maximum: limits.maximum_chunk_bytes,
-                    })?;
-            reader.read_exact(byte_count)?;
-            continue;
-        }
         retained_points = retained_points.checked_add(point_count as usize).ok_or(
             BinaryError::LimitExceeded {
-                what: "MAP retained water point count",
+                what: "MAP retained polygon point count",
                 actual: usize::MAX,
-                maximum: limits.maximum_water_points,
+                maximum: limits.maximum_polygon_total_points,
             },
         )?;
         enforce_limit(
-            "MAP retained water point count",
+            "MAP retained polygon point count",
             retained_points,
-            limits.maximum_water_points,
+            limits.maximum_polygon_total_points,
         )?;
         let mut points = Vec::with_capacity(point_count as usize);
         for _ in 0..point_count {
-            points.push(MapWaterPoint([
+            points.push(MapPolygonPoint([
                 read_i32(&mut reader)?,
                 read_i32(&mut reader)?,
                 read_i32(&mut reader)?,
             ]));
         }
-        areas.push(MapWaterArea {
+        areas.push(MapPolygonArea {
             source_index,
             name,
             layer_name,
             trigger_id,
+            water: is_water,
             river,
             river_start,
             points,
@@ -256,23 +320,72 @@ pub fn decode_map_water(map: &MapFile, limits: MapLimits) -> Result<MapWaterData
     if reader.remaining() != 0 {
         return Err(MapWaterError::TrailingBytes(reader.remaining()));
     }
-    Ok(MapWaterData {
+    Ok(MapPolygonData {
         version: chunk.version(),
-        source_trigger_count: trigger_count,
         areas,
     })
 }
 
-fn water_chunk(map: &MapFile) -> Result<&MapChunk, MapWaterError> {
+/// Projects water-typed polygon records while retaining stable source indices.
+///
+/// # Errors
+///
+/// Returns [`MapWaterError`] when complete polygon decoding fails or the water projection exceeds
+/// its explicit retained-point limit.
+pub fn decode_map_water(map: &MapFile, limits: MapLimits) -> Result<MapWaterData, MapWaterError> {
+    let polygons = decode_map_polygons(map, limits)?;
+    let source_trigger_count =
+        u32::try_from(polygons.areas.len()).map_err(|_| BinaryError::LimitExceeded {
+            what: "MAP polygon trigger count",
+            actual: polygons.areas.len(),
+            maximum: limits.maximum_polygon_triggers,
+        })?;
+    let mut areas = Vec::new();
+    let mut retained_points = 0_usize;
+    for area in polygons.areas {
+        if !area.water {
+            continue;
+        }
+        retained_points =
+            retained_points
+                .checked_add(area.points.len())
+                .ok_or(BinaryError::LimitExceeded {
+                    what: "MAP retained water point count",
+                    actual: usize::MAX,
+                    maximum: limits.maximum_water_points,
+                })?;
+        enforce_limit(
+            "MAP retained water point count",
+            retained_points,
+            limits.maximum_water_points,
+        )?;
+        areas.push(MapWaterArea {
+            source_index: area.source_index,
+            name: area.name,
+            layer_name: area.layer_name,
+            trigger_id: area.trigger_id,
+            river: area.river,
+            river_start: area.river_start,
+            points: area.points,
+        });
+    }
+    Ok(MapWaterData {
+        version: polygons.version,
+        source_trigger_count,
+        areas,
+    })
+}
+
+fn polygon_chunk(map: &MapFile) -> Result<&MapChunk, MapPolygonError> {
     let mut matches = map
         .chunks()
         .iter()
         .filter(|chunk| map.symbol_name(chunk.id()) == Some(POLYGON_TRIGGERS_LABEL));
     let chunk = matches
         .next()
-        .ok_or(MapWaterError::MissingPolygonTriggers)?;
+        .ok_or(MapPolygonError::MissingPolygonTriggers)?;
     if matches.next().is_some() {
-        return Err(MapWaterError::DuplicatePolygonTriggers);
+        return Err(MapPolygonError::DuplicatePolygonTriggers);
     }
     Ok(chunk)
 }
@@ -284,12 +397,12 @@ fn read_i32(reader: &mut BinaryReader<'_>) -> Result<i32, BinaryError> {
 fn read_nonnegative(
     reader: &mut BinaryReader<'_>,
     field: &'static str,
-) -> Result<u32, MapWaterError> {
+) -> Result<u32, MapPolygonError> {
     let value = read_i32(reader)?;
-    u32::try_from(value).map_err(|_| MapWaterError::NegativeValue { field, value })
+    u32::try_from(value).map_err(|_| MapPolygonError::NegativeValue { field, value })
 }
 
-fn enforce_limit(what: &'static str, actual: usize, maximum: usize) -> Result<(), MapWaterError> {
+fn enforce_limit(what: &'static str, actual: usize, maximum: usize) -> Result<(), MapPolygonError> {
     if actual > maximum {
         Err(BinaryError::LimitExceeded {
             what,
@@ -306,7 +419,7 @@ fn enforce_limit(what: &'static str, actual: usize, maximum: usize) -> Result<()
 mod tests {
     use cic_core::BinaryError;
 
-    use super::{MapWaterError, decode_map_water};
+    use super::{MapWaterError, decode_map_polygons, decode_map_water};
     use crate::{MapLimits, parse_map};
 
     fn map(version: u16, payload: &[u8]) -> Vec<u8> {
@@ -443,6 +556,17 @@ mod tests {
         assert_eq!(water.areas().len(), 1);
         assert_eq!(water.areas()[0].source_index(), 1);
         assert_eq!(water.areas()[0].name_bytes(), b"river");
+
+        let parsed =
+            parse_map(&map(4, &two_records), "mixed.map", MapLimits::default()).expect("inventory");
+        let polygons =
+            decode_map_polygons(&parsed, MapLimits::default()).expect("complete polygons");
+        assert_eq!(polygons.areas().len(), 2);
+        assert!(!polygons.areas()[0].is_water());
+        assert_eq!(polygons.areas()[0].source_index(), 0);
+        assert_eq!(polygons.areas()[0].trigger_id(), 9);
+        assert_eq!(polygons.areas()[0].points().len(), 4);
+        assert!(polygons.areas()[1].is_water());
     }
 
     #[test]
@@ -552,6 +676,13 @@ mod tests {
                     ..MapLimits::default()
                 },
                 "points",
+            ),
+            (
+                MapLimits {
+                    maximum_polygon_total_points: 3,
+                    ..MapLimits::default()
+                },
+                "retained polygon points",
             ),
             (
                 MapLimits {

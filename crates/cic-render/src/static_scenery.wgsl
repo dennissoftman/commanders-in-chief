@@ -32,6 +32,8 @@ struct VertexInput {
     @location(4) transform_row_0: vec4<f32>,
     @location(5) transform_row_1: vec4<f32>,
     @location(6) transform_row_2: vec4<f32>,
+    @location(7) tree_sway_0: vec4<f32>,
+    @location(8) tree_sway_1: vec4<f32>,
 }
 
 struct VertexOutput {
@@ -50,16 +52,34 @@ struct GBufferOutput {
 
 @vertex
 fn vertex_main(input: VertexInput) -> VertexOutput {
-    let local = vec4<f32>(input.position, 1.0);
+    var local_position = input.position;
+    var local_normal = input.normal;
+    if input.tree_sway_1.w > 0.5 {
+        let period = max(input.tree_sway_1.x, 0.001);
+        let phase = 6.28318530718 * camera.camera_position_time.w / period * input.tree_sway_1.y;
+        let angle = input.tree_sway_0.z + input.tree_sway_0.w * cos(phase);
+        let sway = vec3<f32>(
+            input.tree_sway_0.x * sin(angle),
+            input.tree_sway_0.y * sin(angle),
+            cos(angle) - 1.0
+        ) * input.tree_sway_1.z;
+        local_position += sway * max(input.position.z, 0.0);
+        let vertical_scale = max(1.0 + sway.z, 0.001);
+        local_normal = normalize(vec3<f32>(
+            input.normal.xy,
+            (input.normal.z - dot(sway.xy, input.normal.xy)) / vertical_scale
+        ));
+    }
+    let local = vec4<f32>(local_position, 1.0);
     let world = vec3<f32>(
         dot(input.transform_row_0, local),
         dot(input.transform_row_1, local),
         dot(input.transform_row_2, local)
     );
     let world_normal = normalize(vec3<f32>(
-        dot(input.transform_row_0.xyz, input.normal),
-        dot(input.transform_row_1.xyz, input.normal),
-        dot(input.transform_row_2.xyz, input.normal)
+        dot(input.transform_row_0.xyz, local_normal),
+        dot(input.transform_row_1.xyz, local_normal),
+        dot(input.transform_row_2.xyz, local_normal)
     ));
     var output: VertexOutput;
     output.position = camera.view_projection * vec4<f32>(world, 1.0);

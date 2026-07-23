@@ -1,7 +1,7 @@
 # MAP Container, Semantic Gates, and Scene-Presentation Plan
 
-- Status: container, terrain/water, world/object, and sides/script data boundaries implemented;
-  complete R3 MAP semantics and scene presentation planned by ADR 0009; water presentation WIP
+- Status: R3 container, terrain/water, complete polygon, world/object, sides/script, and
+  non-simulating scene-presentation boundaries implemented; R4 consumes generated previews
 - Owning crate: `cic-formats`
 - Last updated: 2026-07-23
 
@@ -143,7 +143,7 @@ zero is retained and the table has no explicit entries, matching the source read
 - 2,047 bitmap tiles and 2,047 edge tiles
 - 16,192 blended-tile entries and 32,384 cliff-info entries
 - 256 terrain or edge texture classes and 1,024 bytes per texture-class name
-- 65,536 polygon triggers and points per trigger, 1,000,000 retained water points, and 1,024 bytes
+- 65,536 polygon triggers and points per trigger, 1,000,000 retained total points, and 1,024 bytes
   per trigger name
 
 Every complete chunk closes at its declared boundary. A suffix shorter than the ten-byte header,
@@ -161,7 +161,20 @@ declaration; `--png <output.png>` overrides the destination.
 `cic-inspect map-blend` reports every cell and source-ordered texture, blend, and cliff record;
 floating-point UVs use exact hexadecimal bit patterns.
 `cic-inspect map-water` reports only water-flagged polygon records and their integer points in
-stable source order; non-water trigger semantics remain undecoded.
+stable source order. `cic-inspect map-polygons` reports every established record, including
+non-water areas, without registering gameplay callbacks or spatial queries.
+
+`map-view` and `map-render` visualize this immutable inspection data with project-authored,
+renderer-only geometry. Ordinary waypoints use small cyan octahedra; one-based player-start
+candidates use larger stable per-player colors. Each waypoint may retain three nonempty ASCII
+path-label properties. Labels group case-insensitively in lexical byte order for deterministic
+color assignment; path members sort by stored waypoint ID with placement order as the tie-breaker.
+Shared waypoints remain in every declared group, while unlabelled waypoint markers stay cyan.
+Consecutive members connect with bounded ribbons subdivided at a fixed interval so every section
+samples the staged terrain. Polygon edges become translucent vertical walls whose bases sample the
+exact staged terrain triangle; out-of-bounds points retain their source Z instead of being clamped.
+Water polygons use blue and other zones cycle a stable source-index palette. Geometry has explicit
+global vertex/index limits and remains non-authoritative.
 
 Version-3 river points describe a perimeter rather than adjacent bank pairs. `river_start` marks
 the seam: staging starts on the two points around that seam, advances along one bank, retreats
@@ -171,7 +184,9 @@ the final point is retained by the format model but safely produces no renderer 
 `cic-inspect map-render` additionally decodes ordered `Terrain`/`Texture` declarations from every
 provider version of the mounted default and edition Terrain INIs in stable base-to-overlay order,
 applies `DefaultTerrain` inheritance, resolves sheets beneath `Art/Terrain`, stages source-scaled
-geometry and base/primary/extra layers, and writes an sRGB headless PNG. Size and power-of-two
+geometry and base/primary/extra layers, then adds source-ordered road/water triangles and scenery
+markers in a deterministic fixed-isometric overview and writes an sRGB PNG. Size, explicit time,
+and power-of-two
 pixels per cell are explicit; diagnostics include stable
 geometry/layer counts and the captured RGBA SHA-256. `--terrain-policy legacy` is the default and
 applies stored cliff UVs plus the bounded steep-slope retile; `modern` retains stored mappings but
@@ -214,11 +229,12 @@ semantic decoder creates renderer or simulation resources.
 
 ### Terrain-version and auxiliary metadata closure
 
-R3 now includes the source-backed bounded decoder for the observed `BlendTileData` version 8
-corrected cliff stride. Completion still requires an explicit profile policy for version-1 height resampling and
-established semantic views for presentation/inspection metadata such as map preview data and any
-remaining WorldBuilder auxiliary chunk used by supported maps. Unknown or unobserved versions still
-remain opaque; compatibility claims are version-specific and no nearby layout is inferred.
+R3 includes the source-backed bounded decoder for the observed `BlendTileData` version 8 corrected
+cliff stride. Both presentation profiles retain version-1 heights on their native stored grid; no
+hidden parser resampling is applied. Source-editor preview and auxiliary chunks that are not needed
+to build the scene remain available through the opaque inventory. R4 map selection generates
+previews from `map-render` rather than decoding or redistributing cached retail thumbnails. Unknown
+or unobserved versions remain opaque; compatibility claims are version-specific.
 
 Custom-map fixtures must cover omitted optional sections, reordered known chunks, unknown chunks,
 missing resource definitions, and profile overrides so R3 does not accidentally require retail
@@ -247,9 +263,10 @@ tower references.
 
 R3 preserves endpoint records in object order, diagnoses records with ambiguous road/bridge roles,
 and derives separate immutable road/bridge endpoint lists. A bounded road INI decoder retains
-`Road` texture/width fields and intact `BridgeModelName`/`BridgeScale` fields under explicit
-file/line/count/string limits. Omitted intact bridge fields inherit from the source-order
-`DefaultBridge` visible when that declaration is loaded.
+`Road` texture/width fields and `BridgeScale`, four body-state model/texture pairs, and four tower
+object-template names under explicit file/line/count/string limits. Omitted bridge model, texture,
+and scale fields inherit from the source-order `DefaultBridge` visible when that declaration is
+loaded; matching source construction, tower names do not inherit.
 Provider and sibling-map declarations resolve in stable order; only definitions referenced by MAP
 Point1 records load textures.
 
@@ -267,17 +284,22 @@ zero-length segments remain stable diagnostics. Consecutive bridge endpoints now
 of terrain plus `0.25`; bridge endpoint marker Z is not an authored scenery offset. The renderer
 selects the configured model's `BRIDGE_LEFT`, optional `BRIDGE_SPAN`, and optional `BRIDGE_RIGHT`
 subobjects, rounds the repeat count from the available length, and deforms their X/Y/Z basis onto
-the sloped endpoint axis while applying `BridgeScale` across the section. Ordinary scenery still
-uses terrain plus authored Z verbatim. Damaged/broken resources, tower names, effect
-references, and repair data remain unapplied; damage, repair, sound, effects, collision, and state
-transitions are simulation concerns.
+the sloped endpoint axis while applying `BridgeScale` across the section. The four optional tower
+templates resolve through the bounded object-definition and W3D paths. Their lateral corners and
+from/to facing follow the intact bridge model, with the final source WorldBuilder transform using
+the corresponding bridge endpoint Z. Towers are renderer-only instances tied to the first endpoint
+placement ID, never targetable objects. Ordinary scenery still uses terrain plus authored Z
+verbatim. Damaged/really-damaged/broken model and texture names remain immutable references;
+damage-state selection, transition effects, repair, sound, collision, and state transitions are
+simulation concerns.
 
 ### Waypoints, player starts, sides, teams, and build lists
 
 Waypoint objects are ordinary persisted object records with waypoint properties. The established
 map-info reader recognizes one-based `Player_1_Start`, `Player_2_Start`, and subsequent names as
 start positions. R3 exposes these as ordered spawn candidates without choosing slots or creating
-players.
+players. The three retained waypoint-path labels are renderer-neutral dictionary projections;
+viewer grouping and connected ribbon geometry do not create navigation edges or simulation state.
 
 `SidesList` versions 1 through 3 now decode as a separate established gate. Source evidence shows
 ordered side dictionaries and build lists; version 2 adds team dictionaries; version 3 adds
@@ -295,11 +317,11 @@ selection, runtime teams, and initial live objects.
 
 ### Polygon areas and scripts
 
-The current decoder projects only water/river records from `PolygonTriggers` versions 2 through 4.
-Version 4's additional bounded WorldBuilder layer name is retained. R3 will add a complete immutable
-polygon-area view for established versions while retaining the existing water projection.
-General trigger names, IDs, points, and flags become inspectable and cross-referenceable, but they
-do not register callbacks or spatial gameplay queries.
+The complete decoder retains every source-ordered record from `PolygonTriggers` versions 2 through
+4, including names, IDs, water/river flags, river seam, version-4 WorldBuilder layer name, and all
+integer points. Independent per-area and total-point limits bound retention. The water decoder is a
+stable filtered projection of that value. General areas are inspectable and cross-referenceable,
+but they do not register callbacks or spatial gameplay queries.
 
 The source-established script chunk graph is:
 
@@ -325,7 +347,7 @@ or script names. It
 does not consult live opcode templates, apply implicit compatibility rewrites, evaluate a condition,
 schedule a delay, or execute either action branch. All dispatch and mutation belong to R5.
 
-### `GlobalLighting` and water appearance (WIP presentation)
+### `GlobalLighting` and water appearance
 
 The decoder accepts source-established `GlobalLighting` versions 1 through 3. Every version starts
 with a one-based selected time and four ordered morning/afternoon/evening/night records. Version 1
@@ -343,13 +365,13 @@ project preview fallback. The selected `WaterSet` diffuse color/alpha and U/V sc
 standing, WaterSet sky, and WaterSet environment textures resolve through the VFS after ordered
 global and sibling `Map.ini` overrides.
 
-Water is not considered visually complete. The Modern policy now combines authored sky/environment
-inputs with a bounded screen-space reflection, and `map-view --time` freezes presentation time for
-repeatable interactive comparison. Remaining work includes shadows received by water and cast onto
-its bed where appropriate, anti-aliasing, headless explicit-time capture hashes, and quality
-validation. Water stays outside the opaque G-buffer in an ordered forward pass. Completion requires
-repeatable synthetic captures and user-owned visual comparisons; legacy compatibility and Modern
-presentation remain explicit separate policies.
+The Modern policy combines authored sky/environment inputs with a bounded screen-space reflection,
+and `map-view --time` freezes presentation time for repeatable comparison. Water stays outside the
+opaque G-buffer in an ordered forward pass, samples the same primary directional shadow map as the
+opaque scene, and is followed by edge-aware post-process anti-aliasing. Deterministic explicit-time
+overview hashes and repeatable user-owned comparisons establish the R3 baseline; legacy
+compatibility and Modern presentation remain separate policies, and exact Direct3D 8 pixel
+equivalence is not claimed.
 
 ### Object-definition and static-scene resolution
 
@@ -378,10 +400,10 @@ hierarchy references and exact UV bits remain available as immutable metadata.
 Tree movement spans two data owners. `W3DTreeDraw` INI supplies the tree model/texture and
 push-aside/topple presentation parameters. Normal ambient sway instead reads global `BreezeInfo`:
 the legacy constructor provides a default direction, intensity, lean, period, and randomness, and
-the map script action `SET_TREE_SWAY` can change those values. R3 may sample the documented default
-breeze as explicit-time presentation, but it will not execute `SET_TREE_SWAY`; custom scripted wind
-remains decoded data until R5 owns script execution. Shadows, bridge towers/states,
-decals/scorches, static lights, and explicit-time vegetation sway remain open.
+the map script action `SET_TREE_SWAY` can change those values. R3 samples the documented default
+breeze with explicit time, a stable placement-ID family, and bounded source randomness. It does
+not execute `SET_TREE_SWAY`; custom scripted wind remains decoded data until R5 owns script
+execution. Additional unsupported draw modules remain explicit diagnostics.
 
 ### Playable-boundary presentation
 
@@ -396,18 +418,17 @@ playable extent only: it does not create collision, pathing, or simulation state
   endpoint roles, player starts, and stable placement IDs.
 - `map-sides` reports sides, teams, build lists, and the complete nested script tree with versions,
   raw opcodes, typed parameters, and no execution.
-- A future scenario report will add complete polygon areas and cross-reference diagnostics without
-  runtime validation or repair.
-- `map-view` integrates source lighting and WIP water, source-topology roads, initial instanced
+- `map-polygons` reports complete polygon areas without runtime validation or repair.
+- `map-view` integrates source lighting and forward water, source-topology roads, initial instanced
   static drawables, intact bridges, and the playable-boundary fence. M toggles full-scene wireframe
-  when polygon-line rasterization is available. Remaining draw modules, explicit-time ambient
-  animation, shadows, and reflection closure remain open.
+  when polygon-line rasterization is available. It also includes explicit-time default tree sway,
+  shared directional shadows, and edge-aware anti-aliasing.
 
 Lighting/water inputs, object/world decoding, endpoint staging, sides/teams/spawns, and nested script
-data are implemented, as are source-topology roads and initial object-definition/static-scene
-instancing. Remaining order is bridge towers/states, additional object draw and ambient-animation
-coverage, complete polygons, then integrated scene closure. Each step adds its
-own synthetic fixture, negative tests, stable report, documentation, and completion artifact.
+data are implemented, as are source-topology roads, pristine bridges with tower scenery, initial
+object-definition/static-scene instancing, complete polygons, default tree sway, and integrated
+scene capture. Unsupported presentation modules remain explicit diagnostics or later compatibility
+work rather than implicit gameplay behavior.
 
 ## Synthetic fixture
 
@@ -434,11 +455,12 @@ parameters, truncation, non-finite values, and independent tree limits. No retai
 ## Remaining exclusions and open questions
 
 - Blend versions other than 6 through 8 remain opaque; unobserved versions are never guessed.
-- Object placement, sides/teams/build lists, nested scripts, sibling-map water overrides, source
-  road topology, initial object draw definitions, intact bridges, and static-scenery rendering are
-  implemented. Non-water polygon-trigger semantics, bridge towers/states, real water shadows, and
-  final capture convergence remain WIP.
-- Version-1 compatibility resampling is not applied.
+- Object placement, sides/teams/build lists, nested scripts, sibling-map water overrides, complete
+  polygons, source road topology, initial object draw definitions, intact bridges with tower
+  scenery, static-scenery rendering, default tree sway, shared shadows, and scene capture are
+  implemented.
+- Version-1 compatibility resampling is intentionally not applied; the native stored grid is the
+  explicit R3 policy.
 - No unobserved version or compression wrapper is assumed to share an established layout.
 - Exact legacy fixed-function custom-edge multipass equations remain outside the established
   preview. Gameplay simulation, player/team activation, pathfinding, collision, AI, damage/repair,

@@ -2,6 +2,7 @@
 
 mod boundary;
 mod lighting;
+mod map_overlay;
 mod map_scene;
 mod model;
 mod resource;
@@ -23,11 +24,12 @@ use sha2::{Digest, Sha256};
 
 pub use boundary::{BoundaryStagingError, BoundaryVertex, StagedBoundaryFence};
 pub use lighting::{TerrainDirectionalLight, TerrainLighting};
+pub use map_overlay::{MapOverlayError, MapOverlayVertex, StagedMapOverlays};
 pub use map_scene::{
     MapEndpointKind, MapPresentationFrame, MapSceneStagingError, StagedMapEndpoint,
     StagedMapPlacement, StagedMapScene, StagedWaypoint,
 };
-pub use model::{AnimatedModel, StagedModel};
+pub use model::{AnimatedModel, BridgeTowerPlacement, StagedModel, bridge_tower_placements};
 pub use resource::{TextureId, TextureImage, TextureResourceManager};
 pub use road::{
     RoadDiagnostic, RoadDiagnosticKind, RoadDrawKind, RoadStagingError, RoadTexture, RoadVertex,
@@ -35,7 +37,7 @@ pub use road::{
 };
 pub use scenery::{
     StagedStaticScenery, StagedStaticSceneryModel, StaticSceneryDiagnostic,
-    StaticSceneryDiagnosticKind, StaticSceneryError, StaticSceneryInstance,
+    StaticSceneryDiagnosticKind, StaticSceneryError, StaticSceneryInstance, TreeSwayPresentation,
 };
 pub use terrain::{
     StagedTerrain, TERRAIN_HEIGHT_SCALE, TERRAIN_XY_SCALE, TerrainCell, TerrainCompatibilityPolicy,
@@ -1090,6 +1092,102 @@ impl HeadlessRenderer {
         self.finish_capture(encoder, &readback, width, height, unpadded_row, padded_row)
     }
 
+    /// Produces a deterministic headless scene-overview capture at explicit presentation time.
+    ///
+    /// The established terrain capture remains the base image. Source-ordered road and water
+    /// triangles plus static-instance markers are then projected with the same fixed isometric
+    /// transform. Tree markers sample their explicit sway input, so captures never consult a
+    /// renderer clock or simulation RNG.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured capture or geometry error from the bounded terrain render.
+    #[allow(clippy::too_many_arguments)]
+    pub fn capture_map_scene_overview(
+        &self,
+        width: u32,
+        height: u32,
+        terrain: &StagedTerrain,
+        roads: &StagedRoads,
+        overlays: &StagedMapOverlays,
+        scenery: &StagedStaticScenery,
+        water: &StagedWater,
+        frame: MapPresentationFrame,
+    ) -> Result<Capture, RenderError> {
+        let mut capture = self.capture_terrain(width, height, terrain)?;
+        let projection = SceneOverviewProjection::new(terrain, width, height);
+        for triangle in roads.indices().chunks_exact(3) {
+            let Some(points) = indexed_triangle(triangle, |index| {
+                roads.vertices().get(index).map(|vertex| vertex.position())
+            }) else {
+                return Err(RenderError::InvalidIndex);
+            };
+            rasterize_overview_triangle(
+                &mut capture,
+                points.map(|point| projection.project(point)),
+                [126, 116, 102, 176],
+            );
+        }
+        for triangle in water.indices().chunks_exact(3) {
+            let Some(points) =
+                indexed_triangle(triangle, |index| water.vertices().get(index).copied())
+            else {
+                return Err(RenderError::InvalidIndex);
+            };
+            rasterize_overview_triangle(
+                &mut capture,
+                points.map(|point| projection.project(point)),
+                [30, 112, 158, 154],
+            );
+        }
+        for triangle in overlays.indices().chunks_exact(3) {
+            let Some(points) = indexed_triangle(triangle, |index| {
+                overlays
+                    .vertices()
+                    .get(index)
+                    .map(|vertex| vertex.position())
+            }) else {
+                return Err(RenderError::InvalidIndex);
+            };
+            let color = usize::try_from(triangle[0])
+                .ok()
+                .and_then(|index| overlays.vertices().get(index))
+                .map_or([255, 0, 255, 255], |vertex| {
+                    overview_overlay_color(vertex.color())
+                });
+            rasterize_overview_triangle(
+                &mut capture,
+                points.map(|point| projection.project(point)),
+                color,
+            );
+        }
+        for model in scenery.models() {
+            let color = overview_model_color(model.name_bytes());
+            for instance in model.instances() {
+                let base = instance.position();
+                let mut tip = base;
+                let marker_height = 60.0 * instance.scale();
+                tip[2] += marker_height;
+                if let Some(sway) = instance.tree_sway() {
+                    let offset = sway.offset_at(frame.seconds(), marker_height);
+                    // The overview uses symbolic model markers rather than model geometry; amplify
+                    // the small legacy bend so distinct explicit-time samples remain inspectable
+                    // at bounded thumbnail resolutions. The interactive viewer uses exact scale.
+                    tip[0] += offset[0] * 8.0;
+                    tip[1] += offset[1] * 8.0;
+                    tip[2] += offset[2];
+                }
+                draw_overview_line(
+                    &mut capture,
+                    projection.project(base),
+                    projection.project(tip),
+                    [color[0], color[1], color[2], 230],
+                );
+            }
+        }
+        Ok(capture)
+    }
+
     fn finish_capture(
         &self,
         encoder: wgpu::CommandEncoder,
@@ -1133,6 +1231,193 @@ impl HeadlessRenderer {
             rgba,
         })
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SceneOverviewProjection {
+    center: [f32; 2],
+    minimum_depth: f32,
+    scale: f32,
+    depth_scale: f32,
+    aspect: f32,
+    width: u32,
+    height: u32,
+}
+
+impl SceneOverviewProjection {
+    #[allow(clippy::cast_precision_loss)]
+    fn new(terrain: &StagedTerrain, width: u32, height: u32) -> Self {
+        let aspect = width as f32 / height as f32;
+        let mut minimum = [f32::INFINITY; 3];
+        let mut maximum = [f32::NEG_INFINITY; 3];
+        for vertex in terrain.vertices() {
+            let projected = isometric_project(vertex.position());
+            for axis in 0..3 {
+                minimum[axis] = minimum[axis].min(projected[axis]);
+                maximum[axis] = maximum[axis].max(projected[axis]);
+            }
+        }
+        let range_x = (maximum[0] - minimum[0]).max(f32::EPSILON);
+        let range_y = (maximum[1] - minimum[1]).max(f32::EPSILON);
+        Self {
+            center: [
+                (minimum[0] + maximum[0]) * 0.5,
+                (minimum[1] + maximum[1]) * 0.5,
+            ],
+            minimum_depth: minimum[2],
+            scale: 1.8 / range_y.max(range_x / aspect),
+            depth_scale: 0.9 / (maximum[2] - minimum[2]).max(f32::EPSILON),
+            aspect,
+            width,
+            height,
+        }
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn project(self, world: [f32; 3]) -> [f32; 3] {
+        let projected = isometric_project(world);
+        let clip_x = (projected[0] - self.center[0]) * self.scale / self.aspect;
+        let clip_y = (projected[1] - self.center[1]) * self.scale;
+        [
+            (clip_x * 0.5 + 0.5) * self.width.saturating_sub(1) as f32,
+            (0.5 - clip_y * 0.5) * self.height.saturating_sub(1) as f32,
+            0.05 + (projected[2] - self.minimum_depth) * self.depth_scale,
+        ]
+    }
+}
+
+fn isometric_project([x, y, z]: [f32; 3]) -> [f32; 3] {
+    [
+        (x - y) * std::f32::consts::FRAC_1_SQRT_2,
+        z * 0.816_496_6 - (x + y) * 0.408_248_3,
+        (x + y - z) * 0.577_350_26,
+    ]
+}
+
+fn indexed_triangle(
+    indices: &[u32],
+    mut lookup: impl FnMut(usize) -> Option<[f32; 3]>,
+) -> Option<[[f32; 3]; 3]> {
+    let [first, second, third] = indices else {
+        return None;
+    };
+    Some([
+        lookup(usize::try_from(*first).ok()?)?,
+        lookup(usize::try_from(*second).ok()?)?,
+        lookup(usize::try_from(*third).ok()?)?,
+    ])
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+fn rasterize_overview_triangle(capture: &mut Capture, points: [[f32; 3]; 3], color: [u8; 4]) {
+    let minimum_x = points
+        .iter()
+        .map(|point| point[0])
+        .fold(f32::INFINITY, f32::min)
+        .floor()
+        .max(0.0) as u32;
+    let maximum_x = points
+        .iter()
+        .map(|point| point[0])
+        .fold(f32::NEG_INFINITY, f32::max)
+        .ceil()
+        .min(capture.width.saturating_sub(1) as f32) as u32;
+    let minimum_y = points
+        .iter()
+        .map(|point| point[1])
+        .fold(f32::INFINITY, f32::min)
+        .floor()
+        .max(0.0) as u32;
+    let maximum_y = points
+        .iter()
+        .map(|point| point[1])
+        .fold(f32::NEG_INFINITY, f32::max)
+        .ceil()
+        .min(capture.height.saturating_sub(1) as f32) as u32;
+    let area = edge(points[0], points[1], points[2]);
+    if !area.is_finite() || area.abs() <= f32::EPSILON {
+        return;
+    }
+    for y in minimum_y..=maximum_y {
+        for x in minimum_x..=maximum_x {
+            let point = [x as f32 + 0.5, y as f32 + 0.5, 0.0];
+            let first = edge(points[1], points[2], point) / area;
+            let second = edge(points[2], points[0], point) / area;
+            let third = 1.0 - first - second;
+            if first >= 0.0 && second >= 0.0 && third >= 0.0 {
+                blend_overview_pixel(capture, x, y, color);
+            }
+        }
+    }
+}
+
+fn edge(first: [f32; 3], second: [f32; 3], point: [f32; 3]) -> f32 {
+    (point[0] - first[0]) * (second[1] - first[1]) - (point[1] - first[1]) * (second[0] - first[0])
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+fn draw_overview_line(capture: &mut Capture, first: [f32; 3], second: [f32; 3], color: [u8; 4]) {
+    let steps = (second[0] - first[0])
+        .abs()
+        .max((second[1] - first[1]).abs())
+        .ceil()
+        .clamp(1.0, capture.width.max(capture.height) as f32) as u32;
+    for step in 0..=steps {
+        let factor = step as f32 / steps as f32;
+        let x = first[0] + (second[0] - first[0]) * factor;
+        let y = first[1] + (second[1] - first[1]) * factor;
+        if x >= 0.0 && y >= 0.0 && x < capture.width as f32 && y < capture.height as f32 {
+            blend_overview_pixel(capture, x.round() as u32, y.round() as u32, color);
+        }
+    }
+}
+
+fn blend_overview_pixel(capture: &mut Capture, x: u32, y: u32, color: [u8; 4]) {
+    let Some(pixel_index) = y
+        .checked_mul(capture.width)
+        .and_then(|row| row.checked_add(x))
+        .and_then(|pixel| pixel.checked_mul(4))
+        .and_then(|index| usize::try_from(index).ok())
+    else {
+        return;
+    };
+    let Some(pixel_end) = pixel_index.checked_add(4) else {
+        return;
+    };
+    let Some(pixel) = capture.rgba.get_mut(pixel_index..pixel_end) else {
+        return;
+    };
+    let alpha = u32::from(color[3]);
+    for channel in 0..3 {
+        let blended = u32::from(color[channel]) * alpha
+            + u32::from(pixel[channel]) * (u32::from(u8::MAX) - alpha);
+        pixel[channel] = u8::try_from((blended + 127) / 255).expect("blended channel fits u8");
+    }
+    pixel[3] = u8::MAX;
+}
+
+fn overview_model_color(name: &[u8]) -> [u8; 3] {
+    let hash = name.iter().fold(0x811c_9dc5_u32, |hash, byte| {
+        (hash ^ u32::from(*byte)).wrapping_mul(0x0100_0193)
+    });
+    [
+        80 + u8::try_from(hash & 0x7f).expect("masked red fits u8"),
+        80 + u8::try_from((hash >> 8) & 0x7f).expect("masked green fits u8"),
+        80 + u8::try_from((hash >> 16) & 0x7f).expect("masked blue fits u8"),
+    ]
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn overview_overlay_color(color: [f32; 4]) -> [u8; 4] {
+    color.map(|channel| (channel.clamp(0.0, 1.0) * f32::from(u8::MAX)).round() as u8)
 }
 
 fn create_headless_terrain_pipeline(
@@ -1233,6 +1518,7 @@ pub enum RenderError {
     CaptureTooLarge,
     EmptyModel,
     GeometryTooLarge,
+    InvalidIndex,
     InvalidHierarchy,
     GeometryOutsideLimits,
     InvalidAnimation,
@@ -1260,6 +1546,7 @@ impl Display for RenderError {
             Self::CaptureTooLarge => formatter.write_str("capture byte size exceeds limits"),
             Self::EmptyModel => formatter.write_str("model contains no renderable triangles"),
             Self::GeometryTooLarge => formatter.write_str("model geometry exceeds renderer limits"),
+            Self::InvalidIndex => formatter.write_str("staged scene contains an invalid index"),
             Self::InvalidHierarchy => formatter.write_str("model hierarchy references are invalid"),
             Self::GeometryOutsideLimits => {
                 formatter.write_str("transformed model geometry is non-finite or outside limits")

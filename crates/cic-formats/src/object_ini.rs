@@ -4,10 +4,11 @@
 //! Bounded immutable decoder for renderer-facing `Object` INI model declarations.
 //!
 //! `Object`, `ObjectReskin`, `Draw`, `DefaultConditionState`, `Model`, and `Scale` field meanings
-//! are derived from `W3DModelDraw.cpp`, `W3DModelDraw.h`, and `INI.cpp` in `GeneralsGameCode`
-//! revision `9f7abb866f5afd446db14149979e744c7216baaf`, licensed under GPL-3.0-or-later
-//! with Electronic Arts Section 7 terms. Full notices are recorded in
-//! `docs/provenance/map.md`. The bounded non-executing extraction state machine and resource
+//! are derived from `W3DModelDraw.cpp`, `W3DModelDraw.h`, and `INI.cpp`; `W3DTreeDraw`'s flat
+//! `ModelName` and `TextureName` fields are derived from `W3DTreeDraw.cpp` and `.h`. All named
+//! sources are from `GeneralsGameCode` revision `9f7abb866f5afd446db14149979e744c7216baaf`,
+//! licensed under GPL-3.0-or-later with Electronic Arts Section 7 terms. Full notices are recorded
+//! in `docs/provenance/map.md`. The bounded non-executing extraction state machine and resource
 //! limits are project-authored.
 
 use std::error::Error;
@@ -24,6 +25,7 @@ pub struct ObjectIniLimits {
     pub max_name_bytes: usize,
     pub max_module_bytes: usize,
     pub max_model_bytes: usize,
+    pub max_texture_bytes: usize,
 }
 
 impl Default for ObjectIniLimits {
@@ -37,8 +39,16 @@ impl Default for ObjectIniLimits {
             max_name_bytes: 255,
             max_module_bytes: 255,
             max_model_bytes: 1_024,
+            max_texture_bytes: 1_024,
         }
     }
+}
+
+/// Presentation family selected by one supported W3D draw module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectDrawKind {
+    Model,
+    Tree,
 }
 
 /// One source-ordered initial model selected by a W3D draw module.
@@ -46,7 +56,9 @@ impl Default for ObjectIniLimits {
 pub struct ObjectModelDraw {
     module: Vec<u8>,
     model: Vec<u8>,
+    texture: Option<Vec<u8>>,
     scale: f32,
+    kind: ObjectDrawKind,
 }
 
 impl ObjectModelDraw {
@@ -61,8 +73,18 @@ impl ObjectModelDraw {
     }
 
     #[must_use]
+    pub fn texture_bytes(&self) -> Option<&[u8]> {
+        self.texture.as_deref()
+    }
+
+    #[must_use]
     pub const fn scale(&self) -> f32 {
         self.scale
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> ObjectDrawKind {
+        self.kind
     }
 }
 
@@ -115,7 +137,9 @@ struct ActiveObject {
 struct ActiveDraw {
     module: Vec<u8>,
     model: Option<Vec<u8>>,
+    texture: Option<Vec<u8>>,
     scale: f32,
+    kind: ObjectDrawKind,
     in_condition_state: bool,
     select_condition_state: bool,
     saw_initial_condition_state: bool,
@@ -320,7 +344,13 @@ pub fn parse_object_ini(
                 active_draw = Some(ActiveDraw {
                     module: module.to_vec(),
                     model: None,
+                    texture: None,
                     scale: 1.0,
+                    kind: if module.eq_ignore_ascii_case(b"W3DTreeDraw") {
+                        ObjectDrawKind::Tree
+                    } else {
+                        ObjectDrawKind::Model
+                    },
                     in_condition_state: false,
                     select_condition_state: false,
                     saw_initial_condition_state: false,
@@ -355,6 +385,28 @@ pub fn parse_object_ini(
             if !value.is_empty() && !value.eq_ignore_ascii_case(b"NONE") {
                 enforce_value_limit(value, line_number, "Model", limits.max_model_bytes)?;
                 draw.model = Some(value.to_vec());
+            }
+            continue;
+        }
+        if draw.kind == ObjectDrawKind::Tree
+            && !draw.in_condition_state
+            && field_eq(line, b"ModelName")
+        {
+            let value = field_value(line).unwrap_or_default();
+            if !value.is_empty() && !value.eq_ignore_ascii_case(b"NONE") {
+                enforce_value_limit(value, line_number, "ModelName", limits.max_model_bytes)?;
+                draw.model = Some(value.to_vec());
+            }
+            continue;
+        }
+        if draw.kind == ObjectDrawKind::Tree
+            && !draw.in_condition_state
+            && field_eq(line, b"TextureName")
+        {
+            let value = field_value(line).unwrap_or_default();
+            if !value.is_empty() && !value.eq_ignore_ascii_case(b"NONE") {
+                enforce_value_limit(value, line_number, "TextureName", limits.max_texture_bytes)?;
+                draw.texture = Some(value.to_vec());
             }
             continue;
         }
@@ -423,7 +475,9 @@ fn finish_draw(object: &mut Option<ActiveObject>, draw: &mut Option<ActiveDraw>)
         object.draws.push(ObjectModelDraw {
             module: draw.module,
             model,
+            texture: draw.texture,
             scale: draw.scale,
+            kind: draw.kind,
         });
     }
 }
@@ -521,7 +575,7 @@ fn trim_ascii(mut value: &[u8]) -> &[u8] {
 
 #[cfg(test)]
 mod tests {
-    use super::{ObjectIniError, ObjectIniLimits, parse_object_ini};
+    use super::{ObjectDrawKind, ObjectIniError, ObjectIniLimits, parse_object_ini};
 
     #[test]
     fn constructor_defaults_and_implicit_draw_scale_are_exact() {
@@ -536,6 +590,7 @@ mod tests {
                 max_name_bytes: 255,
                 max_module_bytes: 255,
                 max_model_bytes: 1_024,
+                max_texture_bytes: 1_024,
             }
         );
         let parsed = parse_object_ini(
@@ -559,11 +614,46 @@ mod tests {
         assert_eq!(object.draws().len(), 2);
         assert_eq!(object.draws()[0].model_bytes(), b"SyntheticHouse");
         assert_eq!(object.draws()[1].model_bytes(), b"SyntheticCrown");
+        assert_eq!(object.draws()[1].kind(), ObjectDrawKind::Tree);
         assert_eq!(object.draws()[1].scale().to_bits(), 1.25_f32.to_bits());
         assert_eq!(
             parsed.definitions()[1].reskin_of_bytes(),
             Some(b"SyntheticBuilding".as_slice())
         );
+    }
+
+    #[test]
+    fn extracts_bounded_flat_tree_resources_without_executing_topple_fields() {
+        let bytes = b"\
+Object SyntheticTree
+ Draw = W3DTreeDraw Tag
+  ModelName = SyntheticTreeModel
+  TextureName = SyntheticTreeTexture.tga
+  MoveOutwardTime = 3
+  DoTopple = Yes
+ End
+End
+";
+        let parsed = parse_object_ini(bytes, ObjectIniLimits::default()).expect("tree draw");
+        let draw = &parsed.definitions()[0].draws()[0];
+        assert_eq!(draw.kind(), ObjectDrawKind::Tree);
+        assert_eq!(draw.model_bytes(), b"SyntheticTreeModel");
+        assert_eq!(
+            draw.texture_bytes(),
+            Some(b"SyntheticTreeTexture.tga".as_slice())
+        );
+
+        let limits = ObjectIniLimits {
+            max_texture_bytes: 3,
+            ..ObjectIniLimits::default()
+        };
+        assert!(matches!(
+            parse_object_ini(bytes, limits),
+            Err(ObjectIniError::ValueTooLong {
+                field: "TextureName",
+                ..
+            })
+        ));
     }
 
     #[test]

@@ -50,10 +50,12 @@ pub struct MapLimits {
     pub maximum_texture_classes: usize,
     /// Maximum bytes in one texture-class name.
     pub maximum_texture_name_bytes: usize,
-    /// Maximum polygon triggers inspected by the water-only decoder.
+    /// Maximum polygon triggers retained by the semantic decoder.
     pub maximum_polygon_triggers: usize,
     /// Maximum points in one polygon trigger.
     pub maximum_polygon_points: usize,
+    /// Maximum points retained across every polygon trigger.
+    pub maximum_polygon_total_points: usize,
     /// Maximum points retained across all water polygon triggers.
     pub maximum_water_points: usize,
     /// Maximum bytes in one polygon-trigger name.
@@ -80,6 +82,7 @@ impl Default for MapLimits {
             maximum_texture_name_bytes: 1_024,
             maximum_polygon_triggers: 65_536,
             maximum_polygon_points: 65_536,
+            maximum_polygon_total_points: 1_000_000,
             maximum_water_points: 1_000_000,
             maximum_trigger_name_bytes: 1_024,
         }

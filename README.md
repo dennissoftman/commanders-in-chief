@@ -114,9 +114,9 @@ earlier mounts. Archive backslashes and host separators are normalized; manifest
 emit portable `/` virtual paths.
 No retail game assets are included in this repository.
 
-The current R3 terrain gate inventories MAP chunks, decodes immutable height and version-6/7 blend
-values, resolves semantic terrain classes through mounted Terrain INI definitions, and stages
-source-scaled layered terrain for a deterministic headless capture:
+The completed R3 scene gate inventories MAP chunks, decodes immutable height, version-6/7/8 blend,
+complete polygon, object, side/team, and script data, resolves referenced presentation resources,
+and stages a deterministic non-simulating scene:
 
 ```powershell
 cargo run -p cic-tools -- map-height "maps/synthetic/synthetic.map"
@@ -124,11 +124,13 @@ cargo run -p cic-tools -- map-height --report "maps/synthetic/synthetic.map"
 cargo run -p cic-tools -- map-render --size 768 "maps/synthetic/synthetic.map"
 cargo run -p cic-tools -- map-view "maps/synthetic/synthetic.map"
 cargo run -p cic-tools -- map-water "maps/synthetic/synthetic.map"
+cargo run -p cic-tools -- map-polygons "maps/synthetic/synthetic.map"
 cargo run -p cic-tools -- map-objects "maps/synthetic/synthetic.map"
 cargo run -p cic-tools -- map-sides "maps/synthetic/synthetic.map"
 ```
 
-The first command derives `synthetic.png`; the terrain render derives `synthetic-terrain.png`.
+The first command derives `synthetic.png`; `map-render` derives `synthetic-terrain.png`, a
+fixed-isometric overview containing terrain, roads, scenery, tree sway, and water.
 Explicit output paths and directory/BIG mounts remain supported. `map-view` opens a perspective
 flyover: WASD moves, Space/Ctrl changes altitude, Shift boosts, right-drag looks, the wheel moves
 forward/back, R resets, M toggles full-scene wireframe where the GPU supports polygon-line mode,
@@ -141,13 +143,19 @@ textures into terrain-fitted strips with legacy-radius curves/miters and dedicat
 tee/Y/slanted/four-way junctions plus authored cross-material alpha joins. Road textures retain the
 source three-level mip budget, and a renderer-only depth bias complements the source height lift to
 prevent distant terrain/road depth contention without changing staged world geometry.
-Paired bridge endpoints resolve bounded intact bridge model/scale fields through the same static
-instance path. Placed `Object`/`ObjectReskin` definitions resolve `End`-delimited default or
+Paired bridge endpoints resolve bounded pristine bridge model/scale fields through the same static
+instance path. Damage-state model/texture names remain inert references, while four optional tower
+templates resolve into source-cornered renderer-only scenery. Placed `Object`/`ObjectReskin`
+definitions resolve `End`-delimited default or
 initial-NONE W3D draw states and scale into stable GPU instance batches; standalone mesh W3Ds
 receive a neutral renderer-only root, and ground placements sample the exact rendered terrain
 triangle and add the MAP-authored relative Z offset verbatim,
 without clamping or an added epsilon. W3D Header3 two-sided flags select static culling. A translucent
-renderer-only fence follows the primary playable boundary and clears the map's highest cliff. The
+renderer-only fence follows the primary playable boundary and clears the map's highest cliff.
+Larger stable-color beacons show `Player_n_Start` candidates, smaller cyan beacons show ordinary
+waypoints, and named waypoint paths use distinct deterministic colors with continuous
+terrain-following ribbons in stored waypoint-ID order. A waypoint may belong to multiple paths.
+Translucent source-ordered perimeter walls expose polygon zones without activating them. The
 viewer resolves terrain and static scenery through a G-buffer, alpha-overlays roads, then draws
 decoded water polygons and the boundary in depth-aware forward passes. It keeps the deterministic 8-pixel background and
 uses a persistent GPU-composed virtual-texture cache for camera-space-depth-capped 16- and
@@ -162,16 +170,16 @@ sky/environment textures after ordered sibling-map overrides. The shader project
 underwater bed and combines them with depth absorption, shallow shoreline effects, and bounded
 Modern reflections.
 
-Water remains a work-in-progress presentation path: real scene shadows, anti-aliasing, headless
-explicit-time hashes, and repeatable visual comparisons remain open. R3 now decodes immutable
+The R3 water baseline shares the primary directional shadow map, runs before edge-aware
+post-process anti-aliasing, and participates in deterministic explicit-time overview hashes.
+Exact legacy fixed-function pixel equivalence remains outside the compatibility claim. R3 decodes immutable
 `WorldInfo`/`ObjectsList` placement data, waypoints/player starts, sides, teams, build lists, and the
 complete nested script tree, and stages source-order endpoint/scenery buckets. It is designed to
-continue through exact source curve/tee UVs, bridge towers/states, additional draw modules, and all remaining
-resolvable decals and static lights. Source-authored vegetation sway and other
-ambient visual animation
-will use explicit presentation time. R3 will also decode waypoints and `Player_n_Start` candidates,
-sides, teams, build lists, polygon areas, and the complete nested MAP script tree for stable
-inspection. It will not activate players, construct gameplay objects, or execute scripts; those
+continue through additional draw modules and all remaining resolvable decals and static lights.
+Source-default vegetation sway uses explicit presentation time and deterministic placement
+families. Waypoints, `Player_n_Start` candidates, sides, teams, build lists, polygon areas, and the
+complete nested MAP script tree are available for stable inspection. R3 does not activate players,
+construct gameplay objects, or execute scripts; those
 operations begin at the deterministic R5 simulation boundary. R4 is the intervening WND/UI
 milestone: a custom retained compatibility layer and `wgpu` renderer will load user-owned menu
 layouts, mapped images, fonts, and CSF text, then navigate from the main menu into skirmish setup

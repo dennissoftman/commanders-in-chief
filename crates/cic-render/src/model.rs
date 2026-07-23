@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use cic_formats::{
-    W3dAnimation, W3dAnimationChannel, W3dAnimationChannelKind, W3dMaterialPass, W3dModel,
-    W3dStaticMesh,
+    BridgeTowerSlot, W3dAnimation, W3dAnimationChannel, W3dAnimationChannelKind, W3dMaterialPass,
+    W3dModel, W3dStaticMesh,
 };
 
 use crate::{RenderError, TextureId, TextureResourceManager};
@@ -12,6 +12,71 @@ const MAX_ABS_RENDER_COORDINATE: f32 = 1_000_000_000.0;
 const HIDDEN_ATTACHMENT_MIN_DISTANCE: f32 = 100.0;
 const HIDDEN_ATTACHMENT_MODEL_MULTIPLIER: f32 = 32.0;
 const HIDDEN_ATTACHMENT_SCALE: f32 = 0.000_1;
+
+/// One final source bridge-tower corner and facing transform.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BridgeTowerPlacement {
+    slot: BridgeTowerSlot,
+    position: [f32; 3],
+    angle: f32,
+}
+
+impl BridgeTowerPlacement {
+    #[must_use]
+    pub const fn slot(self) -> BridgeTowerSlot {
+        self.slot
+    }
+
+    #[must_use]
+    pub const fn position(self) -> [f32; 3] {
+        self.position
+    }
+
+    #[must_use]
+    pub const fn angle(self) -> f32 {
+        self.angle
+    }
+}
+
+/// Computes the four source bridge-tower corners from the intact left bridge section.
+///
+/// Provenance: corner selection, lateral bounds, scale, and from/to facing follow
+/// `W3DBridgeBuffer.cpp` from `GeneralsGameCode` revision
+/// `9f7abb866f5afd446db14149979e744c7216baaf`; notices are in
+/// `docs/provenance/map.md`.
+///
+/// # Errors
+///
+/// Returns a structured renderer error for missing bridge geometry, invalid hierarchy references,
+/// non-finite inputs, or a degenerate horizontal bridge axis.
+pub fn bridge_tower_placements(
+    model: &W3dModel,
+    start: [f32; 3],
+    end: [f32; 3],
+    bridge_scale: f32,
+) -> Result<[BridgeTowerPlacement; 4], RenderError> {
+    if start
+        .into_iter()
+        .chain(end)
+        .chain([bridge_scale])
+        .any(|value| !value.is_finite())
+        || bridge_scale <= 0.0
+    {
+        return Err(RenderError::NonFinitePose);
+    }
+    let worlds = bind_pose_transforms(model)?;
+    let left = model
+        .meshes()
+        .iter()
+        .find(|mesh| mesh_name_eq(mesh.mesh(), b"BRIDGE_LEFT"))
+        .ok_or(RenderError::EmptyModel)?;
+    bridge_tower_layout(
+        start,
+        end,
+        bridge_scale,
+        mesh_bind_axis_bounds(left, &worlds, 1)?,
+    )
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct ModelVertex {
@@ -1109,6 +1174,14 @@ fn mesh_bind_x_bounds(
     model_mesh: &cic_formats::W3dModelMesh,
     worlds: &[Transform],
 ) -> Result<[f32; 2], RenderError> {
+    mesh_bind_axis_bounds(model_mesh, worlds, 0)
+}
+
+fn mesh_bind_axis_bounds(
+    model_mesh: &cic_formats::W3dModelMesh,
+    worlds: &[Transform],
+    axis: usize,
+) -> Result<[f32; 2], RenderError> {
     let mesh = model_mesh.mesh();
     let rigid = worlds
         .get(usize::try_from(model_mesh.pivot()).map_err(|_| RenderError::InvalidHierarchy)?)
@@ -1121,17 +1194,77 @@ fn mesh_bind_x_bounds(
             .vertex_bones()
             .and_then(|bones| worlds.get(usize::from(bones[index])).copied())
             .unwrap_or(rigid);
-        let x = transform.point([position.x(), position.y(), position.z()])[0];
-        if !x.is_finite() {
+        let coordinate = transform.point([position.x(), position.y(), position.z()])[axis];
+        if !coordinate.is_finite() {
             return Err(RenderError::GeometryOutsideLimits);
         }
-        minimum = minimum.min(x);
-        maximum = maximum.max(x);
+        minimum = minimum.min(coordinate);
+        maximum = maximum.max(coordinate);
     }
     if minimum > maximum {
         return Err(RenderError::EmptyModel);
     }
     Ok([minimum, maximum])
+}
+
+fn bridge_tower_layout(
+    start: [f32; 3],
+    end: [f32; 3],
+    bridge_scale: f32,
+    lateral_bounds: [f32; 2],
+) -> Result<[BridgeTowerPlacement; 4], RenderError> {
+    if start
+        .into_iter()
+        .chain(end)
+        .chain([bridge_scale])
+        .chain(lateral_bounds)
+        .any(|value| !value.is_finite())
+        || bridge_scale <= 0.0
+    {
+        return Err(RenderError::NonFinitePose);
+    }
+    if lateral_bounds[0] > lateral_bounds[1] {
+        return Err(RenderError::GeometryOutsideLimits);
+    }
+    let delta = [end[0] - start[0], end[1] - start[1]];
+    let horizontal = delta[0].hypot(delta[1]);
+    if !horizontal.is_finite() || horizontal <= f32::EPSILON {
+        return Err(RenderError::GeometryOutsideLimits);
+    }
+    let lateral = [
+        -delta[1] / horizontal * bridge_scale,
+        delta[0] / horizontal * bridge_scale,
+    ];
+    let angle = delta[1].atan2(delta[0]);
+    let corner = |origin: [f32; 3], offset: f32| {
+        [
+            origin[0] + lateral[0] * offset,
+            origin[1] + lateral[1] * offset,
+            origin[2],
+        ]
+    };
+    Ok([
+        BridgeTowerPlacement {
+            slot: BridgeTowerSlot::FromLeft,
+            position: corner(start, lateral_bounds[1]),
+            angle: angle + std::f32::consts::PI,
+        },
+        BridgeTowerPlacement {
+            slot: BridgeTowerSlot::FromRight,
+            position: corner(start, lateral_bounds[0]),
+            angle: angle + std::f32::consts::PI,
+        },
+        BridgeTowerPlacement {
+            slot: BridgeTowerSlot::ToLeft,
+            position: corner(end, lateral_bounds[1]),
+            angle,
+        },
+        BridgeTowerPlacement {
+            slot: BridgeTowerSlot::ToRight,
+            position: corner(end, lateral_bounds[0]),
+            angle,
+        },
+    ])
 }
 
 fn bridge_span_layout(
@@ -1697,9 +1830,11 @@ fn rotate(quaternion: [f32; 4], vector: [f32; 3]) -> [f32; 3] {
 
 #[cfg(test)]
 mod tests {
+    use cic_formats::BridgeTowerSlot;
+
     use super::{
-        BlendMode, StagedMapper, Transform, bridge_span_layout, mapped_texcoord, mesh_is_two_sided,
-        preview_blend, project_fixed_vertex,
+        BlendMode, StagedMapper, Transform, bridge_span_layout, bridge_tower_layout,
+        mapped_texcoord, mesh_is_two_sided, preview_blend, project_fixed_vertex,
     };
 
     #[test]
@@ -1723,6 +1858,39 @@ mod tests {
         assert_eq!(count, 3);
         assert!((repeated - 6.0).abs() < f32::EPSILON);
         assert!((generated - 14.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn bridge_tower_layout_matches_source_corner_order_and_facing() {
+        let placements =
+            bridge_tower_layout([10.0, 20.0, 5.0], [30.0, 20.0, 7.0], 2.0, [-3.0, 4.0])
+                .expect("bounded tower layout");
+        assert_eq!(
+            placements.map(super::BridgeTowerPlacement::slot),
+            BridgeTowerSlot::ALL
+        );
+        assert_eq!(
+            placements[0].position().map(f32::to_bits),
+            [10.0_f32, 28.0, 5.0].map(f32::to_bits)
+        );
+        assert_eq!(
+            placements[1].position().map(f32::to_bits),
+            [10.0_f32, 14.0, 5.0].map(f32::to_bits)
+        );
+        assert_eq!(
+            placements[2].position().map(f32::to_bits),
+            [30.0_f32, 28.0, 7.0].map(f32::to_bits)
+        );
+        assert_eq!(
+            placements[3].position().map(f32::to_bits),
+            [30.0_f32, 14.0, 7.0].map(f32::to_bits)
+        );
+        assert_eq!(
+            placements[0].angle().to_bits(),
+            std::f32::consts::PI.to_bits()
+        );
+        assert_eq!(placements[2].angle().to_bits(), 0.0_f32.to_bits());
+        assert!(bridge_tower_layout([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], 1.0, [-1.0, 1.0]).is_err());
     }
 
     #[test]
