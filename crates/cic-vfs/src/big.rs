@@ -479,8 +479,7 @@ impl Error for BigError {
 mod tests {
     use super::{BigError, BigLimits, BigVersion, parse_big_archive};
 
-    fn fixture() -> Vec<u8> {
-        let hex = include_str!("../tests/fixtures/minimal.big.hex");
+    fn decode_hex_fixture(hex: &str) -> Vec<u8> {
         let digits = hex
             .bytes()
             .filter(|byte| !byte.is_ascii_whitespace())
@@ -493,6 +492,14 @@ mod tests {
                 u8::from_str_radix(pair, 16).expect("valid hex fixture")
             })
             .collect()
+    }
+
+    fn fixture() -> Vec<u8> {
+        decode_hex_fixture(include_str!("../tests/fixtures/minimal.big.hex"))
+    }
+
+    fn fixture_big4() -> Vec<u8> {
+        decode_hex_fixture(include_str!("../tests/fixtures/minimal.big4.hex"))
     }
 
     #[test]
@@ -560,5 +567,45 @@ mod tests {
         archive[20..24].copy_from_slice(&0_u32.to_be_bytes());
         let index = parse_big_archive(&archive, BigLimits::default()).expect("valid marker");
         assert_eq!(index.entries()[0].bytes(&archive), Some([].as_slice()));
+    }
+
+    #[test]
+    fn indexes_synthetic_big4_archive() {
+        let archive = fixture_big4();
+        let index = parse_big_archive(&archive, BigLimits::default()).expect("valid BIG4");
+
+        assert_eq!(index.version(), BigVersion::Big4);
+        assert_eq!(index.archive_size(), 69);
+        assert_eq!(index.first_file_offset(), 62);
+        assert_eq!(index.directory_trailer(), b"L231\0\0\0\0");
+        assert_eq!(index.entries().len(), 2);
+        assert_eq!(index.entries()[0].path().as_str(), "data/a.txt");
+        assert_eq!(index.entries()[0].bytes(&archive), Some(b"new!".as_slice()));
+        assert_eq!(index.entries()[1].path().as_str(), "data/z.bin");
+        assert_eq!(
+            index.entries()[1].bytes(&archive),
+            Some([0, 1, 2].as_slice())
+        );
+    }
+
+    #[test]
+    fn rejects_every_truncated_big4_prefix() {
+        let archive = fixture_big4();
+        for length in 0..archive.len() {
+            assert!(
+                parse_big_archive(&archive[..length], BigLimits::default()).is_err(),
+                "BIG4 prefix of {length} bytes must fail"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_big4_entry_outside_payload() {
+        let mut archive = fixture_big4();
+        archive[16..20].copy_from_slice(&0_u32.to_be_bytes());
+        assert!(matches!(
+            parse_big_archive(&archive, BigLimits::default()),
+            Err(BigError::EntryOutsidePayload { entry: 0, .. })
+        ));
     }
 }
