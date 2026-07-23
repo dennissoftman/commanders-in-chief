@@ -57,12 +57,42 @@ impl TerrainDefinition {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerrainIni {
     definitions: Vec<TerrainDefinition>,
+    diagnostics: Vec<TerrainIniDiagnostic>,
 }
 
 impl TerrainIni {
     #[must_use]
     pub fn definitions(&self) -> &[TerrainDefinition] {
         &self.definitions
+    }
+
+    /// Returns every field name inside a `Terrain` block that this narrow decoder does not
+    /// recognize, in source order. These never fail parsing; they exist so an unsupported or
+    /// missing field stays discoverable instead of disappearing silently.
+    #[must_use]
+    pub fn diagnostics(&self) -> &[TerrainIniDiagnostic] {
+        &self.diagnostics
+    }
+}
+
+/// One field name inside a `Terrain` block that this decoder does not specifically recognize.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerrainIniDiagnostic {
+    line: usize,
+    field: Vec<u8>,
+}
+
+impl TerrainIniDiagnostic {
+    /// Returns the one-based source line the field appeared on.
+    #[must_use]
+    pub const fn line(&self) -> usize {
+        self.line
+    }
+
+    /// Returns the unrecognized field name exactly as spelled in the source.
+    #[must_use]
+    pub fn field_bytes(&self) -> &[u8] {
+        &self.field
     }
 }
 
@@ -156,8 +186,11 @@ impl Error for TerrainIniError {}
 
 /// Decodes the Terrain blocks needed to resolve MAP texture classes.
 ///
-/// Unknown fields within a Terrain block are intentionally ignored; their simulation semantics
-/// do not belong to the renderer-facing texture catalog.
+/// A `Terrain` block's simulation-only fields (for example `Class`) are outside the
+/// renderer-facing texture catalog this decoder builds, so they are not applied to
+/// [`TerrainDefinition`] — but they are never silently discarded either. Every field name this
+/// decoder does not specifically recognize is retained as a [`TerrainIniDiagnostic`] so an
+/// unsupported or genuinely missing field stays discoverable instead of disappearing silently.
 ///
 /// # Errors
 ///
@@ -175,6 +208,7 @@ pub fn parse_terrain_ini(
     }
 
     let mut definitions = Vec::new();
+    let mut diagnostics = Vec::new();
     let mut active: Option<(usize, Vec<u8>, Option<Vec<u8>>)> = None;
     for (zero_based_line, raw_line) in bytes.split(|byte| *byte == b'\n').enumerate() {
         let line_number = zero_based_line
@@ -253,13 +287,21 @@ pub fn parse_terrain_ini(
                 });
             }
             *texture = Some(value.to_vec());
+        } else {
+            diagnostics.push(TerrainIniDiagnostic {
+                line: line_number,
+                field: field.to_vec(),
+            });
         }
     }
 
     if let Some((line, _, _)) = active {
         return Err(TerrainIniError::UnterminatedTerrain { line });
     }
-    Ok(TerrainIni { definitions })
+    Ok(TerrainIni {
+        definitions,
+        diagnostics,
+    })
 }
 
 fn strip_comment(line: &[u8]) -> &[u8] {
@@ -303,7 +345,7 @@ mod tests {
     use super::{TerrainIniError, TerrainIniLimits, parse_terrain_ini};
 
     #[test]
-    fn decodes_ordered_texture_declarations_and_ignores_other_fields() {
+    fn decodes_ordered_texture_declarations_and_diagnoses_other_fields() {
         let ini = parse_terrain_ini(
             b"; synthetic fixture\r\nTerrain DefaultTerrain\r\n  Texture = Base.tga\r\n  Class = ROCK\r\nEnd\r\n\r\nTerrain Cliff\n  BlendEdges = Yes\nEnd\nTerrain Cliff\n  Texture = \"Override.dds\"\nEnd\n",
             TerrainIniLimits::default(),
@@ -321,6 +363,12 @@ mod tests {
             ini.definitions()[2].texture_bytes(),
             Some(b"Override.dds".as_slice())
         );
+
+        assert_eq!(ini.diagnostics().len(), 2);
+        assert_eq!(ini.diagnostics()[0].line(), 4);
+        assert_eq!(ini.diagnostics()[0].field_bytes(), b"Class");
+        assert_eq!(ini.diagnostics()[1].line(), 8);
+        assert_eq!(ini.diagnostics()[1].field_bytes(), b"BlendEdges");
     }
 
     #[test]
