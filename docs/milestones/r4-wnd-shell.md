@@ -3,6 +3,20 @@
 **Status:** Active. R3 produced the complete non-simulating MAP scene and scenario description;
 the first vertical slice is bounded WND inventory/layout decoding plus a synthetic headless menu.
 
+**Progress:** Gate 1 (WND inventory and bounded syntax) is implemented. `crates/cic-formats/src/wnd.rs`
+bounds `FILE_VERSION`, the `STARTLAYOUTBLOCK`/`ENDLAYOUTBLOCK` layout block (with the source-confirmed
+`FILE_VERSION >= 2` gating and `"[None]"` version-1 default), and the complete `WINDOW`/`CHILD`/`END`/
+`ENDALLCHILDREN` hierarchy with `WINDOWTYPE`/`SCREENRECT` typed; every other field is retained
+generically rather than dropped, and unrecognized top-level keywords or out-of-vocabulary
+`WINDOWTYPE` values are surfaced as non-fatal diagnostics. Original synthetic positive,
+exhaustive-truncation, per-limit, and unknown-field-preservation tests pass. `cic-inspect wnd`
+produces a stable source-order report, and `cic-inspect wnd-render` stages every window rectangle
+as a flat colored quad and writes a surface-free deterministic capture through the existing
+`HeadlessRenderer` boundary, proving the immutable decoded value can drive a renderer capture. Gate
+2's typed per-gadget fields (fonts, state colors/borders, draw-data arrays, header templates,
+gadget-specific `DATA`), resource resolution (mapped images/fonts/CSF), the retained `cic-ui`
+runtime, and main-menu navigation remain unimplemented and are the next slice.
+
 **Scope:** Boundedly decode the complete source-established WND grammar and the UI definition
 resources required by it, then present those values through a retained, non-gameplay UI runtime.
 Cover nested layouts, exact creation rectangles, resolution scaling, status/style flags, draw and
@@ -91,10 +105,11 @@ source WND bytes are edited and no renderer path searches for special window nam
 
 ### R4 implementation gates
 
-1. **WND inventory and bounded syntax.** Specify file versions, `STARTLAYOUTBLOCK`, layout
-   init/update/shutdown names, nested `WINDOW`/`CHILD` blocks, creation resolution/rectangles,
+1. **WND inventory and bounded syntax (implemented).** Specify file versions, `STARTLAYOUTBLOCK`,
+   layout init/update/shutdown names, nested `WINDOW`/`CHILD` blocks, creation resolution/rectangles,
    defaults, fields, `DATA`, and exact `END` closure. Preserve callback names and unknown tokens as
-   data; never resolve a WND string to a native function pointer in the parser.
+   data; never resolve a WND string to a native function pointer in the parser. `DATA` and
+   per-gadget field typing are still generic (Gate 2), but nothing is dropped.
 2. **Immutable control definitions.** Decode all established status/style names, fonts, text and
    tooltip labels, state colors/borders, image offsets, draw-data arrays, header templates, and
    gadget-specific records. Apply explicit limits to every nesting and variable-length surface.

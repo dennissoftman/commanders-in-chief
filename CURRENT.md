@@ -2,13 +2,13 @@
 
 ## Objective
 
-R4 is now active. Its first vertical slice is a bounded, unknown-preserving WND inventory and
-immutable layout/control decoder, followed immediately by a surface-free `wgpu` capture of one
-original synthetic menu. That creates a visible UI result before adding retained interaction,
-user-owned mapped images/fonts/CSF labels, the main-menu stack, modern display settings, and the
-skirmish/map-selection harness. R4 remains presentation-only: callbacks are allowlisted typed
-events, MAP scripts stay inert until R5, and project-owned post-parse patches augment rather than
-modify user-owned WND bytes.
+R4 is active. Its first vertical slice — a bounded, unknown-preserving WND inventory and
+immutable layout/control decoder, plus a surface-free `wgpu` capture of one original synthetic
+menu — is complete (see [docs/milestones/r4-wnd-shell.md](docs/milestones/r4-wnd-shell.md) Gate 1).
+The next slice adds user-owned mapped images/fonts/CSF labels, the retained `cic-ui` runtime,
+the main-menu stack, modern display settings, and the skirmish/map-selection harness. R4 remains
+presentation-only: callbacks are allowlisted typed events, MAP scripts stay inert until R5, and
+project-owned post-parse patches augment rather than modify user-owned WND bytes.
 
 R3 is complete; its charter, progress, and completion evidence are recorded in
 [docs/milestones/r3-map-scene.md](docs/milestones/r3-map-scene.md). R4 adds
@@ -25,8 +25,7 @@ refresh-rate, and UI-scale controls with transactional confirmation/rollback.
 
 ## Next verified step
 
-Start R4 with a bounded WND container/layout inventory and immutable control tree that preserves
-unknown fields and callback names without invoking them. Add original synthetic positive,
-truncation, limit, and unknown-preservation fixtures, a stable `wnd` report, and a surface-free
-`wgpu` capture of one synthetic menu. The next slice resolves user-owned mapped images, explicit
-fonts, and CSF labels before retained interaction and main-menu navigation.
+Resolve user-owned mapped images, explicit fonts, and CSF labels for the fields Gate 1 already
+retains generically (`docs/formats/wnd.md`'s Gate 2 typed fields: fonts, state colors/borders,
+draw-data arrays, header templates, gadget-specific `DATA`), then begin the retained `cic-ui`
+runtime before main-menu navigation.

@@ -5,6 +5,23 @@ land under the active milestone heading.
 
 ## R4: WND user interface and navigable shell (active)
 
+### Added
+
+- Added a bounded WND text-format decoder (`crates/cic-formats/src/wnd.rs`) covering `FILE_VERSION`,
+  the `STARTLAYOUTBLOCK`/`ENDLAYOUTBLOCK` layout block, and the complete `WINDOW`/`CHILD`/`END`/
+  `ENDALLCHILDREN` hierarchy with `WINDOWTYPE`/`SCREENRECT` typed. Every other field is retained
+  generically rather than dropped, and unrecognized top-level keywords or out-of-vocabulary
+  `WINDOWTYPE` values are surfaced as non-fatal diagnostics instead of silently disappearing.
+  Original synthetic positive, exhaustive-truncation, per-limit, and unknown-field-preservation
+  tests pass.
+- Added `cic-inspect wnd`, a stable source-order inventory report over the decoded hierarchy,
+  generic fields, and diagnostics.
+- Added `cic-inspect wnd-render`, a surface-free proof-of-pipeline capture that stages every window
+  rectangle as a flat colored quad (`crates/cic-render/src/wnd_scene.rs`) and renders it through the
+  existing `HeadlessRenderer` boundary to a deterministic PPM plus RGBA SHA-256 hash. It has no
+  images, text, gadget visuals, or scaling policy yet; it proves the immutable decoded value can
+  drive a renderer capture ahead of the retained UI runtime.
+
 ### Changed
 
 - Closed R3 and advanced the active objective to R4's bounded WND inventory/layout decoder and

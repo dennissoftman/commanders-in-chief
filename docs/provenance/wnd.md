@@ -122,6 +122,19 @@ the design-only change. Implementation must review the selected versions, licens
 
 ## Implementation record
 
-No WND/UI implementation exists yet. This document records design evidence only. Future project
-files derived from the pinned facts must cite this provenance record and retain all applicable GPL
-and Section 7 notices.
+`crates/cic-formats/src/wnd.rs` implements Gate 1 (bounded WND inventory/hierarchy decode):
+`FILE_VERSION`, the `STARTLAYOUTBLOCK`/`ENDLAYOUTBLOCK` layout block, the `WINDOW`/`CHILD`/`END`/
+`ENDALLCHILDREN` hierarchy with `WINDOWTYPE`/`SCREENRECT` typed, and every other field retained
+generically. Its module doc comment cites `winCreateFromScript` and `parseLayoutBlock` in
+`GameWindowManagerScript.cpp` at the pinned revision above. The exact lexical grammar facts
+(no comments, `;` as a hard terminator, case-sensitive structural keywords versus case-insensitive
+status/style names, double-quote strings with no escapes, decimal-only numbers, the layout block's
+`FILE_VERSION >= 2` gating and `"[None]"` version-1 default, and the independent top-level
+color/font keywords) were confirmed by directly fetching that file at revision
+`9f7abb866f5afd446db14149979e744c7216baaf` during this implementation pass, not merely inferred
+from the design-only facts recorded above. `crates/cic-render/src/wnd_scene.rs` stages the decoded
+hierarchy as renderer-only colored quads; this staging and its capture path are original project
+presentation, not derived from the legacy renderer. No C++ source was copied, translated line by
+line, or imported; names and API boundaries are native to this repository. Gate 2 (typed per-gadget
+fields), resource resolution, the retained `cic-ui` runtime, and everything else recorded above
+remain design-only.

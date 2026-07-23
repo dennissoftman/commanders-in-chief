@@ -246,6 +246,86 @@ fn w3d_inside_big_produces_a_stable_nested_inventory() {
 }
 
 #[test]
+fn wnd_inside_big_produces_a_stable_inventory_report() {
+    let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("wnd-cli");
+    if root.exists() {
+        fs::remove_dir_all(&root).expect("remove stale test tree");
+    }
+    fs::create_dir_all(&root).expect("create test tree");
+    let archive_path = root.join("window.big");
+    fs::write(
+        &archive_path,
+        big_with_entry(r"Menus\Synthetic.wnd", wnd_fixture()),
+    )
+    .expect("write synthetic archive");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cic-inspect"))
+        .arg("wnd")
+        .arg("MENUS/SYNTHETIC.WND")
+        .arg(&archive_path)
+        .output()
+        .expect("run cic-inspect");
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("UTF-8 output"),
+        "file_version\t2\n\
+         layout_init\tSyntheticMenuInit\n\
+         layout_update\tSyntheticMenuUpdate\n\
+         layout_shutdown\tSyntheticMenuShutdown\n\
+         top_level_field\tname\tvalue\tline\n\
+         window\tpath\tdepth\tid\twindow_type\tupper_left_x\tupper_left_y\tbottom_right_x\tbottom_right_y\tcreation_width\tcreation_height\n\
+         window_field\tpath\tname\tvalue\tline\n\
+         window\t0\t0\t0\tPUSHBUTTON\t10\t20\t210\t70\t800\t600\n\
+         window_field\t0\tSTATUS\tACTIVE ENABLED\t11\n\
+         window\t0/0\t1\t1\tSTATICTEXT\t20\t30\t200\t50\t800\t600\n\
+         diagnostic\tline\twindow_id\tkind\tdetail\n"
+    );
+
+    fs::remove_dir_all(root).expect("remove test tree");
+}
+
+#[test]
+fn wnd_render_inside_big_writes_a_capture_with_adapter_fallback() {
+    let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("wnd-render-cli");
+    if root.exists() {
+        fs::remove_dir_all(&root).expect("remove stale test tree");
+    }
+    fs::create_dir_all(&root).expect("create test tree");
+    let archive_path = root.join("window.big");
+    fs::write(
+        &archive_path,
+        big_with_entry(r"Menus\Synthetic.wnd", wnd_fixture()),
+    )
+    .expect("write synthetic archive");
+    let output_path = root.join("synthetic.ppm");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cic-inspect"))
+        .arg("wnd-render")
+        .arg("menus/synthetic.wnd")
+        .arg(&output_path)
+        .arg(&archive_path)
+        .output()
+        .expect("run WND capture");
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("requesting a graphics adapter"), "{stderr}");
+        fs::remove_dir_all(root).expect("remove test tree");
+        return;
+    }
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 capture report");
+    assert!(stdout.contains("canvas_width\t800\n"));
+    assert!(stdout.contains("canvas_height\t600\n"));
+    assert!(stdout.contains("windows\t2\n"));
+    assert!(stdout.contains(
+        "rgba_sha256\t94e0373ffd3bb085f68e55495fb8c0d58f37a40909c2c4a1335633b1daacec9e\n"
+    ));
+    assert!(output_path.exists());
+
+    fs::remove_dir_all(root).expect("remove test tree");
+}
+
+#[test]
 fn map_inside_big_produces_stable_inventory_and_height_reports() {
     let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("map-cli");
     if root.exists() {
@@ -543,6 +623,28 @@ fn map_lighting_fixture() -> Vec<u8> {
     );
     bytes.extend_from_slice(&payload);
     bytes
+}
+
+fn wnd_fixture() -> &'static [u8] {
+    b"FILE_VERSION = 2\n\
+STARTLAYOUTBLOCK\n\
+  LAYOUTINIT = SyntheticMenuInit;\n\
+  LAYOUTUPDATE = SyntheticMenuUpdate;\n\
+  LAYOUTSHUTDOWN = SyntheticMenuShutdown;\n\
+ENDLAYOUTBLOCK\n\
+WINDOW\n\
+  WINDOWTYPE = PUSHBUTTON;\n\
+  SCREENRECT = UPPERLEFT: 10 20 BOTTOMRIGHT: 210 70\n\
+               CREATIONRESOLUTION: 800 600;\n\
+  STATUS = ACTIVE ENABLED;\n\
+  CHILD\n\
+    WINDOW\n\
+      WINDOWTYPE = STATICTEXT;\n\
+      SCREENRECT = UPPERLEFT: 20 30 BOTTOMRIGHT: 200 50\n\
+                   CREATIONRESOLUTION: 800 600;\n\
+    END\n\
+  ENDALLCHILDREN\n\
+END\n"
 }
 
 fn w3d_fixture() -> Vec<u8> {
