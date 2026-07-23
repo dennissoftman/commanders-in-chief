@@ -284,6 +284,21 @@ impl MapObjectPlacement {
         }
     }
 
+    /// Returns one of the three source waypoint-path labels, when it is a nonempty byte string.
+    #[must_use]
+    pub fn waypoint_path_label_bytes(&self, slot: usize) -> Option<&[u8]> {
+        let names = [
+            b"waypointPathLabel1".as_slice(),
+            b"waypointPathLabel2".as_slice(),
+            b"waypointPathLabel3".as_slice(),
+        ];
+        let name = names.get(slot)?;
+        match self.properties.last_ascii_case_insensitive(name)?.value() {
+            MapDictionaryValue::Ascii(value) if !value.is_empty() => Some(value),
+            _ => None,
+        }
+    }
+
     /// Recognizes the source one-based `Player_n_Start` waypoint convention.
     #[must_use]
     pub fn player_start_number(&self) -> Option<u32> {
@@ -1627,6 +1642,9 @@ mod tests {
     const BOOL_KEY: u32 = 22;
     const REAL_KEY: u32 = 23;
     const UNICODE_KEY: u32 = 24;
+    const WAYPOINT_PATH_1_KEY: u32 = 25;
+    const WAYPOINT_PATH_2_KEY: u32 = 26;
+    const WAYPOINT_PATH_3_KEY: u32 = 27;
     const UNKNOWN_CHILD_ID: u32 = 30;
 
     fn symbols() -> Vec<(u32, &'static [u8])> {
@@ -1648,6 +1666,9 @@ mod tests {
             (BOOL_KEY, b"rawBool"),
             (REAL_KEY, b"realValue"),
             (UNICODE_KEY, b"unicodeValue"),
+            (WAYPOINT_PATH_1_KEY, b"waypointPathLabel1"),
+            (WAYPOINT_PATH_2_KEY, b"waypointPathLabel2"),
+            (WAYPOINT_PATH_3_KEY, b"waypointPathLabel3"),
             (UNKNOWN_CHILD_ID, b"FutureChunk"),
         ]
     }
@@ -1723,6 +1744,9 @@ mod tests {
         data.extend_from_slice(&dict(&[
             (WAYPOINT_ID_KEY, 1, 7_i32.to_le_bytes().to_vec()),
             (WAYPOINT_NAME_KEY, 3, ascii(b"Player_2_Start")),
+            (WAYPOINT_PATH_1_KEY, 3, ascii(b"Patrol East")),
+            (WAYPOINT_PATH_2_KEY, 3, ascii(b"Patrol Shared")),
+            (WAYPOINT_PATH_3_KEY, 3, ascii(b"")),
         ]));
         data
     }
@@ -1766,6 +1790,16 @@ mod tests {
             Some(b"Player_2_Start".as_slice())
         );
         assert_eq!(object.player_start_number(), Some(2));
+        assert_eq!(
+            object.waypoint_path_label_bytes(0),
+            Some(b"Patrol East".as_slice())
+        );
+        assert_eq!(
+            object.waypoint_path_label_bytes(1),
+            Some(b"Patrol Shared".as_slice())
+        );
+        assert_eq!(object.waypoint_path_label_bytes(2), None);
+        assert_eq!(object.waypoint_path_label_bytes(3), None);
         assert_eq!(
             decoded
                 .player_starts()

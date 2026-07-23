@@ -12,6 +12,85 @@ const MAX_STATIC_MODELS: usize = 16_384;
 const MAX_STATIC_INSTANCES: usize = 1_000_000;
 const MAX_STATIC_NAME_BYTES: usize = 1_024;
 
+/// Explicit renderer-only ambient sway parameters for one tree instance.
+///
+/// The legacy defaults and ten sway families are derived from `ScriptEngine.cpp` and
+/// `W3DTreeBuffer.cpp`/`.h` in `GeneralsGameCode` revision
+/// `9f7abb866f5afd446db14149979e744c7216baaf`, licensed under GPL-3.0-or-later with Electronic Arts
+/// Section 7 terms. The placement-ID family assignment is project-authored so preview output is
+/// stable without consuming simulation RNG.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TreeSwayPresentation {
+    direction: [f32; 2],
+    lean: f32,
+    intensity: f32,
+    period_seconds: f32,
+    speed_factor: f32,
+    amount_factor: f32,
+}
+
+impl TreeSwayPresentation {
+    /// Returns the Zero Hour constructor-default breeze with deterministic preview variation.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn zero_hour_legacy_default(placement_id: u32) -> Self {
+        const SWAY_FAMILY_COUNT: u32 = 10;
+        const RANDOMNESS_DELTA: f32 = 0.1;
+        let direction = std::f32::consts::PI / 3.0;
+        let family = placement_id % SWAY_FAMILY_COUNT;
+        let speed_unit = stable_unit_interval(family ^ 0x6d2b_79f5);
+        let amount_unit = stable_unit_interval(family ^ 0x1b87_3593);
+        Self {
+            direction: [direction.sin(), direction.cos()],
+            lean: 0.07 * std::f32::consts::PI / 4.0,
+            intensity: 0.07 * std::f32::consts::PI / 4.0,
+            period_seconds: 5.0,
+            speed_factor: 1.0 + (speed_unit * 2.0 - 1.0) * RANDOMNESS_DELTA,
+            amount_factor: 1.0 + (amount_unit * 2.0 - 1.0) * RANDOMNESS_DELTA,
+        }
+    }
+
+    fn gpu_rows(self) -> [[f32; 4]; 2] {
+        [
+            [
+                self.direction[0],
+                self.direction[1],
+                self.lean,
+                self.intensity,
+            ],
+            [
+                self.period_seconds,
+                self.speed_factor,
+                self.amount_factor,
+                1.0,
+            ],
+        ]
+    }
+
+    /// Samples the renderer-only bend of a vertical point at explicit presentation time.
+    #[must_use]
+    pub fn offset_at(self, seconds: f32, local_height: f32) -> [f32; 3] {
+        let phase = std::f32::consts::TAU * seconds / self.period_seconds * self.speed_factor;
+        let angle = self.lean + self.intensity * phase.cos();
+        let (sine, cosine) = angle.sin_cos();
+        [
+            self.direction[0] * sine * self.amount_factor * local_height,
+            self.direction[1] * sine * self.amount_factor * local_height,
+            (cosine - 1.0) * self.amount_factor * local_height,
+        ]
+    }
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn stable_unit_interval(mut value: u32) -> f32 {
+    value ^= value >> 16;
+    value = value.wrapping_mul(0x7feb_352d);
+    value ^= value >> 15;
+    value = value.wrapping_mul(0x846c_a68b);
+    value ^= value >> 16;
+    (value & 0x00ff_ffff) as f32 / 0x00ff_ffff_u32 as f32
+}
+
 /// One source placement transformed in W3D's Z-up world space.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StaticSceneryInstance {
@@ -19,6 +98,7 @@ pub struct StaticSceneryInstance {
     position: [f32; 3],
     angle: f32,
     scale: f32,
+    tree_sway: Option<TreeSwayPresentation>,
 }
 
 impl StaticSceneryInstance {
@@ -46,7 +126,15 @@ impl StaticSceneryInstance {
             position,
             angle,
             scale,
+            tree_sway: None,
         })
+    }
+
+    /// Adds explicit renderer-only ambient tree sway to this immutable placement.
+    #[must_use]
+    pub const fn with_tree_sway(mut self, tree_sway: TreeSwayPresentation) -> Self {
+        self.tree_sway = Some(tree_sway);
+        self
     }
 
     #[must_use]
@@ -67,6 +155,11 @@ impl StaticSceneryInstance {
     #[must_use]
     pub const fn scale(self) -> f32 {
         self.scale
+    }
+
+    #[must_use]
+    pub const fn tree_sway(self) -> Option<TreeSwayPresentation> {
+        self.tree_sway
     }
 
     fn transform_rows(self) -> [[f32; 4]; 3] {
@@ -137,9 +230,15 @@ impl StagedStaticSceneryModel {
     }
 
     pub(crate) fn instance_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(self.instances.len().saturating_mul(48));
+        let mut bytes = Vec::with_capacity(self.instances.len().saturating_mul(80));
         for instance in &self.instances {
             for value in instance.transform_rows().into_iter().flatten() {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            let sway = instance
+                .tree_sway
+                .map_or([[0.0; 4]; 2], TreeSwayPresentation::gpu_rows);
+            for value in sway.into_iter().flatten() {
                 bytes.extend_from_slice(&value.to_le_bytes());
             }
         }
@@ -286,7 +385,7 @@ impl Error for StaticSceneryError {}
 
 #[cfg(test)]
 mod tests {
-    use super::StaticSceneryInstance;
+    use super::{StaticSceneryInstance, TreeSwayPresentation};
 
     #[test]
     fn instance_transform_is_z_up_and_stably_packed() {
@@ -301,5 +400,28 @@ mod tests {
             rows[2].map(f32::to_bits),
             [0.0, 0.0, 2.0, 30.0].map(f32::to_bits)
         );
+    }
+
+    #[test]
+    fn legacy_tree_sway_is_explicit_stable_and_gpu_packed() {
+        let sway = TreeSwayPresentation::zero_hour_legacy_default(17);
+        assert_eq!(sway, TreeSwayPresentation::zero_hour_legacy_default(17));
+        assert_ne!(sway, TreeSwayPresentation::zero_hour_legacy_default(18));
+        assert_eq!(sway.period_seconds.to_bits(), 5.0_f32.to_bits());
+        assert!((0.9..=1.1).contains(&sway.speed_factor));
+        assert!((0.9..=1.1).contains(&sway.amount_factor));
+        assert_eq!(
+            sway.offset_at(2.0, 20.0).map(f32::to_bits),
+            sway.offset_at(2.0, 20.0).map(f32::to_bits)
+        );
+        assert_ne!(
+            sway.offset_at(0.0, 20.0).map(f32::to_bits),
+            sway.offset_at(2.0, 20.0).map(f32::to_bits)
+        );
+
+        let instance = StaticSceneryInstance::new(17, [0.0; 3], 0.0, 1.0)
+            .expect("instance")
+            .with_tree_sway(sway);
+        assert_eq!(instance.tree_sway(), Some(sway));
     }
 }

@@ -447,6 +447,8 @@ fn map_render_inside_big_writes_a_textured_png() {
         .arg("map-render")
         .arg("--size")
         .arg("128")
+        .arg("--time")
+        .arg("2")
         .arg("maps/synthetic/blend.map")
         .arg(&output_path)
         .arg(&archive_path)
@@ -466,6 +468,16 @@ fn map_render_inside_big_writes_a_textured_png() {
     assert!(stdout.contains("custom_edge_cells\t1\n"));
     assert!(stdout.contains("edge_indices\t6\n"));
     assert!(stdout.contains("terrain_policy\tlegacy\n"));
+    assert!(stdout.contains("presentation_time\t2\n"));
+    assert!(stdout.contains("road_draws\t0\n"));
+    assert!(stdout.contains("waypoints\t0\n"));
+    assert!(stdout.contains("spawn_markers\t0\n"));
+    assert!(stdout.contains("waypoint_paths\t0\n"));
+    assert!(stdout.contains("waypoint_path_segments\t0\n"));
+    assert!(stdout.contains("polygon_areas\t0\n"));
+    assert!(stdout.contains("polygon_segments\t0\n"));
+    assert!(stdout.contains("scenery_instances\t0\n"));
+    assert!(stdout.contains("water_areas\t0\n"));
     let image = image::open(&output_path)
         .expect("open terrain PNG")
         .to_rgba8();

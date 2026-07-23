@@ -33,6 +33,15 @@ fn static_scenery_and_boundary_shaders_parse_and_validate() {
             "boundary fence",
             include_str!("../src/boundary_viewer.wgsl"),
         ),
+        (
+            "deferred lighting and antialiasing",
+            include_str!("../src/terrain_deferred.wgsl"),
+        ),
+        (
+            "terrain shadows",
+            include_str!("../src/terrain_shadow.wgsl"),
+        ),
+        ("scene shadows", include_str!("../src/scene_shadow.wgsl")),
     ] {
         let module = naga::front::wgsl::parse_str(source)
             .unwrap_or_else(|error| panic!("{name} WGSL parses: {error}"));

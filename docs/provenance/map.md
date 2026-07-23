@@ -182,8 +182,10 @@ For the ADR-0009 gates, the pinned WorldBuilder writer establishes top-level `Wo
 nested `Object` location, angle, flags, name, later-version typed dictionary data, waypoint
 collection, and one-based `Player_n_Start` recognition. `MapObject.h` establishes distinct road and
 bridge endpoint, corner, join, mirror, and no-draw flags. The TerrainRoad declarations and INI
-reader establish road texture/width inputs and bridge model/scale/state/tower references. These
-facts support the immutable placement view and endpoint staging implemented here. The regular-road
+reader establish road texture/width inputs and bridge model/scale/state/tower references. The
+bounded bridge definition now retains all four body-state model/texture pairs and all four tower
+object names; only the pristine state is presented. These facts support the immutable placement
+view and endpoint staging implemented here. The regular-road
 gate additionally follows `W3DRoadBuffer.cpp` for consecutive Point1/Point2 pairing, the product of
 road width and in-texture width, terrain-cell tessellation, maximum supporting height, small
 height offset, regular-segment UV scale, handed curve traversal, atlas junction selection, repeated
@@ -192,16 +194,21 @@ project-authored modern renderer policy. Cloud/noise lighting is not claimed yet
 `W3DBridgeBuffer.cpp` establishes
 that bridge marker Z is rebuilt as terrain plus `BRIDGE_FLOAT_AMT` (`0.25`), and establishes the
 `BRIDGE_LEFT`/`BRIDGE_SPAN`/`BRIDGE_RIGHT` section lookup, rounded span repetition, X offsets, and
-endpoint-axis deformation used by the intact bridge preview. Texture/material staging is native to
-this repository. It does not claim source-equivalent tower, collision, damage, repair, or state
+endpoint-axis deformation used by the intact bridge preview. Its WorldBuilder tower path establishes
+the from-left/from-right/to-left/to-right slot order, lateral min/max-Y corners, opposite facing for
+from-side towers, first `W3DModelDraw` selection, and final bridge-info endpoint Z written by
+`updateTowerPos`. The project resolves those templates into renderer-only instances; it does not
+construct targetable objects. Texture/material staging is native to this repository. It does not
+claim source-equivalent collision, damage-state selection, transition effects, repair, or tower
 behavior.
 
 `W3DTreeDraw.cpp`/`.h` establish tree model/texture plus move-outward, move-inward, darkening,
 topple, and shadow module fields. `ScriptEngine.h`/`.cpp` establish global `BreezeInfo`, its default
 direction/intensity/lean/period/randomness, and the `SET_TREE_SWAY` script action; `W3DTreeBuffer.cpp`
-establishes explicit-frame cosine sway consumption. These facts document the future presentation
-input boundary only. R3 does not execute that action, and any source-default breeze preview will be
-an explicit compatibility policy rather than hidden script execution.
+establishes explicit-frame cosine sway consumption. R3 uses those default scalar inputs with
+explicit presentation time. Selection of ten placement-ID sway families and the stable bounded
+random factors is project-authored deterministic policy. R3 does not execute `SET_TREE_SWAY`;
+custom scripted wind remains data until R5.
 
 `W3DModelDraw.cpp`/`.h` and the generic INI reader establish top-level `Object`/`ObjectReskin`
 declarations, draw-module naming, `DefaultConditionState` model selection, and per-draw `Scale`.
@@ -432,7 +439,8 @@ The Rust implementations in `crates/cic-formats/src/map.rs`, `map_blend.rs`, `ma
 `map_scenario.rs`, `object_ini.rs`,
 `refpack.rs`, `road_ini.rs`, `terrain_ini.rs`, and `water_ini.rs`, terrain/water/road/scenery staging in
 `crates/cic-render/src/terrain.rs`, `water.rs`, `map_scene.rs`, `road.rs`, `scenery.rs`, and
-`boundary.rs`, plus report/CLI integration
+`boundary.rs`, the project-authored `scene_shadow.wgsl` and edge-aware composite in
+`terrain_deferred.wgsl`, plus report/CLI integration
 in `crates/cic-tools`, were authored for this project from the documented facts. No C++ source code
 was copied, translated line by line, or imported. The immutable values, structured errors, explicit
 limits, exact closure checks, top-level opaque-payload policy, stable staging/report schemas, and
@@ -445,6 +453,18 @@ allocation/depth limits, both action branches, and raw coordinate/scalar paramet
 use synthetic VFS providers to reproduce constructor/global/sibling-map precedence for standing,
 sky, and environment textures; the WGSL parser/validator test checks the expanded bindings. No
 retail bytes, strings, maps, or images are retained.
+
+The fixed-isometric headless scene overview is project-authored integration policy. It reuses the
+deterministic GPU terrain capture, then composites source-ordered road/water triangles and
+placement markers with explicit-time tree offsets. It does not translate an upstream thumbnail
+renderer and does not claim interactive-view pixel equivalence.
+
+Waypoint/start octahedra, connected waypoint-path ribbons, and polygon perimeter walls in
+`crates/cic-render/src/map_overlay.rs` are project-authored diagnostics over the retained
+source-classified values. The source dictionary supplies up to three waypoint path-label
+properties; case folding, lexical color-group order, waypoint-ID connection order, hue selection,
+ribbon dimensions, subdivision, terrain sampling, and geometry limits are original project policy.
+They do not imply trigger registration, player construction, pathing, or simulation ownership.
 
 Project-authored road tests cover source-order road/bridge field replacement, malformed structure,
 finite reals, definition limits, consecutive endpoint pairing, terrain fitting,

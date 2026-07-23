@@ -9,8 +9,9 @@ use std::fmt::Write;
 
 use cic_formats::{
     CsfFile, MapBlendData, MapDictionary, MapDictionaryValue, MapFile, MapHeightField,
-    MapLightingData, MapScript, MapScriptAction, MapScriptParameterValue, MapSidesData,
-    MapWaterData, MapWorldObjects, W3dChunk, W3dFile, W3dStaticMesh, W3dVector3, w3d_chunk_name,
+    MapLightingData, MapPolygonData, MapScript, MapScriptAction, MapScriptParameterValue,
+    MapSidesData, MapWaterData, MapWorldObjects, W3dChunk, W3dFile, W3dStaticMesh, W3dVector3,
+    w3d_chunk_name,
 };
 use cic_render::Capture;
 use cic_vfs::Vfs;
@@ -225,6 +226,61 @@ pub fn render_map_blend(blend: &MapBlendData) -> String {
     render_map_texture_classes(&mut output, blend);
     render_map_blend_tiles(&mut output, blend);
     render_map_cliff_info(&mut output, blend);
+    output
+}
+
+/// Formats complete polygon data in stable source and point order.
+#[must_use]
+pub fn render_map_polygons(polygons: &MapPolygonData) -> String {
+    let point_count = polygons
+        .areas()
+        .iter()
+        .map(|area| area.points().len())
+        .sum::<usize>();
+    let water_count = polygons
+        .areas()
+        .iter()
+        .filter(|area| area.is_water())
+        .count();
+    let river_count = polygons
+        .areas()
+        .iter()
+        .filter(|area| area.is_river())
+        .count();
+    let mut output =
+        String::from("version\tpolygon_areas\tpolygon_points\twater_areas\triver_areas\n");
+    writeln!(
+        output,
+        "{}\t{}\t{}\t{}\t{}",
+        polygons.version(),
+        polygons.areas().len(),
+        point_count,
+        water_count,
+        river_count
+    )
+    .expect("writing to a String cannot fail");
+    output.push_str("area\tsource_index\tid\twater\triver\triver_start\tpoints\tname\tlayer\n");
+    for (index, area) in polygons.areas().iter().enumerate() {
+        writeln!(
+            output,
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            index,
+            area.source_index(),
+            area.trigger_id(),
+            u8::from(area.is_water()),
+            u8::from(area.is_river()),
+            area.river_start(),
+            area.points().len(),
+            escape_bytes(area.name_bytes()),
+            escape_bytes(area.layer_name_bytes())
+        )
+        .expect("writing to a String cannot fail");
+        for (point_index, point) in area.points().iter().enumerate() {
+            let [x, y, z] = point.coordinates();
+            writeln!(output, "point\t{index}\t{point_index}\t{x}\t{y}\t{z}")
+                .expect("writing to a String cannot fail");
+        }
+    }
     output
 }
 
@@ -897,13 +953,13 @@ fn escape_text(text: &str) -> String {
 mod tests {
     use cic_formats::{
         CsfLimits, MapLimits, W3dLimits, W3dMeshLimits, decode_map_blend, decode_map_height,
-        decode_static_mesh, parse_csf, parse_map, parse_w3d,
+        decode_map_polygons, decode_static_mesh, parse_csf, parse_map, parse_w3d,
     };
     use cic_vfs::{Vfs, VirtualPath};
 
     use super::{
         encode_map_height_png, render_csf, render_manifest, render_map, render_map_blend,
-        render_map_height, render_w3d, render_w3d_mesh,
+        render_map_height, render_map_polygons, render_w3d, render_w3d_mesh,
     };
 
     fn hex_fixture(hex: &str) -> Vec<u8> {
@@ -1086,6 +1142,49 @@ mod tests {
              1\t1\t1\t0\t1\t0\t3\t1\t0\n\
              cliff\ttile\tu0\tv0\tu1\tv1\tu2\tv2\tu3\tv3\tflip\tmutant\n\
              1\t3\t0x00000000\t0x00000000\t0x00000000\t0x3F800000\t0x3F800000\t0x3F800000\t0x3F800000\t0x00000000\t1\t0\n"
+        );
+    }
+
+    #[test]
+    fn complete_polygon_report_retains_nonwater_records_and_layer_names() {
+        let mut payload = 1_i32.to_le_bytes().to_vec();
+        payload.extend_from_slice(&4_u16.to_le_bytes());
+        payload.extend_from_slice(b"Area");
+        payload.extend_from_slice(&5_u16.to_le_bytes());
+        payload.extend_from_slice(b"Layer");
+        payload.extend_from_slice(&7_i32.to_le_bytes());
+        payload.push(0);
+        payload.push(0);
+        payload.extend_from_slice(&0_i32.to_le_bytes());
+        payload.extend_from_slice(&2_i32.to_le_bytes());
+        for point in [[1_i32, 2, 3], [4, 5, 6]] {
+            for value in point {
+                payload.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        let mut bytes = b"CkMp".to_vec();
+        bytes.extend_from_slice(&1_i32.to_le_bytes());
+        bytes.push(15);
+        bytes.extend_from_slice(b"PolygonTriggers");
+        bytes.extend_from_slice(&1_u32.to_le_bytes());
+        bytes.extend_from_slice(&1_u32.to_le_bytes());
+        bytes.extend_from_slice(&4_u16.to_le_bytes());
+        bytes.extend_from_slice(
+            &i32::try_from(payload.len())
+                .expect("payload length")
+                .to_le_bytes(),
+        );
+        bytes.extend_from_slice(&payload);
+        let map = parse_map(&bytes, "polygon.map", MapLimits::default()).expect("inventory");
+        let polygons = decode_map_polygons(&map, MapLimits::default()).expect("complete polygons");
+        assert_eq!(
+            render_map_polygons(&polygons),
+            "version\tpolygon_areas\tpolygon_points\twater_areas\triver_areas\n\
+             4\t1\t2\t0\t0\n\
+             area\tsource_index\tid\twater\triver\triver_start\tpoints\tname\tlayer\n\
+             0\t0\t7\t0\t0\t0\t2\tArea\tLayer\n\
+             point\t0\t0\t1\t2\t3\n\
+             point\t0\t1\t4\t5\t6\n"
         );
     }
 

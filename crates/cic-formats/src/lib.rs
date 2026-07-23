@@ -35,13 +35,18 @@ pub use map_scenario::{
     MapScriptParameter, MapScriptParameterValue, MapSide, MapSidesData, MapWorldInfo,
     MapWorldObjects, decode_map_sides, decode_map_world_objects, object_flags,
 };
-pub use map_water::{MapWaterArea, MapWaterData, MapWaterError, MapWaterPoint, decode_map_water};
+pub use map_water::{
+    MapPolygonArea, MapPolygonData, MapPolygonError, MapPolygonPoint, MapWaterArea, MapWaterData,
+    MapWaterError, MapWaterPoint, decode_map_polygons, decode_map_water,
+};
 pub use object_ini::{
-    ObjectDefinition, ObjectIni, ObjectIniError, ObjectIniLimits, ObjectModelDraw, parse_object_ini,
+    ObjectDefinition, ObjectDrawKind, ObjectIni, ObjectIniError, ObjectIniLimits, ObjectModelDraw,
+    parse_object_ini,
 };
 pub use refpack::RefPackError;
 pub use road_ini::{
-    BridgeDefinition, RoadDefinition, RoadIni, RoadIniError, RoadIniLimits, parse_road_ini,
+    BridgeBodyState, BridgeDefinition, BridgeTowerSlot, RoadDefinition, RoadIni, RoadIniError,
+    RoadIniLimits, parse_road_ini,
 };
 pub use terrain_ini::{
     TerrainDefinition, TerrainIni, TerrainIniError, TerrainIniLimits, parse_terrain_ini,

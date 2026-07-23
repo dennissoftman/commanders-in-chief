@@ -2,11 +2,20 @@
 
 ## Objective
 
-R3 now owns complete bounded MAP ingestion and pre-simulation scene presentation, not terrain
+R4 is now active. Its first vertical slice is a bounded, unknown-preserving WND inventory and
+immutable layout/control decoder, followed immediately by a surface-free `wgpu` capture of one
+original synthetic menu. That creates a visible UI result before adding retained interaction,
+user-owned mapped images/fonts/CSF labels, the main-menu stack, modern display settings, and the
+skirmish/map-selection harness. R4 remains presentation-only: callbacks are allowlisted typed
+events, MAP scripts stay inert until R5, and project-owned post-parse patches augment rather than
+modify user-owned WND bytes.
+
+R3 is complete and owns bounded MAP ingestion and pre-simulation scene presentation, not terrain
 alone. The established terrain gate includes water-only polygon decoding, stable lake/river
 staging, a hybrid-deferred viewer with forward water, source caustic/transparency inputs, Modern
 macro variation, horizon-safe GPU page composition, persistent LRU residency, complete mip chains,
-and anisotropic sampling. Water remains visibly work in progress. Immutable world/object and
+anisotropic sampling, shared directional shadows, and edge-aware anti-aliasing. Immutable
+world/object and
 sides/teams/build-list/script data now decode under explicit limits, and source-order scene staging
 classifies endpoints, scenery, waypoints, and player starts without constructing live objects.
 Bounded `Road` definitions now resolve regular Point1/Point2 pairs into terrain-fitted textured
@@ -17,7 +26,11 @@ standalone meshes, and render
 placements composed from the exact rendered terrain triangle plus verbatim authored Z offsets
 through stable GPU instance batches. Header3 two-sided flags now select model culling policy, and
 bounded intact bridge models now stitch and deform named left/span/right sections between paired
-terrain-sampled endpoints. An explicit legacy-preview W3D policy recovers missing optional meshes,
+terrain-sampled endpoints. Bridge definitions retain pristine/damaged/really-damaged/broken
+model/texture references plus four source-ordered tower object names. The pristine preview resolves
+optional towers through the bounded object/W3D path and places renderer-only instances at the
+source bridge corners and facing without constructing targetable objects. An explicit legacy-preview
+W3D policy recovers missing optional meshes,
 bad one-past-end hierarchy references, and non-finite UV presentation without weakening strict
 composition. The primary playable boundary is
 visible as a terrain-following translucent fence whose top clears the map's highest terrain. The
@@ -28,10 +41,14 @@ source-derived MAP scene boundary now has a pinned-source executable test matrix
 modeled constructor/default, function input/output branch, binary structure field, version boundary,
 limit, road topology, and atlas primitive; deliberately unmodeled legacy runtime state is recorded
 as an exclusion rather than assigned speculative values. The
-next design sequence is bridge towers/states, explicit-time ambient animation,
-polygon-area closure, and final water convergence. Scripts
+completed scene also retains all polygon areas, applies explicit-time default-breeze tree sway, and
+supports deterministic fixed-isometric full-scene overview capture. Renderer-only diagnostic
+geometry now shows ordinary waypoints, per-player start candidates, and terrain-following polygon
+perimeters in both the interactive viewer and overview capture. Named waypoint paths receive
+deterministic distinct colors and continuous terrain-following ribbons in stored waypoint-ID order;
+multi-path waypoints remain members of every declared path. Scripts
 are inspectable in R3 but cannot be executed until the deterministic simulation boundary begins in
-R5. After R3 closes, R4 will add
+R5. R4 adds
 bounded WND/UI ingestion and a navigable `wgpu` main-menu/skirmish demo so map compatibility can be
 inspected through the intended shell before simulation exists. Its Options path will use bounded
 post-parse WND patches—not hardcoded window-name rendering—to add modern window mode, resolution,
@@ -226,10 +243,13 @@ refresh-rate, and UI-scale controls with transactional confirmation/rollback.
 - Terrain, custom-edge, and nested-detail pipelines cull clockwise back faces from the established
   counter-clockwise height-field winding. Synthetic headless capture hashes remain unchanged;
   water remains a separately ordered material rather than inheriting terrain culling policy.
-- `PolygonTriggers` versions 2 through 4 now have a bounded water-only decoder that retains stable
-  water/river flags, identifiers, names, version-4 WorldBuilder layer names, seam indices, and
-  integer points while skipping general trigger semantics and allocations for non-water points.
-  Degenerate markers are preserved and safely produce no renderer geometry.
+- `PolygonTriggers` versions 2 through 4 now have a bounded complete decoder that retains every
+  source-ordered area, water/river flags, identifier, name, version-4 WorldBuilder layer name,
+  seam index, and integer point under per-area and total-point limits. `map-water` remains a stable
+  compatibility projection; degenerate water markers safely produce no renderer geometry.
+- `map-polygons` emits the complete immutable area report. Synthetic tests cover established
+  versions, all truncated prefixes, neighboring-version rejection, strings, per-area points, total
+  retained points, and stable source indices.
 - River staging uses the stored seam index exactly as the source renderer does: one bank advances
   through the perimeter while the other retreats with bounded wraparound, producing stable paired
   cross-sections instead of pairing adjacent points on the same bank. Invalid seam metadata safely
@@ -243,6 +263,29 @@ refresh-rate, and UI-scale controls with transactional confirmation/rollback.
   surface, then renders water in a depth-tested/no-depth-write forward pass. The original project
   shader applies thickness absorption, refraction, Fresnel sky response, specular, and shallow
   foam; no legacy water-rendering algorithm was translated.
+- The viewer renders terrain and alpha-tested static scenery into one 2048-square primary
+  directional shadow map and samples it from deferred opaque lighting and forward water with
+  bounded 3-by-3 PCF. Its final composite uses edge-aware post-process anti-aliasing.
+- `W3DTreeDraw` resources now resolve separately from ordinary model draws and receive
+  source-default `BreezeInfo` direction, lean, intensity, five-second period, bounded randomness,
+  and one of ten deterministic placement-ID sway families. Presentation samples explicit seconds;
+  decoded `SET_TREE_SWAY` remains inert until R5.
+- `map-render --time` now emits a deterministic fixed-isometric full-scene overview rather than a
+  terrain-only image. It layers source-ordered road and water triangles plus scenery markers over
+  the GPU terrain capture and reports all scene counts with the RGBA hash.
+- `map-view` and `map-render` stage bounded octahedral markers for every waypoint and larger,
+  stable-color markers for one-based `Player_n_Start` candidates. All polygon areas render as
+  source-ordered translucent terrain-following perimeter walls; water polygons are visibly
+  distinct. Up to three retained path labels per waypoint form case-insensitive, lexically ordered
+  color groups whose members connect in stored waypoint-ID order with bounded terrain-following
+  ribbons. These diagnostics neither register spatial triggers nor create players.
+- The deferred-lighting, composite, terrain virtual-texture, and terrain-shadow pipeline layouts
+  now match their exact WGSL bindings. A GPU regression test constructs the deferred pipelines;
+  the reported release map remains live with shadows, AA, 197 waypoint markers, and 18 zones.
+- A user-owned path-bearing map grouped those 197 waypoints into 26 named paths and emitted 1,678
+  bounded terrain-following ribbon sections. Two 768-square release captures at explicit time 2
+  matched RGBA SHA-256 `cdaac067e69fb61423bf688d3364d9d36f66474f947435be7b76dc8951d98461`;
+  both temporary captures were deleted.
 - `Modern` terrain policy applies deterministic world-anchored integer macro variation after
   authored layer composition without rotating or mirroring content. Repeated staging and full
   versus streamed 32-pixel bakes are byte-identical; legacy headless output remains unchanged.
@@ -337,6 +380,11 @@ refresh-rate, and UI-scale controls with transactional confirmation/rollback.
 - The optimized USA06 viewer remained live for 15 seconds after angled LOD selection moved from a
   radial/world-axis approximation to camera-space depth and projected page ranking. Regression
   tests preserve the angled cutoff and coarse-visible-before-fine policy; no capture was retained.
+- The final installed overview smoke retained all six polygon areas and 54 points on one dense map.
+  A separate water-bearing map staged 448 road draws, 1,995 scenery instances across 119 models,
+  862 boundary segments, and three water areas; two 256-square captures at explicit time 2 matched
+  RGBA SHA-256 `ba60f7a4aeb92680366ab15170cfe1521de9acfdbf3f6abf5d5d7fc6dc71660e`.
+  Temporary captures were deleted and no retail bytes, names, coordinates, or images were retained.
 
 ## Known blockers
 
@@ -347,8 +395,9 @@ refresh-rate, and UI-scale controls with transactional confirmation/rollback.
   export.
 - Exact legacy fixed-function equations and spatial environment/screen coordinate generation remain
   compatibility research beyond R2's documented preview policy.
-- Version-1 MAP downsampling differs between legacy loading paths and remains preserved-but-unapplied
-  until user-owned observations justify an explicit compatibility policy.
+- Version-1 MAP downsampling differs between legacy loading paths. R3 explicitly retains and
+  presents the native stored grid; any future historical downsampled view must be a separate
+  versioned compatibility policy.
 - MAP wrappers other than the source-established and installed-verified `EAR\0` RefPack form remain
   unsupported rather than guessed.
 - Blend payload versions other than 6 through 8 remain opaque. Version 7's source-defined short
@@ -358,11 +407,11 @@ refresh-rate, and UI-scale controls with transactional confirmation/rollback.
 - The installed Zero Hour Alpine Assault overlay validated `BlendTileData` version 8 at 380 by 400
   cells with a corrected 48-byte cliff stride. Its optimized `map-view` smoke remained live for 30
   seconds and staged 198 scenery instances across 70 models without missing or invalid resources.
-- Source standing-water texture/color/blend/opacity and WaterSet sky/environment textures now drive
-  the selected appearance, including sibling `Map.ini` overrides. Modern water has bounded
-  screen-space/environment reflection inputs and `map-view --time` freezes presentation time, but
-  real shadow receiving/casting, anti-aliasing, headless explicit-time capture hashes, and
-  repeatable user-owned comparisons remain open.
+- Source standing-water texture/color/blend/opacity and WaterSet sky/environment textures drive the
+  selected appearance, including sibling `Map.ini` overrides. Modern water adds bounded
+  screen-space/environment reflection inputs; shared shadows, edge-aware anti-aliasing,
+  explicit-time overview hashes, and repeatable user-owned comparisons complete the R3 baseline.
+  Exact legacy fixed-function pixel equivalence remains excluded.
 - `WorldInfo`, complete `ObjectsList`/`Object` records, waypoint/player-start metadata,
   `SidesList`, teams, build lists, and the nested player-script tree now have bounded immutable
   decoders and stable reports. Source-order staging classifies road/bridge endpoints, scenery,
@@ -372,21 +421,17 @@ refresh-rate, and UI-scale controls with transactional confirmation/rollback.
   order. Initial W3D draw states and reskins now resolve `End`-delimited default or initial-NONE
   states to static model instances whose ground placement includes the MAP border, exact rendered
   triangle, and authored relative Z; standalone mesh W3Ds receive a neutral renderer-only root. The
-  boundary fence is renderer-only. Intact TerrainBridge models and Header3-driven static culling
-  are implemented; bridge towers/states, explicit-time default-breeze tree animation (without
-  script execution), and non-water polygon semantics remain open.
+  boundary fence is renderer-only. Intact TerrainBridge models, retained body-state assets,
+  renderer-only tower scenery, and Header3-driven static culling are implemented; damage selection
+  stays deferred. Explicit-time default-breeze tree animation and complete polygon retention are
+  implemented without script execution.
   The installed Alpine Assault completion run staged 678 road draws with zero road diagnostics and
   592 scenery instances across 74 models; its greatest emitted road-triangle edge was an ordinary
   75.519-unit edge on a 52-unit-wide DirtRoad strip rather than inserted junction geometry.
-
 ## Next verified step
 
-Complete TerrainBridge tower/state presentation, then extend the implemented
-static instance path with explicit-time default `BreezeInfo` tree sway and remaining draw modules;
-decoded `SET_TREE_SWAY` stays data-only until R5. In parallel,
-close water
-with real scene shadows, headless explicit-time capture
-hashes, anti-aliasing, and repeatable user-owned comparisons. Complete non-water polygon semantics;
-keep the decoded script tree data-only, with all execution deferred to R5. R4 then consumes the
-completed R3 map catalog and spawn previews for its main-menu, skirmish-options, and map-selection
-UI demo.
+Start R4 with a bounded WND container/layout inventory and immutable control tree that preserves
+unknown fields and callback names without invoking them. Add original synthetic positive,
+truncation, limit, and unknown-preservation fixtures, a stable `wnd` report, and a surface-free
+`wgpu` capture of one synthetic menu. The next slice resolves user-owned mapped images, explicit
+fonts, and CSF labels before retained interaction and main-menu navigation.

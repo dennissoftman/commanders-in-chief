@@ -15,6 +15,11 @@ struct Camera {
     terrain_lights: array<DirectionalLight, 3>,
 }
 
+struct ShadowCamera {
+    view_projection: mat4x4<f32>,
+    time: vec4<f32>,
+}
+
 struct FullscreenOutput {
     @builtin(position) position: vec4<f32>,
 }
@@ -32,6 +37,35 @@ fn fullscreen_vertex(@builtin(vertex_index) vertex_index: u32) -> FullscreenOutp
 @group(0) @binding(1) var g_normal: texture_2d<f32>;
 @group(0) @binding(2) var g_world: texture_2d<f32>;
 @group(0) @binding(3) var<uniform> light_camera: Camera;
+@group(0) @binding(4) var primary_shadow: texture_depth_2d;
+@group(0) @binding(5) var primary_shadow_sampler: sampler_comparison;
+@group(0) @binding(6) var<uniform> shadow_camera: ShadowCamera;
+
+fn shadow_visibility(world_position: vec3<f32>) -> f32 {
+    let clip = shadow_camera.view_projection * vec4<f32>(world_position, 1.0);
+    if clip.w <= 0.0 {
+        return 1.0;
+    }
+    let projected = clip.xyz / clip.w;
+    let uv = projected.xy * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5);
+    if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0))
+        || projected.z < 0.0 || projected.z > 1.0 {
+        return 1.0;
+    }
+    let texel = 1.0 / vec2<f32>(textureDimensions(primary_shadow));
+    var visible = 0.0;
+    for (var y = -1; y <= 1; y += 1) {
+        for (var x = -1; x <= 1; x += 1) {
+            visible += textureSampleCompare(
+                primary_shadow,
+                primary_shadow_sampler,
+                uv + vec2<f32>(f32(x), f32(y)) * texel,
+                projected.z - 0.0015
+            );
+        }
+    }
+    return mix(0.35, 1.0, visible / 9.0);
+}
 
 @fragment
 fn lighting_fragment(input: FullscreenOutput) -> @location(0) vec4<f32> {
@@ -45,31 +79,75 @@ fn lighting_fragment(input: FullscreenOutput) -> @location(0) vec4<f32> {
     let normal_roughness = textureLoad(g_normal, pixel, 0);
     let normal = normalize(normal_roughness.xyz);
     let view_direction = normalize(light_camera.camera_position_time.xyz - world.xyz);
+    let primary_visibility = shadow_visibility(world.xyz);
     var color = vec3<f32>(0.0);
     for (var index = 0; index < 3; index += 1) {
         let light = light_camera.terrain_lights[index];
         color += albedo * light.ambient.rgb;
         let direction_length = length(light.source_direction.xyz);
         if (direction_length > 0.00001) {
+            let visibility = select(1.0, primary_visibility, index == 0);
             let light_direction = -light.source_direction.xyz / direction_length;
             let diffuse_factor = max(dot(normal, light_direction), 0.0);
-            color += albedo * light.diffuse.rgb * diffuse_factor;
+            color += albedo * light.diffuse.rgb * diffuse_factor * visibility;
             let half_vector = normalize(light_direction + view_direction);
             let specular = pow(
                 max(dot(normal, half_vector), 0.0),
                 mix(64.0, 8.0, normal_roughness.w)
             );
-            color += light.diffuse.rgb * specular * 0.06;
+            color += light.diffuse.rgb * specular * 0.06 * visibility;
         }
     }
     return vec4<f32>(color, 1.0);
 }
 
 @group(1) @binding(0) var scene_color: texture_2d<f32>;
+@group(1) @binding(1) var scene_sampler: sampler;
+
+fn luma(color: vec3<f32>) -> f32 {
+    return dot(color, vec3<f32>(0.299, 0.587, 0.114));
+}
 
 @fragment
 fn composite_fragment(input: FullscreenOutput) -> @location(0) vec4<f32> {
-    let hdr = textureLoad(scene_color, vec2<i32>(input.position.xy), 0).rgb;
+    let inverse_viewport = 1.0 / light_camera.viewport.xy;
+    let uv = (input.position.xy + vec2<f32>(0.5)) * inverse_viewport;
+    let center = textureSampleLevel(scene_color, scene_sampler, uv, 0.0).rgb;
+    let north = textureSampleLevel(
+        scene_color,
+        scene_sampler,
+        uv + vec2<f32>(0.0, -inverse_viewport.y),
+        0.0
+    ).rgb;
+    let south = textureSampleLevel(
+        scene_color,
+        scene_sampler,
+        uv + vec2<f32>(0.0, inverse_viewport.y),
+        0.0
+    ).rgb;
+    let west = textureSampleLevel(
+        scene_color,
+        scene_sampler,
+        uv + vec2<f32>(-inverse_viewport.x, 0.0),
+        0.0
+    ).rgb;
+    let east = textureSampleLevel(
+        scene_color,
+        scene_sampler,
+        uv + vec2<f32>(inverse_viewport.x, 0.0),
+        0.0
+    ).rgb;
+    let center_luma = luma(center);
+    let minimum_luma = min(center_luma, min(min(luma(north), luma(south)), min(luma(west), luma(east))));
+    let maximum_luma = max(center_luma, max(max(luma(north), luma(south)), max(luma(west), luma(east))));
+    let contrast = maximum_luma - minimum_luma;
+    let edge_strength = smoothstep(
+        max(0.0312, maximum_luma * 0.125),
+        max(0.0625, maximum_luma * 0.25),
+        contrast
+    );
+    let neighbors = (north + south + west + east) * 0.25;
+    let hdr = mix(center, neighbors, edge_strength * 0.75);
     let mapped = hdr / (vec3<f32>(1.0) + hdr);
     return vec4<f32>(mapped, 1.0);
 }
