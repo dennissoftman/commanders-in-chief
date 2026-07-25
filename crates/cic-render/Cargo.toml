@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 cic-formats = { path = "../cic-formats" }
+png = "0.18"
 pollster = "0.4"
 sha2 = "0.10"
 wgpu = { version = "30", default-features = false, features = ["std", "dx12", "metal", "vulkan", "wgsl"] }

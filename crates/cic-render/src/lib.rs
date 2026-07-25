@@ -224,15 +224,25 @@ impl Capture {
         format!("{:x}", Sha256::digest(&self.rgba))
     }
 
-    /// Encodes a portable binary PPM for local visual inspection. Alpha is omitted.
-    #[must_use]
-    pub fn ppm(&self) -> Vec<u8> {
-        let mut bytes = format!("P6\n{} {}\n255\n", self.width, self.height).into_bytes();
-        bytes.reserve(self.rgba.len() / 4 * 3);
-        for pixel in self.rgba.chunks_exact(4) {
-            bytes.extend_from_slice(&pixel[..3]);
+    /// Encodes the capture as PNG, preserving alpha and tagging perceptual sRGB.
+    ///
+    /// The digest reported by [`Capture::sha256`] is taken over the raw RGBA bytes, before
+    /// encoding, so the container format never affects determinism.
+    ///
+    /// # Errors
+    ///
+    /// Returns the encoder's error if the image cannot be written.
+    pub fn png(&self) -> Result<Vec<u8>, png::EncodingError> {
+        let mut output = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut output, self.width, self.height);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
+            let mut writer = encoder.write_header()?;
+            writer.write_image_data(&self.rgba)?;
         }
-        bytes
+        Ok(output)
     }
 }
 

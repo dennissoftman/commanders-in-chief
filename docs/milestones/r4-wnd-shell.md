@@ -17,6 +17,40 @@ as a flat colored quad and writes a surface-free deterministic capture through t
 gadget-specific `DATA`), resource resolution (mapped images/fonts/CSF), the retained `cic-ui`
 runtime, and main-menu navigation remain unimplemented and are the next slice.
 
+Gate 1 is now verified against real data: every one of the 80 retail `.wnd` layouts reachable
+through the `Wnd` resource profile in both editions decodes under default limits, producing one
+non-fatal diagnostic across the whole corpus. That verification corrected two grammar facts —
+`CHILD` is an inert marker rather than a required prefix, and the status vocabulary is
+edition-dependent — and confirmed that no configured limit needs raising (deepest nesting 6,
+largest layout 113 windows, widest child list 80, longest record 833 bytes). A field census over
+the same corpus scopes Gate 2: 43 distinct window field names, 13 of them present on every window,
+with every gadget-specific record cleanly confined to its own window types.
+
+Gate 2 (immutable typed control definitions) is implemented. `parseWindow`'s 46-keyword field chain
+is enumerated from source and reconciled exactly with the census, and all 46 are accounted for:
+45 are typed — the common window records, the 21 draw-data arrays, the seven gadget `DATA` records,
+and `IMAGEOFFSET` — while `TOOLTIP` is deliberately untyped because its source parser ignores the
+record and stores a placeholder marked `@todo`. Every field name occurring anywhere in either
+retail edition decodes, corpus-wide, with no malformed-field diagnostics. Reports expose the typed
+values so a modded layout can be compared record by record without rendering it, satisfying this
+gate's stable-report requirement. Two records (`TABCONTROLDATA`, `IMAGEOFFSET`) rest on source
+evidence alone, having no retail occurrence to cross-check, and are marked as such.
+
+Gate 3 (bounded WND patch overlays) is implemented. The versioned patch document, its bounded
+decoder, and the apply engine cover preconditions, field replacement and addition, rectangle
+replacement, and the structural `reorder`, `reparent`, and `insert-window` operations — with
+per-field provenance, an unmodified source document, and structured errors for every failure mode
+including reparent cycles, duplicate inserted names, and out-of-range indices. An inserted subtree
+is parsed by the ordinary bounded WND decoder, so it obeys the same grammar, limits, and typed-field
+rules as authored source. `cic-inspect wnd-patch` reports operations, provenance, and the patched
+hierarchy.
+
+This was verified end to end against the retail `OptionsMenu.wnd`: the stock `ComboBoxResolution` is
+reused and repositioned while a project-owned refresh-rate combo is inserted beside it. That is
+precisely the Gate 9 composition ADR 0010 requires be expressible as auditable data rather than
+hardcoded window names, demonstrated before any of the Options UI exists. Profile-driven patch
+selection is the remaining integration step.
+
 **Scope:** Boundedly decode the complete source-established WND grammar and the UI definition
 resources required by it, then present those values through a retained, non-gameplay UI runtime.
 Cover nested layouts, exact creation rectangles, resolution scaling, status/style flags, draw and
@@ -110,11 +144,12 @@ source WND bytes are edited and no renderer path searches for special window nam
    defaults, fields, `DATA`, and exact `END` closure. Preserve callback names and unknown tokens as
    data; never resolve a WND string to a native function pointer in the parser. `DATA` and
    per-gadget field typing are still generic (Gate 2), but nothing is dropped.
-2. **Immutable control definitions.** Decode all established status/style names, fonts, text and
-   tooltip labels, state colors/borders, image offsets, draw-data arrays, header templates, and
-   gadget-specific records. Apply explicit limits to every nesting and variable-length surface.
-   Stable reports must be sufficient to compare a modded WND without rendering it.
-3. **Bounded WND patch overlays.** Define a versioned project-owned patch format targeting one WND
+2. **Immutable control definitions (implemented).** Decode all established status/style names,
+   fonts, text and tooltip labels, state colors/borders, image offsets, draw-data arrays, header
+   templates, and gadget-specific records. Apply explicit limits to every nesting and
+   variable-length surface. Stable reports must be sufficient to compare a modded WND without
+   rendering it.
+3. **Bounded WND patch overlays (implemented).** Define a versioned project-owned patch format targeting one WND
    virtual path and exact decorated window names. Support explicit preconditions, known-field
    replacement, hide/show/enable defaults, reparent/reorder where safe, and insertion of complete
    project-owned window subtrees. Apply patches in VFS/profile then file-operation order to produce

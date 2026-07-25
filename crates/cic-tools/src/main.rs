@@ -10,12 +10,12 @@ use cic_formats::{
     BridgeDefinition, BridgeTowerSlot, CsfLimits, MapLightingError, MapLimits, MapScenarioError,
     MapScenarioLimits, MapWaterError, ObjectDefinition, ObjectDrawKind, ObjectIniLimits,
     OptionsIniLimits, RoadDefinition, RoadIniLimits, TerrainIniLimits, W3dFile, W3dLimits,
-    W3dMeshLimits, W3dModelDecodePolicy, W3dSceneLimits, WaterIniLimits, WndLimits,
-    compose_static_w3d_model, decode_map_blend, decode_map_height, decode_map_lighting,
-    decode_map_polygons, decode_map_sides, decode_map_water, decode_map_world_objects,
-    decode_static_mesh, decode_w3d_model_set_with_policy, parse_csf, parse_map, parse_object_ini,
-    parse_options_ini, parse_road_ini, parse_terrain_ini, parse_w3d, parse_water_ini, parse_wnd,
-    w3d_model_hierarchy_name,
+    W3dMeshLimits, W3dModelDecodePolicy, W3dSceneLimits, WaterIniLimits, WndLimits, WndPatchLimits,
+    apply_wnd_patches, compose_static_w3d_model, decode_map_blend, decode_map_height,
+    decode_map_lighting, decode_map_polygons, decode_map_sides, decode_map_water,
+    decode_map_world_objects, decode_static_mesh, decode_w3d_model_set_with_policy, parse_csf,
+    parse_map, parse_object_ini, parse_options_ini, parse_road_ini, parse_terrain_ini, parse_w3d,
+    parse_water_ini, parse_wnd, parse_wnd_patch, w3d_model_hierarchy_name,
 };
 use cic_render::{
     AnimatedModel, BridgeTowerPlacement, HeadlessRenderer, MapPresentationFrame, ModelFrame,
@@ -36,7 +36,7 @@ use cic_tools::{
     GltfTextureRequest, encode_capture_png, encode_map_height_png, pack_w3d_glb, render_csf,
     render_manifest, render_map, render_map_blend, render_map_height, render_map_lighting,
     render_map_polygons, render_map_sides, render_map_water, render_map_world_objects,
-    render_options_ini, render_w3d, render_w3d_gltf, render_w3d_mesh, render_wnd,
+    render_options_ini, render_w3d, render_w3d_gltf, render_w3d_mesh, render_wnd, render_wnd_patch,
 };
 use cic_vfs::{BigLimits, Vfs, VirtualPath};
 
@@ -60,10 +60,10 @@ const USAGE: &str = "Usage:\n\
   cic-inspect w3d <virtual-path> <mount> [<mount> ...]\n\
   cic-inspect w3d-mesh <virtual-path> <top-level-index> <mount> [<mount> ...]\n\
   cic-inspect w3d-view <virtual-path> [<mount> ...]\n\
-  cic-inspect w3d-render [--animation <index>] [--frame <frame>] [--time <seconds>] [--rotation <radians>] <virtual-path> [<output.ppm>] [<mount> ...]\n\
+  cic-inspect w3d-render [--animation <index>] [--frame <frame>] [--time <seconds>] [--rotation <radians>] <virtual-path> [<output.png>] [<mount> ...]\n\
   cic-inspect w3d-export [--gltf] <virtual-path> [<output.glb|output.gltf>] [<mount> ...]\n\
   cic-inspect wnd <virtual-path> <mount> [<mount> ...]\n\
-  cic-inspect wnd-render <virtual-path> [<output.ppm>] [<mount> ...]\n\
+  cic-inspect wnd-render <virtual-path> [<output.png>] [<mount> ...]\n\
 Each mount is a directory or BIG archive. Mounts are applied from left to right; later mounts override earlier mounts.";
 
 const MAX_ENCODED_IMAGE_BYTES: usize = 256 * 1_024 * 1_024;
@@ -219,6 +219,7 @@ fn run(arguments: impl IntoIterator<Item = String>) -> Result<String, Box<dyn Er
             Ok(render_wnd(&document))
         }
         "wnd-render" => render_wnd_capture(&mut arguments, &options),
+        "wnd-patch" => report_wnd_patch(&mut arguments, &options),
         _ => Err(format!("unknown command {command:?}").into()),
     }
 }
@@ -1752,18 +1753,18 @@ where
     let (output_path, mounts) = if remaining.first().is_some_and(|candidate| {
         Path::new(candidate)
             .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("ppm"))
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
     }) {
         (PathBuf::from(&remaining[0]), remaining[1..].to_vec())
     } else {
-        (default_render_path(&resource_path)?, remaining)
+        (default_render_path(&resource_path, "png")?, remaining)
     };
     if !output_path
         .extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("ppm"))
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
     {
-        return Err("W3D render capture requires a .ppm output path".into());
+        return Err("W3D render capture requires a .png output path".into());
     }
     let vfs = mount_all(
         "w3d-render",
@@ -1777,7 +1778,7 @@ where
     let explicit_frame = ModelFrame::new(animation, frame, mapper_time_seconds, rotation)?;
     let renderer = pollster::block_on(HeadlessRenderer::new())?;
     let capture = renderer.capture_animated_model(512, 512, &staged, explicit_frame)?;
-    fs::write(&output_path, capture.ppm())?;
+    fs::write(&output_path, encode_capture_png(&capture)?)?;
     Ok(format!(
         "adapter\t{}\nanimation\t{}\nframe\t{}\nmapper_time_seconds\t{}\nvertices\t{}\nindices\t{}\ndraws\t{}\nmaterials\t{}\ntextures\t{}\nrgba_sha256\t{}\nwrote\t{}\n",
         renderer.adapter_info().name,
@@ -1810,18 +1811,18 @@ where
     let (output_path, mounts) = if remaining.first().is_some_and(|candidate| {
         Path::new(candidate)
             .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("ppm"))
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
     }) {
         (PathBuf::from(&remaining[0]), remaining[1..].to_vec())
     } else {
-        (default_render_path(&resource_path)?, remaining)
+        (default_render_path(&resource_path, "png")?, remaining)
     };
     if !output_path
         .extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("ppm"))
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
     {
-        return Err("WND render capture requires a .ppm output path".into());
+        return Err("WND render capture requires a .png output path".into());
     }
     let vfs = mount_all("wnd-render", &mounts, options, ResourceKind::Wnd)?;
     let entry = vfs
@@ -1833,7 +1834,9 @@ where
     let scene = StagedWndScene::from_document(&document)?;
     let renderer = pollster::block_on(HeadlessRenderer::new())?;
     let capture = renderer.capture_wnd_scene(&scene, [0.05, 0.05, 0.08, 1.0])?;
-    fs::write(&output_path, capture.ppm())?;
+    // The reported hash is taken over the capture's RGBA bytes, before encoding, so the
+    // container format does not affect determinism.
+    fs::write(&output_path, encode_capture_png(&capture)?)?;
     let [width, height] = scene.canvas();
     Ok(format!(
         "adapter\t{}\ncanvas_width\t{width}\ncanvas_height\t{height}\nwindows\t{}\nvertices\t{}\nindices\t{}\nrgba_sha256\t{}\nwrote\t{}\n",
@@ -1846,11 +1849,67 @@ where
     ))
 }
 
-fn default_render_path(resource_path: &VirtualPath) -> Result<PathBuf, Box<dyn Error>> {
+/// Reports the effect of one or more patch overlays without writing a patched WND.
+///
+/// Patch files are read from the host filesystem rather than the VFS: they are
+/// project-owned or profile-owned data, not resources inside a game archive.
+fn report_wnd_patch<I>(
+    arguments: &mut std::iter::Peekable<I>,
+    options: &CliOptions,
+) -> Result<String, Box<dyn Error>>
+where
+    I: Iterator<Item = String>,
+{
+    let resource_name = arguments
+        .next()
+        .ok_or("wnd-patch requires a virtual path")?;
+    let resource_path = VirtualPath::new(&resource_name)?;
+
+    let mut patch_paths = Vec::new();
+    let mut mounts = Vec::new();
+    while let Some(argument) = arguments.next() {
+        if argument == "--patch" {
+            patch_paths.push(
+                arguments
+                    .next()
+                    .ok_or("--patch requires a file path")?
+                    .clone(),
+            );
+        } else {
+            mounts.push(argument);
+        }
+    }
+    if patch_paths.is_empty() {
+        return Err("wnd-patch requires at least one --patch <file>".into());
+    }
+
+    let vfs = mount_all("wnd-patch", &mounts, options, ResourceKind::Wnd)?;
+    let entry = vfs
+        .resolve(&resource_path)
+        .ok_or_else(|| format!("resource not found: {resource_path}"))?;
+    let limits = WndLimits::default();
+    let bytes = entry.read(limits.maximum_file_bytes)?;
+    let document = parse_wnd(&bytes, limits)?;
+
+    let patch_limits = WndPatchLimits::default();
+    let mut patches = Vec::with_capacity(patch_paths.len());
+    for path in &patch_paths {
+        let patch_bytes = fs::read(path)?;
+        patches.push(parse_wnd_patch(path, &patch_bytes, patch_limits)?);
+    }
+
+    let overlaid = apply_wnd_patches(&document, resource_path.as_str(), &patches, limits)?;
+    Ok(render_wnd_patch(&patches, &overlaid))
+}
+
+fn default_render_path(
+    resource_path: &VirtualPath,
+    extension: &str,
+) -> Result<PathBuf, Box<dyn Error>> {
     let stem = Path::new(resource_path.as_str())
         .file_stem()
         .ok_or("render resource path has no file name")?;
-    Ok(PathBuf::from(stem).with_extension("ppm"))
+    Ok(PathBuf::from(stem).with_extension(extension))
 }
 
 fn load_composed_model(

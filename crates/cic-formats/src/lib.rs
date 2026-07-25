@@ -17,6 +17,7 @@ mod w3d_mesh;
 mod w3d_scene;
 mod water_ini;
 mod wnd;
+mod wnd_patch;
 
 pub use csf::{CsfError, CsfFile, CsfHeader, CsfLabel, CsfLimits, CsfString, parse_csf};
 pub use map::{
@@ -77,6 +78,13 @@ pub use water_ini::{
     parse_water_ini, parse_water_transparency_ini,
 };
 pub use wnd::{
-    WndDiagnostic, WndDiagnosticKind, WndDocument, WndError, WndField, WndLayoutBlock, WndLimits,
-    WndScreenRect, WndWindow, parse_wnd,
+    WND_DRAW_DATA_ENTRIES, WND_TAB_PANES, WndCallbackKind, WndCallbacks, WndColor, WndComboBoxData,
+    WndDiagnostic, WndDiagnosticKind, WndDocument, WndDrawData, WndDrawDataSlot, WndDrawEntry,
+    WndError, WndField, WndFlag, WndFont, WndGadgetData, WndLayoutBlock, WndLimits, WndListBoxData,
+    WndScreenRect, WndSliderData, WndTabControlData, WndTextColors, WndTextEntryData, WndToken,
+    WndTokenKind, WndWindow, parse_wnd,
+};
+pub use wnd_patch::{
+    PatchedWndDocument, WND_PATCH_VERSION, WndPatch, WndPatchError, WndPatchLimits,
+    WndPatchOperation, WndPatchProvenance, WndPatchStep, apply_wnd_patches, parse_wnd_patch,
 };

@@ -35,7 +35,7 @@ adapter and matching hash.
 `cic-inspect w3d-render` is the tools-layer bridge from installed profiles or explicit BIG mounts.
 It composes and validates the W3D model before constructing `StagedModel`; the renderer receives no
 archive handle or path. The initial model capture applies the hierarchy bind pose, uses stable
-model/triangle order, orthographically frames bounds, and writes a depth-tested geometry PPM.
+model/triangle order, orthographically frames bounds, and writes a depth-tested geometry PPM.[^1]
 Vertex-material colors and diagnostic lighting are an explicit approximation; texture and
 fixed-function pass submission remain a later gate.
 
@@ -101,3 +101,8 @@ RGBA hash.
   remains window-free.
 - GPU output equality is asserted for both the deliberately simple RGBA8 triangle and the composed
   synthetic textured multi-pass animated-pose diagnostic.
+
+[^1]: Amended 2026-07-25: captures are now written as PNG rather than PPM, by `Capture::png` at the
+    renderer boundary. Only the container changed — the reported digest is still taken over the raw
+    RGBA bytes before encoding, so every determinism property this ADR relies on is unaffected. The
+    original wording is left intact as the record of what was decided at the time.

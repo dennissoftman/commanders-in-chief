@@ -40,7 +40,7 @@ observable behavior.
 | W3D | GLB/glTF 2.0 preview export | verified | Synthetic CLI/PNG tests + Blender 3.3 GLB import |
 | Renderer | Stable validated W3D geometry staging | verified | Original fixture + synthetic two-BIG CLI + installed building |
 | Renderer | Headless RGBA8 triangle/pose capture | verified | Checked-in SHA-256 + local RTX 4080 SUPER capture |
-| Renderer | BIG-backed composed bind-pose capture | verified | Synthetic CLI PPM + installed `abarfrccmd.w3d` capture |
+| Renderer | BIG-backed composed bind-pose capture | verified | Synthetic CLI PNG + installed `abarfrccmd.w3d` capture |
 | Renderer | Pass-zero/stage-zero textured material submission | verified | Synthetic resource-manager/material tests + installed airstrip and infantry window smokes |
 | Renderer | Stable additional pass/stage preview submission | verified | Synthetic two-pass/two-stage capture + installed airstrip smoke |
 | Renderer | Rigid/one-bone hierarchy bind pose | verified | Synthetic skinned fixture + installed rigid building capture |

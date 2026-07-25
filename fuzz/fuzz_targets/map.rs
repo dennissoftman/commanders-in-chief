@@ -26,9 +26,9 @@ fuzz_target!(|bytes: &[u8]| {
         maximum_water_points: 16_384,
         maximum_trigger_name_bytes: 1_024,
     };
-    if let Ok(map) = parse_map(bytes, "fuzz.map", limits) {
-        if let Ok(height) = decode_map_height(&map, limits) {
-            let _ = decode_map_blend(&map, &height, limits);
-        }
+    if let Ok(map) = parse_map(bytes, "fuzz.map", limits)
+        && let Ok(height) = decode_map_height(&map, limits)
+    {
+        let _ = decode_map_blend(&map, &height, limits);
     }
 });

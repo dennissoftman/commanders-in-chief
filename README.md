@@ -16,7 +16,7 @@ cargo run -p cic-tools -- map-height maps\synthetic\synthetic.map path\to\maps.b
 cargo run -p cic-tools -- map-height --report maps\synthetic\synthetic.map path\to\maps.big
 cargo run -p cic-tools -- map-blend maps\synthetic\blend.map path\to\maps.big
 cargo run -p cic-tools -- map-render --size 768 maps\synthetic\blend.map path\to\maps.big path\to\terrain-resources
-cargo run -p cic-render --example headless_capture -- target/synthetic-capture.ppm
+cargo run -p cic-render --example headless_capture -- target/synthetic-capture.png
 ```
 
 Complete W3D models can be exported to glTF 2.0 for Blender or a browser-based model
@@ -27,7 +27,7 @@ default resource profile and `--zh` layers Zero Hour over its required Generals 
 cargo run -p cic-tools -- config show
 cargo run -p cic-tools -- w3d-export art/w3d/model.w3d
 cargo run -p cic-tools -- w3d-view art/w3d/model.w3d
-cargo run -p cic-tools -- w3d-render --animation 0 --frame 10 --time 0.5 art/w3d/model.w3d model-capture.ppm
+cargo run -p cic-tools -- w3d-render --animation 0 --frame 10 --time 0.5 art/w3d/model.w3d model-capture.png
 cargo run -p cic-tools -- --zh w3d-export art/w3d/model_skn.w3d custom-name.glb
 cargo run -p cic-tools -- w3d-export --gltf art/w3d/model.w3d preview.gltf
 ```
@@ -91,7 +91,7 @@ Built-in Generals/Zero Hour archive lists are convenience presets only; custom p
 require retail filenames or sentinels. Disk mounts retain directory/BIG indices rather than
 payloads. A resource is read only when selected, under the consuming parser's explicit size limit.
 
-The renderer boundary can produce a window-free synthetic PPM and RGBA SHA-256 with an explicit
+The renderer boundary can produce a window-free synthetic PNG and RGBA SHA-256 with an explicit
 pose. It consumes validated `cic-formats` values and owns no parser, filesystem, or simulation
 resources. `cic-inspect w3d-view` opens a 960x720 depth-tested viewer, frames the model from a
 45-degree elevated camera, rotates it around W3D's Z-up axis, and plays the selected animation.

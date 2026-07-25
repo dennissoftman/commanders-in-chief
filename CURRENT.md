@@ -25,7 +25,36 @@ refresh-rate, and UI-scale controls with transactional confirmation/rollback.
 
 ## Next verified step
 
-Resolve user-owned mapped images, explicit fonts, and CSF labels for the fields Gate 1 already
-retains generically (`docs/formats/wnd.md`'s Gate 2 typed fields: fonts, state colors/borders,
-draw-data arrays, header templates, gadget-specific `DATA`), then begin the retained `cic-ui`
-runtime before main-menu navigation.
+Gates 1 and 2 are complete: the WND grammar and every established field are decoded into immutable
+typed values, verified against all 80 retail layouts in both editions with no malformed-field
+diagnostics (see [docs/formats/wnd.md](docs/formats/wnd.md)). Gate 3's patch overlays are implemented, value-level
+and structural, with per-field provenance, an unmodified source document, and a
+`cic-inspect wnd-patch` report; the composition Gate 9 needs is verified against the retail
+`OptionsMenu.wnd`.
+
+Gate 4 (UI resource resolution) has its evidence pass done and recorded in
+[docs/formats/wnd.md](docs/formats/wnd.md): the demand side is measured (217 mapped images, 7 font
+families, 15 header templates, 366 label references), every definition source is located, and label
+coverage is checked against a real installation. The next verified step is the first decoder —
+bounded `MappedImage` INI decoding over a recursive `Data/INI/MappedImages/**` load — followed by
+`HeaderTemplate.ini` and `Language.ini`, then binding CSF labels through the existing decoder. Three
+facts from the evidence pass shape that work:
+
+- The header-template and font definitions live in the localization archive under
+  `Data/<Language>/`, not `INI.big`, so resolution needs a localization mount alongside the `Wnd`
+  profile.
+- Retail ships no font files, so a project-supplied font is the default path for deterministic
+  captures rather than an opt-in fallback.
+- The two mapped-image directories merge rather than select: their name sets are measured disjoint
+  across both editions, so no variant-selection policy is needed.
+
+Separately, [docs/formats/csf.md](docs/formats/csf.md) now records the language-selection mechanism
+against the pinned source, for the planned goal of shipping languages the original game never had.
+The language is a path component (`Data/<Language>/`), and the original client mounts every `*.big`,
+so a `Russian.big` supplying `Generals.csf`, `HeaderTemplate.ini`, and `Language.ini` under
+`Data/Russian/` fits the established mechanism. Acting on that requires parameterizing this
+project's localization archive candidates and path prefix, which currently hardcode `English.big`
+and `EnglishZH.big` per edition; that is a `cic-tools` resource-profile change, best sequenced with
+Gate 4 since it resolves the same files.
+
+The retained `cic-ui` runtime and main-menu navigation follow.

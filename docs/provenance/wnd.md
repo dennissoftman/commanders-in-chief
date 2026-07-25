@@ -49,6 +49,10 @@
   - `Generals/Code/GameEngine/Source/GameClient/GUI/GUICallbacks/Menus/SkirmishMapSelectMenu.cpp`
   - `Generals/Code/GameEngine/Source/GameClient/GUI/GUICallbacks/Menus/MapSelectMenu.cpp`
   - `Core/GameEngine/Source/GameClient/MapUtil.cpp`
+- Language selection and archive discovery:
+  - `GeneralsMD/Code/Main/WinMain.cpp` (`g_csfFile = "data\%s\Generals.csf"`)
+  - `Core/GameEngine/Source/GameClient/GameText.cpp`
+  - `Core/GameEngineDevice/Source/Win32Device/Common/Win32BIGFileSystem.cpp`
 - Established Options/display boundary:
   - `Generals/Code/GameEngine/Source/GameClient/GUI/GUICallbacks/Menus/OptionsMenu.cpp`
   - `Core/GameEngine/Include/GameClient/Display.h`
@@ -58,6 +62,7 @@
 ## Permanent links
 
 - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Generals/Code/GameEngine/Source/GameClient/GUI/GameWindowManagerScript.cpp>
+- <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/GeneralsMD/Code/GameEngine/Source/GameClient/GUI/GameWindowManagerScript.cpp>
 - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/GameEngine/Include/GameClient/GameWindow.h>
 - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/GameEngine/Include/GameClient/WindowLayout.h>
 - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/GameEngine/Source/GameClient/GUI/WindowLayout.cpp>
@@ -121,6 +126,45 @@ the design-only change. Implementation must review the selected versions, licens
 `wgpu` compatibility before updating Cargo manifests.
 
 ## Implementation record
+
+The `CHILD` keyword's real role was established by reading `parseChildWindows` in
+`GameWindowManagerScript.cpp` at the pinned revision: its loop compares against
+`ENDALLCHILDREN`, `END`, the five default-color keywords, and `WINDOW`, with no `CHILD` case and no
+fallback branch, so `CHILD` is an inert marker and a bare `WINDOW` opens the next sibling. The
+Zero Hour status vocabulary was established from `WindowStatusNames` on the `GeneralsMD` source
+path, which appends `ON_MOUSE_DOWN` after `ALWAYS_COLOR`; the `Generals` path's 25-name list is a
+prefix of it. Both were checked against a structural census of the 80 retail `.wnd` layouts
+reachable through the `Wnd` resource profile in a local installation. That census recorded
+aggregate counts only — keyword and field-name frequencies, hierarchy extremes, and vocabulary
+coverage. No retail file content, geometry, string, or asset was retained in the repository.
+
+The window field vocabulary was established from `parseWindow`'s field chain at the pinned
+revision, which compares against 46 keywords, and from the record helpers it dispatches to
+(`parseFont`, `parseTextColor`, `parseTooltipDelay`, `parseHeaderTemplate`, `parseText`,
+`parseTooltipText`, and the four callback parsers) for each record's expected sub-label and value
+sequence. That list was cross-checked against the census: the three keywords with no retail
+occurrences (`TABCONTROLDATA`, `IMAGEOFFSET`, `TOOLTIP`) plus the 43 observed field names account
+for all 46 exactly, and applying the derived shapes to every retail layout types every occurrence
+with no malformed-field diagnostics.
+
+The remaining record grammars — `parseDrawData`, `parseListboxData`, `parseComboBoxData`,
+`parseSliderData`, `parseRadioButtonData`, `parseTextEntryData`, `parseStaticTextData`,
+`parseTabControlData`, and `parseImageOffset` — were read verbatim from the same file, retrieved
+through the GitHub contents API at the pinned revision rather than through any summarizing
+intermediary. That direct reading corrected an error an earlier summarized reading had introduced:
+the claim that `parseWindow` returns immediately after `parseChildWindows` without consuming its
+own `END`. There is no such early return, which is why the hierarchy model holds for the 31 retail
+layouts containing a child-bearing child followed by a later sibling.
+
+`MAX_DRAW_DATA` is pinned at nine through `Gadget.h`'s `NUM_TAB_PANES = 8, //(MAX_DRAW_DATA - 1)`,
+matching the nine entries in all 7,875 retail draw-data records. `TOOLTIP` is left untyped because
+`parseTooltip` ignores its buffer and stores a placeholder marked `@todo`, so no grammar exists to
+derive. `TABCONTROLDATA` and `IMAGEOFFSET` are typed from source alone and recorded as such, since
+neither occurs in retail data to cross-check.
+
+The upstream repository contains no `.wnd` files — it is a source release without game assets — so
+record shapes can be established from the parser sources and validated against a user-owned
+installation, but there are no upstream reference layouts to compare against.
 
 `crates/cic-formats/src/wnd.rs` implements Gate 1 (bounded WND inventory/hierarchy decode):
 `FILE_VERSION`, the `STARTLAYOUTBLOCK`/`ENDLAYOUTBLOCK` layout block, the `WINDOW`/`CHILD`/`END`/

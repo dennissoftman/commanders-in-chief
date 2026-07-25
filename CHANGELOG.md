@@ -18,21 +18,95 @@ land under the active milestone heading.
   generic fields, and diagnostics.
 - Added `cic-inspect wnd-render`, a surface-free proof-of-pipeline capture that stages every window
   rectangle as a flat colored quad (`crates/cic-render/src/wnd_scene.rs`) and renders it through the
-  existing `HeadlessRenderer` boundary to a deterministic PPM plus RGBA SHA-256 hash. It has no
+  existing `HeadlessRenderer` boundary to a deterministic PNG plus RGBA SHA-256 hash. It has no
   images, text, gadget visuals, or scaling policy yet; it proves the immutable decoded value can
   drive a renderer capture ahead of the retained UI runtime.
 - Added an original synthetic `BIG4` fixture and truncation-at-every-prefix tests alongside the
   existing `BIGF` coverage, and a bounded `big` libFuzzer target, closing an R1 acceptance-test gap
   where BIG4 had no automated coverage and BIG archives had no fuzz target.
 
+- Added the project-owned WND patch overlay layer (`crates/cic-formats/src/wnd_patch.rs`), so
+  modern controls and profile-specific adjustments are auditable data rather than hardcoded window
+  names in the parser, renderer, or a menu callback. A versioned line-oriented patch targets one WND
+  virtual path and exact decorated control names, and supports `require-window`/`require-field`
+  preconditions plus `set-field`, `add-field`, and `set-rect`. Applying returns a new document —
+  the parsed source is never mutated, so one parse can be patched differently per profile — and
+  every write records provenance. A patched field is re-typed, so an overlay that rewrites `STATUS`
+  is visible through the typed accessor. The structural operations `reorder`, `reparent`, and
+  `insert-window` complete the set: an inserted subtree is parsed by the ordinary bounded WND
+  decoder, so it obeys the same grammar, limits, and typed-field rules as authored source, and its
+  window ids are renumbered so they cannot collide. `reparent` refuses to move a window beneath its
+  own descendant, and a failure after detaching restores the tree rather than dropping the subtree.
+  Verified end to end against the retail `OptionsMenu.wnd`, reusing and repositioning the stock
+  resolution combo while inserting a project-owned refresh-rate control beside it.
+- Added `cic-inspect wnd-patch`, reporting each patch's declared operations, the provenance of every
+  field written, and the resulting hierarchy, without ever rewriting the source WND.
+- Completed WND field decoding: the 21 draw-data arrays (nine `IMAGE`/`COLOR`/`BORDERCOLOR` entries
+  each, with `NoImage` decoded as an absent image) and all seven gadget `DATA` records
+  (`LISTBOXDATA`, `COMBOBOXDATA`, `SLIDERDATA`, `RADIOBUTTONDATA`, `TEXTENTRYDATA`,
+  `STATICTEXTDATA`, `TABCONTROLDATA`) plus `IMAGEOFFSET`, reported as `window_draw_entry` and
+  `window_gadget_data` rows. Every field name occurring in either retail edition is now typed, and
+  the whole corpus decodes with no malformed-field diagnostics: 7,875 of 7,875 draw-data arrays and
+  753 of 753 gadget records. `LISTBOXDATA`'s `SCROLLIFATEND` is decoded as genuinely optional, which
+  five retail records depend on; an omitted sub-record stays distinguishable from an explicit false.
+  `TABCONTROLDATA`'s pane count is bounded at the source's own array width, which the source reads
+  past without checking. `TOOLTIP` is deliberately left untyped: its parser ignores the record and
+  stores a placeholder marked `@todo`, so no grammar exists to decode.
+- Added typed decoding for the common WND window records — `STATUS`/`STYLE` flag lists, the four
+  callback names, `FONT`, `HEADERTEMPLATE`, `TOOLTIPDELAY`, `TEXT`, `TOOLTIPTEXT`, and `TEXTCOLOR`'s
+  six state colors — exposed as accessors on the immutable window value and as
+  `window_flag`/`window_callback`/`window_property`/`window_font`/`window_text_color` rows in
+  `cic-inspect wnd`, so a modded layout can be compared record by record without rendering it.
+  Typed values are views: every record also remains in the generic field list. Across both retail
+  editions this types every occurrence (1,667 of 1,667 `FONT` and `TEXTCOLOR` records, 6,668 of
+  6,668 callbacks) with no malformed-field diagnostics. A record that does not match its established
+  shape produces a `MalformedField` diagnostic and an absent typed view rather than failing the
+  document; required structural values (`FILE_VERSION`, `WINDOWTYPE`, `SCREENRECT`) remain hard
+  errors.
+- Added quoting- and punctuation-preserving WND record retention. Each field now carries an ordered
+  token sequence alongside its verbatim value, so `FONT = NAME: "Times New Roman", SIZE: 14;` is no
+  longer indistinguishable from the same characters written unquoted — previously the value
+  flattened to `NAME: Times New Roman , SIZE: 14`, leaving no way to delimit a font name containing
+  spaces. `,`, `:`, and `+` are tokenized outside quotes; quoted tokens are never split.
+- Added typed decorated window names (`WndWindow::name`/`control_name`), reported by
+  `cic-inspect wnd` in a new column, plus a `DuplicateWindowName` diagnostic for two windows sharing
+  a non-empty control name. Windows declaring only a layout prefix are treated as unnamed.
+- Added `STATUS` and `STYLE` flag validation over the `+`-separated name lists, against the union of
+  both editions' vocabularies. Applied to every retail layout in both editions, this produces no
+  false positives.
+- Added a bounded `wnd` libFuzzer target and a `maximum_record_tokens` limit (default 4,096) so one
+  record cannot allocate a token vector sized only by the much larger record byte limit.
+
 ### Fixed
 
+- Fixed the WND decoder rejecting Zero Hour's `Menus/MainMenu.wnd`, the layout the R4 main-menu
+  artifact is built around. The decoder required a `CHILD` marker before every child window, but
+  the source's child-list loop has no `CHILD` case at all — the marker is inert and a bare `WINDOW`
+  opens the next sibling. A census of all 80 retail layouts in both editions found exactly one
+  sibling written without its marker, and it is in that file. The decoder now accepts either
+  spelling once the child list is open and reports the unmarked form as a non-fatal
+  `MissingChildKeyword` diagnostic; a bare `WINDOW` before any `CHILD` is still a field name, and
+  `ENDALLCHILDREN` still closes the list. All 80 retail layouts in both editions now decode, with
+  one diagnostic across the whole corpus.
+- Corrected the documented WND status vocabulary, which listed only the `Generals` source path's 25
+  names. Zero Hour adds `ON_MOUSE_DOWN`, used 67 times in its retail layouts, so validating against
+  the Generals list alone would report 67 false unknowns against a stock Zero Hour install.
 - Repaired the `map` libFuzzer target, which no longer compiled after `MapLimits` gained polygon
   and water-trigger fields during R3; fuzzing was not part of the workspace test suite so the
   regression was silent.
 - Corrected the R2 milestone doc's stale W3D chunk-identifier count (73 to 77).
 
 ### Changed
+
+- Changed every renderer capture from an uncompressed netpbm PPM to PNG, which also preserves the
+  alpha channel that PPM discarded and tags perceptual sRGB. `Capture::ppm` is replaced by
+  `Capture::png` at the renderer boundary, so `cic-inspect wnd-render`, `w3d-render`, and the
+  `headless_capture` example all emit `.png` and default their output name accordingly. Reported
+  hashes are taken over the capture's raw RGBA bytes before encoding, so determinism is unchanged;
+  ADR 0004 carries an amendment note recording this.
+- Added `*.png`/`*.ppm` to `.gitignore` (excluding `docs/`). The `*-render` commands write into the
+  working directory when given no output path, so a capture of a user-owned layout or map could
+  otherwise be committed as retail-derived output.
 
 - Changed `terrain_ini.rs`, `water_ini.rs`, `road_ini.rs`, and `object_ini.rs` (owned by R3) so an
   unrecognized field name inside a block they otherwise decode is never silently dropped. Each

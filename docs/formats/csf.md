@@ -2,7 +2,7 @@
 
 - Status: verified against a user-owned Steam Generals `generals.csf`
 - Owning crate: `cic-formats`
-- Last updated: 2026-07-21
+- Last updated: 2026-07-25
 
 ## Evidence
 
@@ -77,6 +77,37 @@ them. Diagnostic output escapes non-ASCII bytes losslessly.
   default US language; version 2 and later use the header language identifier.
 - Text whitespace is preserved by the decoder. The original client's presentation-time
   whitespace cleanup belongs in a compatibility policy above the file parser.
+
+## Language selection and adding a new language
+
+Confirmed from `GeneralsMD/Code/Main/WinMain.cpp`, `Core/GameEngine/Source/GameClient/GameText.cpp`,
+and `Core/GameEngineDevice/Source/Win32Device/Common/Win32BIGFileSystem.cpp` at the pinned
+`GeneralsGameCode` revision (see `docs/provenance/wnd.md`):
+
+- The CSF path is a format string, `g_csfFile = "data\\%s\\Generals.csf"`, filled at load time with
+  the language name (`GetRegistryLanguage()` in the original client). **The language is a path
+  component, not an archive name.**
+- The original client mounts *every* `*.big` in the install directory
+  (`loadBigFilesFromDirectory("", "*.big")`) rather than a fixed list, so retail's
+  `English.big`/`EnglishZH.big` naming is packaging convention, not an engine requirement.
+- The per-language payload is three files under `Data/<Language>/`: `Generals.csf`,
+  `HeaderTemplate.ini` (control presentation templates), and `Language.ini` (font families,
+  `UnicodeFontName`, and `ResolutionFontAdjustment`).
+
+A language the original game never shipped therefore needs no engine change in principle: supplying
+`Data/Russian/Generals.csf` plus that directory's `HeaderTemplate.ini` and `Language.ini`, packaged
+as `Russian.big`/`RussianZH.big`, matches the established mechanism exactly. Two consequences are
+worth planning around:
+
+- `HeaderTemplate.ini` and `Language.ini` being per-language is the mechanism's whole point — the
+  shipped comments say the files exist so a different script can change fonts and drop bold. A
+  Cyrillic language legitimately chooses its own fonts there, and `UnicodeFontName` exists for
+  exactly that case.
+- This project must not depend on the original client's registry lookup for the language name. The
+  language belongs in a project-owned setting, and `cic-tools`' resource profiles currently hardcode
+  localization archive names per edition (`English.big`, `EnglishZH.big`). Supporting arbitrary
+  languages means parameterizing both the archive candidates and the `data/<language>/` path prefix,
+  rather than adding a second hardcoded list.
 
 ## Current safety limits
 

@@ -275,6 +275,7 @@ version = "0.1.0"
 dependencies = [
  "cic-formats",
  "naga",
+ "png",
  "pollster",
  "sha2",
  "wgpu",
