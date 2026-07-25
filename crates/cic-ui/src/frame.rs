@@ -68,6 +68,9 @@ pub enum UiFrameItem {
         color: Option<WndColor>,
         /// The slot's border colour, absent when the control declares no draw data for the slot.
         border_color: Option<WndColor>,
+        /// Whether the control declares `BORDER`, which is what makes the original draw its border
+        /// and corners at all. A colour alone does not.
+        border: bool,
     },
     /// A control's text.
     Text(UiTextRun),
@@ -141,6 +144,7 @@ impl UiLayout {
                 image: entry.and_then(|entry| entry.image()).map(str::to_owned),
                 color: entry.map(WndDrawEntry::color),
                 border_color: entry.map(WndDrawEntry::border_color),
+                border: control.status().contains(UiStatus::BORDER),
             });
             if let Some(run) = self.text_run(id, rect) {
                 frame.items.push(UiFrameItem::Text(run));
@@ -194,5 +198,30 @@ impl UiLayout {
             color: control.text_color(self.state_slot(id)),
             masked,
         })
+    }
+}
+
+impl UiFrame {
+    /// Returns a copy of this frame with every text run's label replaced by `resolve`'s result.
+    ///
+    /// A `TEXT` record holds either a localization label or a literal string, and the retained model
+    /// deliberately does not decide which. This lets a caller that owns a string table substitute
+    /// localized text without the runtime depending on localization: returning `None` keeps the
+    /// original value, which is the correct behavior for both a literal and an unresolved label.
+    #[must_use]
+    pub fn with_resolved_text(&self, resolve: &dyn Fn(&str) -> Option<String>) -> Self {
+        Self {
+            items: self
+                .items
+                .iter()
+                .map(|item| match item {
+                    UiFrameItem::Text(run) => UiFrameItem::Text(UiTextRun {
+                        label: resolve(&run.label).unwrap_or_else(|| run.label.clone()),
+                        ..run.clone()
+                    }),
+                    other => other.clone(),
+                })
+                .collect(),
+        }
     }
 }

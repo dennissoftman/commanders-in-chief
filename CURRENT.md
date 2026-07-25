@@ -63,16 +63,25 @@ One measurement from that pass changes a later gate: the whole Zero Hour corpus 
 `TABSTOP` controls, so keyboard traversal of a retail menu cannot come from the layouts and the shell
 gate will need project-owned tab order.
 
-The next verified step is Gate 6, custom `wgpu` presentation: executing a `UiFrame` as ordered
-image and colour quads with borders, scissor rectangles, and shaped Unicode text over either a 2D
-background or an R3 scene, with bounded atlases, batched stable draws, and surface-free deterministic
-capture. That gate needs the text stack decided first — ADR 0010 prefers `cosmic-text` with `glyphon`
-subject to verifying compatibility with the workspace `wgpu`, and licences and notices must be
-reviewed before either enters the manifests.
+Gate 6's custom `wgpu` presentation is implemented and verified against real data. The text stack is
+settled: `cosmic-text` 0.19 and `glyphon` 0.12, which declares `wgpu ^30.0.0` and unifies with the
+workspace `wgpu` 30 rather than pulling a second copy; both licences are permissive and compatible
+with GPL-3.0-only. `cic-inspect ui-render` writes a deterministic PNG plus hash from explicit inputs
+only, and renders the retail main menu, options menu, and skirmish options with correct geometry,
+batching, clipping, colour, and localized text, byte-identical across runs.
 
-Two smaller pieces remain queued behind it: the rest of Gate 4 — bounded `WindowTransition`,
-`MouseCursor`, and `ShellMenuScheme` subsets, which live in the same INI family and reuse the shared
-lexer — and the runtime-side visible placeholders for the resources retail names but never defines.
+The next verified step is **per-family gadget draw-data composition**. A draw-data record holds nine
+entries that the source's `W3DGadget*` renderers compose per family — a push button's ends and
+repeating centre, a slider's track pieces, a list box's scroll parts — and this implementation draws
+entry 0 stretched across the control rectangle. Everything else about presentation is correct, so a
+retail menu renders in the right places with the right text but with stretched single-piece art. That
+needs the `W3DGadget*` renderers read at the pinned revision.
+
+Two smaller pieces remain queued: the rest of Gate 4 — bounded `WindowTransition`, `MouseCursor`, and
+`ShellMenuScheme` subsets, which live in the same INI family and reuse the shared lexer — and Gate 7's
+shell stack, which is what hides the subpanels a retail menu overlays today: rendering `MainMenu.wnd`
+currently shows every subpanel at once, because retail hides them from menu code rather than through
+`STATUS`.
 
 Separately, [docs/formats/csf.md](docs/formats/csf.md) records the language-selection mechanism
 against the pinned source, for the planned goal of shipping languages the original game never had.

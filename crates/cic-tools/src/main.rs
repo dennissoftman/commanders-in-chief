@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::error::Error;
+use std::fmt::Write as _;
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -20,12 +21,13 @@ use cic_formats::{
 use cic_render::{
     AnimatedModel, BridgeTowerPlacement, HeadlessRenderer, MapPresentationFrame, ModelFrame,
     StagedBoundaryFence, StagedMapOverlays, StagedMapScene, StagedRoads, StagedStaticScenery,
-    StagedStaticSceneryModel, StagedTerrain, StagedWater, StagedWndScene, StaticSceneryDiagnostic,
-    StaticSceneryDiagnosticKind, StaticSceneryInstance, TerrainCompatibilityPolicy,
-    TerrainLighting, TerrainStagingOptions, TextureId, TextureResourceManager,
-    TreeSwayPresentation, WaterAppearance, WaterCausticSequence, WaterPresentationPolicy,
-    WaterSurfaceTexture, bridge_tower_placements, run_model_viewer, run_terrain_viewer_with_map,
-    run_terrain_viewer_with_map_at_time,
+    StagedStaticSceneryModel, StagedTerrain, StagedUiFrame, StagedWater, StagedWndScene,
+    StaticSceneryDiagnostic, StaticSceneryDiagnosticKind, StaticSceneryInstance,
+    TerrainCompatibilityPolicy, TerrainLighting, TerrainStagingOptions, TextureId,
+    TextureResourceManager, TreeSwayPresentation, UiImageBinding, UiStagingDiagnosticKind,
+    UiStagingLimits, UiTextPolicy, UiTexturePage, WaterAppearance, WaterCausticSequence,
+    WaterPresentationPolicy, WaterSurfaceTexture, bridge_tower_placements, run_model_viewer,
+    run_terrain_viewer_with_map, run_terrain_viewer_with_map_at_time,
 };
 use cic_tools::resource::{
     DEFAULT_LANGUAGE, GameEdition, MountProfile, MountProfileLimits, ResourceKind, StoredLocations,
@@ -33,8 +35,9 @@ use cic_tools::resource::{
     resolve_options_ini_path, validate_installation,
 };
 use cic_tools::ui_resources::{
-    DEFAULT_MAPPED_IMAGE_TEXTURE_SIZE, UiResourceLimits, collect_ui_resource_demand,
-    load_localization_resources, load_mapped_image_catalog, resolve_ui_resources,
+    DEFAULT_MAPPED_IMAGE_TEXTURE_SIZE, LocalizationResources, UiResourceLimits,
+    collect_ui_resource_demand, load_localization_resources, load_mapped_image_catalog,
+    resolve_ui_resources,
 };
 use cic_tools::{
     GltfTextureRequest, encode_capture_png, encode_map_height_png, pack_w3d_glb, render_csf,
@@ -43,7 +46,10 @@ use cic_tools::{
     render_options_ini, render_ui_layout, render_ui_resources, render_w3d, render_w3d_gltf,
     render_w3d_mesh, render_wnd, render_wnd_patch,
 };
-use cic_ui::{UiLayout, UiLimits, UiPresentation, UiScalePolicy, UiViewport};
+use cic_ui::{
+    UiClipPolicy, UiFrame, UiFrameItem, UiLayout, UiLimits, UiPresentation, UiScalePolicy,
+    UiViewport,
+};
 use cic_vfs::{BigLimits, Vfs, VirtualPath};
 
 const USAGE: &str = "Usage:\n\
@@ -232,6 +238,7 @@ fn run(arguments: impl IntoIterator<Item = String>) -> Result<String, Box<dyn Er
         "wnd-patch" => report_wnd_patch(&mut arguments, &options),
         "ui-resources" => report_ui_resources(&mut arguments, &options),
         "ui-layout" => report_ui_layout(&mut arguments, &options),
+        "ui-render" => render_ui_capture(&mut arguments, &options),
         _ => Err(format!("unknown command {command:?}").into()),
     }
 }
@@ -1927,6 +1934,244 @@ where
 
     let overlaid = apply_wnd_patches(&document, resource_path.as_str(), &patches, limits)?;
     Ok(render_wnd_patch(&patches, &overlaid))
+}
+
+/// Renders one retained layout to a deterministic PNG plus an RGBA SHA-256 hash.
+///
+/// Every presentation input is explicit: viewport, scale policy, language, texture-size selection,
+/// and the font files used for shaping. Nothing reads the host display, a host font, or a clock, so
+/// two runs with the same inputs produce the same bytes. Without `--font` the capture stages visible
+/// text placeholders instead of falling back to a platform face.
+#[allow(clippy::too_many_lines)]
+fn render_ui_capture<I>(
+    arguments: &mut std::iter::Peekable<I>,
+    options: &CliOptions,
+) -> Result<String, Box<dyn Error>>
+where
+    I: Iterator<Item = String>,
+{
+    let mut viewport = UiViewport::new(800, 600)?;
+    let mut scale = UiScalePolicy::Classic;
+    let mut texture_size = DEFAULT_MAPPED_IMAGE_TEXTURE_SIZE;
+    let mut font_paths: Vec<PathBuf> = Vec::new();
+    let mut clip = UiClipPolicy::None;
+    while arguments
+        .peek()
+        .is_some_and(|argument| argument.starts_with("--"))
+    {
+        match arguments.next().expect("peeked ui-render option").as_str() {
+            "--viewport" => {
+                let value = arguments
+                    .next()
+                    .ok_or("--viewport requires <width>x<height>")?;
+                let (width, height) = value
+                    .split_once('x')
+                    .ok_or("--viewport requires <width>x<height>")?;
+                viewport = UiViewport::new(width.parse::<i32>()?, height.parse::<i32>()?)?;
+            }
+            "--scale" => {
+                scale = match arguments
+                    .next()
+                    .ok_or("--scale requires classic or modern")?
+                    .as_str()
+                {
+                    "classic" => UiScalePolicy::Classic,
+                    "modern" => UiScalePolicy::Modern,
+                    other => return Err(format!("unknown scale policy {other:?}").into()),
+                };
+            }
+            "--texture-size" => {
+                texture_size = arguments
+                    .next()
+                    .ok_or("--texture-size requires a pixel count")?
+                    .parse::<u32>()?;
+            }
+            "--font" => {
+                font_paths.push(PathBuf::from(
+                    arguments.next().ok_or("--font requires a file path")?,
+                ));
+            }
+            "--clip" => {
+                clip = match arguments
+                    .next()
+                    .ok_or("--clip requires none or parent")?
+                    .as_str()
+                {
+                    "none" => UiClipPolicy::None,
+                    "parent" => UiClipPolicy::ClipToParent,
+                    other => return Err(format!("unknown clip policy {other:?}").into()),
+                };
+            }
+            option => return Err(format!("unknown ui-render option {option:?}").into()),
+        }
+    }
+    let resource_name = arguments
+        .next()
+        .ok_or("ui-render requires a virtual path")?;
+    let mut output_path = None;
+    let mut mounts = Vec::new();
+    for argument in arguments.by_ref() {
+        if output_path.is_none() && argument.to_ascii_lowercase().ends_with(".png") {
+            output_path = Some(PathBuf::from(argument));
+        } else {
+            mounts.push(argument);
+        }
+    }
+
+    let vfs = mount_all("ui-render", &mounts, options, ResourceKind::Ui)?;
+    let resource_path = VirtualPath::new(&resource_name)?;
+    let entry = vfs
+        .resolve(&resource_path)
+        .ok_or_else(|| format!("resource not found: {resource_path}"))?;
+    let wnd_limits = WndLimits::default();
+    let bytes = entry.read(wnd_limits.maximum_file_bytes)?;
+    let document = parse_wnd(&bytes, wnd_limits)?;
+    let layout = UiLayout::instantiate(
+        &document,
+        UiPresentation::new(viewport, scale),
+        UiLimits::default(),
+    )?;
+
+    let resource_limits = UiResourceLimits::default();
+    let catalog = load_mapped_image_catalog(&vfs, texture_size, resource_limits)?;
+    let localization = load_localization_resources(&vfs, &options.language, resource_limits)?;
+
+    // Text is resolved through the localization table before staging, so a label becomes its
+    // localized string and a literal or unresolved label stays exactly as authored.
+    let frame = layout
+        .frame(clip)
+        .with_resolved_text(&|label| localized_text(&localization, label));
+
+    let mut pages: Vec<UiTexturePage> = Vec::new();
+    let mut page_indices: BTreeMap<String, usize> = BTreeMap::new();
+    let mut bindings: BTreeMap<String, UiImageBinding> = BTreeMap::new();
+    for image in collect_frame_images(&frame) {
+        let Some(cataloged) = catalog.find(image.as_bytes()) else {
+            continue;
+        };
+        let texture = String::from_utf8_lossy(cataloged.image().texture_bytes()).into_owned();
+        if texture.is_empty() {
+            continue;
+        }
+        let page = if let Some(page) = page_indices.get(&texture) {
+            *page
+        } else {
+            {
+                let Ok((path, encoded)) = resolve_texture(&vfs, texture.as_bytes()) else {
+                    continue;
+                };
+                // TGA carries no magic bytes, so the format comes from the resolved path rather
+                // than from guessing, exactly as the terrain and model paths do.
+                let decoded = decode_viewer_texture(&encoded, image_format(&path)?)?;
+                let page =
+                    UiTexturePage::new(decoded.width(), decoded.height(), decoded.into_raw())?;
+                pages.push(page);
+                let index = pages.len() - 1;
+                page_indices.insert(texture.clone(), index);
+                index
+            }
+        };
+        bindings.insert(
+            image,
+            UiImageBinding {
+                page,
+                uv: cataloged.image().uv(),
+            },
+        );
+    }
+
+    let fonts = font_paths
+        .iter()
+        .map(fs::read)
+        .collect::<Result<Vec<Vec<u8>>, _>>()?;
+    let text_policy = if fonts.is_empty() {
+        UiTextPolicy::Placeholder
+    } else {
+        UiTextPolicy::Shape
+    };
+    let staged = StagedUiFrame::from_frame(
+        &frame,
+        [
+            u32::try_from(viewport.width())?,
+            u32::try_from(viewport.height())?,
+        ],
+        text_policy,
+        UiStagingLimits::default(),
+        &|name| bindings.get(name).copied(),
+    )?;
+
+    let renderer = pollster::block_on(HeadlessRenderer::new())?;
+    let mut font_set = if fonts.is_empty() {
+        None
+    } else {
+        Some(renderer.create_ui_font_set(&fonts)?)
+    };
+    let capture =
+        renderer.capture_ui_frame(&staged, &pages, font_set.as_mut(), [0.0, 0.0, 0.0, 1.0])?;
+
+    let path = output_path.unwrap_or(default_render_path(&resource_path, "png")?);
+    let png = encode_capture_png(&capture)?;
+    fs::write(&path, &png)?;
+    let mut report = format!(
+        "ui-render\t{}\t{}\t{}\t{}\t{}\n",
+        path.display(),
+        capture.width(),
+        capture.height(),
+        png.len(),
+        capture.sha256()
+    );
+    writeln!(
+        report,
+        "ui-render-detail\tquads={}\tbatches={}\ttext_runs={}\tpages={}\tfonts={}",
+        staged.vertices().len() / 4,
+        staged.batches().len(),
+        staged.text().len(),
+        pages.len(),
+        fonts.len()
+    )?;
+    for diagnostic in staged.diagnostics() {
+        let (kind, detail) = match diagnostic.kind() {
+            UiStagingDiagnosticKind::UnboundImage { name } => ("unbound_image", name.to_string()),
+            UiStagingDiagnosticKind::UnbalancedPopClip => ("unbalanced_pop_clip", "-".to_owned()),
+            UiStagingDiagnosticKind::UnclosedClips { depth } => {
+                ("unclosed_clips", depth.to_string())
+            }
+            UiStagingDiagnosticKind::UnshapeableText { text } => {
+                ("unshapeable_text", text.to_string())
+            }
+        };
+        writeln!(
+            report,
+            "ui-render-diagnostic\t{}\t{kind}\t{detail}",
+            diagnostic.item()
+        )?;
+    }
+    Ok(report)
+}
+
+/// Returns every distinct mapped-image name a frame draws, in first-use order.
+fn collect_frame_images(frame: &UiFrame) -> Vec<String> {
+    let mut names = Vec::new();
+    for item in frame.items() {
+        if let UiFrameItem::Quad {
+            image: Some(image), ..
+        } = item
+            && !names.iter().any(|name| name == image)
+        {
+            names.push(image.clone());
+        }
+    }
+    names
+}
+
+/// Returns a label's localized string, or `None` for a literal or unresolved label.
+fn localized_text(localization: &LocalizationResources, label: &str) -> Option<String> {
+    let (_, csf) = localization.labels()?;
+    csf.labels()
+        .iter()
+        .find(|entry| entry.name_bytes().eq_ignore_ascii_case(label.as_bytes()))
+        .and_then(|entry| entry.strings().first())
+        .map(|string| string.text().to_owned())
 }
 
 /// Reports one layout instantiated as a retained control tree for an explicit viewport.

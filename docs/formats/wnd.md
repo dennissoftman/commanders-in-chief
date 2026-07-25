@@ -1,10 +1,10 @@
 # WND Layout and R4 UI Compatibility Plan
 
-- Status: Gates 1 and 2 (bounded WND inventory/hierarchy decode and immutable typed control
-  definitions) and Gate 3 (bounded patch overlays) implemented; Gates 1-2 are verified against
-  every retail layout in both editions. Resource resolution (Gate 4) and the retained `cic-ui`
-  state (Gate 5+) not started
-- Owning crates: `cic-formats` for syntax/immutable values, planned `cic-ui` for retained state,
+- Status: Gates 1-3 (bounded decode, typed control definitions, patch overlays), Gate 4's definition
+  resources, Gate 5 (retained runtime), and Gate 6 (custom `wgpu` presentation) implemented, each
+  verified against every retail layout in both editions. Gate 4's transition/cursor/scheme subsets,
+  per-family gadget draw-data composition, and Gates 7-11 not started
+- Owning crates: `cic-formats` for syntax/immutable values, `cic-ui` for retained state,
   `cic-render` for GPU presentation
 - Last updated: 2026-07-25
 
@@ -519,6 +519,47 @@ Default limits are 4 MiB per file, 100,000 lines, 4,096 bytes per line, 16,384 d
 255-byte names, 1,024-byte values, and 256 entries per repeated field. Resolution adds 4,096
 definition files per directory tree and 65,536 catalog definitions.
 
+## Custom `wgpu` presentation
+
+Gate 6 is implemented in `crates/cic-render/src/ui.rs` (staging), `ui.wgsl` (the quad pipeline), and
+`ui_text.rs` (Unicode shaping), driven through `HeadlessRenderer::capture_ui_frame`.
+
+Staging turns a frame's ordered instructions into vertices, indices, and batches, breaking a batch
+only when the bound texture page or the scissor rectangle changes, so submission keeps the frame's
+order while still batching adjacent work. Nested clips intersect, so an inner region can never draw
+outside an outer one, and a scissor is clamped into the attachment rather than trusted — a layout may
+legitimately clip against a region partly off screen. Colour handling is explicit: pages upload in
+the capture target's own space so a sampled byte reaches the attachment unchanged, because declaring
+a page sRGB against a linear target linearizes on read without re-encoding on write and darkens every
+image. Alpha is straight, not premultiplied, matching the source's stored channel bytes.
+
+A border is drawn only for a control declaring `BORDER`. A border colour alone is inert, which
+matters because most retail controls carry one: honouring colour alone outlines the entire menu.
+
+**Text** uses `cosmic-text` 0.19 for Unicode shaping and `glyphon` 0.12 for `wgpu` glyph rendering,
+the pair ADR 0010 selected. `glyphon` 0.12 declares `wgpu ^30.0.0`, which unifies with the workspace
+`wgpu` 30 rather than pulling a second copy; both are permissively licensed (`cosmic-text` MIT or
+Apache-2.0, `glyphon` MIT, Apache-2.0, or Zlib) and so compatible with this project's GPL-3.0-only
+licence. Fonts are always supplied as bytes by the caller: nothing enumerates host fonts, because a
+capture that silently picked up a platform face would hash differently on another machine. With no
+font supplied, staging emits a visible placeholder bar per run and a diagnostic instead of silently
+dropping the text. A secret entry field renders one mask glyph per character, never its contents.
+
+Verified against a real installation at 1280x720 with a user-owned font: `MainMenu.wnd` stages 37
+quads in 12 batches over three texture pages with 29 shaped runs, `OptionsMenu.wnd` 41 quads and 25
+runs, `SkirmishGameOptionsMenu.wnd` 52 quads and 21 runs. Repeated runs produce byte-identical
+hashes. Localized labels resolve through the CSF decoder before staging, so the capture shows real
+menu text.
+
+### Known gap: multi-entry gadget composition
+
+A draw-data record holds nine entries, and the gadget renderers compose them per family — a push
+button's ends and repeating centre, a slider's track pieces, a list box's scroll parts. This
+implementation draws **entry 0 stretched across the control's rectangle**, so a control whose art is
+authored as separate pieces renders as one stretched piece. Geometry, batching, clipping, colour,
+text, and determinism are correct; per-family entry composition is not implemented and is the next
+presentation step. It needs the `W3DGadget*` renderers read at the pinned revision.
+
 ## Retained UI behavior
 
 The parser returns definitions; `cic-ui` creates retained instances. That crate is implemented for
@@ -687,8 +728,11 @@ before R5.
   policy and reports the retained tree with resolved and screen-space rectangles, live state, status
   bits, control family, tab order, frame submission order, and diagnostics. Nothing is read from the
   host display, so the report is reproducible on any machine.
-- `cic-inspect ui-render` (planned) emits a deterministic synthetic PNG/hash for an explicit layout,
-  viewport, scale policy, locale, font set, time, and input/state snapshot.
+- `cic-inspect ui-render` (implemented) executes a retained frame on the GPU and writes a
+  surface-free PNG plus an RGBA SHA-256 hash. Every presentation input is explicit — viewport, scale
+  policy, clip policy, language, texture-size selection, and the font files used for shaping — so two
+  runs with the same inputs produce the same bytes. It reports staged quad, batch, text-run, page, and
+  font counts plus every staging diagnostic.
 - `cic-inspect ui-demo` (planned) launches the interactive main-menu/skirmish compatibility harness.
 
 The checked-in completion artifact is entirely original. Installed verification records aggregate

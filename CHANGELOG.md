@@ -141,6 +141,28 @@ land under the active milestone heading.
   census's window count. That pass also measured that the whole corpus declares only nine `TABSTOP`
   controls, so keyboard traversal of a retail menu will need project-owned tab order.
 
+- Added custom `wgpu` presentation for retained UI, so a decoded layout renders as a real menu rather
+  than as flat rectangles. `cic-render` stages a frame into batched geometry - breaking a batch only
+  when the bound texture page or scissor rectangle changes - and executes it through the existing
+  surface-free capture boundary. Nested clips intersect and are clamped into the attachment, alpha is
+  straight rather than premultiplied to match the source's stored channel bytes, and texture pages
+  upload in the capture target's own colour space so a sampled byte reaches the attachment unchanged.
+  A border draws only for a control declaring `BORDER`; honouring a border colour alone outlines the
+  entire menu, because most retail controls carry one.
+- Added Unicode text shaping through `cosmic-text` 0.19 and `glyphon` 0.12, the pair ADR 0010
+  selected. `glyphon` 0.12 declares `wgpu ^30.0.0` and unifies with the workspace `wgpu` 30 rather
+  than pulling a second copy, and both licences are permissive. Fonts are always supplied as bytes by
+  the caller - nothing enumerates host fonts, because a capture that silently picked up a platform
+  face would hash differently on another machine. With no font supplied, a visible placeholder bar and
+  a diagnostic stand in for each run instead of the text silently disappearing, and a secret entry
+  field renders one mask glyph per character rather than its contents.
+- Added `cic-inspect ui-render`, which writes a deterministic PNG plus an RGBA SHA-256 hash from
+  explicit inputs only: viewport, scale policy, clip policy, language, texture-size selection, and
+  font files. Verified against a real installation at 1280x720 - `MainMenu.wnd` stages 37 quads in 12
+  batches over three texture pages with 29 shaped runs, `OptionsMenu.wnd` 41 quads and 25 runs,
+  `SkirmishGameOptionsMenu.wnd` 52 quads and 21 runs - with byte-identical hashes across repeated
+  runs and localized labels resolved through the CSF decoder before staging.
+
 ### Fixed
 
 - Corrected the recorded mapped-image load policy. This project had documented

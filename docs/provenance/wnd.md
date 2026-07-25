@@ -239,5 +239,22 @@ tab list. `cic-ui` reproduces the manager's wraparound cycle and derives the lis
 
 The arena representation, typed `UiEvent` values, the `Modern` scale policy, the clip policy, the
 frame vocabulary, the character-wise text-editing model, diagnostics, and every limit are project
-design. Gate 4's transition, cursor, and menu-scheme subsets and everything else recorded above
+design.
+
+`crates/cic-render/src/ui.rs`, `ui.wgsl`, and `ui_text.rs` implement Gate 6 as original project
+presentation: the batching scheme, vertex format, shader, clip intersection and clamping, placeholder
+policy, and capture path derive no algorithm from the legacy Direct3D UI renderer. Two behaviours do
+follow the source: a border is drawn only for a control declaring `WIN_STATUS_BORDER`, and the
+enabled/disabled/hilite slot selection follows the three-state draw data every gadget declares.
+
+Text uses `cosmic-text` 0.19 (MIT or Apache-2.0) and `glyphon` 0.12 (MIT, Apache-2.0, or Zlib), the
+pair ADR 0010 selected, at the current releases satisfying it. `glyphon` 0.12 declares
+`wgpu ^30.0.0`, which unifies with the workspace `wgpu` 30 — verified with `cargo tree -i wgpu`,
+which reports one `wgpu v30.0.0` shared by both. Both licences are permissive and compatible with
+this project's GPL-3.0-only licence; neither library defines UI semantics.
+
+One gap is deliberate and recorded rather than approximated: a draw-data record holds nine entries
+that the `W3DGadget*` renderers compose per gadget family, and this implementation draws entry 0
+stretched across the control rectangle. Composing the remaining entries requires reading those
+renderers at the pinned revision and is not yet done. Gate 4's transition, cursor, and menu-scheme subsets and everything else recorded above
 remain design-only.

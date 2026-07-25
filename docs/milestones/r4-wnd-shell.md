@@ -107,6 +107,34 @@ Reading the runtime source produced one finding worth recording: `GameWindow::wi
 focus, so per-window tab traversal is not source behavior. The live mechanism is the window manager's
 tab list, whose wraparound cycle `cic-ui` reproduces over the declared `TABSTOP` bits.
 
+Gate 6 (custom `wgpu` presentation) is implemented. `cic-render` stages a retained frame into batched
+geometry, breaking a batch only when the bound texture page or scissor rectangle changes, and executes
+it through the existing surface-free capture boundary. Nested clips intersect and are clamped into the
+attachment; alpha is straight to match the source's stored channel bytes; pages upload in the capture
+target's colour space, because declaring a page sRGB against a linear target linearizes on read
+without re-encoding on write and darkens every image. A border draws only for a control declaring
+`BORDER` — honouring a border colour alone outlines the entire menu, since most retail controls carry
+one.
+
+The text stack is settled and pinned: `cosmic-text` 0.19 for shaping and `glyphon` 0.12 for `wgpu`
+glyph rendering, the pair ADR 0010 selected. `glyphon` 0.12 declares `wgpu ^30.0.0` and unifies with
+the workspace `wgpu` 30 rather than pulling a second copy, verified with `cargo tree -i wgpu`; both
+licences are permissive and compatible with GPL-3.0-only. Fonts are always supplied as bytes, never
+enumerated from the host, and a capture with no font supplied stages a visible placeholder bar plus a
+diagnostic per run.
+
+Verified against a real installation at 1280x720 with a user-owned font: `MainMenu.wnd` stages 37
+quads in 12 batches over three texture pages with 29 shaped runs, `OptionsMenu.wnd` 41 quads and 25
+runs, `SkirmishGameOptionsMenu.wnd` 52 quads and 21 runs, with byte-identical hashes across repeated
+runs. Localized labels resolve through the CSF decoder before staging, so captures show real menu text
+in the right places.
+
+One gap is recorded rather than approximated: a draw-data record holds nine entries that the source's
+`W3DGadget*` renderers compose per gadget family, and this implementation draws entry 0 stretched
+across the control rectangle, so art authored as separate pieces renders as one stretched piece.
+Geometry, batching, clipping, colour, text, and determinism are correct; per-family composition is the
+next presentation step.
+
 The Gate 3 patch work was verified end to end against the retail `OptionsMenu.wnd`: the stock
 `ComboBoxResolution` is
 reused and repositioned while a project-owned refresh-rate combo is inserted beside it. That is
@@ -228,7 +256,8 @@ source WND bytes are edited and no renderer path searches for special window nam
    show/hide/enable, parent-relative layout, classic/modern resolution policies, clipping, z-order,
    hit testing, capture, focus, tab order, hover, press, selection, text editing, scrolling, and
    control-specific invariants. UI state is presentation state, not simulation state.
-6. **Custom `wgpu` presentation.** Render ordered colored/image quads, borders, state overlays,
+6. **Custom `wgpu` presentation (implemented; per-family gadget draw-data composition pending).**
+   Render ordered colored/image quads, borders, state overlays,
    scissor rectangles, cursors, and shaped Unicode text over either a 2D background or an R3 scene.
    Support source alpha and explicit color-space handling, bounded atlases, batched stable draws,
    explicit transition time, and surface-free deterministic capture.
