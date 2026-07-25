@@ -24,7 +24,7 @@ never included in fixtures or captures.
 The first record is a numeric `FILE_VERSION`. Version 2 and later require a layout block:
 
 ```text
-FILE_VERSION = <version>
+FILE_VERSION = <version>;
 STARTLAYOUTBLOCK
   LAYOUTINIT = <name>;
   LAYOUTUPDATE = <name>;
@@ -42,9 +42,22 @@ WINDOW
     WINDOW
       ...
     END
+  CHILD
+    WINDOW
+      ...
+    END
   ENDALLCHILDREN
 END
 ```
+
+`FILE_VERSION` is itself a semicolon-terminated record, not a bare newline-terminated one — every
+retail `.wnd` file in `Window.big` opens with `FILE_VERSION = 2;`. `CHILD` is not a single keyword
+introducing the whole child list: it precedes **each** child individually (`CHILD` `WINDOW` `...`
+`END`, repeated once per child), and `ENDALLCHILDREN` appears exactly once after the last child,
+immediately before the parent's own `END`. A window with no children omits `CHILD`/`ENDALLCHILDREN`
+entirely. Both facts were confirmed by decoding real retail archives during implementation, not
+merely inferred from the pinned source excerpt; no retail file content is reproduced here or in any
+fixture.
 
 The lexical grammar is now confirmed directly from `winCreateFromScript` and `parseLayoutBlock` in
 `GameWindowManagerScript.cpp`: there is no comment syntax; `;` is a hard statement terminator (a

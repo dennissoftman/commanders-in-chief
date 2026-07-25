@@ -328,8 +328,10 @@ pub enum WndError {
     /// A `SCREENRECT` value did not match the source `UPPERLEFT`/`BOTTOMRIGHT`/
     /// `CREATIONRESOLUTION` grammar.
     InvalidScreenRect { line: usize },
-    /// A token inside `CHILD`/`ENDALLCHILDREN` was not `WINDOW` or `ENDALLCHILDREN`.
+    /// The token immediately after a `CHILD` keyword was not `WINDOW`.
     ExpectedChildWindow { line: usize },
+    /// A `WINDOW` block declared at least one `CHILD` but closed without `ENDALLCHILDREN`.
+    MissingEndAllChildren { line: usize },
     /// The document exceeds [`WndLimits::maximum_windows`].
     TooManyWindows { limit: usize },
     /// A `CHILD` nesting exceeds [`WndLimits::maximum_depth`].
@@ -398,7 +400,11 @@ impl Display for WndError {
             }
             Self::ExpectedChildWindow { line } => write!(
                 formatter,
-                "WND CHILD at line {line} expected WINDOW or ENDALLCHILDREN"
+                "WND CHILD at line {line} must be followed by WINDOW"
+            ),
+            Self::MissingEndAllChildren { line } => write!(
+                formatter,
+                "WND WINDOW at line {line} declared CHILD but never ENDALLCHILDREN"
             ),
             Self::TooManyWindows { limit } => write!(formatter, "WND exceeds {limit} windows"),
             Self::TooDeeplyNested { limit } => {
@@ -628,10 +634,10 @@ fn read_file_version(cursor: &mut Cursor<'_>, limits: WndLimits) -> Result<u32, 
         return Err(WndError::MissingFileVersion { line: keyword.line });
     }
     expect_equals(cursor, limits, keyword.line)?;
-    let value = cursor.next_token(limits)?;
-    let text = decode_token(&value)?;
-    text.parse::<u32>()
-        .map_err(|_| WndError::InvalidFileVersion { line: value.line })
+    let value = cursor.read_value_until_semicolon(limits)?;
+    value
+        .parse::<u32>()
+        .map_err(|_| WndError::InvalidFileVersion { line: keyword.line })
 }
 
 fn read_layout_block(
@@ -780,33 +786,36 @@ fn parse_window(
     let mut rect = None;
     let mut fields = Vec::new();
     let mut children = Vec::new();
+    let mut saw_endallchildren = false;
 
     loop {
         let token = cursor.next_token(limits)?;
         if token.text == b"END" {
+            if !children.is_empty() && !saw_endallchildren {
+                return Err(WndError::MissingEndAllChildren { line: window_line });
+            }
             break;
         }
+        if token.text == b"ENDALLCHILDREN" {
+            saw_endallchildren = true;
+            continue;
+        }
         if token.text == b"CHILD" {
-            loop {
-                let child_token = cursor.next_token(limits)?;
-                if child_token.text == b"ENDALLCHILDREN" {
-                    break;
-                }
-                if child_token.text != b"WINDOW" {
-                    return Err(WndError::ExpectedChildWindow {
-                        line: child_token.line,
-                    });
-                }
-                let child = parse_window(
-                    cursor,
-                    limits,
-                    state,
-                    diagnostics,
-                    depth + 1,
-                    child_token.line,
-                )?;
-                children.push(child);
+            let child_token = cursor.next_token(limits)?;
+            if child_token.text != b"WINDOW" {
+                return Err(WndError::ExpectedChildWindow {
+                    line: child_token.line,
+                });
             }
+            let child = parse_window(
+                cursor,
+                limits,
+                state,
+                diagnostics,
+                depth + 1,
+                child_token.line,
+            )?;
+            children.push(child);
             continue;
         }
         if token.text == b"SCREENRECT" {
@@ -920,7 +929,7 @@ mod tests {
     use super::{WndDiagnosticKind, WndError, WndLimits, parse_wnd};
 
     fn positive_fixture() -> &'static [u8] {
-        b"FILE_VERSION = 2\n\
+        b"FILE_VERSION = 2;\n\
 STARTLAYOUTBLOCK\n\
   LAYOUTINIT = SyntheticMenuInit;\n\
   LAYOUTUPDATE = SyntheticMenuUpdate;\n\
@@ -971,7 +980,7 @@ END"
 
     #[test]
     fn version_one_defaults_every_layout_callback_to_the_source_none_literal() {
-        let bytes = b"FILE_VERSION = 1\nWINDOW\n  WINDOWTYPE = PUSHBUTTON;\n  SCREENRECT = UPPERLEFT: 0 0 BOTTOMRIGHT: 1 1 CREATIONRESOLUTION: 800 600;\nEND\n";
+        let bytes = b"FILE_VERSION = 1;\nWINDOW\n  WINDOWTYPE = PUSHBUTTON;\n  SCREENRECT = UPPERLEFT: 0 0 BOTTOMRIGHT: 1 1 CREATIONRESOLUTION: 800 600;\nEND\n";
         let document = parse_wnd(bytes, WndLimits::default()).expect("version 1 WND");
         let layout = document.layout().expect("default layout block");
         assert_eq!(layout.init(), Some("[None]"));
@@ -992,7 +1001,7 @@ END"
 
     #[test]
     fn rejects_a_document_with_no_windows() {
-        let bytes = b"FILE_VERSION = 2\nSTARTLAYOUTBLOCK\nENDLAYOUTBLOCK\n";
+        let bytes = b"FILE_VERSION = 2;\nSTARTLAYOUTBLOCK\nENDLAYOUTBLOCK\n";
         assert_eq!(
             parse_wnd(bytes, WndLimits::default()),
             Err(WndError::NoWindows)
@@ -1004,7 +1013,7 @@ END"
         let default = WndLimits::default();
         let cases: [(&[u8], WndLimits); 6] = [
             (
-                b"FILE_VERSION = 1\n",
+                b"FILE_VERSION = 1;\n",
                 WndLimits {
                     maximum_file_bytes: 4,
                     ..default
@@ -1025,21 +1034,21 @@ END"
                 },
             ),
             (
-                b"FILE_VERSION = 1\nWINDOW\n  WINDOWTYPE = PUSHBUTTON;\n  SCREENRECT = UPPERLEFT: 0 0 BOTTOMRIGHT: 1 1 CREATIONRESOLUTION: 800 600;\n  DATA = one two three four five six seven eight nine ten eleven twelve;\nEND\n",
+                b"FILE_VERSION = 1;\nWINDOW\n  WINDOWTYPE = PUSHBUTTON;\n  SCREENRECT = UPPERLEFT: 0 0 BOTTOMRIGHT: 1 1 CREATIONRESOLUTION: 800 600;\n  DATA = one two three four five six seven eight nine ten eleven twelve;\nEND\n",
                 WndLimits {
                     maximum_record_bytes: 8,
                     ..default
                 },
             ),
             (
-                b"FILE_VERSION = 1\nWINDOW\n  WINDOWTYPE = ASuperLongWindowTypeNameThatExceedsTheField;\n  SCREENRECT = UPPERLEFT: 0 0 BOTTOMRIGHT: 1 1 CREATIONRESOLUTION: 800 600;\nEND\n",
+                b"FILE_VERSION = 1;\nWINDOW\n  WINDOWTYPE = ASuperLongWindowTypeNameThatExceedsTheField;\n  SCREENRECT = UPPERLEFT: 0 0 BOTTOMRIGHT: 1 1 CREATIONRESOLUTION: 800 600;\nEND\n",
                 WndLimits {
                     maximum_field_bytes: 4,
                     ..default
                 },
             ),
             (
-                b"FILE_VERSION = 1\nWINDOW\n  WINDOWTYPE = PUSHBUTTON;\n  SCREENRECT = UPPERLEFT: 0 0 BOTTOMRIGHT: 1 1 CREATIONRESOLUTION: 800 600;\nEND\n",
+                b"FILE_VERSION = 1;\nWINDOW\n  WINDOWTYPE = PUSHBUTTON;\n  SCREENRECT = UPPERLEFT: 0 0 BOTTOMRIGHT: 1 1 CREATIONRESOLUTION: 800 600;\nEND\n",
                 WndLimits {
                     maximum_windows: 0,
                     ..default
@@ -1053,7 +1062,7 @@ END"
             );
         }
 
-        let nested = b"FILE_VERSION = 1\nWINDOW\n  WINDOWTYPE = PUSHBUTTON;\n  SCREENRECT = UPPERLEFT: 0 0 BOTTOMRIGHT: 1 1 CREATIONRESOLUTION: 800 600;\n  CHILD\n    WINDOW\n      WINDOWTYPE = STATICTEXT;\n      SCREENRECT = UPPERLEFT: 0 0 BOTTOMRIGHT: 1 1 CREATIONRESOLUTION: 800 600;\n    END\n  ENDALLCHILDREN\nEND\n";
+        let nested = b"FILE_VERSION = 1;\nWINDOW\n  WINDOWTYPE = PUSHBUTTON;\n  SCREENRECT = UPPERLEFT: 0 0 BOTTOMRIGHT: 1 1 CREATIONRESOLUTION: 800 600;\n  CHILD\n    WINDOW\n      WINDOWTYPE = STATICTEXT;\n      SCREENRECT = UPPERLEFT: 0 0 BOTTOMRIGHT: 1 1 CREATIONRESOLUTION: 800 600;\n    END\n  ENDALLCHILDREN\nEND\n";
         assert!(matches!(
             parse_wnd(
                 nested,
@@ -1068,7 +1077,7 @@ END"
 
     #[test]
     fn unknown_top_level_and_window_fields_are_retained_and_diagnosed() {
-        let bytes = b"FILE_VERSION = 1\nSOMEUNKNOWNTOPLEVEL = 1;\nWINDOW\n  WINDOWTYPE = PUSHBUTTON;\n  SCREENRECT = UPPERLEFT: 0 0 BOTTOMRIGHT: 1 1 CREATIONRESOLUTION: 800 600;\n  SOMEUNKNOWNWINDOWFIELD = value;\nEND\n";
+        let bytes = b"FILE_VERSION = 1;\nSOMEUNKNOWNTOPLEVEL = 1;\nWINDOW\n  WINDOWTYPE = PUSHBUTTON;\n  SCREENRECT = UPPERLEFT: 0 0 BOTTOMRIGHT: 1 1 CREATIONRESOLUTION: 800 600;\n  SOMEUNKNOWNWINDOWFIELD = value;\nEND\n";
         let document = parse_wnd(bytes, WndLimits::default()).expect("valid WND");
 
         assert_eq!(document.top_level_fields().len(), 1);
@@ -1088,9 +1097,31 @@ END"
 
     #[test]
     fn recognizes_confirmed_top_level_default_visual_keywords_without_diagnostics() {
-        let bytes = b"FILE_VERSION = 1\nENABLEDCOLOR = 255 255 255 255;\nFONT = Arial 10 0;\nWINDOW\n  WINDOWTYPE = PUSHBUTTON;\n  SCREENRECT = UPPERLEFT: 0 0 BOTTOMRIGHT: 1 1 CREATIONRESOLUTION: 800 600;\nEND\n";
+        let bytes = b"FILE_VERSION = 1;\nENABLEDCOLOR = 255 255 255 255;\nFONT = Arial 10 0;\nWINDOW\n  WINDOWTYPE = PUSHBUTTON;\n  SCREENRECT = UPPERLEFT: 0 0 BOTTOMRIGHT: 1 1 CREATIONRESOLUTION: 800 600;\nEND\n";
         let document = parse_wnd(bytes, WndLimits::default()).expect("valid WND");
         assert_eq!(document.top_level_fields().len(), 2);
         assert!(document.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn decodes_multiple_children_each_wrapped_in_its_own_child_keyword() {
+        // Every retail WND file precedes each child with its own CHILD keyword (`CHILD WINDOW
+        // ... END`, repeated) rather than one CHILD wrapping the whole list, and closes the
+        // list with a single ENDALLCHILDREN before the parent's own END.
+        let bytes = b"FILE_VERSION = 1;\nWINDOW\n  WINDOWTYPE = USER;\n  SCREENRECT = UPPERLEFT: 0 0 BOTTOMRIGHT: 1 1 CREATIONRESOLUTION: 800 600;\n  CHILD\n    WINDOW\n      WINDOWTYPE = PUSHBUTTON;\n      SCREENRECT = UPPERLEFT: 0 0 BOTTOMRIGHT: 1 1 CREATIONRESOLUTION: 800 600;\n    END\n  CHILD\n    WINDOW\n      WINDOWTYPE = STATICTEXT;\n      SCREENRECT = UPPERLEFT: 0 0 BOTTOMRIGHT: 1 1 CREATIONRESOLUTION: 800 600;\n    END\n  ENDALLCHILDREN\nEND\n";
+        let document = parse_wnd(bytes, WndLimits::default()).expect("valid WND");
+        let root = &document.windows()[0];
+        assert_eq!(root.children().len(), 2);
+        assert_eq!(root.children()[0].window_type(), "PUSHBUTTON");
+        assert_eq!(root.children()[1].window_type(), "STATICTEXT");
+    }
+
+    #[test]
+    fn rejects_children_without_a_closing_endallchildren() {
+        let bytes = b"FILE_VERSION = 1;\nWINDOW\n  WINDOWTYPE = USER;\n  SCREENRECT = UPPERLEFT: 0 0 BOTTOMRIGHT: 1 1 CREATIONRESOLUTION: 800 600;\n  CHILD\n    WINDOW\n      WINDOWTYPE = PUSHBUTTON;\n      SCREENRECT = UPPERLEFT: 0 0 BOTTOMRIGHT: 1 1 CREATIONRESOLUTION: 800 600;\n    END\nEND\n";
+        assert!(matches!(
+            parse_wnd(bytes, WndLimits::default()),
+            Err(WndError::MissingEndAllChildren { .. })
+        ));
     }
 }

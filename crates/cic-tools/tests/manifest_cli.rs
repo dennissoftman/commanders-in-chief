@@ -626,7 +626,7 @@ fn map_lighting_fixture() -> Vec<u8> {
 }
 
 fn wnd_fixture() -> &'static [u8] {
-    b"FILE_VERSION = 2\n\
+    b"FILE_VERSION = 2;\n\
 STARTLAYOUTBLOCK\n\
   LAYOUTINIT = SyntheticMenuInit;\n\
   LAYOUTUPDATE = SyntheticMenuUpdate;\n\

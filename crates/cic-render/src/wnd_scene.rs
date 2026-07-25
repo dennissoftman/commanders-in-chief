@@ -233,7 +233,7 @@ mod tests {
 
     #[test]
     fn stages_every_window_rect_in_source_order() {
-        let bytes = b"FILE_VERSION = 1\n\
+        let bytes = b"FILE_VERSION = 1;\n\
 WINDOW\n\
   WINDOWTYPE = PUSHBUTTON;\n\
   SCREENRECT = UPPERLEFT: 0 0 BOTTOMRIGHT: 100 50 CREATIONRESOLUTION: 800 600;\n\
