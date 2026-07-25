@@ -13,6 +13,7 @@ mod terrain_viewer;
 mod terrain_virtual;
 mod viewer;
 mod water;
+mod wnd_scene;
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -54,6 +55,7 @@ pub use water::{
     StagedWater, WaterAppearance, WaterCausticSequence, WaterPresentationPolicy,
     WaterSurfaceTexture,
 };
+pub use wnd_scene::{StagedWndScene, WndQuadVertex, WndSceneError};
 
 const CAPTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const BYTES_PER_PIXEL: u32 = 4;
@@ -240,6 +242,7 @@ pub struct HeadlessRenderer {
     queue: wgpu::Queue,
     synthetic_pipeline: wgpu::RenderPipeline,
     model_pipeline: wgpu::RenderPipeline,
+    wnd_pipeline: wgpu::RenderPipeline,
     terrain_pipeline: wgpu::RenderPipeline,
     terrain_edge_pipeline: wgpu::RenderPipeline,
     terrain_layout: wgpu::BindGroupLayout,
@@ -393,6 +396,49 @@ impl HeadlessRenderer {
             multiview_mask: None,
             cache: None,
         });
+        let wnd_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("cic-render wnd pipeline"),
+            layout: None,
+            vertex: wgpu::VertexState {
+                module: &model_shader,
+                entry_point: Some("vertex_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: 28,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x3,
+                            offset: 0,
+                            shader_location: 0,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x4,
+                            offset: 12,
+                            shader_location: 1,
+                        },
+                    ],
+                })],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &model_shader,
+                entry_point: Some("fragment_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: CAPTURE_FORMAT,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         let terrain_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cic-render terrain shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("terrain.wgsl").into()),
@@ -463,6 +509,7 @@ impl HeadlessRenderer {
             queue,
             synthetic_pipeline,
             model_pipeline,
+            wnd_pipeline,
             terrain_pipeline,
             terrain_edge_pipeline,
             terrain_layout,
@@ -664,6 +711,120 @@ impl HeadlessRenderer {
                 multiview_mask: None,
             });
             pass.set_pipeline(&self.model_pipeline);
+            pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+            pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..index_count, 0, 0..1);
+        }
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            texture.size(),
+        );
+        self.finish_capture(encoder, &readback, width, height, unpadded_row, padded_row)
+    }
+
+    /// Renders a staged WND scene's window rectangles as flat alpha-blended quads, in source
+    /// order, over an explicit background color. No depth test is used: painter's-order
+    /// (source order) determines overlap, matching a 2D UI's draw order rather than a 3D
+    /// scene's depth.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured error for an empty scene, overflowing dimensions/geometry, or
+    /// GPU submission/readback failures.
+    pub fn capture_wnd_scene(
+        &self,
+        scene: &StagedWndScene,
+        background: [f64; 4],
+    ) -> Result<Capture, RenderError> {
+        if scene.vertices().is_empty() {
+            return Err(RenderError::EmptyWndScene);
+        }
+        let [width, height] = scene.canvas();
+        let (unpadded_row, padded_row, buffer_size) = capture_layout(width, height)?;
+        let index_count =
+            u32::try_from(scene.indices().len()).map_err(|_| RenderError::GeometryTooLarge)?;
+        let vertex_bytes = scene.vertex_bytes();
+        let index_bytes = scene.index_bytes();
+        let vertex_size =
+            u64::try_from(vertex_bytes.len()).map_err(|_| RenderError::GeometryTooLarge)?;
+        let index_size =
+            u64::try_from(index_bytes.len()).map_err(|_| RenderError::GeometryTooLarge)?;
+        let vertex_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cic-render wnd vertices"),
+            size: vertex_size,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let index_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cic-render wnd indices"),
+            size: index_size,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.queue.write_buffer(&vertex_buffer, 0, &vertex_bytes);
+        self.queue.write_buffer(&index_buffer, 0, &index_bytes);
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("cic-render wnd target"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: CAPTURE_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cic-render wnd readback"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("cic-render wnd encoder"),
+            });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("cic-render wnd pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: background[0],
+                            g: background[1],
+                            b: background[2],
+                            a: background[3],
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.wnd_pipeline);
             pass.set_vertex_buffer(0, vertex_buffer.slice(..));
             pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..index_count, 0, 0..1);
@@ -1525,6 +1686,7 @@ pub enum RenderError {
     InvalidMaterial,
     InvalidTexture,
     TextureTooLarge,
+    EmptyWndScene,
 }
 
 impl Display for RenderError {
@@ -1561,6 +1723,7 @@ impl Display for RenderError {
             Self::TextureTooLarge => {
                 formatter.write_str("decoded texture resources exceed renderer limits")
             }
+            Self::EmptyWndScene => formatter.write_str("staged WND scene contains no window quads"),
         }
     }
 }

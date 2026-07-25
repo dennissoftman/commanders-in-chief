@@ -16,6 +16,7 @@ mod w3d_material;
 mod w3d_mesh;
 mod w3d_scene;
 mod water_ini;
+mod wnd;
 
 pub use csf::{CsfError, CsfFile, CsfHeader, CsfLabel, CsfLimits, CsfString, parse_csf};
 pub use map::{
@@ -74,4 +75,8 @@ pub use w3d_scene::{
 pub use water_ini::{
     WaterIni, WaterIniError, WaterIniLimits, WaterRgba8, WaterSetIni, WaterTransparencyIni,
     parse_water_ini, parse_water_transparency_ini,
+};
+pub use wnd::{
+    WndDiagnostic, WndDiagnosticKind, WndDocument, WndError, WndField, WndLayoutBlock, WndLimits,
+    WndScreenRect, WndWindow, parse_wnd,
 };

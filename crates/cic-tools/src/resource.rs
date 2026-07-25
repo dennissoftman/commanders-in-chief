@@ -34,6 +34,8 @@ pub enum ResourceKind {
     W3d,
     /// W3D model and texture archives.
     W3dWithTextures,
+    /// WND UI-layout archives.
+    Wnd,
 }
 
 /// Explicit bounds for a declarative mount profile.
@@ -631,6 +633,15 @@ fn edition_archives(
             "TexturesZH.big",
             "PatchZH.big",
         ],
+        // Verified against an installed archive listing: both editions ship a `PatchWindow.big`
+        // (no ZH-suffixed variant) carrying WND-specific patch overrides layered between the base
+        // window archive and the generic patch archive.
+        (GameEdition::Generals, ResourceKind::Wnd) => {
+            vec!["Window.big", "PatchWindow.big", "Patch.big"]
+        }
+        (GameEdition::ZeroHour, ResourceKind::Wnd) => {
+            vec!["WindowZH.big", "PatchWindow.big", "PatchZH.big"]
+        }
     };
     let mut paths = Vec::with_capacity(names.len());
     for name in names {
