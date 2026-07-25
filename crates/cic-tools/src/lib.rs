@@ -1225,7 +1225,7 @@ fn ui_control_kind_name(kind: &UiControlKind) -> &'static str {
         UiControlKind::ListBox { .. } => "list_box",
         UiControlKind::ComboBox { .. } => "combo_box",
         UiControlKind::TextEntry { .. } => "text_entry",
-        UiControlKind::StaticText => "static_text",
+        UiControlKind::StaticText { .. } => "static_text",
         UiControlKind::ProgressBar { .. } => "progress_bar",
         UiControlKind::TabControl { .. } => "tab_control",
         UiControlKind::Generic => "generic",

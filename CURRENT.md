@@ -70,12 +70,18 @@ with GPL-3.0-only. `cic-inspect ui-render` writes a deterministic PNG plus hash 
 only, and renders the retail main menu, options menu, and skirmish options with correct geometry,
 batching, clipping, colour, and localized text, byte-identical across runs.
 
-The next verified step is **per-family gadget draw-data composition**. A draw-data record holds nine
-entries that the source's `W3DGadget*` renderers compose per family — a push button's ends and
-repeating centre, a slider's track pieces, a list box's scroll parts — and this implementation draws
-entry 0 stretched across the control rectangle. Everything else about presentation is correct, so a
-retail menu renders in the right places with the right text but with stretched single-piece art. That
-needs the `W3DGadget*` renderers read at the pinned revision.
+Push-button draw-data composition is implemented from `GadgetPushButton.h` and
+`W3DGadgetPushButtonImageDraw`, along with the centred button text `drawButtonText` produces. The
+retail main menu now renders as a real menu: background art, logo, gold-framed buttons, centred
+localized labels.
+
+The next verified step is **the remaining families' draw-data composition** — sliders, list boxes,
+combo boxes, check boxes, text entry, progress bars, and tab controls — each needing its `Gadget*.h`
+index map and `W3DGadget*` geometry read at the pinned revision. Until then those controls stage a
+visible placeholder plus an `UncomposedFamily` diagnostic rather than a misleading fill. One finding
+shapes that work: the draw procedure is selected by the control's retained draw-callback name (an
+`...ImageDraw` variant against a plain `...Draw`), not by the `IMAGE` status bit, so that name is the
+correct discriminator.
 
 Two smaller pieces remain queued: the rest of Gate 4 — bounded `WindowTransition`, `MouseCursor`, and
 `ShellMenuScheme` subsets, which live in the same INI family and reuse the shared lexer — and Gate 7's

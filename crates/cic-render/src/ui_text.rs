@@ -20,7 +20,8 @@
 
 use std::sync::Arc;
 
-use cosmic_text::fontdb;
+use cic_ui::UiTextAlign;
+use cosmic_text::{Align, fontdb};
 use glyphon::{
     Attrs, Buffer, Cache, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache, TextArea,
     TextAtlas, TextBounds, TextRenderer, Viewport, Weight,
@@ -154,13 +155,34 @@ impl UiFontSet {
                 Weight::NORMAL
             };
             let attrs = Attrs::new().family(Family::Name(family)).weight(weight);
-            buffer.set_text(&run.text, &attrs, Shaping::Advanced, None);
+            // `drawButtonText` centres a button's text on both axes. Horizontal centring is the
+            // shaper's own alignment; the vertical half is a placement offset computed below from
+            // the shaped height, since the source centres the measured text block in the control.
+            let align = match run.align {
+                UiTextAlign::Centered => Some(Align::Center),
+                UiTextAlign::TopLeft => None,
+            };
+            buffer.set_text(&run.text, &attrs, Shaping::Advanced, align);
             buffer.shape_until_scroll(&mut self.fonts, false);
             buffers.push(buffer);
         }
 
         let areas = runs.iter().zip(&buffers).map(|(run, buffer)| {
             let bounds = run.scissor.unwrap_or(run.rect);
+            let top_offset = match run.align {
+                UiTextAlign::Centered => {
+                    let lines = buffer.layout_runs().count().max(1);
+                    #[expect(clippy::cast_precision_loss, reason = "a shaped run has few lines")]
+                    let shaped_height = buffer.metrics().line_height * lines as f32;
+                    #[expect(
+                        clippy::cast_precision_loss,
+                        reason = "layout rectangles are small pixel counts"
+                    )]
+                    let available = run.rect.height as f32;
+                    ((available - shaped_height) / 2.0).max(0.0)
+                }
+                UiTextAlign::TopLeft => 0.0,
+            };
             TextArea {
                 buffer,
                 #[expect(
@@ -172,7 +194,7 @@ impl UiFontSet {
                     clippy::cast_precision_loss,
                     reason = "layout rectangles are small pixel counts"
                 )]
-                top: run.rect.y as f32,
+                top: run.rect.y as f32 + top_offset,
                 scale: 1.0,
                 bounds: TextBounds {
                     left: bounds.x,

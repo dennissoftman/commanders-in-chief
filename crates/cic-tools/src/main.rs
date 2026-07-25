@@ -2071,11 +2071,13 @@ where
                 index
             }
         };
+        let (width, height) = cataloged.image().image_size();
         bindings.insert(
             image,
             UiImageBinding {
                 page,
                 uv: cataloged.image().uv(),
+                size: [width, height],
             },
         );
     }
@@ -2139,6 +2141,9 @@ where
             UiStagingDiagnosticKind::UnshapeableText { text } => {
                 ("unshapeable_text", text.to_string())
             }
+            UiStagingDiagnosticKind::UncomposedFamily { window_type } => {
+                ("uncomposed_family", window_type.to_string())
+            }
         };
         writeln!(
             report,
@@ -2149,16 +2154,19 @@ where
     Ok(report)
 }
 
-/// Returns every distinct mapped-image name a frame draws, in first-use order.
+/// Returns every distinct mapped-image name a frame can draw, in first-use order.
+///
+/// Every entry of a quad's slot is collected, not just the background: a family that composes
+/// pieces reads later indices, so binding only entry 0 would silently disable composition.
 fn collect_frame_images(frame: &UiFrame) -> Vec<String> {
     let mut names = Vec::new();
     for item in frame.items() {
-        if let UiFrameItem::Quad {
-            image: Some(image), ..
-        } = item
-            && !names.iter().any(|name| name == image)
-        {
-            names.push(image.clone());
+        if let UiFrameItem::Quad { entries, .. } = item {
+            for image in entries.iter().flatten() {
+                if !names.iter().any(|name| name == image) {
+                    names.push(image.clone());
+                }
+            }
         }
     }
     names

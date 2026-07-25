@@ -551,14 +551,35 @@ runs, `SkirmishGameOptionsMenu.wnd` 52 quads and 21 runs. Repeated runs produce 
 hashes. Localized labels resolve through the CSF decoder before staging, so the capture shows real
 menu text.
 
-### Known gap: multi-entry gadget composition
+### Gadget draw-data composition
 
-A draw-data record holds nine entries, and the gadget renderers compose them per family — a push
-button's ends and repeating centre, a slider's track pieces, a list box's scroll parts. This
-implementation draws **entry 0 stretched across the control's rectangle**, so a control whose art is
-authored as separate pieces renders as one stretched piece. Geometry, batching, clipping, colour,
-text, and determinism are correct; per-family entry composition is not implemented and is the next
-presentation step. It needs the `W3DGadget*` renderers read at the pinned revision.
+A draw-data record holds nine entries, and each gadget family composes them from its own indices.
+`GadgetPushButton.h` fixes the push-button map: the unselected art is left 0, middle 5, right 6, and
+the pushed art is left 1, middle 3, right 4. `W3DGadgetPushButtonImageDraw` takes the three-piece
+path only when the middle image is present and otherwise stretches the entry-0 background, which is
+reproduced exactly: the centre repeats in whole pieces from the left end's right edge, a final partial
+piece covers the remainder, and the two ends draw last so they sit over the centre. The source's
+`centerWidth <= 0` branch — ends alone not fitting, so each takes half the control — is reproduced
+too. The source clips that final partial piece with a clip region; trimming its texture coordinates
+samples the same pixels without a state change and keeps the batch intact.
+
+Button text is centred on both axes, as `drawButtonText` does, through the shaper's own alignment
+horizontally and a measured offset vertically. Static text centres only when its own `CENTERED` flag
+is set.
+
+Two colour rules came out of rendering real data. **An image draw is untinted**: `winDrawImage` takes
+no colour, and a slot's `COLOR` belongs to the colour-only fill path, so multiplying an image by it
+paints every textured control in whatever that unused field happens to hold — which in retail data is
+frequently red. And **a control declaring `IMAGE` whose slot has no entry-0 image keeps its art at
+indices only its own family reads**; filling with the slot colour there would paint that same unused
+red, so a visible placeholder plus an `UncomposedFamily` diagnostic names the control instead.
+
+Per-family composition beyond push buttons — sliders, list boxes, combo boxes, check boxes, text
+entry, progress bars, tab controls — is the remaining presentation work, and each needs its
+`Gadget*.h` index map and `W3DGadget*` geometry read at the pinned revision. A further finding for
+that work: the draw procedure is selected by the control's retained draw-callback name (for example
+an `...ImageDraw` variant against a plain `...Draw`), not by the `IMAGE` status bit, so that name is
+the correct discriminator.
 
 ## Retained UI behavior
 

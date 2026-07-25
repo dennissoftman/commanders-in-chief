@@ -26,6 +26,31 @@ pub enum UiClipPolicy {
     ClipToParent,
 }
 
+/// Which established gadget family a quad belongs to.
+///
+/// A presentation layer needs this because the source composes a draw-data record's nine entries
+/// per family: a push button's ends and repeating centre come from different indices than a
+/// slider's track pieces. The retained control knows its family; the frame carries it so the
+/// renderer does not have to reach back into the layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UiControlFamily {
+    /// `PUSHBUTTON`, whose art is authored as a left end, a repeating centre, and a right end.
+    PushButton,
+    /// Any other family, whose base visual is one image stretched across the control.
+    #[default]
+    Simple,
+}
+
+/// How a text run is positioned inside its rectangle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UiTextAlign {
+    /// Placed at the rectangle's top left.
+    #[default]
+    TopLeft,
+    /// Centred on both axes, which is what `drawButtonText` does for a push button.
+    Centered,
+}
+
 /// One shaped text run a frame asks the renderer to draw.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UiTextRun {
@@ -41,6 +66,8 @@ pub struct UiTextRun {
     pub color: Option<WndColor>,
     /// Whether the run renders masked, for a secret text entry.
     pub masked: bool,
+    /// Where the run sits inside its rectangle.
+    pub align: UiTextAlign,
 }
 
 /// One renderer-neutral draw instruction.
@@ -71,6 +98,18 @@ pub enum UiFrameItem {
         /// Whether the control declares `BORDER`, which is what makes the original draw its border
         /// and corners at all. A colour alone does not.
         border: bool,
+        /// Every image name in the selected slot, in entry order, so a presentation layer can
+        /// compose the pieces its family declares. Entry 0 is the whole-control background.
+        entries: Vec<Option<String>>,
+        /// The control's `IMAGEOFFSET`, which the source adds to every piece's position.
+        image_offset: (i32, i32),
+        /// Which family's composition rules apply.
+        family: UiControlFamily,
+        /// Whether the control is currently held down, which selects the pushed art.
+        selected: bool,
+        /// Whether the control declares `IMAGE`, which is what makes the original take an
+        /// image-drawing path at all instead of filling with the slot's colour.
+        image_status: bool,
     },
     /// A control's text.
     Text(UiTextRun),
@@ -145,6 +184,11 @@ impl UiLayout {
                 color: entry.map(WndDrawEntry::color),
                 border_color: entry.map(WndDrawEntry::border_color),
                 border: control.status().contains(UiStatus::BORDER),
+                entries: control.draw_entry_images(slot),
+                image_offset: control.image_offset().unwrap_or((0, 0)),
+                family: control.family(),
+                selected: control.is_pressed(),
+                image_status: control.status().contains(UiStatus::IMAGE),
             });
             if let Some(run) = self.text_run(id, rect) {
                 frame.items.push(UiFrameItem::Text(run));
@@ -197,6 +241,7 @@ impl UiLayout {
                 .map(|(name, size, bold)| (name.to_owned(), size, bold)),
             color: control.text_color(self.state_slot(id)),
             masked,
+            align: control.text_align(),
         })
     }
 }

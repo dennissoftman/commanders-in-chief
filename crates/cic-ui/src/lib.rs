@@ -24,7 +24,7 @@ mod retained;
 #[cfg(test)]
 mod tests;
 
-pub use frame::{UiClipPolicy, UiFrame, UiFrameItem, UiTextRun};
+pub use frame::{UiClipPolicy, UiControlFamily, UiFrame, UiFrameItem, UiTextAlign, UiTextRun};
 pub use input::{UiEvent, UiKey, UiMouseButton};
 pub use retained::{
     UiControl, UiControlId, UiControlKind, UiDiagnostic, UiDiagnosticKind, UiLayout, UiLayoutError,

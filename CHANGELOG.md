@@ -163,8 +163,20 @@ land under the active milestone heading.
   `SkirmishGameOptionsMenu.wnd` 52 quads and 21 runs - with byte-identical hashes across repeated
   runs and localized labels resolved through the CSF decoder before staging.
 
+- Added push-button draw-data composition and centred button text, so a retail menu renders as a menu
+  rather than as stretched single-piece art. `GadgetPushButton.h` fixes the indices (unselected left 0,
+  middle 5, right 6; pushed 1, 3, 4) and `W3DGadgetPushButtonImageDraw` takes the three-piece path only
+  when the middle image is present. The centre repeats in whole pieces, a final partial piece covers
+  the remainder, and the ends draw last over it, including the source's branch for ends that do not
+  fit. Button text is centred on both axes, as `drawButtonText` does.
+
 ### Fixed
 
+- Fixed images being tinted by their slot's `COLOR`. `winDrawImage` takes no colour - that field
+  belongs to the colour-only fill path - and retail frequently leaves an unused red there beside a
+  valid image, so every textured control rendered red. A control declaring `IMAGE` whose slot has no
+  entry-0 image now stages a visible placeholder and an `UncomposedFamily` diagnostic naming it,
+  instead of painting that same unused colour.
 - Corrected the recorded mapped-image load policy. This project had documented
   `Data/INI/MappedImages/**` as a plain recursive merge, on the measured basis that the
   `HandCreated/` and `TextureSize_512/` name sets were disjoint, and noted that the source loader had

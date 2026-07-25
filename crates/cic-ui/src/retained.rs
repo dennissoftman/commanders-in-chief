@@ -19,9 +19,12 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
 use cic_formats::{
-    WndColor, WndComboBoxData, WndDocument, WndDrawData, WndDrawDataSlot, WndDrawEntry,
-    WndGadgetData, WndListBoxData, WndSliderData, WndTextColors, WndTextEntryData, WndWindow,
+    WND_DRAW_DATA_ENTRIES, WndColor, WndComboBoxData, WndDocument, WndDrawData, WndDrawDataSlot,
+    WndDrawEntry, WndGadgetData, WndListBoxData, WndSliderData, WndTextColors, WndTextEntryData,
+    WndWindow,
 };
+
+use crate::frame::{UiControlFamily, UiTextAlign};
 
 /// Explicit bounds for instantiating a retained layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -365,7 +368,10 @@ pub enum UiControlKind {
         secret: bool,
     },
     /// `STATICTEXT`.
-    StaticText,
+    StaticText {
+        /// Whether `STATICTEXTDATA` declares the text centred.
+        centered: bool,
+    },
     /// `PROGRESSBAR`.
     ProgressBar {
         /// Completion percentage, clamped to `0..=100`.
@@ -400,6 +406,7 @@ pub struct UiControl {
     name: Option<String>,
     window_type: String,
     rect: UiRect,
+    image_offset: Option<(i32, i32)>,
     status: UiStatus,
     hidden: bool,
     enabled: bool,
@@ -544,6 +551,58 @@ impl UiControl {
     #[must_use]
     pub const fn kind(&self) -> &UiControlKind {
         &self.kind
+    }
+
+    /// Returns every image name in one draw-data slot, in entry order.
+    ///
+    /// A slot always holds [`WND_DRAW_DATA_ENTRIES`] entries; a control declaring no draw data for
+    /// the slot yields that many absent names, so an index is always in range for a caller composing
+    /// pieces by index.
+    #[must_use]
+    pub fn draw_entry_images(&self, slot: WndDrawDataSlot) -> Vec<Option<String>> {
+        self.draw_data
+            .iter()
+            .find(|(candidate, _)| *candidate == slot)
+            .map_or_else(
+                || vec![None; WND_DRAW_DATA_ENTRIES],
+                |(_, data)| {
+                    data.entries()
+                        .iter()
+                        .map(|entry| entry.image().map(str::to_owned))
+                        .collect()
+                },
+            )
+    }
+
+    /// Returns the control's `IMAGEOFFSET`, which the source adds to every drawn piece's position.
+    #[must_use]
+    pub const fn image_offset(&self) -> Option<(i32, i32)> {
+        self.image_offset
+    }
+
+    /// Returns which family's draw-data composition rules apply.
+    #[must_use]
+    pub const fn family(&self) -> UiControlFamily {
+        match self.kind {
+            UiControlKind::PushButton => UiControlFamily::PushButton,
+            _ => UiControlFamily::Simple,
+        }
+    }
+
+    /// Returns where this control's text sits inside its rectangle.
+    ///
+    /// `drawButtonText` centres a push button's text on both axes unless the control declares
+    /// `SHORTCUT_BUTTON`, which the source itself calls a hack for drawing at the top left. Static
+    /// text centres only when its own `CENTERED` flag is set.
+    #[must_use]
+    pub const fn text_align(&self) -> UiTextAlign {
+        match self.kind {
+            UiControlKind::PushButton
+            | UiControlKind::RadioButton { .. }
+            | UiControlKind::CheckBox { .. }
+            | UiControlKind::StaticText { centered: true } => UiTextAlign::Centered,
+            _ => UiTextAlign::TopLeft,
+        }
     }
 
     /// Returns one draw-data slot's first state entry, which is the entry the base visual uses.
@@ -802,6 +861,7 @@ impl UiLayout {
             name: window.name().map(str::to_owned),
             window_type: window.window_type().to_owned(),
             rect,
+            image_offset: window.image_offset(),
             status,
             hidden: status.contains(UiStatus::HIDDEN),
             enabled: status.contains(UiStatus::ENABLED),
@@ -904,7 +964,9 @@ impl UiLayout {
                 active_pane: 0,
                 panes: usize::try_from(data.tab_count().max(0)).unwrap_or(0),
             },
-            Some(WndGadgetData::StaticTextCentered(_)) => UiControlKind::StaticText,
+            Some(WndGadgetData::StaticTextCentered(centered)) => UiControlKind::StaticText {
+                centered: *centered,
+            },
             None => Self::kind_from_window_type(window.window_type()),
         };
         (kind, diagnostics)
@@ -1005,7 +1067,7 @@ impl UiLayout {
         match window_type {
             "PUSHBUTTON" => UiControlKind::PushButton,
             "CHECKBOX" => UiControlKind::CheckBox { checked: false },
-            "STATICTEXT" => UiControlKind::StaticText,
+            "STATICTEXT" => UiControlKind::StaticText { centered: false },
             "PROGRESSBAR" => UiControlKind::ProgressBar { progress: 0 },
             _ => UiControlKind::Generic,
         }

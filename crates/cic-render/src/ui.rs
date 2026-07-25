@@ -16,7 +16,7 @@
 //! shaped at render time by the font set the caller supplies, because deterministic captures must
 //! never fall back to host fonts.
 
-use cic_ui::{UiFrame, UiFrameItem, UiRect};
+use cic_ui::{UiControlFamily, UiFrame, UiFrameItem, UiRect, UiTextAlign};
 
 /// One staged vertex: position in viewport pixels, texture coordinate, straight RGBA, and whether
 /// the fragment samples its page.
@@ -123,6 +123,8 @@ pub struct UiImageBinding {
     pub page: usize,
     /// Normalized `[left, top, right, bottom]` coordinates within that page.
     pub uv: [f32; 4],
+    /// The image's own size in pixels, which the source reads to size a composed piece.
+    pub size: [i32; 2],
 }
 
 /// One contiguous run of indices sharing a page and scissor rectangle.
@@ -177,6 +179,8 @@ pub struct StagedUiText {
     pub color: [u8; 4],
     /// The scissor rectangle in effect, absent when unclipped.
     pub scissor: Option<UiRect>,
+    /// Where the run sits inside its rectangle.
+    pub align: UiTextAlign,
 }
 
 /// Why one frame item could not be staged as authored.
@@ -193,6 +197,12 @@ pub enum UiStagingDiagnosticKind {
     UnclosedClips {
         /// How many remained open.
         depth: usize,
+    },
+    /// A control declares `IMAGE` and carries slot images, but not at the index this layer composes
+    /// for its family. A visible placeholder was staged rather than a misleading colour fill.
+    UncomposedFamily {
+        /// The family whose composition rules are not implemented yet.
+        window_type: Box<str>,
     },
     /// A text run was staged as a placeholder bar because no font set can shape it.
     UnshapeableText {
@@ -389,8 +399,28 @@ impl StagedUiFrame {
                     color,
                     border_color,
                     border,
+                    entries,
+                    image_offset,
+                    family,
+                    selected,
+                    image_status,
                     ..
                 } => {
+                    // A push button whose middle piece is present composes three pieces; the
+                    // source falls back to the single stretched background otherwise.
+                    if *family == UiControlFamily::PushButton
+                        && let Some(pieces) = ButtonPieces::resolve(entries, *selected, bind_image)
+                    {
+                        quads += staged.push_button_three(
+                            *rect,
+                            *image_offset,
+                            &pieces,
+                            scissor,
+                            quads,
+                            limits,
+                        )?;
+                        continue;
+                    }
                     let binding = image.as_deref().map(|name| (name, bind_image(name)));
                     let (page, uv, fill) = match binding {
                         Some((name, None)) => {
@@ -402,11 +432,26 @@ impl StagedUiFrame {
                             });
                             (None, [0.0; 4], UI_PLACEHOLDER_COLOR)
                         }
-                        Some((_, Some(binding))) => (
-                            Some(binding.page),
-                            binding.uv,
-                            color.map_or([255, 255, 255, 255], channels),
-                        ),
+                        // An image draw is untinted: the source's `winDrawImage` takes no colour,
+                        // and a slot's `COLOR` belongs to the colour-only fill path. Retail leaves
+                        // an unused red in that field beside a valid image, so multiplying by it
+                        // turns every textured control red.
+                        Some((_, Some(binding))) => {
+                            (Some(binding.page), binding.uv, [255, 255, 255, 255])
+                        }
+                        // A control declaring `IMAGE` whose slot has no entry-0 image keeps its art
+                        // at other indices, which only its own family's composition reads. Filling
+                        // with the slot's colour would paint retail's unused red over the control,
+                        // so a placeholder plus a diagnostic names it instead.
+                        None if *image_status && entries.iter().any(Option::is_some) => {
+                            staged.diagnostics.push(UiStagingDiagnostic {
+                                item: index,
+                                kind: UiStagingDiagnosticKind::UncomposedFamily {
+                                    window_type: format!("{family:?}").into_boxed_str(),
+                                },
+                            });
+                            (None, [0.0; 4], UI_PLACEHOLDER_COLOR)
+                        }
                         None => (None, [0.0; 4], color.map_or([0, 0, 0, 0], channels)),
                     };
                     if fill[3] > 0 {
@@ -458,6 +503,7 @@ impl StagedUiFrame {
                             bold: run.font.as_ref().is_some_and(|(_, _, bold)| *bold),
                             color,
                             scissor,
+                            align: run.align,
                         }),
                         UiTextPolicy::Placeholder => {
                             staged.diagnostics.push(UiStagingDiagnostic {
@@ -491,9 +537,163 @@ impl StagedUiFrame {
         Ok(staged)
     }
 
+    /// Stages a push button's three pieces and returns how many quads it added.
+    ///
+    /// Reproduces `W3DGadgetPushButtonImageDrawThree`: the centre repeats in whole pieces from the
+    /// left end's right edge, a final partial piece is clipped to the remaining width, and the two
+    /// ends draw last so they sit over the centre. When the ends alone do not fit — the source's
+    /// `centerWidth <= 0` branch — each end takes half the control instead.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one straight-line reproduction of the source's piece geometry; splitting it would                   separate the two branches the source itself writes together"
+    )]
+    fn push_button_three(
+        &mut self,
+        rect: UiRect,
+        image_offset: (i32, i32),
+        pieces: &ButtonPieces,
+        scissor: Option<UiRect>,
+        quads: usize,
+        limits: UiStagingLimits,
+    ) -> Result<usize, UiStagingError> {
+        // Composed pieces draw untinted, like every other image draw.
+        let tint = [255, 255, 255, 255];
+        let (x_offset, y_offset) = image_offset;
+        let left_width = pieces.left.size[0];
+        let right_width = pieces.right.size[0];
+        let left_end_x = rect.x + left_width + x_offset;
+        let right_start_x = rect.x + rect.width - right_width + x_offset;
+        let top = rect.y + y_offset;
+        let mut added = 0;
+
+        if right_start_x - left_end_x <= 0 {
+            let split = rect.x + x_offset + rect.width / 2;
+            added += 1;
+            self.push_piece(
+                UiRect {
+                    x: rect.x + x_offset,
+                    y: top,
+                    width: split - (rect.x + x_offset),
+                    height: rect.height + y_offset,
+                },
+                &pieces.left,
+                tint,
+                scissor,
+                quads + added,
+                limits,
+            )?;
+            added += 1;
+            self.push_piece(
+                UiRect {
+                    x: split,
+                    y: top,
+                    width: rect.x + rect.width - split,
+                    height: rect.height,
+                },
+                &pieces.right,
+                tint,
+                scissor,
+                quads + added,
+                limits,
+            )?;
+            return Ok(added);
+        }
+
+        let centre_width = pieces.centre.size[0].max(1);
+        let mut x = left_end_x;
+        while x + centre_width <= right_start_x {
+            added += 1;
+            self.push_piece(
+                UiRect {
+                    x,
+                    y: top,
+                    width: centre_width,
+                    height: rect.height + y_offset,
+                },
+                &pieces.centre,
+                tint,
+                scissor,
+                quads + added,
+                limits,
+            )?;
+            x += centre_width;
+        }
+        if x < right_start_x {
+            // The source draws a whole piece under a clip region ending at the right end's start;
+            // trimming the texture coordinates instead reaches the same pixels without a state
+            // change, and keeps the batch intact.
+            added += 1;
+            let trimmed = pieces
+                .centre
+                .trimmed_to_width(right_start_x - x, centre_width);
+            self.push_piece(
+                UiRect {
+                    x,
+                    y: top,
+                    width: right_start_x - x,
+                    height: rect.height + y_offset,
+                },
+                &trimmed,
+                tint,
+                scissor,
+                quads + added,
+                limits,
+            )?;
+        }
+        added += 1;
+        self.push_piece(
+            UiRect {
+                x: rect.x + x_offset,
+                y: top,
+                width: left_width,
+                height: rect.height + y_offset,
+            },
+            &pieces.left,
+            tint,
+            scissor,
+            quads + added,
+            limits,
+        )?;
+        added += 1;
+        self.push_piece(
+            UiRect {
+                x: right_start_x,
+                y: top,
+                width: right_width,
+                height: rect.height,
+            },
+            &pieces.right,
+            tint,
+            scissor,
+            quads + added,
+            limits,
+        )?;
+        Ok(added)
+    }
+
+    fn push_piece(
+        &mut self,
+        rect: UiRect,
+        piece: &UiImageBinding,
+        tint: [u8; 4],
+        scissor: Option<UiRect>,
+        quads: usize,
+        limits: UiStagingLimits,
+    ) -> Result<(), UiStagingError> {
+        self.push_quad(
+            rect,
+            piece.uv,
+            tint,
+            Some(piece.page),
+            scissor,
+            quads,
+            limits,
+        )
+    }
+
     #[expect(
         clippy::too_many_arguments,
-        reason = "one quad's complete bound state; grouping it into a struct would only move the                   same fields behind another name"
+        reason = "one quad's complete bound state; a struct would only move the same fields behind                   another name"
     )]
     fn push_quad(
         &mut self,
@@ -634,6 +834,61 @@ impl StagedUiFrame {
     }
 }
 
+/// The three images a push button composes, resolved for its current state.
+///
+/// `GadgetPushButton.h` fixes the indices: unselected art is left 0, middle 5, right 6, and the
+/// pushed art is left 1, middle 3, right 4. The source only takes the three-piece path when the
+/// middle image is present, so a definition supplying no middle keeps the stretched background.
+struct ButtonPieces {
+    left: UiImageBinding,
+    centre: UiImageBinding,
+    right: UiImageBinding,
+}
+
+impl ButtonPieces {
+    fn resolve(
+        entries: &[Option<String>],
+        selected: bool,
+        bind_image: &dyn Fn(&str) -> Option<UiImageBinding>,
+    ) -> Option<Self> {
+        let (left, centre, right) = if selected { (1, 3, 4) } else { (0, 5, 6) };
+        let bind = |index: usize| -> Option<UiImageBinding> {
+            entries
+                .get(index)
+                .and_then(Option::as_deref)
+                .and_then(bind_image)
+        };
+        Some(Self {
+            left: bind(left)?,
+            centre: bind(centre)?,
+            right: bind(right)?,
+        })
+    }
+}
+
+impl UiImageBinding {
+    /// Returns this binding with its texture coordinates trimmed to a partial width.
+    ///
+    /// The source draws a whole repeating piece under a clip region; trimming the coordinates
+    /// samples exactly the visible part instead, which needs no clip state change.
+    fn trimmed_to_width(&self, visible: i32, full: i32) -> Self {
+        if visible >= full || full <= 0 {
+            return *self;
+        }
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "piece widths are small pixel counts"
+        )]
+        let fraction = visible as f32 / full as f32;
+        let [left, top, right, bottom] = self.uv;
+        Self {
+            page: self.page,
+            uv: [left, top, left + (right - left) * fraction, bottom],
+            size: [visible, self.size[1]],
+        }
+    }
+}
+
 fn channels(color: cic_formats::WndColor) -> [u8; 4] {
     color.channels()
 }
@@ -763,6 +1018,7 @@ END
         (name == "SynthPanel").then_some(UiImageBinding {
             page: 0,
             uv: [0.0, 0.0, 0.5, 0.25],
+            size: [64, 32],
         })
     }
 
