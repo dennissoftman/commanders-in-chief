@@ -54,7 +54,14 @@ Gate 5's retained runtime is implemented as the new `cic-ui` crate: layout repro
 `parseScreenRect` exactly plus a project-designed uniform-scale `Modern` policy, the original's
 three-pass layered hit testing with source-order child descent, focus with its `NOFOCUS` refusal and
 parent walk, a wraparound tab cycle over declared `TABSTOP` controls, every control-family invariant,
-and renderer-neutral frames. Twenty-one tests over one original synthetic layout pass.
+and renderer-neutral frames. Twenty-one tests over one original synthetic layout pass, and
+`cic-inspect ui-layout` verifies it against real data: all 80 Zero Hour and 78 Generals layouts
+instantiate at 800x600, 1920x1080, and 21:9 2560x1080 under both policies with no failures and zero
+diagnostics.
+
+One measurement from that pass changes a later gate: the whole Zero Hour corpus declares only nine
+`TABSTOP` controls, so keyboard traversal of a retail menu cannot come from the layouts and the shell
+gate will need project-owned tab order.
 
 The next verified step is Gate 6, custom `wgpu` presentation: executing a `UiFrame` as ordered
 image and colour quads with borders, scissor rectangles, and shaped Unicode text over either a 2D

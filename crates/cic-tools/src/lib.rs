@@ -21,6 +21,7 @@ use cic_formats::{
     WndPatchOperation, WndWindow, w3d_chunk_name,
 };
 use cic_render::Capture;
+use cic_ui::{UiClipPolicy, UiControlKind, UiDiagnosticKind, UiFrameItem, UiLayout, UiScalePolicy};
 use cic_vfs::Vfs;
 
 /// Formats winning VFS entries as deterministic tab-separated records.
@@ -1089,6 +1090,146 @@ pub fn render_wnd(document: &WndDocument) -> String {
         .expect("writing to a String cannot fail");
     }
     output
+}
+
+/// Formats a retained layout instantiated for one viewport: the control tree with resolved
+/// rectangles and live state, the tab order, the frame submission order, and any diagnostics.
+///
+/// Rows carry names, geometry, and counts. This is the report an acceptance check compares when a
+/// modded layout changes, without rendering it.
+#[must_use]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one straight-line report writer per row family; splitting it would separate each \
+              header from the rows it describes"
+)]
+pub fn render_ui_layout(layout: &UiLayout) -> String {
+    let presentation = layout.presentation();
+    let mut output = String::from("ui_layout\twidth\theight\tscale\tcontrols\ttab_stops\n");
+    writeln!(
+        output,
+        "ui_layout\t{}\t{}\t{}\t{}\t{}",
+        presentation.viewport.width(),
+        presentation.viewport.height(),
+        match presentation.scale {
+            UiScalePolicy::Classic => "classic",
+            UiScalePolicy::Modern => "modern",
+        },
+        layout.controls().len(),
+        layout.tab_order().len()
+    )
+    .expect("writing to a String cannot fail");
+
+    output.push_str(
+        "ui_control\tid\tdepth\tparent\tname\ttype\tx\ty\twidth\theight\tscreen_x\tscreen_y\t\
+         hidden\tenabled\tstatus\tkind\ttext\n",
+    );
+    for control in layout.controls() {
+        let origin = layout.screen_origin(control.id());
+        let rect = control.rect();
+        writeln!(
+            output,
+            "ui_control\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:#010x}\t{}\t{}",
+            control.id().index(),
+            control.depth(),
+            control
+                .parent()
+                .map_or_else(|| "-".to_owned(), |parent| parent.index().to_string()),
+            control.name().unwrap_or("-"),
+            control.window_type(),
+            rect.x,
+            rect.y,
+            rect.width,
+            rect.height,
+            origin.x,
+            origin.y,
+            control.is_hidden(),
+            control.is_enabled(),
+            control.status().bits(),
+            ui_control_kind_name(control.kind()),
+            control.text_label().unwrap_or("-")
+        )
+        .expect("writing to a String cannot fail");
+    }
+
+    output.push_str("ui_tab_stop\torder\tid\tname\n");
+    for (order, id) in layout.tab_order().iter().enumerate() {
+        writeln!(
+            output,
+            "ui_tab_stop\t{order}\t{}\t{}",
+            id.index(),
+            layout.control(*id).name().unwrap_or("-")
+        )
+        .expect("writing to a String cannot fail");
+    }
+
+    output.push_str("ui_frame_item\torder\tkind\tid\tdetail\n");
+    for (order, item) in layout.frame(UiClipPolicy::None).items().iter().enumerate() {
+        let (kind, id, detail) = match item {
+            UiFrameItem::PushClip { rect } => (
+                "push_clip",
+                "-".to_owned(),
+                format!("{}x{}+{}+{}", rect.width, rect.height, rect.x, rect.y),
+            ),
+            UiFrameItem::PopClip => ("pop_clip", "-".to_owned(), "-".to_owned()),
+            UiFrameItem::Quad {
+                control,
+                slot,
+                image,
+                ..
+            } => (
+                "quad",
+                control.index().to_string(),
+                format!(
+                    "{}\t{}",
+                    wnd_draw_slot_name(*slot),
+                    image.as_deref().unwrap_or("-")
+                ),
+            ),
+            UiFrameItem::Text(run) => ("text", run.control.index().to_string(), run.label.clone()),
+        };
+        writeln!(output, "ui_frame_item\t{order}\t{kind}\t{id}\t{detail}")
+            .expect("writing to a String cannot fail");
+    }
+
+    output.push_str("ui_layout_diagnostic\tid\tkind\tdetail\n");
+    for diagnostic in layout.diagnostics() {
+        let (kind, detail) = match diagnostic.kind() {
+            UiDiagnosticKind::UnmappedStatus { name } => ("unmapped_status", name.to_string()),
+            UiDiagnosticKind::InvertedSliderBounds { minimum, maximum } => {
+                ("inverted_slider_bounds", format!("{minimum}..{maximum}"))
+            }
+            UiDiagnosticKind::ListRowsClamped { declared, applied } => {
+                ("list_rows_clamped", format!("{declared} to {applied}"))
+            }
+            UiDiagnosticKind::TextLengthClamped { declared, applied } => {
+                ("text_length_clamped", format!("{declared} to {applied}"))
+            }
+        };
+        writeln!(
+            output,
+            "ui_layout_diagnostic\t{}\t{kind}\t{detail}",
+            diagnostic.control().index()
+        )
+        .expect("writing to a String cannot fail");
+    }
+    output
+}
+
+fn ui_control_kind_name(kind: &UiControlKind) -> &'static str {
+    match kind {
+        UiControlKind::PushButton => "push_button",
+        UiControlKind::RadioButton { .. } => "radio_button",
+        UiControlKind::CheckBox { .. } => "check_box",
+        UiControlKind::Slider { .. } => "slider",
+        UiControlKind::ListBox { .. } => "list_box",
+        UiControlKind::ComboBox { .. } => "combo_box",
+        UiControlKind::TextEntry { .. } => "text_entry",
+        UiControlKind::StaticText => "static_text",
+        UiControlKind::ProgressBar { .. } => "progress_bar",
+        UiControlKind::TabControl { .. } => "tab_control",
+        UiControlKind::Generic => "generic",
+    }
 }
 
 /// Formats UI resource resolution for one layout: which definition files loaded, which demands

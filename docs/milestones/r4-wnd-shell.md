@@ -86,6 +86,22 @@ disabling a control clears hover, press, focus, and capture through its whole su
 tests over one original synthetic layout covering every control family pass, including a determinism
 check that two instantiations of the same inputs produce identical controls and frames.
 
+Gate 5 is verified against real data through `cic-inspect ui-layout`, which instantiates a layout for
+an explicit viewport and scale policy and reports the tree, tab order, frame submission order, and
+diagnostics. Every one of the 80 Zero Hour layouts and 78 Generals layouts instantiates at 800x600,
+1920x1080, and 21:9 2560x1080 under both policies — 480 instantiations — with no failures and, after
+mapping the complete `WindowStatusNames` vocabulary, **zero diagnostics in either edition**. The 80
+Zero Hour layouts yield 1,667 retained controls, matching the WND census's window count exactly, and
+their family distribution is 539 static text, 424 push buttons, 411 windows with no gadget state, 115
+combo boxes, 45 check boxes, 39 list boxes, 34 progress bars, 32 entry fields, 19 radio buttons, and
+nine sliders.
+
+That pass also measured something the runtime gates need to know: the whole Zero Hour corpus declares
+only **nine** `TABSTOP` controls. Keyboard traversal of a retail menu therefore cannot come from the
+layouts, which is consistent with the original populating the manager's tab list from menu code rather
+than from the WND. A usable demo will need project-owned tab order, and that belongs to the shell gate
+rather than to the parser.
+
 Reading the runtime source produced one finding worth recording: `GameWindow::winNextTab` and
 `winPrevTab` are entirely commented out at the pinned revision and return success without moving
 focus, so per-window tab traversal is not source behavior. The live mechanism is the window manager's

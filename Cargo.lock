@@ -288,6 +288,7 @@ version = "0.1.0"
 dependencies = [
  "cic-formats",
  "cic-render",
+ "cic-ui",
  "cic-vfs",
  "image",
  "png",

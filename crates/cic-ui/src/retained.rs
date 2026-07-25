@@ -205,11 +205,30 @@ impl UiStatus {
     pub const WRAP_CENTERED: Self = Self(0x0004_0000);
     /// `WIN_STATUS_CHECK_LIKE`.
     pub const CHECK_LIKE: Self = Self(0x0008_0000);
+    /// `WIN_STATUS_DESTROYED`.
+    pub const DESTROYED: Self = Self(0x0000_0800);
+    /// `WIN_STATUS_NO_FLUSH`.
+    pub const NO_FLUSH: Self = Self(0x0000_8000);
+    /// `WIN_STATUS_HOTKEY_TEXT`.
+    pub const HOTKEY_TEXT: Self = Self(0x0010_0000);
+    /// `WIN_STATUS_USE_OVERLAY_STATES`.
+    pub const USE_OVERLAY_STATES: Self = Self(0x0020_0000);
+    /// `WIN_STATUS_NOT_READY`.
+    pub const NOT_READY: Self = Self(0x0040_0000);
+    /// `WIN_STATUS_FLASHING`.
+    pub const FLASHING: Self = Self(0x0080_0000);
+    /// `WIN_STATUS_ALWAYS_COLOR`.
+    pub const ALWAYS_COLOR: Self = Self(0x0100_0000);
     /// `WIN_STATUS_ON_MOUSE_DOWN`.
     pub const ON_MOUSE_DOWN: Self = Self(0x0200_0000);
 
-    /// Every name this crate maps, paired with its bit.
-    const NAMES: [(&'static str, Self); 19] = [
+    /// The complete `WindowStatusNames` vocabulary, paired with its `WIN_STATUS_*` bit.
+    ///
+    /// Every name either edition can write is mapped, so a retail or modded layout produces no
+    /// unmapped-status diagnostic. Bits beyond visibility, enablement, layering, input, focus, and
+    /// tab stops are retained as the definition's request without a retained-state effect of their
+    /// own; the presentation gates consume them.
+    const NAMES: [(&'static str, Self); 26] = [
         ("ACTIVE", Self::ACTIVE),
         ("TOGGLE", Self::TOGGLE),
         ("DRAGABLE", Self::DRAGGABLE),
@@ -228,6 +247,13 @@ impl UiStatus {
         ("RIGHT_CLICK", Self::RIGHT_CLICK),
         ("WRAP_CENTERED", Self::WRAP_CENTERED),
         ("CHECK_LIKE", Self::CHECK_LIKE),
+        ("DESTROYED", Self::DESTROYED),
+        ("NO_FLUSH", Self::NO_FLUSH),
+        ("HOTKEY_TEXT", Self::HOTKEY_TEXT),
+        ("USE_OVERLAY_STATES", Self::USE_OVERLAY_STATES),
+        ("NOT_READY", Self::NOT_READY),
+        ("FLASHING", Self::FLASHING),
+        ("ALWAYS_COLOR", Self::ALWAYS_COLOR),
         ("ON_MOUSE_DOWN", Self::ON_MOUSE_DOWN),
     ];
 

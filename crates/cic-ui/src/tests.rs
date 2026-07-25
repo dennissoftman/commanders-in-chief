@@ -639,7 +639,7 @@ fn declared_status_seeds_live_state_and_unmapped_names_are_reported() {
                         BOTTOMRIGHT: 10 10,\n\
                         CREATIONRESOLUTION: 800 600;\n\
            NAME = \"SynthMenu.wnd:ButtonHidden\";\n\
-           STATUS = HIDDEN+NOFOCUS+FLASHING;\n\
+           STATUS = HIDDEN+NOFOCUS+SPARKLE;\n\
          END\n";
     let document = parse_wnd(source.as_bytes(), WndLimits::default()).expect("decode layout");
     let mut layout = UiLayout::instantiate(&document, classic(800, 600), UiLimits::default())
@@ -648,8 +648,8 @@ fn declared_status_seeds_live_state_and_unmapped_names_are_reported() {
     assert!(layout.control(button).is_hidden());
     assert!(!layout.control(button).is_enabled());
     assert!(layout.control(button).status().contains(UiStatus::NO_FOCUS));
-    // `FLASHING` is a real status name this crate does not map to retained state; it is reported
-    // rather than silently ignored.
+    // `SPARKLE` is outside the established vocabulary; it is reported rather than ignored. Every
+    // real status name is mapped, so retail layouts produce no such diagnostic.
     assert_eq!(layout.diagnostics().len(), 1);
 
     // A control refusing focus never receives it.

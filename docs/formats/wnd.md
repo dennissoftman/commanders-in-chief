@@ -562,6 +562,10 @@ the window manager's own tab list, which cycles with wraparound and is inert whi
 `cic-ui` reproduces the manager's cycle and derives the list from the declared `TABSTOP` status bit
 in source order, skipping stops that are disabled or hidden so focus cannot be trapped.
 
+Measured against real data, that list is nearly empty: the whole Zero Hour corpus declares **nine**
+`TABSTOP` controls across 80 layouts. Keyboard traversal of a retail menu cannot come from the
+layouts, so the shell gate will need project-owned tab order.
+
 ### Implemented control invariants
 
 Radio buttons are exclusive within their declared `GROUP` across the owning window's peers, matching
@@ -588,6 +592,16 @@ callers that want a masked region.
 
 Default limits are 4,096 controls, 64 levels of nesting, 1,024 characters in an entry field whose
 definition declares no limit, and 4,096 list rows.
+
+### Measured retained-layout coverage
+
+Every one of the 80 Zero Hour and 78 Generals layouts instantiates at 800x600, 1920x1080, and 21:9
+2560x1080 under both scale policies — 480 instantiations — with no failures and zero diagnostics. The
+Zero Hour corpus yields 1,667 retained controls, matching the WND census's window count, distributed
+as 539 static text, 424 push buttons, 411 without gadget state, 115 combo boxes, 45 check boxes, 39
+list boxes, 34 progress bars, 32 entry fields, 19 radio buttons, and nine sliders. Mapping the
+complete `WindowStatusNames` vocabulary was what closed the last diagnostic: `HOTKEY_TEXT` occurred
+once corpus-wide.
 
 Control state changes produce typed UI events. Callback fields are looked up only in an application
 allowlist. Unknown callback names are inert. Layout update names do not create a general scripting
@@ -669,6 +683,10 @@ before R5.
   plus its binding — defining file, texture file and resolved texture path, header-template font,
   point and weight, or the matched font role. Rows carry names, virtual paths, and counts only; no
   retail definition content is embedded. Transitions and cursors are not covered yet.
+- `cic-inspect ui-layout` (implemented) instantiates a layout for an explicit viewport and scale
+  policy and reports the retained tree with resolved and screen-space rectangles, live state, status
+  bits, control family, tab order, frame submission order, and diagnostics. Nothing is read from the
+  host display, so the report is reproducible on any machine.
 - `cic-inspect ui-render` (planned) emits a deterministic synthetic PNG/hash for an explicit layout,
   viewport, scale policy, locale, font set, time, and input/state snapshot.
 - `cic-inspect ui-demo` (planned) launches the interactive main-menu/skirmish compatibility harness.

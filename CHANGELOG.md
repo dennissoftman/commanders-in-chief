@@ -133,6 +133,14 @@ land under the active milestone heading.
   over its parent. Clipping is an explicit policy because the original does not clip and retail
   layouts rely on that.
 
+- Added `cic-inspect ui-layout`, which instantiates a layout for an explicit viewport and scale
+  policy and reports the retained tree, tab order, frame submission order, and diagnostics without
+  reading the host display. Every one of the 80 Zero Hour and 78 Generals layouts instantiates at
+  800x600, 1920x1080, and 21:9 2560x1080 under both policies — 480 instantiations — with no failures
+  and zero diagnostics. The Zero Hour corpus yields 1,667 retained controls, matching the WND
+  census's window count. That pass also measured that the whole corpus declares only nine `TABSTOP`
+  controls, so keyboard traversal of a retail menu will need project-owned tab order.
+
 ### Fixed
 
 - Corrected the recorded mapped-image load policy. This project had documented

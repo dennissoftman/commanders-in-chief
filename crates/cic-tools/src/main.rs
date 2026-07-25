@@ -40,9 +40,10 @@ use cic_tools::{
     GltfTextureRequest, encode_capture_png, encode_map_height_png, pack_w3d_glb, render_csf,
     render_manifest, render_map, render_map_blend, render_map_height, render_map_lighting,
     render_map_polygons, render_map_sides, render_map_water, render_map_world_objects,
-    render_options_ini, render_ui_resources, render_w3d, render_w3d_gltf, render_w3d_mesh,
-    render_wnd, render_wnd_patch,
+    render_options_ini, render_ui_layout, render_ui_resources, render_w3d, render_w3d_gltf,
+    render_w3d_mesh, render_wnd, render_wnd_patch,
 };
+use cic_ui::{UiLayout, UiLimits, UiPresentation, UiScalePolicy, UiViewport};
 use cic_vfs::{BigLimits, Vfs, VirtualPath};
 
 const USAGE: &str = "Usage:\n\
@@ -71,6 +72,7 @@ const USAGE: &str = "Usage:\n\
   cic-inspect wnd-render <virtual-path> [<output.png>] [<mount> ...]\n\
   cic-inspect wnd-patch <virtual-path> <patch> [<patch> ...] -- [<mount> ...]\n\
   cic-inspect ui-resources [--texture-size <pixels>] <virtual-path> [<mount> ...]\n\
+  cic-inspect ui-layout [--viewport <width>x<height>] [--scale <classic|modern>] <virtual-path> [<mount> ...]\n\
 Each mount is a directory or BIG archive. Mounts are applied from left to right; later mounts override earlier mounts.";
 
 const MAX_ENCODED_IMAGE_BYTES: usize = 256 * 1_024 * 1_024;
@@ -229,6 +231,7 @@ fn run(arguments: impl IntoIterator<Item = String>) -> Result<String, Box<dyn Er
         "wnd-render" => render_wnd_capture(&mut arguments, &options),
         "wnd-patch" => report_wnd_patch(&mut arguments, &options),
         "ui-resources" => report_ui_resources(&mut arguments, &options),
+        "ui-layout" => report_ui_layout(&mut arguments, &options),
         _ => Err(format!("unknown command {command:?}").into()),
     }
 }
@@ -1924,6 +1927,67 @@ where
 
     let overlaid = apply_wnd_patches(&document, resource_path.as_str(), &patches, limits)?;
     Ok(render_wnd_patch(&patches, &overlaid))
+}
+
+/// Reports one layout instantiated as a retained control tree for an explicit viewport.
+///
+/// The viewport and scale policy are explicit rather than read from the host display, so the report
+/// is reproducible on any machine.
+fn report_ui_layout<I>(
+    arguments: &mut std::iter::Peekable<I>,
+    options: &CliOptions,
+) -> Result<String, Box<dyn Error>>
+where
+    I: Iterator<Item = String>,
+{
+    let mut viewport = UiViewport::new(800, 600)?;
+    let mut scale = UiScalePolicy::Classic;
+    while arguments
+        .peek()
+        .is_some_and(|argument| argument.starts_with("--"))
+    {
+        match arguments.next().expect("peeked ui-layout option").as_str() {
+            "--viewport" => {
+                let value = arguments
+                    .next()
+                    .ok_or("--viewport requires <width>x<height>")?;
+                let (width, height) = value
+                    .split_once('x')
+                    .ok_or("--viewport requires <width>x<height>")?;
+                viewport = UiViewport::new(width.parse::<i32>()?, height.parse::<i32>()?)?;
+            }
+            "--scale" => {
+                scale = match arguments
+                    .next()
+                    .ok_or("--scale requires classic or modern")?
+                    .as_str()
+                {
+                    "classic" => UiScalePolicy::Classic,
+                    "modern" => UiScalePolicy::Modern,
+                    other => return Err(format!("unknown scale policy {other:?}").into()),
+                };
+            }
+            option => return Err(format!("unknown ui-layout option {option:?}").into()),
+        }
+    }
+    let resource_name = arguments
+        .next()
+        .ok_or("ui-layout requires a virtual path")?;
+    let mounts = arguments.collect::<Vec<_>>();
+    let vfs = mount_all("ui-layout", &mounts, options, ResourceKind::Wnd)?;
+    let resource_path = VirtualPath::new(&resource_name)?;
+    let entry = vfs
+        .resolve(&resource_path)
+        .ok_or_else(|| format!("resource not found: {resource_path}"))?;
+    let limits = WndLimits::default();
+    let bytes = entry.read(limits.maximum_file_bytes)?;
+    let document = parse_wnd(&bytes, limits)?;
+    let layout = UiLayout::instantiate(
+        &document,
+        UiPresentation::new(viewport, scale),
+        UiLimits::default(),
+    )?;
+    Ok(render_ui_layout(&layout))
 }
 
 /// Reports which UI definition resources one layout names and how each one resolves.
