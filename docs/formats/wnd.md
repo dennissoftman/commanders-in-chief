@@ -521,11 +521,73 @@ definition files per directory tree and 65,536 catalog definitions.
 
 ## Retained UI behavior
 
-The parser returns definitions; the planned `cic-ui` layer creates retained instances. Required R4
-behavior includes parent-relative layout, classic and Modern scaling policies, visibility,
-enablement, z/order, clipping, mouse hit testing/capture, hover/press/release, keyboard focus and tab
-traversal, radio/check invariants, slider bounds, list/combo selection and scrolling, Unicode text
-entry/selection, password masking, tooltips, cursors, and transition sampling.
+The parser returns definitions; `cic-ui` creates retained instances. That crate is implemented for
+layout, hit testing, focus, control invariants, and renderer-neutral frames; tooltips, cursors, and
+transition sampling wait for the later gates that own them.
+
+### Implemented layout and scaling
+
+`parseScreenRect` establishes the exact classic policy, reproduced in `UiScalePolicy::Classic`: each
+stored corner is scaled by `viewport / creation_resolution` **per axis** and truncated toward zero,
+size is derived from the scaled corners, and a child's position is then made relative to its
+parent's already-scaled screen position. Non-uniform viewports therefore stretch — an 800x600 layout
+on 1600x900 scales 2.0 horizontally and 1.5 vertically, so a 100x40 button becomes 200x60 rather
+than keeping its authored aspect ratio. `screen_position` sums every ancestor's parent-relative
+origin, so nested rectangles compose the way the original composes them.
+
+`UiScalePolicy::Modern` is project design, not source behavior: it applies the smaller axis ratio to
+both axes and centres the result, letterboxing the authored composition instead of stretching it.
+
+### Implemented hit testing
+
+`getWindowUnderCursor` establishes a layered search that is reproduced exactly. Top-level windows
+are searched in three passes — `ABOVE` first, then windows with none of `ABOVE`/`BELOW`/`HIDDEN`,
+then `BELOW` — and the first whose region contains the point descends through `winPointInChild`,
+which walks children in **source order** and returns the first visible, enabled child containing the
+point, recursing into it. A hidden or disabled child that contains the point is skipped and iteration
+continues with its later siblings, so a click falls through to the parent rather than being swallowed.
+A control declaring `NO_INPUT` discards the result. Every edge test is inclusive on both ends
+(`x >= left && x <= left + width`), which decides which of two adjacent controls a boundary click
+reaches. While a control holds the mouse the search is confined to it.
+
+### Implemented focus and tab traversal
+
+`winSetFocus` establishes the refusal rules: a control declaring `NOFOCUS` refuses focus outright,
+and otherwise the request walks up parents until one accepts, with focus becoming absent when none
+does. Reproduced.
+
+Tab traversal needed a source finding. `GameWindow::winNextTab` and `winPrevTab` are **entirely
+commented out** at the pinned revision and return success without moving focus; the live mechanism is
+the window manager's own tab list, which cycles with wraparound and is inert while a modal is up.
+`cic-ui` reproduces the manager's cycle and derives the list from the declared `TABSTOP` status bit
+in source order, skipping stops that are disabled or hidden so focus cannot be trapped.
+
+### Implemented control invariants
+
+Radio buttons are exclusive within their declared `GROUP` across the owning window's peers, matching
+`GadgetRadioButtonSetSelection`. Sliders clamp into their declared `MINVALUE`/`MAXVALUE`, and an
+inverted pair is ordered with a diagnostic rather than accepted. List and combo selection refuse an
+index outside the current row set instead of clamping, so a stale index cannot silently select a
+different row; single-select lists replace rather than accumulate. List scrolling clamps so the last
+page stays full. Text entry counts **characters, not bytes**, against its declared `MAXLEN`, so a
+Unicode field holds what its definition promises, and caret motion and deletion are character-wise.
+Progress bars clamp to `0..=100`. Hiding or disabling a control clears its hover, press, focus, and
+capture state through its whole subtree, because a hidden window takes no input.
+
+### Implemented frames
+
+A frame is an ordered list of renderer-neutral instructions: optional clip push/pop, one quad per
+visible control carrying the mapped-image name, fill, and border colour of the draw-data slot its
+current state selects, and one text run carrying the `TEXT` value, font, state colour, and a mask
+flag for secret entries. Submission order inverts the hit-test layering — `BELOW`, then unlayered,
+then `ABOVE` — with each subtree emitted parent before children in source order, so a child draws
+over its parent. Disabled wins over hover when selecting the slot. A control declaring `SEE_THRU`
+emits no quad but still emits its children. Clipping is an explicit policy: the default matches the
+original, which does not clip and which retail layouts rely on, and `ClipToParent` is available for
+callers that want a masked region.
+
+Default limits are 4,096 controls, 64 levels of nesting, 1,024 characters in an entry field whose
+definition declares no limit, and 4,096 list rows.
 
 Control state changes produce typed UI events. Callback fields are looked up only in an application
 allowlist. Unknown callback names are inert. Layout update names do not create a general scripting

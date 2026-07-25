@@ -39,19 +39,22 @@ definition database          asset database
                scripts, commands)
 ```
 
-The current workspace has five deliberately narrow crates:
+The current workspace has six deliberately narrow crates:
 
 - `cic-core`: dependency-free invariants and bounded binary input.
 - `cic-formats`: bounded decoders and immutable, renderer-neutral format values.
 - `cic-vfs`: normalized paths, providers, overlay order, and asset provenance.
+- `cic-ui`: retained UI state instantiated from immutable WND definitions — layout, hit testing,
+  focus, control invariants, typed events, and renderer-neutral frames. Depends only on
+  `cic-formats`.
 - `cic-render`: stable model staging, bounded texture resources, deterministic
   diagnostic capture, and interactive `wgpu` presentation.
-- `cic-tools`: diagnostic applications that compose the public VFS, format, and
+- `cic-tools`: diagnostic applications that compose the public VFS, format, UI, and
   renderer APIs.
 
-R4 will add a narrow `cic-ui` crate for retained UI state, input, and safe navigation while keeping
-WND parsing in `cic-formats` and GPU presentation in `cic-render`. Simulation, AI, networking, and
-script execution remain excluded until R5. R3 does include bounded
+`cic-ui` keeps WND parsing in `cic-formats` and GPU presentation in `cic-render`: it consumes
+immutable definitions and produces frames, so it links to no rendering API and holds no simulation
+state. Simulation, AI, networking, and script execution remain excluded until R5. R3 does include bounded
 MAP script decoding because scripts are part of the persisted map format; the resulting immutable
 tree has no evaluator, callbacks, timers, or access to live engine state.
 

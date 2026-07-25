@@ -6,6 +6,7 @@ members = [
     "crates/cic-render",
     "crates/cic-vfs",
     "crates/cic-tools",
+    "crates/cic-ui",
 ]
 
 [workspace.package]

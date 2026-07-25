@@ -1,0 +1,13 @@
+[package]
+name = "cic-ui"
+description = "Retained, renderer-neutral user-interface state for Commanders in Chief"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+cic-formats = { path = "../cic-formats" }
+
+[lints]
+workspace = true

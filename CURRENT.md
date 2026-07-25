@@ -50,11 +50,22 @@ Three facts from that pass shape the runtime work:
 - `Language.ini` fixes `ResolutionFontAdjustment = 0.7` and a font-scaling policy, which is the
   presentation-policy input the scaling gate needs.
 
-The next verified step is the remainder of Gate 4 — bounded `WindowTransition`, `MouseCursor`, and
-`ShellMenuScheme` subsets, which live in the same INI family and reuse the shared lexer — followed by
-Gate 5's retained `cic-ui` runtime: instantiating the immutable definitions into a menu state tree
-with parent-relative layout, clipping, z-order, hit testing, focus, and the control-specific
-invariants, with UI state kept as presentation state rather than simulation state.
+Gate 5's retained runtime is implemented as the new `cic-ui` crate: layout reproducing
+`parseScreenRect` exactly plus a project-designed uniform-scale `Modern` policy, the original's
+three-pass layered hit testing with source-order child descent, focus with its `NOFOCUS` refusal and
+parent walk, a wraparound tab cycle over declared `TABSTOP` controls, every control-family invariant,
+and renderer-neutral frames. Twenty-one tests over one original synthetic layout pass.
+
+The next verified step is Gate 6, custom `wgpu` presentation: executing a `UiFrame` as ordered
+image and colour quads with borders, scissor rectangles, and shaped Unicode text over either a 2D
+background or an R3 scene, with bounded atlases, batched stable draws, and surface-free deterministic
+capture. That gate needs the text stack decided first — ADR 0010 prefers `cosmic-text` with `glyphon`
+subject to verifying compatibility with the workspace `wgpu`, and licences and notices must be
+reviewed before either enters the manifests.
+
+Two smaller pieces remain queued behind it: the rest of Gate 4 — bounded `WindowTransition`,
+`MouseCursor`, and `ShellMenuScheme` subsets, which live in the same INI family and reuse the shared
+lexer — and the runtime-side visible placeholders for the resources retail names but never defines.
 
 Separately, [docs/formats/csf.md](docs/formats/csf.md) records the language-selection mechanism
 against the pinned source, for the planned goal of shipping languages the original game never had.

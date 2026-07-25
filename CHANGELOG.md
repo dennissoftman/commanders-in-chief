@@ -105,6 +105,34 @@ land under the active milestone heading.
   localization archives to the window archives, because header templates, fonts, and labels live in
   the localization archive rather than the window archive.
 
+- Added `cic-ui`, the retained user-interface runtime, so an immutable WND definition becomes a live
+  control tree with presentation state. It depends only on `cic-formats`: it consumes definitions and
+  produces renderer-neutral frames, so it links to no rendering API and holds no simulation state.
+  Layout reproduces the original's scaling exactly — each stored corner scaled per axis by
+  viewport-over-creation-resolution and truncated, size derived from the scaled corners, and child
+  positions made relative to the parent's already-scaled origin — so an 800x600 layout on 1600x900
+  stretches the way the original does. A project-designed `Modern` policy applies one uniform ratio
+  and centres the result instead, for callers that would rather letterbox than stretch.
+- Added hit testing that reproduces the original's layered search: `ABOVE` windows first, then
+  unlayered, then `BELOW`, descending through children in source order and returning the first
+  visible, enabled one, with a hidden or disabled child skipped so the click falls through to the
+  parent instead of being swallowed. Edge tests are inclusive on both ends, which decides which of two
+  adjacent controls a boundary click reaches, and a control declaring `NO_INPUT` discards the result.
+- Added focus, tab traversal, and control invariants: `NOFOCUS` refusal with the original's
+  parent-walking acceptance; a wraparound tab cycle over declared `TABSTOP` controls that skips
+  disabled and hidden stops; radio-group exclusivity; slider clamping that orders an inverted
+  `MINVALUE`/`MAXVALUE` pair with a diagnostic; list and combo selection that refuses an out-of-range
+  index rather than clamping it to a different row; list scroll clamping that keeps the last page
+  full; and text entry that counts characters rather than bytes against its declared `MAXLEN`, so a
+  Unicode field holds what its definition promises. Hiding or disabling a control clears hover, press,
+  focus, and capture through its whole subtree.
+- Added renderer-neutral UI frames: an ordered list of quads carrying the mapped-image name and
+  colours of the draw-data slot the control's current state selects, text runs carrying the label,
+  font, state colour, and a mask flag for secret entries, and optional clip push/pop. Submission
+  order inverts the hit-test layering and emits each subtree parent before children, so a child draws
+  over its parent. Clipping is an explicit policy because the original does not clip and retail
+  layouts rely on that.
+
 ### Fixed
 
 - Corrected the recorded mapped-image load policy. This project had documented

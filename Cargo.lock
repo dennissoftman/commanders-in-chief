@@ -296,6 +296,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cic-ui"
+version = "0.1.0"
+dependencies = [
+ "cic-formats",
+]
+
+[[package]]
 name = "cic-vfs"
 version = "0.1.0"
 dependencies = [

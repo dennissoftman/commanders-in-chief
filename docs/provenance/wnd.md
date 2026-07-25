@@ -23,6 +23,11 @@
   - `Core/GameEngine/Include/GameClient/GadgetProgressBar.h`
   - `Core/GameEngine/Include/GameClient/GadgetTabControl.h`
   - `Core/GameEngine/Source/GameClient/GUI/Gadget/`
+- Retained runtime evidence:
+  - `Core/GameEngine/Source/GameClient/GUI/GameWindow.cpp`
+  - `GeneralsMD/Code/GameEngine/Source/GameClient/GUI/GameWindowManager.cpp`
+  - `GeneralsMD/Code/GameEngine/Source/GameClient/GUI/GameWindowManagerScript.cpp`
+  - `GeneralsMD/Code/GameEngine/Include/GameClient/GameWindowManager.h`
 - Legacy rendering evidence:
   - `Generals/Code/GameEngineDevice/Include/W3DDevice/GameClient/W3DGameWindowManager.h`
   - `Generals/Code/GameEngineDevice/Source/W3DDevice/GameClient/GUI/W3DGameWindowManager.cpp`
@@ -211,5 +216,28 @@ overrides in Generals and 43 in Zero Hour — so the earlier claim was wrong and
 required for correctness. `GameClient::init` supplies the literal `512`.
 
 Composition, catalog and report shapes, diagnostics, limits, the language parameterization, and the
-`ui-resources` report are project design, not source behavior. Gate 4's transition, cursor, and menu
-scheme subsets, the retained `cic-ui` runtime, and everything else recorded above remain design-only.
+`ui-resources` report are project design, not source behavior.
+
+`crates/cic-ui` implements Gate 5 against source read at the same pinned revision.
+`parseScreenRect` in `GameWindowManagerScript.cpp` establishes the classic scaling policy exactly:
+per-axis ratios, a truncating `(Int)` cast, size derived from the scaled corners, and a child
+position made relative to the parent's already-scaled screen position. `GameWindow.cpp` establishes
+that a child rectangle is parent-relative (`winGetScreenPosition` sums ancestors), that the point
+test is inclusive on both edges, and that `winPointInChild` walks children in source order, skips a
+hidden or disabled child and continues with its siblings, and returns the parent when no child
+matches. `GameWindowManager.cpp` establishes the three-pass `ABOVE`/unlayered/`BELOW` search, the
+`NO_INPUT` discard, the mouse-captor confinement, `winSetFocus`'s `NOFOCUS` refusal and
+parent-walking acceptance, and the wraparound tab cycle. `GameWindow.h` supplies the `WIN_STATUS_*`
+bit values, which `UiStatus` mirrors one to one. `GadgetRadioButton.cpp` establishes group
+exclusivity.
+
+Reading that source produced one finding worth recording: `GameWindow::winNextTab` and
+`winPrevTab` are entirely commented out at this revision and return success without moving focus, so
+per-window tab traversal is not source behavior at all. The live mechanism is the window manager's
+tab list. `cic-ui` reproduces the manager's wraparound cycle and derives the list from the declared
+`TABSTOP` status bit, which is project design filling a documented gap rather than a port.
+
+The arena representation, typed `UiEvent` values, the `Modern` scale policy, the clip policy, the
+frame vocabulary, the character-wise text-editing model, diagnostics, and every limit are project
+design. Gate 4's transition, cursor, and menu-scheme subsets and everything else recorded above
+remain design-only.

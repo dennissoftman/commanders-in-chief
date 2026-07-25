@@ -70,6 +70,27 @@ localization mount is now language-parameterized (`--language`, `<Language>.big`
 never had requires. `cic-inspect ui-resources` reports all of it. Transitions, cursors, menu schemes,
 and the runtime-side visible placeholders remain the rest of Gate 4.
 
+Gate 5 (retained UI runtime) is implemented as the new `cic-ui` crate, which depends only on
+`cic-formats`: it consumes immutable definitions and produces renderer-neutral frames, so it links to
+no rendering API and holds no simulation state. Layout reproduces `parseScreenRect` exactly —
+per-axis ratios, a truncating cast, size derived from the scaled corners, and child positions made
+relative to the parent's already-scaled origin — alongside a project-designed uniform-scale
+`Modern` policy. Hit testing reproduces the three-pass `ABOVE`/unlayered/`BELOW` search, the
+source-order child descent that skips a hidden or disabled child and falls through to the parent, the
+inclusive edge test, the `NO_INPUT` discard, and mouse-captor confinement. Focus reproduces the
+`NOFOCUS` refusal and the parent-walking acceptance. Control invariants cover radio-group
+exclusivity, check toggling, slider clamping with an inverted-bounds diagnostic, list and combo
+selection that refuses an out-of-range index rather than clamping it, list scroll clamping,
+character-wise Unicode text entry against the declared `MAXLEN`, and progress clamping. Hiding or
+disabling a control clears hover, press, focus, and capture through its whole subtree. Twenty-one
+tests over one original synthetic layout covering every control family pass, including a determinism
+check that two instantiations of the same inputs produce identical controls and frames.
+
+Reading the runtime source produced one finding worth recording: `GameWindow::winNextTab` and
+`winPrevTab` are entirely commented out at the pinned revision and return success without moving
+focus, so per-window tab traversal is not source behavior. The live mechanism is the window manager's
+tab list, whose wraparound cycle `cic-ui` reproduces over the declared `TABSTOP` bits.
+
 The Gate 3 patch work was verified end to end against the retail `OptionsMenu.wnd`: the stock
 `ComboBoxResolution` is
 reused and repositioned while a project-owned refresh-rate combo is inserted beside it. That is
@@ -187,7 +208,7 @@ source WND bytes are edited and no renderer path searches for special window nam
    and required menu-definition subsets. Resolve CSF labels through the existing localization
    decoder and images/fonts through the VFS. Missing resources use visible placeholders and stable
    diagnostics; system-font fallback is opt-in and never used by deterministic captures.
-5. **Retained UI runtime.** Instantiate immutable definitions into an isolated menu state tree with
+5. **Retained UI runtime (implemented).** Instantiate immutable definitions into an isolated menu state tree with
    show/hide/enable, parent-relative layout, classic/modern resolution policies, clipping, z-order,
    hit testing, capture, focus, tab order, hover, press, selection, text editing, scrolling, and
    control-specific invariants. UI state is presentation state, not simulation state.
