@@ -368,7 +368,7 @@ global and sibling `Map.ini` overrides.
 The Modern policy combines authored sky/environment inputs with a bounded screen-space reflection,
 and `map-view --time` freezes presentation time for repeatable comparison. Water stays outside the
 opaque G-buffer in an ordered forward pass, samples the same primary directional shadow map as the
-opaque scene, and is followed by edge-aware post-process anti-aliasing. Deterministic explicit-time
+opaque scene, and precedes the viewer's final composite (see ADR 0007). Deterministic explicit-time
 overview hashes and repeatable user-owned comparisons establish the R3 baseline; legacy
 compatibility and Modern presentation remain separate policies, and exact Direct3D 8 pixel
 equivalence is not claimed.
@@ -422,7 +422,7 @@ playable extent only: it does not create collision, pathing, or simulation state
 - `map-view` integrates source lighting and forward water, source-topology roads, initial instanced
   static drawables, intact bridges, and the playable-boundary fence. M toggles full-scene wireframe
   when polygon-line rasterization is available. It also includes explicit-time default tree sway,
-  shared directional shadows, and edge-aware anti-aliasing.
+  shared directional shadows, and the multisampled composite described in ADR 0007.
 
 Lighting/water inputs, object/world decoding, endpoint staging, sides/teams/spawns, and nested script
 data are implemented, as are source-topology roads, pristine bridges with tower scenery, initial

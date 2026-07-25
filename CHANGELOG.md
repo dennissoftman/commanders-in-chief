@@ -44,6 +44,16 @@ land under the active milestone heading.
   `object_ini`'s intentionally out-of-scope gameplay modules (`Behavior`, `Body`, and similar)
   remain excluded as before, since that boundary is architectural, not a dropped field.
 
+- Replaced the terrain viewer's single-pass FXAA-style composite blur with hardware anti-aliasing.
+  The opaque G-buffer pass (terrain, streamed detail, custom edges, roads, and static scenery) now
+  rasterizes at four samples and resolves before lighting, with an explicit depth-resolve pass
+  because `wgpu` has no automatic one. Alpha-tested cutout foliage decides coverage before the alpha
+  test runs, so the non-blended scenery pipelines enable alpha-to-coverage to antialias leaf
+  silhouettes per sample. The now-redundant blur became a bounded contrast-adaptive sharpen that
+  restores mid-contrast detail without ringing edges multisampling already resolved. `map-view` is
+  visibly cleaner; `map-render` is unaffected, since deterministic headless capture does not use
+  this path and remains single-sampled with unchanged RGBA hashes.
+
 - Closed R3 and advanced the active objective to R4's bounded WND inventory/layout decoder and
   synthetic headless menu vertical slice. Version-1 height presentation now explicitly retains its
   native stored grid; source-editor preview/auxiliary chunks remain opaque and R4 previews are

@@ -67,8 +67,8 @@ scene captures; local user-owned verification retains only aggregate diagnostics
    and sibling-map inputs now resolve alongside the standing texture, diffuse tint/alpha, blend
    choice, opacity, and terrain-depth shoreline. Modern presentation adds bounded screen-space and
    authored-environment reflection inputs. Water is a depth-tested forward pass over the resolved
-   opaque scene, samples the shared directional shadow map, and is followed by bounded edge-aware
-   anti-aliasing. Explicit-time full-scene hashes and repeatable user-owned comparisons close the
+   opaque scene, samples the shared directional shadow map, and precedes the viewer's final
+   composite. Explicit-time full-scene hashes and repeatable user-owned comparisons close the
    integration gate without claiming exact Direct3D 8 pixel equivalence.
 2. **Placed-object and world metadata boundary (implemented).** Established `WorldInfo`,
    `ObjectsList`, and nested `Object` versions decode without constructing live objects. They retain finite XYZ placement,
@@ -117,7 +117,7 @@ scene captures; local user-owned verification retains only aggregate diagnostics
    evaluation, timers, side effects, and compatibility rewrites belong to R5.
 7. **Scene integration and R3 closure (complete).** Present all resolved opaque scenery through the existing
    G-buffer, then ordered alpha/additive scenery and forward water. The viewer adds a shared primary
-   directional shadow map and edge-aware anti-aliasing; `map-render --time` emits a deterministic
+   directional shadow map and a multisampled composite; `map-render --time` emits a deterministic
    full-scene overview. Both profiles retain version-1 height data at its native stored grid.
    Source-editor preview/auxiliary chunks remain opaque because they are not scene inputs; R4
    generates previews from the completed renderer. Dense installed and original synthetic fixtures
@@ -155,9 +155,9 @@ optional full-scene wireframe on M. `End`-delimited default/initial-NONE object 
 stable static-model instancing, exact terrain-triangle placement, a renderer-only playable-boundary
 fence, intact bridges with retained state assets and tower scenery, and source mesh culling are
 integrated. Complete polygon retention/reporting, explicit-time default-breeze tree sway, shared
-terrain/scenery/water shadows, edge-aware anti-aliasing, and deterministic full-scene overview
-capture close R3. Unsupported draw modules remain visible diagnostics and gameplay-bearing modules
-remain excluded rather than blocking this presentation milestone.
+terrain/scenery/water shadows, the viewer's multisampled composite, and deterministic full-scene
+overview capture close R3. Unsupported draw modules remain visible diagnostics and gameplay-bearing
+modules remain excluded rather than blocking this presentation milestone.
 
 ## Closure summary
 
@@ -165,7 +165,7 @@ R3 is complete and owns bounded MAP ingestion and pre-simulation scene presentat
 alone. The established terrain gate includes water-only polygon decoding, stable lake/river
 staging, a hybrid-deferred viewer with forward water, source caustic/transparency inputs, Modern
 macro variation, horizon-safe GPU page composition, persistent LRU residency, complete mip chains,
-anisotropic sampling, shared directional shadows, and edge-aware anti-aliasing. Immutable
+anisotropic sampling, shared directional shadows, and a multisampled composite. Immutable
 world/object and
 sides/teams/build-list/script data now decode under explicit limits, and source-order scene staging
 classifies endpoints, scenery, waypoints, and player starts without constructing live objects.
@@ -281,7 +281,9 @@ R5.
   foam; no legacy water-rendering algorithm was translated.
 - The viewer renders terrain and alpha-tested static scenery into one 2048-square primary
   directional shadow map and samples it from deferred opaque lighting and forward water with
-  bounded 3-by-3 PCF. Its final composite uses edge-aware post-process anti-aliasing.
+  bounded 3-by-3 PCF. Its opaque G-buffer is hardware multisampled and its final composite applies
+  a bounded contrast-adaptive sharpen; ADR 0007 owns both. Deterministic headless capture does not
+  use that path and is single-sampled.
 - `W3DTreeDraw` resources now resolve separately from ordinary model draws and receive
   source-default `BreezeInfo` direction, lean, intensity, five-second period, bounded randomness,
   and one of ten deterministic placement-ID sway families. Presentation samples explicit seconds;
@@ -419,7 +421,7 @@ R5.
   seconds and staged 198 scenery instances across 70 models without missing or invalid resources.
 - Source standing-water texture/color/blend/opacity and WaterSet sky/environment textures drive the
   selected appearance, including sibling `Map.ini` overrides. Modern water adds bounded
-  screen-space/environment reflection inputs; shared shadows, edge-aware anti-aliasing,
+  screen-space/environment reflection inputs; shared shadows, the viewer's multisampled composite,
   explicit-time overview hashes, and repeatable user-owned comparisons complete the R3 baseline.
   Exact legacy fixed-function pixel equivalence remains excluded.
 - `WorldInfo`, complete `ObjectsList`/`Object` records, waypoint/player-start metadata,
