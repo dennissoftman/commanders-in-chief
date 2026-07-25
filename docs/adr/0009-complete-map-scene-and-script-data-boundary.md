@@ -77,7 +77,8 @@ notices, and permanent links are recorded in `docs/provenance/map.md`.
   `SET_TREE_SWAY` action remains inert until R5 executes scripts.
 - `GlobalLighting` supplies separate immutable terrain/object lighting inputs. Water remains a
   forward transmissive pass; it shares the primary directional shadow map with opaque scenery and
-  is followed by bounded edge-aware post-process anti-aliasing.
+  runs after the resolved opaque scene but before the final composite. ADR 0007 owns that
+  composite, including the interactive path's multisampling and sharpen.
 - `HeightMapData` version 1 remains an immutable native stored grid in both presentation profiles.
   The parser does not hide a legacy downsampling transform. A future historically exact derived
   view must be an explicit versioned compatibility policy and cannot replace the retained samples.

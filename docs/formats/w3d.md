@@ -52,7 +52,7 @@ Representative top-level W3D identifiers are:
 | `0x00000740` | Collision box render object |
 
 Identifiers do not determine whether a chunk is nested; the size word's high bit is the
-authoritative container flag. The inspector currently labels 73 mesh, material, hierarchy,
+authoritative container flag. The inspector currently labels 77 mesh, material, hierarchy,
 animation, tree, and top-level identifiers from the pinned GPL header.
 
 ## Inventory policy

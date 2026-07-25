@@ -439,8 +439,8 @@ The Rust implementations in `crates/cic-formats/src/map.rs`, `map_blend.rs`, `ma
 `map_scenario.rs`, `object_ini.rs`,
 `refpack.rs`, `road_ini.rs`, `terrain_ini.rs`, and `water_ini.rs`, terrain/water/road/scenery staging in
 `crates/cic-render/src/terrain.rs`, `water.rs`, `map_scene.rs`, `road.rs`, `scenery.rs`, and
-`boundary.rs`, the project-authored `scene_shadow.wgsl` and edge-aware composite in
-`terrain_deferred.wgsl`, plus report/CLI integration
+`boundary.rs`, the project-authored `scene_shadow.wgsl` and the multisample-resolve and
+contrast-adaptive-sharpen composite in `terrain_deferred.wgsl`, plus report/CLI integration
 in `crates/cic-tools`, were authored for this project from the documented facts. No C++ source code
 was copied, translated line by line, or imported. The immutable values, structured errors, explicit
 limits, exact closure checks, top-level opaque-payload policy, stable staging/report schemas, and

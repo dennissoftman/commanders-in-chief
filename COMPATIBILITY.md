@@ -21,7 +21,7 @@ observable behavior.
 | CSF | Deterministic VFS-backed report | verified | Synthetic BIG-to-CSF CLI integration test |
 | W3D | Nested chunk inventory | verified | Original fixture + 113,980-byte installed asset |
 | W3D | Unknown payload preservation | verified | Nested synthetic round-trip values and CLI report |
-| W3D | Known identifier reporting | implemented | 73 identifiers from pinned GPL header |
+| W3D | Known identifier reporting | implemented | 77 identifiers from pinned GPL header |
 | W3D | Static mesh geometry | verified | Original fixture + version 4.2 Steam Generals mesh |
 | W3D | Deterministic static mesh report | verified | Synthetic BIG-backed CLI integration test |
 | W3D | Vertex-material diffuse colors and pass IDs | verified | Colored fixture + installed version 4.2 meshes |
@@ -57,7 +57,7 @@ observable behavior.
 | MAP | Terrain INI resolution and layered terrain staging | verified | Synthetic ordered-history test/capture hashes + installed Generals-under-ZH class smoke |
 | MAP | Water/river `PolygonTriggers` versions 2 through 4 | verified | Synthetic layer-name/truncation/seam reconstruction tests + installed lake/long-river/empty-marker smokes |
 | MAP | Water transparency, standing texture, and source caustic inputs | verified | Synthetic constructor/history/map-overlay tests + installed texture/scalar/frame smokes |
-| MAP | R3 water appearance baseline | verified | Forward depth/refraction/shoreline path, shared directional shadows, edge-aware AA, explicit-time hashes, and repeatable installed comparisons; exact D3D8 pixels excluded |
+| MAP | R3 water appearance baseline | verified | Forward depth/refraction/shoreline path, shared directional shadows, multisampled viewer composite, explicit-time hashes, and repeatable installed comparisons; exact D3D8 pixels excluded |
 | MAP | `GlobalLighting` versions 1 through 3 | verified | Synthetic exact-layout/truncation tests + installed selected-time smoke |
 | MAP | `WorldInfo` and `ObjectsList` placements | verified | Bounded synthetic layouts, truncation/limit tests, stable report, and immutable source-order staging |
 | MAP | Roads and bridges | verified | Source-radius curves/miters, atlas joins, stacking, terrain fit, intact instanced bridges, retained body-state assets, and renderer-only tower scenery; runtime state transitions remain R5+ |
