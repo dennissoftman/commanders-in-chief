@@ -399,7 +399,7 @@ The definitions live in three places, and two of them are not where a reader mig
 
 | Resource | Location |
 | --- | --- |
-| Mapped images | `Data/INI/MappedImages/**/*.INI` in `INI.big`/`INIZH.big`/`Patch.big`, under `HandCreated/` and `TextureSize_512/` |
+| Mapped images | `Data/INI/MappedImages/TextureSize_512/` then `HandCreated/`, in `INI.big`/`INIZH.big`/`Patch.big` |
 | Header templates | `Data/<Language>/HeaderTemplate.ini` — in the **localization** archive, not `INI.big` |
 | Fonts | `Data/<Language>/Language.ini` — likewise localized |
 | CSF labels | `Data/<Language>/Generals.csf`, decodable today by `cic-formats`' CSF decoder |
@@ -408,19 +408,59 @@ Resource resolution therefore needs a localization mount alongside the `Wnd` pro
 is a **path component**, not an archive name; see [csf.md](csf.md) for the selection mechanism and
 what adding a new language requires.
 
-The two mapped-image directories are a **plain recursive merge, not a variant selection.** Their
-names invite the opposite conclusion, so this was measured: across both editions the sets are
-completely disjoint — `HandCreated/` defines 32 names in Generals and 41 in Zero Hour, and
-`TextureSize_512/` defines 946 and 1,279, with **zero** appearing in both. No second size directory
-ships either. Loading `Data/INI/MappedImages/**` recursively is therefore correct for retail data,
-and a mod that did introduce a colliding name would resolve through ordinary VFS mount order. The
-source-side loader that walks this directory has not been located, so the merge conclusion rests on
-the data rather than on the code.
+### Mapped-image load order
 
-Coverage against a real installation, measured with the project's own CSF decoder: **349 of 366
-referenced labels resolve; 17 do not.** Retail layouts genuinely reference labels the shipped CSF
-does not define, so visible placeholders and stable diagnostics for missing labels are the ordinary
-path, not an edge case.
+The loader has since been located, and it corrects an earlier conclusion recorded here. The client's
+mapped-image load is an **ordered three-stage load with an explicit texture-size selection**, not a
+recursive merge of `Data/INI/MappedImages/**`:
+
+1. `<UserData>/INI/MappedImages/*.ini`, when that directory exists;
+2. `Data/INI/MappedImages/TextureSize_<N>` — one directory, chosen by the caller's `N`; and
+3. `Data/INI/MappedImages/HandCreated`, last, so it overrides both.
+
+`GameClient::init` calls the loader with a literal `512`, so `TextureSize_512` is the shipped
+selection and any other `TextureSize_<N>` directory in the data is deliberately not loaded. Each
+stage loads a directory's own files before its subdirectories' files, each group sorted by name; the
+source comments that the sort keeps machines in step in a network game, so the order is a
+determinism requirement rather than an implementation detail.
+
+Order matters in retail data, which is the part the earlier note got wrong. Definitions are **not**
+disjoint across the directories: applying the source order to a real installation records 23 name
+overrides in Generals (12 within `TextureSize_512`, 11 from `HandCreated`) and 43 in Zero Hour (33
+within `TextureSize_512`, 10 from `HandCreated`). Both editions ship a `HandCreatedMappedImages.ini`
+in *both* directories. Two definitions are even duplicated inside a single file — `FairPlay` in
+`SCShellUserInterface512.ini` and `SSRadarVanScan` in `SUUserInterface512.ini` — which the source
+loader parses into the existing definition, so later fields win and omitted fields are inherited.
+A merge-everything loader would resolve some of those names to the wrong texture region.
+
+### Measured resource coverage
+
+Applying the implemented resolution to every layout in a real installation, with the project's own
+decoders:
+
+| Resource | Zero Hour (80 layouts) | Generals (78 layouts) |
+| --- | --- | --- |
+| Mapped images | 1,849 resolved, 129 unresolved (50 distinct) | 1,789 resolved, 143 unresolved (48 distinct) |
+| Header templates | 209 resolved, 0 unresolved | 196 resolved, 0 unresolved |
+| Font families | 137 resolved, 43 unresolved (3 distinct) | 133 resolved, 41 unresolved (3 distinct) |
+| CSF labels | 537 resolved, 28 unresolved (17 distinct) | 505 resolved, 21 unresolved (13 distinct) |
+
+Three findings shape the runtime gates:
+
+- **Retail layouts name images retail never defines.** Fifty distinct names in Zero Hour and 48 in
+  Generals — the whole `ProgressBarDisabled*` family, `CheckBoxUseStats*`, `MarketingScreen`, and
+  others — appear in no shipped mapped-image INI in either edition. Visible placeholders and stable
+  diagnostics are the ordinary path, not an edge case.
+- **Zero Hour's 17 unresolved labels reproduce exactly**, matching the independent count from the
+  evidence pass and cross-checking the label classifier against the CSF decoder. Generals leaves 13
+  unresolved against its smaller 2,806-label string table (Zero Hour ships 6,422).
+- **Only three font families go unresolved** — `Generals`, `Abadi MT Bold`, and
+  `Placard MT Condensed` — none declared by `Language.ini` and none shipped as a file.
+
+`[None]` (spelled in retail as both `[None]` and `[NONE]`) is the writer's explicit "selects
+nothing" placeholder for `HEADERTEMPLATE`, `FONT`, and text records, the same spelling the layout
+block uses for an absent callback. `MainMenu.wnd` alone carries 31 `[NONE]` and two `[None]` header
+templates. A placeholder is an absent demand, never a missing resource.
 
 **Retail ships no font files.** `Language.ini` names only host font families — `Arial`,
 `Times New Roman`, `Courier New`, `Arial Unicode MS`, `FixedSys` — and its one `LocalFontFile` line
@@ -428,6 +468,56 @@ is commented out with the note that game fonts were never added. Since determini
 not use host fonts, a project-supplied substitute is the *default* capture path here, not an opt-in
 fallback. `Language.ini` also fixes `ResolutionFontAdjustment = 0.7`, so font size grows at 70% of
 the resolution increase — a presentation-policy input for the scaling gate.
+
+### Implemented UI definition grammar
+
+The three narrow decoders share one bounded lexer (`crates/cic-formats/src/ui_ini.rs`) derived from
+the source INI reader, because all three are read by the same one:
+
+- a line ends at `\n`; a `;` terminates the line at that byte, so comment text is never tokenized;
+  bytes below 32 become spaces, which makes `\r` insignificant;
+- the default separator set is `" \n\r\t="`, so `=` is only a separator and `Field = value`,
+  `Field=value`, and `Field value` are one record; `:` joins the set for `Left:12` sub-tokens; a
+  quoted string is delimited by `"` and `=` alone;
+- block keywords and field names are matched with `strcmp`, so both are **case-sensitive**, while the
+  `End` terminator is matched with `stricmp` and is not;
+- an unknown field inside a block is skipped by the release client; this project retains it as a
+  diagnostic. Reaching end of file with a block open is a hard error in both.
+
+Two source quirks are reproduced rather than corrected, because a definition authored against the
+original reader has to resolve to the same value here: a quoted string is rejoined from at most two
+tokens and a continuation of exactly one character is dropped (`"Synth 0"` reads as `Synth`), and an
+*unquoted* multi-word value keeps only its first token (`UnicodeFontName = Arial Unicode MS` reads as
+`Arial`). Both are covered by tests that assert the quirk.
+
+| Format | Block | Fields |
+| --- | --- | --- |
+| `mapped_image_ini.rs` | `MappedImage <Name>` | `Texture`, `TextureWidth`, `TextureHeight`, `Coords`, `Status` |
+| `header_template_ini.rs` | `HeaderTemplate <Name>` | `Font`, `Point`, `Bold` |
+| `language_ini.rs` | `Language` (unnamed singleton) | 25 fields: 17 font roles plus `UnicodeFontName`, `LocalFontFile`, `MilitaryCaptionSpeed`, `MilitaryCaptionDelayMS`, `UseHardWordWrap`, `ResolutionFontAdjustment`, `ResolutionFontSizeMethod` |
+
+Mapped-image lookup is case-insensitive because the source keys its collection through a lowercased
+name key; header-template lookup is case-sensitive because the source compares names directly. Both
+apply a duplicate definition to the existing entry rather than replacing it, so a field the second
+declaration omits keeps the first declaration's value, and the duplicate is reported.
+
+`Coords` and `Status` are order-dependent in the source and stay so here: the region rect describes
+the *rotated* image, so `Status = ROTATED_90_CLOCKWISE` swaps the stored presentation size at the
+point it is read. A `Status` line placed before its `Coords` line therefore swaps an empty size and
+leaves the later region unswapped. `Status` accepts the `parseBitString32` shape — `NONE`, bare
+names, or `+`/`-` operators, which may not be mixed with bare names.
+
+`Language.ini` supplies every default from the source constructor when a field is absent:
+`ResolutionFontAdjustment` 0.7, `MilitaryCaptionDelayMS` 750, and per-role
+`Arial Unicode MS` at 12 points, not bold. `ResolutionFontSizeMethod` decodes all four policies the
+pinned revision declares (`CLASSIC`, `CLASSIC_NO_CEILING`, `STRICT`, `BALANCED`) with that
+revision's `CLASSIC_NO_CEILING` default; only `CLASSIC` is original behavior. `LocalFontFile` repeats
+and the source pushes each name onto the *front* of its list, so the decoded order is reversed from
+file order — the order fonts are actually registered in.
+
+Default limits are 4 MiB per file, 100,000 lines, 4,096 bytes per line, 16,384 definitions per file,
+255-byte names, 1,024-byte values, and 256 entries per repeated field. Resolution adds 4,096
+definition files per directory tree and 65,536 catalog definitions.
 
 ## Retained UI behavior
 
@@ -510,8 +600,13 @@ before R5.
   menu.
 - `cic-inspect wnd-patch` (implemented) reports target/preconditions, operations, resulting hierarchy,
   per-field provenance, and stable incompatibility diagnostics without writing a patched retail WND.
-- `cic-inspect ui-resources` (planned) reports resolved/missing images, fonts, labels, transitions,
-  and provenance without embedding retail data.
+- `cic-inspect ui-resources` (implemented) reports the selected language and its font policy, every
+  definition file that loaded with its definition count, every definition file the active texture-size
+  selection skipped, every name a later file overrode, all 17 font roles, every declared font file,
+  per-kind resolved/unresolved counts, and one row per demanded resource with each site that named it
+  plus its binding — defining file, texture file and resolved texture path, header-template font,
+  point and weight, or the matched font role. Rows carry names, virtual paths, and counts only; no
+  retail definition content is embedded. Transitions and cursors are not covered yet.
 - `cic-inspect ui-render` (planned) emits a deterministic synthetic PNG/hash for an explicit layout,
   viewport, scale policy, locale, font set, time, and input/state snapshot.
 - `cic-inspect ui-demo` (planned) launches the interactive main-menu/skirmish compatibility harness.

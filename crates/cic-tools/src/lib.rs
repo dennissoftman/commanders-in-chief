@@ -2,17 +2,23 @@
 
 mod gltf;
 pub mod resource;
+pub mod ui_resources;
 
 pub use gltf::{GltfTextureRequest, W3dGlbError, W3dGltfBundle, pack_w3d_glb, render_w3d_gltf};
 
 use std::fmt::Write;
 
+use crate::ui_resources::{
+    LocalizationResources, MappedImageCatalog, UiResourceBinding, UiResourceKind,
+    UiResourceResolution,
+};
 use cic_formats::{
-    CsfFile, MapBlendData, MapDictionary, MapDictionaryValue, MapFile, MapHeightField,
-    MapLightingData, MapPolygonData, MapScript, MapScriptAction, MapScriptParameterValue,
-    MapSidesData, MapWaterData, MapWorldObjects, OptionsIni, PatchedWndDocument, W3dChunk, W3dFile,
-    W3dStaticMesh, W3dVector3, WndCallbackKind, WndDiagnosticKind, WndDocument, WndDrawDataSlot,
-    WndGadgetData, WndPatch, WndPatchOperation, WndWindow, w3d_chunk_name,
+    CsfFile, LanguageFontRole, MapBlendData, MapDictionary, MapDictionaryValue, MapFile,
+    MapHeightField, MapLightingData, MapPolygonData, MapScript, MapScriptAction,
+    MapScriptParameterValue, MapSidesData, MapWaterData, MapWorldObjects, OptionsIni,
+    PatchedWndDocument, UiIniDiagnosticKind, W3dChunk, W3dFile, W3dStaticMesh, W3dVector3,
+    WndCallbackKind, WndDiagnosticKind, WndDocument, WndDrawDataSlot, WndGadgetData, WndPatch,
+    WndPatchOperation, WndWindow, w3d_chunk_name,
 };
 use cic_render::Capture;
 use cic_vfs::Vfs;
@@ -1085,6 +1091,255 @@ pub fn render_wnd(document: &WndDocument) -> String {
     output
 }
 
+/// Formats UI resource resolution for one layout: which definition files loaded, which demands
+/// bound to which definitions, and which did not resolve.
+///
+/// No retail definition content is embedded: rows carry names, virtual paths, and counts, which is
+/// what a compatibility check needs.
+#[must_use]
+pub fn render_ui_resources(
+    catalog: &MappedImageCatalog,
+    localization: &LocalizationResources,
+    resolution: &UiResourceResolution,
+) -> String {
+    let mut output = String::new();
+    render_ui_language(&mut output, localization);
+    render_ui_definition_files(&mut output, catalog, localization);
+    render_ui_fonts(&mut output, localization);
+    render_ui_bindings(&mut output, resolution);
+    render_ui_definition_diagnostics(&mut output, catalog, localization);
+    output
+}
+
+fn render_ui_language(output: &mut String, localization: &LocalizationResources) {
+    output.push_str("ui_language\tname\tfont_size_method\tfont_adjustment\tlabels\n");
+    let text = localization.text();
+    writeln!(
+        output,
+        "ui_language\t{}\t{}\t{}\t{}",
+        localization.language(),
+        text.resolution_font_size_method().name(),
+        text.resolution_font_adjustment(),
+        localization.labels().map_or_else(
+            || "-".to_owned(),
+            |(path, csf)| format!("{path}:{}", csf.labels().len())
+        )
+    )
+    .expect("writing to a String cannot fail");
+}
+
+fn render_ui_definition_files(
+    output: &mut String,
+    catalog: &MappedImageCatalog,
+    localization: &LocalizationResources,
+) {
+    output.push_str("ui_definition_file\tkind\tpath\tdefinitions\n");
+    for file in catalog.files() {
+        writeln!(
+            output,
+            "ui_definition_file\tmapped_image\t{}\t{}",
+            file.path(),
+            file.definitions()
+        )
+        .expect("writing to a String cannot fail");
+    }
+    for file in localization.text_files() {
+        writeln!(
+            output,
+            "ui_definition_file\tlanguage\t{}\t{}",
+            file.path(),
+            file.definitions()
+        )
+        .expect("writing to a String cannot fail");
+    }
+    for (path, ini) in localization.header_template_files() {
+        writeln!(
+            output,
+            "ui_definition_file\theader_template\t{path}\t{}",
+            ini.templates().len()
+        )
+        .expect("writing to a String cannot fail");
+    }
+
+    output.push_str("ui_unselected_file\tpath\n");
+    for path in catalog.unselected_files() {
+        writeln!(output, "ui_unselected_file\t{path}").expect("writing to a String cannot fail");
+    }
+
+    output.push_str("ui_definition_override\tname\tsuperseded\twinner\n");
+    for entry in catalog.overrides() {
+        writeln!(
+            output,
+            "ui_definition_override\t{}\t{}\t{}",
+            String::from_utf8_lossy(entry.name_bytes()),
+            entry.previous(),
+            entry.winner()
+        )
+        .expect("writing to a String cannot fail");
+    }
+}
+
+fn render_ui_fonts(output: &mut String, localization: &LocalizationResources) {
+    let text = localization.text();
+    output.push_str("ui_font_role\trole\tfamily\tsize\tbold\tdeclared\n");
+    for role in LanguageFontRole::ALL {
+        let font = text.font(role);
+        writeln!(
+            output,
+            "ui_font_role\t{}\t{}\t{}\t{}\t{}",
+            role.field_name(),
+            String::from_utf8_lossy(font.name_bytes()),
+            font.size(),
+            font.bold(),
+            font.is_declared()
+        )
+        .expect("writing to a String cannot fail");
+    }
+    output.push_str("ui_font_file\tname\n");
+    for file in text.local_font_files() {
+        writeln!(output, "ui_font_file\t{}", String::from_utf8_lossy(file))
+            .expect("writing to a String cannot fail");
+    }
+}
+
+fn render_ui_bindings(output: &mut String, resolution: &UiResourceResolution) {
+    output.push_str("ui_summary\tkind\tresolved\tmissing\n");
+    for kind in [
+        UiResourceKind::MappedImage,
+        UiResourceKind::Font,
+        UiResourceKind::HeaderTemplate,
+        UiResourceKind::Label,
+    ] {
+        let (resolved, missing) = resolution.counts(kind);
+        writeln!(
+            output,
+            "ui_summary\t{}\t{resolved}\t{missing}",
+            kind.row_name()
+        )
+        .expect("writing to a String cannot fail");
+    }
+
+    output.push_str("ui_resource\tkind\tname\tstatus\tsites\tdetail\n");
+    output.push_str("ui_resource_site\tkind\tname\twindow_id\twindow\trecord\n");
+    for resource in resolution.resources() {
+        let demand = resource.demand();
+        let (status, detail) = ui_binding_row(resource.binding());
+        writeln!(
+            output,
+            "ui_resource\t{}\t{}\t{status}\t{}\t{detail}",
+            demand.kind().row_name(),
+            demand.name(),
+            demand.sites().len()
+        )
+        .expect("writing to a String cannot fail");
+        for site in demand.sites() {
+            writeln!(
+                output,
+                "ui_resource_site\t{}\t{}\t{}\t{}\t{}",
+                demand.kind().row_name(),
+                demand.name(),
+                site.window_id(),
+                site.window_name().unwrap_or("-"),
+                site.detail()
+            )
+            .expect("writing to a String cannot fail");
+        }
+    }
+}
+
+fn ui_binding_row(binding: &UiResourceBinding) -> (&'static str, String) {
+    match binding {
+        UiResourceBinding::Image {
+            definition,
+            texture,
+            texture_path,
+            size,
+        } => (
+            if texture_path.is_some() {
+                "resolved"
+            } else {
+                "texture_missing"
+            },
+            format!(
+                "{definition}\t{texture}\t{}\t{}x{}",
+                texture_path
+                    .as_ref()
+                    .map_or_else(|| "-".to_owned(), ToString::to_string),
+                size.0,
+                size.1
+            ),
+        ),
+        UiResourceBinding::HeaderTemplate {
+            definition,
+            font,
+            point,
+            bold,
+        } => ("resolved", format!("{definition}\t{font}\t{point}\t{bold}")),
+        UiResourceBinding::Font {
+            role,
+            local_font_file,
+        } => (
+            "resolved",
+            format!(
+                "{}\t{}",
+                role.unwrap_or("unicode_font_name"),
+                local_font_file.as_deref().unwrap_or("-")
+            ),
+        ),
+        UiResourceBinding::Label { definition } => ("resolved", definition.to_string()),
+        UiResourceBinding::Missing => ("missing", "-".to_owned()),
+    }
+}
+
+fn render_ui_definition_diagnostics(
+    output: &mut String,
+    catalog: &MappedImageCatalog,
+    localization: &LocalizationResources,
+) {
+    output.push_str("ui_definition_diagnostic\tpath\tline\tkind\tdetail\n");
+    let files = catalog
+        .files()
+        .iter()
+        .chain(localization.text_files().iter());
+    for file in files {
+        for diagnostic in file.diagnostics() {
+            let (kind, detail) = ui_ini_diagnostic_row(diagnostic.kind());
+            writeln!(
+                output,
+                "ui_definition_diagnostic\t{}\t{}\t{kind}\t{detail}",
+                file.path(),
+                diagnostic.line()
+            )
+            .expect("writing to a String cannot fail");
+        }
+    }
+    for (path, ini) in localization.header_template_files() {
+        for diagnostic in ini.diagnostics() {
+            let (kind, detail) = ui_ini_diagnostic_row(diagnostic.kind());
+            writeln!(
+                output,
+                "ui_definition_diagnostic\t{path}\t{}\t{kind}\t{detail}",
+                diagnostic.line()
+            )
+            .expect("writing to a String cannot fail");
+        }
+    }
+}
+
+fn ui_ini_diagnostic_row(kind: &UiIniDiagnosticKind) -> (&'static str, String) {
+    match kind {
+        UiIniDiagnosticKind::UnknownBlock { keyword } => ("unknown_block", keyword.to_string()),
+        UiIniDiagnosticKind::UnknownField { field } => ("unknown_field", field.to_string()),
+        UiIniDiagnosticKind::MalformedField { field, reason } => {
+            ("malformed_field", format!("{field}: {reason}"))
+        }
+        UiIniDiagnosticKind::DuplicateDefinition { name, first_line } => (
+            "duplicate_definition",
+            format!("{name} first declared on line {first_line}"),
+        ),
+    }
+}
+
 /// Formats the effect of applied patch overlays: what each patch declared, what it wrote,
 /// and the resulting hierarchy. The source WND is never rewritten.
 #[must_use]
@@ -1411,7 +1666,7 @@ fn render_wnd_gadget_data(output: &mut String, data: &WndGadgetData, path_text: 
     }
 }
 
-fn wnd_draw_slot_name(slot: WndDrawDataSlot) -> &'static str {
+pub(crate) fn wnd_draw_slot_name(slot: WndDrawDataSlot) -> &'static str {
     match slot {
         WndDrawDataSlot::Enabled => "enabled",
         WndDrawDataSlot::Disabled => "disabled",

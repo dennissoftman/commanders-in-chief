@@ -36,7 +36,17 @@ pub enum ResourceKind {
     W3dWithTextures,
     /// WND UI-layout archives.
     Wnd,
+    /// Everything UI resource resolution needs: WND layouts, mapped-image and other INI
+    /// definitions, texture pages, and the selected language's localization archive.
+    Ui,
 }
+
+/// The default localization language.
+///
+/// The language is a path component (`Data/<Language>/`) and an archive-name stem, never a compiled
+/// constant in the original client, so every language-bearing path here is parameterized. See
+/// `docs/formats/csf.md` for the selection mechanism and what shipping a new language requires.
+pub const DEFAULT_LANGUAGE: &str = "English";
 
 /// Explicit bounds for a declarative mount profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -447,6 +457,26 @@ pub fn resolve_archives(
     kind: ResourceKind,
     explicit_game_dir: Option<&Path>,
 ) -> Result<Vec<PathBuf>, ResourceError> {
+    resolve_archives_for_language(edition, kind, explicit_game_dir, DEFAULT_LANGUAGE)
+}
+
+/// Resolves configured or discovered roots for one localization language.
+///
+/// Identical to [`resolve_archives`] except that localization-bearing profiles select
+/// `<language>.big` and `<language>ZH.big` instead of the [`DEFAULT_LANGUAGE`] archives. A language
+/// whose archive is absent simply contributes no mount, exactly as an absent optional archive does,
+/// so a missing translation surfaces as unresolved resources rather than a discovery failure.
+///
+/// # Errors
+///
+/// Returns an error when configuration cannot be read, an installation cannot be located or
+/// validated, or its archive directory cannot be enumerated.
+pub fn resolve_archives_for_language(
+    edition: GameEdition,
+    kind: ResourceKind,
+    explicit_game_dir: Option<&Path>,
+    language: &str,
+) -> Result<Vec<PathBuf>, ResourceError> {
     let stored = StoredLocations::load(&config_path()?)?;
     let discovered = discover_steam_locations();
     let generals = if edition == GameEdition::Generals {
@@ -473,9 +503,14 @@ pub fn resolve_archives(
         None
     };
 
-    let mut archives = edition_archives(GameEdition::Generals, kind, &generals)?;
+    let mut archives = edition_archives(GameEdition::Generals, kind, &generals, language)?;
     if let Some(root) = zero_hour {
-        archives.extend(edition_archives(GameEdition::ZeroHour, kind, &root)?);
+        archives.extend(edition_archives(
+            GameEdition::ZeroHour,
+            kind,
+            &root,
+            language,
+        )?);
     }
     Ok(archives)
 }
@@ -592,64 +627,94 @@ fn edition_archives(
     edition: GameEdition,
     kind: ResourceKind,
     root: &Path,
+    language: &str,
 ) -> Result<Vec<PathBuf>, ResourceError> {
-    let names: Vec<&str> = match (edition, kind) {
+    let localization = match edition {
+        GameEdition::Generals => format!("{language}.big"),
+        GameEdition::ZeroHour => format!("{language}ZH.big"),
+    };
+    let names: Vec<String> = match (edition, kind) {
         (_, ResourceKind::Manifest) => return all_big_files(root),
-        (GameEdition::Generals, ResourceKind::Localization) => vec!["English.big", "Patch.big"],
-        (GameEdition::ZeroHour, ResourceKind::Localization) => vec!["EnglishZH.big", "PatchZH.big"],
-        (GameEdition::Generals, ResourceKind::Map) => vec!["Maps.big", "Patch.big"],
-        (GameEdition::ZeroHour, ResourceKind::Map) => vec!["MapsZH.big", "PatchZH.big"],
-        (GameEdition::Generals, ResourceKind::Terrain) => {
-            vec![
-                "Maps.big",
-                "Terrain.big",
-                "Textures.big",
-                "INI.big",
-                "W3D.big",
-                "Patch.big",
-            ]
+        (GameEdition::Generals, ResourceKind::Localization) => {
+            vec![localization, "Patch.big".into()]
         }
-        (GameEdition::ZeroHour, ResourceKind::Terrain) => {
-            vec![
-                "MapsZH.big",
-                "TerrainZH.big",
-                "TexturesZH.big",
-                "INIZH.big",
-                "W3DZH.big",
-                "W3DEnglishZH.big",
-                "PatchZH.big",
-            ]
+        (GameEdition::ZeroHour, ResourceKind::Localization) => {
+            vec![localization, "PatchZH.big".into()]
         }
-        (GameEdition::Generals, ResourceKind::W3d) => vec!["W3D.big", "Patch.big"],
+        // UI resource resolution reads WND layouts, `Data/INI/MappedImages/**`, the texture pages
+        // those definitions name, and the selected language's `HeaderTemplate.ini`, `Language.ini`,
+        // and `Generals.csf`. Patch archives stay last so their overrides win.
+        (GameEdition::Generals, ResourceKind::Ui) => vec![
+            "INI.big".into(),
+            "Textures.big".into(),
+            "Window.big".into(),
+            localization,
+            "PatchWindow.big".into(),
+            "Patch.big".into(),
+        ],
+        (GameEdition::ZeroHour, ResourceKind::Ui) => vec![
+            "INIZH.big".into(),
+            "TexturesZH.big".into(),
+            "WindowZH.big".into(),
+            localization,
+            "PatchWindow.big".into(),
+            "PatchZH.big".into(),
+        ],
+        (GameEdition::Generals, ResourceKind::Map) => vec!["Maps.big".into(), "Patch.big".into()],
+        (GameEdition::ZeroHour, ResourceKind::Map) => {
+            vec!["MapsZH.big".into(), "PatchZH.big".into()]
+        }
+        (GameEdition::Generals, ResourceKind::Terrain) => owned(&[
+            "Maps.big",
+            "Terrain.big",
+            "Textures.big",
+            "INI.big",
+            "W3D.big",
+            "Patch.big",
+        ]),
+        (GameEdition::ZeroHour, ResourceKind::Terrain) => owned(&[
+            "MapsZH.big",
+            "TerrainZH.big",
+            "TexturesZH.big",
+            "INIZH.big",
+            "W3DZH.big",
+            "W3DEnglishZH.big",
+            "PatchZH.big",
+        ]),
+        (GameEdition::Generals, ResourceKind::W3d) => owned(&["W3D.big", "Patch.big"]),
         (GameEdition::ZeroHour, ResourceKind::W3d) => {
-            vec!["W3DZH.big", "W3DEnglishZH.big", "PatchZH.big"]
+            owned(&["W3DZH.big", "W3DEnglishZH.big", "PatchZH.big"])
         }
         (GameEdition::Generals, ResourceKind::W3dWithTextures) => {
-            vec!["W3D.big", "Textures.big", "Patch.big"]
+            owned(&["W3D.big", "Textures.big", "Patch.big"])
         }
-        (GameEdition::ZeroHour, ResourceKind::W3dWithTextures) => vec![
+        (GameEdition::ZeroHour, ResourceKind::W3dWithTextures) => owned(&[
             "W3DZH.big",
             "W3DEnglishZH.big",
             "TexturesZH.big",
             "PatchZH.big",
-        ],
+        ]),
         // Verified against an installed archive listing: both editions ship a `PatchWindow.big`
         // (no ZH-suffixed variant) carrying WND-specific patch overrides layered between the base
         // window archive and the generic patch archive.
         (GameEdition::Generals, ResourceKind::Wnd) => {
-            vec!["Window.big", "PatchWindow.big", "Patch.big"]
+            owned(&["Window.big", "PatchWindow.big", "Patch.big"])
         }
         (GameEdition::ZeroHour, ResourceKind::Wnd) => {
-            vec!["WindowZH.big", "PatchWindow.big", "PatchZH.big"]
+            owned(&["WindowZH.big", "PatchWindow.big", "PatchZH.big"])
         }
     };
     let mut paths = Vec::with_capacity(names.len());
     for name in names {
-        if let Some(path) = resolve_named_file(root, name)? {
+        if let Some(path) = resolve_named_file(root, &name)? {
             paths.push(path);
         }
     }
     Ok(paths)
+}
+
+fn owned(names: &[&str]) -> Vec<String> {
+    names.iter().map(|name| (*name).to_owned()).collect()
 }
 
 fn all_big_files(root: &Path) -> Result<Vec<PathBuf>, ResourceError> {
@@ -969,8 +1034,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     use super::ResourceError;
     use super::{
-        GameEdition, MountProfile, MountProfileError, MountProfileLimits, ResourceKind,
-        StoredLocations, edition_archives,
+        DEFAULT_LANGUAGE, GameEdition, MountProfile, MountProfileError, MountProfileLimits,
+        ResourceKind, StoredLocations, edition_archives,
     };
 
     fn test_root(name: &str) -> PathBuf {
@@ -1084,11 +1149,16 @@ mod tests {
             fs::write(root.join(name), []).expect("create archive sentinel");
         }
         let names = |edition| {
-            edition_archives(edition, ResourceKind::W3dWithTextures, &root)
-                .expect("resolve archive profile")
-                .into_iter()
-                .map(|path| path.file_name().expect("file name").to_owned())
-                .collect::<Vec<_>>()
+            edition_archives(
+                edition,
+                ResourceKind::W3dWithTextures,
+                &root,
+                DEFAULT_LANGUAGE,
+            )
+            .expect("resolve archive profile")
+            .into_iter()
+            .map(|path| path.file_name().expect("file name").to_owned())
+            .collect::<Vec<_>>()
         };
         assert_eq!(
             names(GameEdition::Generals),
@@ -1104,11 +1174,16 @@ mod tests {
             ]
         );
         assert_eq!(
-            edition_archives(GameEdition::Generals, ResourceKind::Terrain, &root)
-                .expect("terrain archive profile")
-                .into_iter()
-                .map(|path| path.file_name().expect("file name").to_owned())
-                .collect::<Vec<_>>(),
+            edition_archives(
+                GameEdition::Generals,
+                ResourceKind::Terrain,
+                &root,
+                DEFAULT_LANGUAGE
+            )
+            .expect("terrain archive profile")
+            .into_iter()
+            .map(|path| path.file_name().expect("file name").to_owned())
+            .collect::<Vec<_>>(),
             [
                 "Maps.big",
                 "Terrain.big",
@@ -1119,11 +1194,16 @@ mod tests {
             ]
         );
         assert_eq!(
-            edition_archives(GameEdition::ZeroHour, ResourceKind::Terrain, &root)
-                .expect("Zero Hour terrain archive profile")
-                .into_iter()
-                .map(|path| path.file_name().expect("file name").to_owned())
-                .collect::<Vec<_>>(),
+            edition_archives(
+                GameEdition::ZeroHour,
+                ResourceKind::Terrain,
+                &root,
+                DEFAULT_LANGUAGE
+            )
+            .expect("Zero Hour terrain archive profile")
+            .into_iter()
+            .map(|path| path.file_name().expect("file name").to_owned())
+            .collect::<Vec<_>>(),
             [
                 "MapsZH.big",
                 "TerrainZH.big",
@@ -1147,11 +1227,16 @@ mod tests {
         for name in ["w3d.BIG", "textures.BIG", "patch.BIG"] {
             fs::write(root.join(name), []).expect("create mixed-case archive");
         }
-        let names = edition_archives(GameEdition::Generals, ResourceKind::W3dWithTextures, &root)
-            .expect("resolve mixed-case archives")
-            .into_iter()
-            .map(|path| path.file_name().expect("file name").to_owned())
-            .collect::<Vec<_>>();
+        let names = edition_archives(
+            GameEdition::Generals,
+            ResourceKind::W3dWithTextures,
+            &root,
+            DEFAULT_LANGUAGE,
+        )
+        .expect("resolve mixed-case archives")
+        .into_iter()
+        .map(|path| path.file_name().expect("file name").to_owned())
+        .collect::<Vec<_>>();
         assert_eq!(names, ["w3d.BIG", "textures.BIG", "patch.BIG"]);
         fs::remove_dir_all(root).expect("remove archive-case test");
     }
@@ -1168,7 +1253,12 @@ mod tests {
             fs::write(root.join(name), []).expect("create archive candidate");
         }
         assert!(matches!(
-            edition_archives(GameEdition::Generals, ResourceKind::W3dWithTextures, &root),
+            edition_archives(
+                GameEdition::Generals,
+                ResourceKind::W3dWithTextures,
+                &root,
+                DEFAULT_LANGUAGE
+            ),
             Err(ResourceError::AmbiguousArchiveName { .. })
         ));
         fs::remove_dir_all(root).expect("remove ambiguous-case test");

@@ -28,20 +28,25 @@ use cic_render::{
     run_terrain_viewer_with_map_at_time,
 };
 use cic_tools::resource::{
-    GameEdition, MountProfile, MountProfileLimits, ResourceKind, StoredLocations, config_path,
-    discover_options_ini, discover_steam_locations, resolve_archives, resolve_options_ini_path,
-    validate_installation,
+    DEFAULT_LANGUAGE, GameEdition, MountProfile, MountProfileLimits, ResourceKind, StoredLocations,
+    config_path, discover_options_ini, discover_steam_locations, resolve_archives_for_language,
+    resolve_options_ini_path, validate_installation,
+};
+use cic_tools::ui_resources::{
+    DEFAULT_MAPPED_IMAGE_TEXTURE_SIZE, UiResourceLimits, collect_ui_resource_demand,
+    load_localization_resources, load_mapped_image_catalog, resolve_ui_resources,
 };
 use cic_tools::{
     GltfTextureRequest, encode_capture_png, encode_map_height_png, pack_w3d_glb, render_csf,
     render_manifest, render_map, render_map_blend, render_map_height, render_map_lighting,
     render_map_polygons, render_map_sides, render_map_water, render_map_world_objects,
-    render_options_ini, render_w3d, render_w3d_gltf, render_w3d_mesh, render_wnd, render_wnd_patch,
+    render_options_ini, render_ui_resources, render_w3d, render_w3d_gltf, render_w3d_mesh,
+    render_wnd, render_wnd_patch,
 };
 use cic_vfs::{BigLimits, Vfs, VirtualPath};
 
 const USAGE: &str = "Usage:\n\
-  cic-inspect [--zh] [--game-dir <path>] [--profile <profile>] [--mod <mount>]... <command> ...\n\
+  cic-inspect [--zh] [--game-dir <path>] [--language <name>] [--profile <profile>] [--mod <mount>]... <command> ...\n\
   cic-inspect config show\n\
   cic-inspect config set <generals-dir|zero-hour-dir|generals-options-ini|zero-hour-options-ini> <path>\n\
   cic-inspect [--zh] [--options-ini <path>] options\n\
@@ -64,6 +69,8 @@ const USAGE: &str = "Usage:\n\
   cic-inspect w3d-export [--gltf] <virtual-path> [<output.glb|output.gltf>] [<mount> ...]\n\
   cic-inspect wnd <virtual-path> <mount> [<mount> ...]\n\
   cic-inspect wnd-render <virtual-path> [<output.png>] [<mount> ...]\n\
+  cic-inspect wnd-patch <virtual-path> <patch> [<patch> ...] -- [<mount> ...]\n\
+  cic-inspect ui-resources [--texture-size <pixels>] <virtual-path> [<mount> ...]\n\
 Each mount is a directory or BIG archive. Mounts are applied from left to right; later mounts override earlier mounts.";
 
 const MAX_ENCODED_IMAGE_BYTES: usize = 256 * 1_024 * 1_024;
@@ -86,6 +93,7 @@ struct CliOptions {
     edition: GameEdition,
     edition_explicit: bool,
     game_dir: Option<PathBuf>,
+    language: String,
     options_ini: Option<PathBuf>,
     profile: Option<PathBuf>,
     mods: Vec<PathBuf>,
@@ -220,6 +228,7 @@ fn run(arguments: impl IntoIterator<Item = String>) -> Result<String, Box<dyn Er
         }
         "wnd-render" => render_wnd_capture(&mut arguments, &options),
         "wnd-patch" => report_wnd_patch(&mut arguments, &options),
+        "ui-resources" => report_ui_resources(&mut arguments, &options),
         _ => Err(format!("unknown command {command:?}").into()),
     }
 }
@@ -234,6 +243,7 @@ where
         edition: GameEdition::Generals,
         edition_explicit: false,
         game_dir: None,
+        language: DEFAULT_LANGUAGE.to_owned(),
         options_ini: None,
         profile: None,
         mods: Vec::new(),
@@ -256,6 +266,20 @@ where
                 options.options_ini = Some(PathBuf::from(
                     arguments.next().ok_or("--options-ini requires a path")?,
                 ));
+            }
+            "--language" => {
+                arguments.next();
+                let language = arguments.next().ok_or("--language requires a name")?;
+                if language.is_empty()
+                    || !language
+                        .chars()
+                        .all(|character| character.is_ascii_alphanumeric())
+                {
+                    return Err(
+                        "--language must be an ASCII alphanumeric name such as English".into(),
+                    );
+                }
+                options.language = language;
             }
             "--profile" => {
                 arguments.next();
@@ -1902,6 +1926,60 @@ where
     Ok(render_wnd_patch(&patches, &overlaid))
 }
 
+/// Reports which UI definition resources one layout names and how each one resolves.
+///
+/// The mount set is the `Ui` profile, which adds the INI, texture, and selected-language
+/// localization archives to the window archives, because header templates, fonts, and labels live
+/// under `Data/<Language>/` rather than in the window archive.
+fn report_ui_resources<I>(
+    arguments: &mut std::iter::Peekable<I>,
+    options: &CliOptions,
+) -> Result<String, Box<dyn Error>>
+where
+    I: Iterator<Item = String>,
+{
+    let mut texture_size = DEFAULT_MAPPED_IMAGE_TEXTURE_SIZE;
+    while arguments
+        .peek()
+        .is_some_and(|argument| argument.starts_with("--"))
+    {
+        match arguments
+            .next()
+            .expect("peeked ui-resources option")
+            .as_str()
+        {
+            "--texture-size" => {
+                texture_size = arguments
+                    .next()
+                    .ok_or("--texture-size requires a pixel count")?
+                    .parse::<u32>()?;
+            }
+            option => return Err(format!("unknown ui-resources option {option:?}").into()),
+        }
+    }
+    let resource_name = arguments
+        .next()
+        .ok_or("ui-resources requires a virtual path")?;
+    let mounts = arguments.collect::<Vec<_>>();
+    let vfs = mount_all("ui-resources", &mounts, options, ResourceKind::Ui)?;
+    let resource_path = VirtualPath::new(&resource_name)?;
+    let entry = vfs
+        .resolve(&resource_path)
+        .ok_or_else(|| format!("resource not found: {resource_path}"))?;
+    let limits = WndLimits::default();
+    let bytes = entry.read(limits.maximum_file_bytes)?;
+    let document = parse_wnd(&bytes, limits)?;
+
+    let resource_limits = UiResourceLimits::default();
+    let catalog = load_mapped_image_catalog(&vfs, texture_size, resource_limits)?;
+    let localization = load_localization_resources(&vfs, &options.language, resource_limits)?;
+    let demand = collect_ui_resource_demand(&document);
+    let resolution = resolve_ui_resources(demand, &catalog, &localization, &|texture| {
+        resolve_texture_path(&vfs, texture.as_bytes())
+    });
+    Ok(render_ui_resources(&catalog, &localization, &resolution))
+}
+
 fn default_render_path(
     resource_path: &VirtualPath,
     extension: &str,
@@ -2316,6 +2394,21 @@ fn resolve_texture(vfs: &Vfs, raw_name: &[u8]) -> Result<(VirtualPath, Vec<u8>),
     resolve_image(vfs, raw_name, "art/textures")
 }
 
+/// Returns the mounted virtual path of a named texture without reading it.
+///
+/// Mapped-image definitions name a texture file, not a path; the same candidate order used for
+/// loading resolves it, so a report and a render agree on which file a definition refers to.
+fn resolve_texture_path(vfs: &Vfs, raw_name: &[u8]) -> Option<VirtualPath> {
+    let name = std::str::from_utf8(raw_name).ok()?;
+    for candidate in image_candidates(name, "art/textures") {
+        let path = VirtualPath::new(&candidate).ok()?;
+        if vfs.resolve(&path).is_some() {
+            return Some(path);
+        }
+    }
+    None
+}
+
 fn resolve_image(
     vfs: &Vfs,
     raw_name: &[u8],
@@ -2323,11 +2416,20 @@ fn resolve_image(
 ) -> Result<(VirtualPath, Vec<u8>), Box<dyn Error>> {
     let name = std::str::from_utf8(raw_name)
         .map_err(|_| "texture name is not UTF-8 and cannot be mapped to the VFS")?;
+    for candidate in image_candidates(name, resource_directory) {
+        let path = VirtualPath::new(&candidate)?;
+        if let Some(entry) = vfs.resolve(&path) {
+            return Ok((path, entry.read(MAX_ENCODED_IMAGE_BYTES)?));
+        }
+    }
+    Err(format!("referenced texture not found in mounted resources: {name}").into())
+}
+
+/// Returns the ordered, deduplicated candidate paths for one referenced image name.
+fn image_candidates(name: &str, resource_directory: &str) -> Vec<String> {
     let normalized = name.replace('\\', "/");
-    let basename = normalized
-        .rsplit('/')
-        .next()
-        .ok_or("texture name is empty")?;
+    let basename = normalized.rsplit('/').next().unwrap_or("").to_owned();
+    let basename = basename.as_str();
     let mut candidates = vec![
         normalized.clone(),
         format!("{resource_directory}/{normalized}"),
@@ -2353,18 +2455,13 @@ fn resolve_image(
             }
         }
     }
-    let mut checked = Vec::new();
+    let mut checked: Vec<String> = Vec::new();
     for candidate in candidates {
-        if checked.contains(&candidate) {
-            continue;
-        }
-        checked.push(candidate.clone());
-        let path = VirtualPath::new(&candidate)?;
-        if let Some(entry) = vfs.resolve(&path) {
-            return Ok((path, entry.read(MAX_ENCODED_IMAGE_BYTES)?));
+        if !checked.contains(&candidate) {
+            checked.push(candidate);
         }
     }
-    Err(format!("referenced texture not found in mounted resources: {name}").into())
+    checked
 }
 
 fn mount_all(
@@ -2384,7 +2481,12 @@ fn mount_all(
         }
         paths
     } else if mounts.is_empty() {
-        resolve_archives(options.edition, kind, options.game_dir.as_deref())?
+        resolve_archives_for_language(
+            options.edition,
+            kind,
+            options.game_dir.as_deref(),
+            &options.language,
+        )?
     } else {
         mounts.iter().map(PathBuf::from).collect()
     };

@@ -45,7 +45,33 @@ is parsed by the ordinary bounded WND decoder, so it obeys the same grammar, lim
 rules as authored source. `cic-inspect wnd-patch` reports operations, provenance, and the patched
 hierarchy.
 
-This was verified end to end against the retail `OptionsMenu.wnd`: the stock `ComboBoxResolution` is
+Gate 4 (UI resource resolution) is implemented for definition resources. Three narrow decoders over
+one shared bounded INI lexer cover `MappedImage` blocks, `HeaderTemplate.ini`, and `Language.ini`,
+each derived field by field from the pinned source parse tables, including the source's own quirks:
+the `Coords`/`Status` order dependence that swaps a rotated region's presentation size, the
+two-token quoted-string rejoin that drops a one-character continuation, the reversed
+`LocalFontFile` list order, and every constructor default. `cic-tools`' resolution layer composes the
+VFS, those decoders, and the existing CSF decoder into an immutable result where each demanded name
+either binds to a definition with its defining file recorded or is explicitly unresolved.
+
+Locating `ImageCollection::load` corrected a previously recorded conclusion: the mapped-image load is
+an ordered three-stage load with an explicit texture-size selection, not a recursive merge, and the
+directories' name sets are *not* disjoint in retail data — 23 overrides in Generals and 43 in Zero
+Hour. Implementing the source order is therefore required for correctness, not a fidelity nicety.
+
+Verified against a real installation across every layout in both editions: mapped images resolve
+1,849/1,978 in Zero Hour and 1,789/1,932 in Generals, header templates resolve completely (209 and
+196, zero unresolved), and Zero Hour's 17 unresolved labels reproduce the evidence pass's independent
+count exactly. What does not resolve is retail's own gap — 50 and 48 distinct image names no shipped
+INI defines, and the three font families (`Generals`, `Abadi MT Bold`, `Placard MT Condensed`) retail
+names but never ships — which is why placeholders and diagnostics are the ordinary path. The
+localization mount is now language-parameterized (`--language`, `<Language>.big`/`<Language>ZH.big`,
+`Data/<Language>/`) rather than hardcoded to English, which is what shipping a language the original
+never had requires. `cic-inspect ui-resources` reports all of it. Transitions, cursors, menu schemes,
+and the runtime-side visible placeholders remain the rest of Gate 4.
+
+The Gate 3 patch work was verified end to end against the retail `OptionsMenu.wnd`: the stock
+`ComboBoxResolution` is
 reused and repositioned while a project-owned refresh-rate combo is inserted beside it. That is
 precisely the Gate 9 composition ADR 0010 requires be expressible as auditable data rather than
 hardcoded window names, demonstrated before any of the Options UI exists. Profile-driven patch
@@ -156,7 +182,8 @@ source WND bytes are edited and no renderer path searches for special window nam
    a new immutable definition with per-field provenance; preserve the source document unchanged.
    Missing required targets, duplicate inserted IDs, cycles, limit excess, and invalid gadget data
    are structured errors. Version 1 has no wildcards, arbitrary callbacks, or imperative code.
-4. **UI resource resolution.** Add bounded mapped-image, font/language, transition/scheme, cursor,
+4. **UI resource resolution (definitions implemented; transitions, cursors, and schemes pending).**
+   Add bounded mapped-image, font/language, transition/scheme, cursor,
    and required menu-definition subsets. Resolve CSF labels through the existing localization
    decoder and images/fonts through the VFS. Missing resources use visible placeholders and stable
    diagnostics; system-font fallback is opt-in and never used by deterministic captures.

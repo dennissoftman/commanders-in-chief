@@ -5,10 +5,12 @@
 R4 is active. Its first vertical slice — a bounded, unknown-preserving WND inventory and
 immutable layout/control decoder, plus a surface-free `wgpu` capture of one original synthetic
 menu — is complete (see [docs/milestones/r4-wnd-shell.md](docs/milestones/r4-wnd-shell.md) Gate 1).
-The next slice adds user-owned mapped images/fonts/CSF labels, the retained `cic-ui` runtime,
-the main-menu stack, modern display settings, and the skirmish/map-selection harness. R4 remains
-presentation-only: callbacks are allowlisted typed events, MAP scripts stay inert until R5, and
-project-owned post-parse patches augment rather than modify user-owned WND bytes.
+Gates 2 through 4's definition side follow it: typed per-gadget fields, bounded patch overlays, and
+resolution of the mapped images, fonts, header templates, and CSF labels a layout names. The
+remaining slices add the retained `cic-ui` runtime, the main-menu stack, modern display settings, and
+the skirmish/map-selection harness. R4 remains presentation-only: callbacks are allowlisted typed
+events, MAP scripts stay inert until R5, and project-owned post-parse patches augment rather than
+modify user-owned WND bytes.
 
 R3 is complete; its charter, progress, and completion evidence are recorded in
 [docs/milestones/r3-map-scene.md](docs/milestones/r3-map-scene.md). R4 adds
@@ -25,36 +27,37 @@ refresh-rate, and UI-scale controls with transactional confirmation/rollback.
 
 ## Next verified step
 
-Gates 1 and 2 are complete: the WND grammar and every established field are decoded into immutable
-typed values, verified against all 80 retail layouts in both editions with no malformed-field
-diagnostics (see [docs/formats/wnd.md](docs/formats/wnd.md)). Gate 3's patch overlays are implemented, value-level
-and structural, with per-field provenance, an unmodified source document, and a
-`cic-inspect wnd-patch` report; the composition Gate 9 needs is verified against the retail
-`OptionsMenu.wnd`.
+Gates 1 through 3 are complete: the WND grammar and every established field decode into immutable
+typed values against all 80 retail layouts in both editions with no malformed-field diagnostics, and
+patch overlays apply value-level and structural edits with per-field provenance over an unmodified
+source document (see [docs/formats/wnd.md](docs/formats/wnd.md)).
 
-Gate 4 (UI resource resolution) has its evidence pass done and recorded in
-[docs/formats/wnd.md](docs/formats/wnd.md): the demand side is measured (217 mapped images, 7 font
-families, 15 header templates, 366 label references), every definition source is located, and label
-coverage is checked against a real installation. The next verified step is the first decoder —
-bounded `MappedImage` INI decoding over a recursive `Data/INI/MappedImages/**` load — followed by
-`HeaderTemplate.ini` and `Language.ini`, then binding CSF labels through the existing decoder. Three
-facts from the evidence pass shape that work:
+Gate 4's definition resources are implemented and verified against a real installation. Bounded
+decoders cover `MappedImage`, `HeaderTemplate.ini`, and `Language.ini` over one shared lexer derived
+from the original INI reader; `cic-tools` composes them with the existing CSF decoder into an
+immutable resolution result, reported by `cic-inspect ui-resources`. Header templates resolve
+completely in both editions and mapped images resolve 1,849/1,978 in Zero Hour and 1,789/1,932 in
+Generals; what remains unresolved is retail's own gap, now visible. Localization mounts are
+language-parameterized rather than hardcoded to English.
 
-- The header-template and font definitions live in the localization archive under
-  `Data/<Language>/`, not `INI.big`, so resolution needs a localization mount alongside the `Wnd`
-  profile.
-- Retail ships no font files, so a project-supplied font is the default path for deterministic
-  captures rather than an opt-in fallback.
-- The two mapped-image directories merge rather than select: their name sets are measured disjoint
-  across both editions, so no variant-selection policy is needed.
+Three facts from that pass shape the runtime work:
 
-Separately, [docs/formats/csf.md](docs/formats/csf.md) now records the language-selection mechanism
+- Retail names roughly 50 distinct mapped images no shipped INI defines, and three font families it
+  never ships as files, so visible placeholders and stable diagnostics are the ordinary path rather
+  than an edge case.
+- `[None]`, spelled in retail as both `[None]` and `[NONE]`, is the writer's explicit "selects
+  nothing" placeholder for `HEADERTEMPLATE`, `FONT`, and text records, not a missing resource.
+- `Language.ini` fixes `ResolutionFontAdjustment = 0.7` and a font-scaling policy, which is the
+  presentation-policy input the scaling gate needs.
+
+The next verified step is the remainder of Gate 4 — bounded `WindowTransition`, `MouseCursor`, and
+`ShellMenuScheme` subsets, which live in the same INI family and reuse the shared lexer — followed by
+Gate 5's retained `cic-ui` runtime: instantiating the immutable definitions into a menu state tree
+with parent-relative layout, clipping, z-order, hit testing, focus, and the control-specific
+invariants, with UI state kept as presentation state rather than simulation state.
+
+Separately, [docs/formats/csf.md](docs/formats/csf.md) records the language-selection mechanism
 against the pinned source, for the planned goal of shipping languages the original game never had.
-The language is a path component (`Data/<Language>/`), and the original client mounts every `*.big`,
-so a `Russian.big` supplying `Generals.csf`, `HeaderTemplate.ini`, and `Language.ini` under
-`Data/Russian/` fits the established mechanism. Acting on that requires parameterizing this
-project's localization archive candidates and path prefix, which currently hardcode `English.big`
-and `EnglishZH.big` per edition; that is a `cic-tools` resource-profile change, best sequenced with
-Gate 4 since it resolves the same files.
-
-The retained `cic-ui` runtime and main-menu navigation follow.
+The `cic-tools` side of that is now done: `--language` selects `<Language>.big`, `<Language>ZH.big`,
+and `Data/<Language>/`, so a `Russian.big` supplying `Generals.csf`, `HeaderTemplate.ini`, and
+`Language.ini` under `Data/Russian/` fits the established mechanism without further tool changes.

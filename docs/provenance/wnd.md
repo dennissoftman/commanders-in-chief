@@ -30,11 +30,18 @@
   - `Core/GameEngineDevice/Source/W3DDevice/GameClient/GUI/Gadget/`
 - Mapped image, font, localization, and language evidence:
   - `Core/GameEngine/Source/Common/INI/INIMappedImage.cpp`
+  - `Core/GameEngine/Source/GameClient/System/Image.cpp`
+  - `Core/GameEngine/Include/GameClient/Image.h`
+  - `Core/GameEngine/Source/Common/INI/INI.cpp`
+  - `Core/GameEngine/Include/Common/INI.h`
+  - `Core/GameEngine/Source/GameClient/GUI/HeaderTemplate.cpp`
+  - `Core/GameEngine/Include/GameClient/HeaderTemplate.h`
   - `Core/GameEngine/Include/GameClient/GameFont.h`
   - `Core/GameEngine/Source/GameClient/GUI/GameFont.cpp`
   - `Generals/Code/GameEngine/Include/GameClient/FontDesc.h`
   - `Core/GameEngine/Include/GameClient/GlobalLanguage.h`
   - `Core/GameEngine/Source/GameClient/GlobalLanguage.cpp`
+  - `GeneralsMD/Code/GameEngine/Source/GameClient/GameClient.cpp` (`TheMappedImageCollection->load( 512 )`)
 - Callback-name and shell/navigation evidence:
   - `Generals/Code/GameEngine/Include/Common/FunctionLexicon.h`
   - `Generals/Code/GameEngine/Source/Common/System/FunctionLexicon.cpp`
@@ -179,6 +186,30 @@ color/font keywords) were confirmed by directly fetching that file at revision
 from the design-only facts recorded above. `crates/cic-render/src/wnd_scene.rs` stages the decoded
 hierarchy as renderer-only colored quads; this staging and its capture path are original project
 presentation, not derived from the legacy renderer. No C++ source was copied, translated line by
-line, or imported; names and API boundaries are native to this repository. Gate 2 (typed per-gadget
-fields), resource resolution, the retained `cic-ui` runtime, and everything else recorded above
-remain design-only.
+line, or imported; names and API boundaries are native to this repository.
+
+The UI definition decoders (`crates/cic-formats/src/ui_ini.rs`, `mapped_image_ini.rs`,
+`header_template_ini.rs`, `language_ini.rs`) were written against the source files listed above,
+retrieved verbatim through `raw.githubusercontent.com` at the pinned revision rather than through any
+summarizing intermediary. The lexical rules come from `INI::readLine`, `INI::initFromINIMulti`, the
+`getSeps`/`getSepsColon`/`getSepsQuote`/`getEndToken` accessors, `INI::getNextToken`,
+`INI::getNextSubToken`, `INI::getNextQuotedAsciiString`, `INI::getNextAsciiString`, `INI::scanInt`,
+`INI::scanReal`, `INI::scanBool`, `INI::scanIndexList`, and `INI::parseBitString32`. The field sets
+come from `Image::m_imageFieldParseTable`, `HeaderTemplateManager::m_headerFieldParseTable`, and
+`TheGlobalLanguageDataFieldParseTable`; the derived values from `Image::parseImageCoords` and
+`Image::parseImageStatus`; the defaults from `Image::Image`, `HeaderTemplate::HeaderTemplate`,
+`GlobalLanguage::GlobalLanguage`, and `FontDesc::FontDesc`.
+
+Reading that source corrected a conclusion this project had recorded from data alone. `docs/formats/wnd.md`
+previously stated that `Data/INI/MappedImages/**` is a plain recursive merge because the
+`HandCreated/` and `TextureSize_512/` name sets measured disjoint, and noted that the loader had not
+been located. `ImageCollection::load` in `Image.cpp` is that loader: it loads the user-data
+directory, then one `TextureSize_<N>` directory selected by its caller, then `HandCreated` last, with
+`INI::loadDirectory` sorting each directory's own files before its subdirectories' files. Re-measuring
+with the source order against a real installation found the name sets are not disjoint at all — 23
+overrides in Generals and 43 in Zero Hour — so the earlier claim was wrong and the ordered load is
+required for correctness. `GameClient::init` supplies the literal `512`.
+
+Composition, catalog and report shapes, diagnostics, limits, the language parameterization, and the
+`ui-resources` report are project design, not source behavior. Gate 4's transition, cursor, and menu
+scheme subsets, the retained `cic-ui` runtime, and everything else recorded above remain design-only.

@@ -77,7 +77,46 @@ land under the active milestone heading.
 - Added a bounded `wnd` libFuzzer target and a `maximum_record_tokens` limit (default 4,096) so one
   record cannot allocate a token vector sized only by the much larger record byte limit.
 
+- Added the UI definition resources a WND layout names, so a decoded layout's images, fonts, header
+  templates, and localized text can be resolved instead of left as strings. Three bounded decoders
+  share one lexer derived from the original INI reader — `MappedImage` blocks over
+  `Data/INI/MappedImages`, `Data/<Language>/HeaderTemplate.ini`, and `Data/<Language>/Language.ini`
+  with all 25 fields including its 17 font roles. Field names and block keywords are case-sensitive
+  and `End` is not, matching the source's own `strcmp`/`stricmp` split. Source quirks are reproduced
+  rather than corrected, because a definition authored against the original reader must resolve the
+  same way: `Status = ROTATED_90_CLOCKWISE` swaps a region's presentation size at the point it is
+  read, so placing it before `Coords` behaves differently; a quoted string is rejoined from at most
+  two tokens and loses a one-character continuation; an unquoted multi-word value keeps only its
+  first token; and repeated `LocalFontFile` names apply in reverse file order. Unknown fields and
+  blocks become diagnostics instead of disappearing, and a duplicate definition overwrites field by
+  field like the original loader rather than replacing the whole definition.
+- Added `cic-inspect ui-resources`, which loads those catalogs through the VFS and reports every
+  demanded resource with its binding, every definition file that contributed, every name a later file
+  overrode, and per-kind resolved/unresolved counts. Verified against a real installation across every
+  layout in both editions: header templates resolve completely (209 of 209 in Zero Hour, 196 of 196 in
+  Generals) and mapped images resolve 1,849 of 1,978 and 1,789 of 1,932. What is left unresolved is
+  retail's own gap, now visible rather than silent — around 50 distinct image names no shipped INI
+  defines, three font families named but never shipped, and the 17 Zero Hour labels the string table
+  omits, which reproduces an earlier independent measurement exactly.
+- Added language selection to localization mounts. The localization archive and definition paths were
+  hardcoded to `English.big`/`EnglishZH.big`; a `--language <name>` option now selects
+  `<Language>.big`, `<Language>ZH.big`, and `Data/<Language>/`, which is what shipping a language the
+  original game never had requires. A new `Ui` mount profile adds the INI, texture, and selected
+  localization archives to the window archives, because header templates, fonts, and labels live in
+  the localization archive rather than the window archive.
+
 ### Fixed
+
+- Corrected the recorded mapped-image load policy. This project had documented
+  `Data/INI/MappedImages/**` as a plain recursive merge, on the measured basis that the
+  `HandCreated/` and `TextureSize_512/` name sets were disjoint, and noted that the source loader had
+  not been located. It has been: `ImageCollection::load` loads the user-data directory, then one
+  `TextureSize_<N>` directory selected by its caller, then `HandCreated` last, sorting each
+  directory's own files before its subdirectories'. Re-measured with that order against a real
+  installation, the name sets are not disjoint — 23 definitions are overridden in Generals and 43 in
+  Zero Hour, and both editions ship a `HandCreatedMappedImages.ini` in both directories — so a
+  merge-everything loader resolves some names to the wrong texture region. The implemented loader
+  follows the source order.
 
 - Fixed the WND decoder rejecting Zero Hour's `Menus/MainMenu.wnd`, the layout the R4 main-menu
   artifact is built around. The decoder required a `CHILD` marker before every child window, but
