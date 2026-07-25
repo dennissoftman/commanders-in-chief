@@ -2,9 +2,23 @@
 // Copyright (C) 2026 Commanders in Chief contributors
 // SPDX-License-Identifier: GPL-3.0-only
 //
-// This staging layer is original project presentation. It consumes the renderer-neutral frames
-// `cic-ui` produces and emits batched geometry; it derives no algorithm from the legacy Direct3D UI
-// renderer. The draw order it preserves comes from `cic-ui`, which documents its own provenance.
+// The batching scheme, vertex format, clip handling, placeholder policy, and capture path are
+// original project presentation. Two things are not, and are derived from Electronic Arts' GPL-3.0
+// source release, GeneralsGameCode revision 9f7abb866f5afd446db14149979e744c7216baaf:
+//
+// - `ButtonPieces`' entry indices come from
+//   `Core/GameEngine/Include/GameClient/GadgetPushButton.h`, whose accessors fix the unselected art
+//   at entries 0, 5, 6 and the pushed art at 1, 3, 4.
+// - `push_button_three`'s geometry comes from
+//   `Core/GameEngineDevice/Source/W3DDevice/GameClient/GUI/Gadget/W3DPushButton.cpp`
+//   (`W3DGadgetPushButtonImageDraw`, `W3DGadgetPushButtonImageDrawThree`): the middle-image test
+//   that selects the three-piece path, the repeating-centre loop, the partial final piece, the
+//   ends-last draw order, and the `centerWidth <= 0` half-and-half branch. The partial piece trims
+//   texture coordinates where the source sets a clip region, which samples the same pixels.
+//
+// The untinted-image rule follows the same file: `winDrawImage` takes no colour argument there, so a
+// slot's `COLOR` belongs to the colour-only draw path. No C++ was copied or translated line by line.
+// The draw order this layer preserves comes from `cic-ui`, which documents its own provenance.
 
 //! Batched staging of a retained-UI frame into renderer-ready geometry.
 //!

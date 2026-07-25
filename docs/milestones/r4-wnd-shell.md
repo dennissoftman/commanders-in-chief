@@ -129,11 +129,30 @@ runs, `SkirmishGameOptionsMenu.wnd` 52 quads and 21 runs, with byte-identical ha
 runs. Localized labels resolve through the CSF decoder before staging, so captures show real menu text
 in the right places.
 
-One gap is recorded rather than approximated: a draw-data record holds nine entries that the source's
-`W3DGadget*` renderers compose per gadget family, and this implementation draws entry 0 stretched
-across the control rectangle, so art authored as separate pieces renders as one stretched piece.
-Geometry, batching, clipping, colour, text, and determinism are correct; per-family composition is the
-next presentation step.
+Push-button draw-data composition followed, taking the largest interactive family first: 424 of the
+1,667 retail controls. `GadgetPushButton.h` fixes the entry indices and
+`W3DGadgetPushButtonImageDrawThree` the geometry, both reproduced including the branch where the ends
+alone do not fit. Button text is centred on both axes as `drawButtonText` does. With that in place the
+retail main menu renders as a menu — background art, logo, gold-framed buttons, centred localized
+labels — and staged quads rise from 37 to 682.
+
+Rendering real data corrected two colour assumptions. An image draw is **untinted**: `winDrawImage`
+takes no colour argument, and a slot's `COLOR` belongs to the colour-only fill path, so multiplying an
+image by it painted every textured control in whatever that unused field held — frequently red in
+retail data. And a control declaring `IMAGE` whose slot has no entry-0 image keeps its art at indices
+only its own family reads, so filling with the slot colour there painted that same red; those controls
+now stage a visible placeholder plus an `UncomposedFamily` diagnostic naming the family instead.
+
+The remaining families' composition — sliders, list boxes, combo boxes, check boxes, text entry,
+progress bars, tab controls — is the next presentation step. Each needs its `Gadget*.h` index map and
+`W3DGadget*` geometry read at the pinned revision, and the draw procedure is selected by the control's
+retained draw-callback name (an `...ImageDraw` variant against a plain `...Draw`) rather than by the
+`IMAGE` status bit, so that name is the discriminator to dispatch on.
+
+One compatibility fact belongs to Gates 7 and 8 rather than to presentation: rendering
+`Menus/MainMenu.wnd` shows every subpanel at once, with labels overlapping. Retail hides those
+subpanels from menu code, not through `STATUS`, so a correct main menu needs the shell stack's
+show/hide semantics — the layout alone does not describe which subpanel is visible.
 
 The Gate 3 patch work was verified end to end against the retail `OptionsMenu.wnd`: the stock
 `ComboBoxResolution` is

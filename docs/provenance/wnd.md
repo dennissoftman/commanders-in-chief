@@ -29,6 +29,8 @@
   - `GeneralsMD/Code/GameEngine/Source/GameClient/GUI/GameWindowManagerScript.cpp`
   - `GeneralsMD/Code/GameEngine/Include/GameClient/GameWindowManager.h`
 - Legacy rendering evidence:
+  - `Core/GameEngineDevice/Source/W3DDevice/GameClient/GUI/Gadget/W3DPushButton.cpp`
+  - `Core/GameEngine/Include/GameClient/GadgetPushButton.h`
   - `Generals/Code/GameEngineDevice/Include/W3DDevice/GameClient/W3DGameWindowManager.h`
   - `Generals/Code/GameEngineDevice/Source/W3DDevice/GameClient/GUI/W3DGameWindowManager.cpp`
   - `Core/GameEngineDevice/Include/W3DDevice/GameClient/W3DGadget.h`
@@ -253,8 +255,24 @@ pair ADR 0010 selected, at the current releases satisfying it. `glyphon` 0.12 de
 which reports one `wgpu v30.0.0` shared by both. Both licences are permissive and compatible with
 this project's GPL-3.0-only licence; neither library defines UI semantics.
 
-One gap is deliberate and recorded rather than approximated: a draw-data record holds nine entries
-that the `W3DGadget*` renderers compose per gadget family, and this implementation draws entry 0
-stretched across the control rectangle. Composing the remaining entries requires reading those
-renderers at the pinned revision and is not yet done. Gate 4's transition, cursor, and menu-scheme subsets and everything else recorded above
+Push-button draw-data composition is derived from two files at the pinned revision.
+`GadgetPushButton.h`'s inline accessors fix the entry indices: `GadgetButtonGetLeftEnabledImage` reads
+entry 0, `...MiddleEnabledImage` entry 5, `...RightEnabledImage` entry 6, and the selected variants
+read 1, 3, and 4. `W3DPushButton.cpp` supplies the geometry:
+`W3DGadgetPushButtonImageDraw` takes the three-piece path only when the middle image is present,
+`W3DGadgetPushButtonImageDrawThree` repeats the centre in whole pieces from the left end's right
+edge, draws a final partial piece under a clip region, and draws the two ends last so they sit over
+the centre, with a `centerWidth <= 0` branch giving each end half the control. `drawButtonText` in the
+same file centres a button's text on both axes unless the control declares `SHORTCUT_BUTTON`.
+
+This project's implementation trims the partial piece's texture coordinates where the source sets a
+clip region — the same pixels reach the target without a state change — and that substitution is the
+only intentional divergence. It also derives one rule from what the same file does *not* do:
+`winDrawImage` takes no colour argument, so an image draw is untinted and a slot's `COLOR` belongs to
+the colour-only draw path.
+
+The remaining families' composition is not implemented. Each needs its own `Gadget*.h` index map and
+`W3DGadget*` geometry read at the pinned revision, and one further fact applies to that work: the draw
+procedure is selected by the control's retained draw-callback name — an `...ImageDraw` variant against
+a plain `...Draw` — not by the `WIN_STATUS_IMAGE` bit, so that name is the correct discriminator. Gate 4's transition, cursor, and menu-scheme subsets and everything else recorded above
 remain design-only.
