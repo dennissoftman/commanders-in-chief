@@ -788,12 +788,16 @@ before R5.
 - `cic-inspect ui-layout` (implemented) instantiates a layout for an explicit viewport and scale
   policy and reports the retained tree with resolved and screen-space rectangles, live state, status
   bits, control family, tab order, frame submission order, and diagnostics. Nothing is read from the
-  host display, so the report is reproducible on any machine.
+  host display, so the report is reproducible on any machine. Its `role` column names a control the
+  gadget-creation code built rather than the file — a slider thumb, a scroll bar's parts, or a combo
+  box's field, button, and drop-down list — and those rows carry a `<part>` suffix on the owner's
+  name, which is this project's addition since the original leaves them unnamed.
 - `cic-inspect ui-render` (implemented) executes a retained frame on the GPU and writes a
   surface-free PNG plus an RGBA SHA-256 hash. Every presentation input is explicit — viewport, scale
   policy, clip policy, language, texture-size selection, and the font files used for shaping — so two
   runs with the same inputs produce the same bytes. It reports staged quad, batch, text-run, page, and
-  font counts plus every staging diagnostic.
+  font counts plus every staging diagnostic. A diagnostic names both the frame-item index and the
+  control it belongs to, so it can be looked up in the `ui-layout` report.
 - `cic-inspect ui-demo` (planned) launches the interactive main-menu/skirmish compatibility harness.
 
 The checked-in completion artifact is entirely original. Installed verification records aggregate

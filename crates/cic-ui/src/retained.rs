@@ -52,6 +52,86 @@ impl Default for UiLimits {
     }
 }
 
+/// What a synthesised gadget child is, for a control the definition never declared.
+///
+/// The original's gadget-creation functions build these while creating the gadget itself, so they
+/// are as real as any declared control: they hit test, they take focus, and they draw from the
+/// parent's child-specific draw-data records. Nothing here is invented — see
+/// [`UiLayout::synthesise_children`] for the source of each one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum UiGadgetRole {
+    /// A slider's draggable thumb, from `gogoGadgetSlider`.
+    SliderThumb,
+    /// A scroll list box's up button, from `GadgetListboxCreateScrollbar`.
+    ListBoxUpButton,
+    /// A scroll list box's down button, from `GadgetListboxCreateScrollbar`.
+    ListBoxDownButton,
+    /// A scroll list box's vertical slider, from `GadgetListboxCreateScrollbar`.
+    ListBoxSlider,
+    /// A combo box's drop-down button, from `gogoGadgetComboBox`.
+    ComboBoxDropDownButton,
+    /// A combo box's edit field, from `gogoGadgetComboBox`.
+    ComboBoxEditBox,
+    /// A combo box's drop-down list, from `gogoGadgetComboBox`.
+    ComboBoxListBox,
+}
+
+impl UiGadgetRole {
+    /// Returns the stable report name.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::SliderThumb => "slider_thumb",
+            Self::ListBoxUpButton => "list_box_up_button",
+            Self::ListBoxDownButton => "list_box_down_button",
+            Self::ListBoxSlider => "list_box_slider",
+            Self::ComboBoxDropDownButton => "combo_box_drop_down_button",
+            Self::ComboBoxEditBox => "combo_box_edit_box",
+            Self::ComboBoxListBox => "combo_box_list_box",
+        }
+    }
+
+    /// Returns the suffix appended to the parent's name to name this child.
+    ///
+    /// The original leaves these windows unnamed and reaches them through `ListboxData` and
+    /// `ComboBoxData` pointers. A name is this project's own addition, so a report can identify one
+    /// and a patch overlay cannot silently collide with a declared control.
+    const fn name_suffix(self) -> &'static str {
+        match self {
+            Self::SliderThumb => "<thumb>",
+            Self::ListBoxUpButton => "<upbutton>",
+            Self::ListBoxDownButton => "<downbutton>",
+            Self::ListBoxSlider => "<slider>",
+            Self::ComboBoxDropDownButton => "<dropdownbutton>",
+            Self::ComboBoxEditBox => "<editbox>",
+            Self::ComboBoxListBox => "<listbox>",
+        }
+    }
+}
+
+/// The button width `GadgetListboxCreateScrollbar` and `gogoGadgetComboBox` both hardcode.
+///
+/// Every size in this group is a literal applied to an already-scaled parent rectangle, so a scroll
+/// button stays 21 pixels wide at every resolution while the gadget around it grows. That is source
+/// behaviour, not an oversight in this port.
+const GADGET_BUTTON_WIDTH: i32 = 21;
+
+/// The button height `GadgetListboxCreateScrollbar` hardcodes beside [`GADGET_BUTTON_WIDTH`].
+///
+/// `gogoGadgetComboBox` declares the same local and then never uses it, giving its drop-down button
+/// the combo box's full height instead.
+const GADGET_BUTTON_HEIGHT: i32 = 22;
+
+/// `Gadget.h`'s `HORIZONTAL_SLIDER_THUMB_WIDTH`.
+const HORIZONTAL_SLIDER_THUMB_WIDTH: i32 = 13;
+
+/// `Gadget.h`'s `HORIZONTAL_SLIDER_THUMB_HEIGHT`.
+const HORIZONTAL_SLIDER_THUMB_HEIGHT: i32 = 16;
+
+/// `GadgetSlider.h`'s `HORIZONTAL_SLIDER_THUMB_POSITION`, which is two thirds of the thumb height
+/// under integer division.
+const HORIZONTAL_SLIDER_THUMB_POSITION: i32 = HORIZONTAL_SLIDER_THUMB_HEIGHT * 2 / 3;
+
 /// The presentation viewport a layout is instantiated for, in physical pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UiViewport {
@@ -292,6 +372,22 @@ impl UiStatus {
     const fn with(self, other: Self) -> Self {
         Self(self.0 | other.0)
     }
+
+    const fn without(self, other: Self) -> Self {
+        Self(self.0 & !other.0)
+    }
+}
+
+/// How a synthesised gadget child's status differs from the gadget's own.
+///
+/// The source builds each part by masking bits out of the parent's status and setting others, which
+/// is why a part of a hidden or bordered gadget is neither.
+#[derive(Debug, Clone, Copy)]
+struct GadgetChildStatus {
+    /// Bits forced on.
+    set: UiStatus,
+    /// Bits forced off.
+    clear: UiStatus,
 }
 
 /// A stable, source-order control identity within one layout.
@@ -357,6 +453,8 @@ pub enum UiControlKind {
         max_display: usize,
         /// Whether the edit field accepts typing.
         editable: bool,
+        /// `MAXCHARS`, which the synthesised edit field is created with.
+        max_chars: usize,
     },
     /// `ENTRYFIELD`.
     TextEntry {
@@ -426,6 +524,10 @@ pub struct UiControl {
     draw_data: Vec<(WndDrawDataSlot, WndDrawData)>,
     text_colors: Option<WndTextColors>,
     kind: UiControlKind,
+    role: Option<UiGadgetRole>,
+    /// `LISTBOXDATA`'s `SCROLLBAR`, which decides whether the list box builds a scroll bar. It is
+    /// creation-time input rather than retained state, so it stays out of [`UiControlKind`].
+    list_box_scroll_bar: bool,
 }
 
 impl UiControl {
@@ -445,6 +547,16 @@ impl UiControl {
     #[must_use]
     pub fn children(&self) -> &[UiControlId] {
         &self.children
+    }
+
+    /// Returns which gadget part this control is, absent for a control the definition declared.
+    ///
+    /// A synthesised child is built by the original's gadget-creation code rather than written in
+    /// the layout, so nothing in the file names it and a report needs this to explain where it came
+    /// from.
+    #[must_use]
+    pub const fn gadget_role(&self) -> Option<UiGadgetRole> {
+        self.role
     }
 
     /// Returns the nesting depth, zero for a top-level control.
@@ -832,6 +944,10 @@ pub enum UiDiagnosticKind {
         /// The applied length.
         applied: usize,
     },
+    /// A scroll list box declared text, so `GadgetListboxCreateScrollbar` would inset its scroll bar
+    /// by the title's font height. This crate holds no font metrics and laid the bar out as though
+    /// the box were untitled. No retail layout reaches this.
+    UntitledScrollBarAssumed,
 }
 
 /// One non-fatal instantiation observation, attributed to a control.
@@ -980,13 +1096,462 @@ impl UiLayout {
             draw_data: window.draw_data().to_vec(),
             text_colors: window.text_colors().copied(),
             kind,
+            role: None,
+            list_box_scroll_bar: matches!(
+                window.gadget_data(),
+                Some(WndGadgetData::ListBox(data)) if data.scroll_bar()
+            ),
         });
         if let Some(parent) = parent {
             self.controls[parent.0].children.push(id);
         }
+        // The original's gadget-creation functions run inside `winCreate`, before the script reads
+        // the gadget's own `CHILD` list, so a synthesised part precedes every declared child.
+        self.synthesise_children(id, depth)?;
         for child in window.children() {
             self.add(child, Some(id), depth + 1)?;
         }
+        Ok(id)
+    }
+
+    /// Builds the child windows the original's gadget-creation code creates for a control.
+    ///
+    /// A slider gets a thumb from `gogoGadgetSlider`; a scroll list box that asks for a scroll bar
+    /// gets an up button, a down button, and a vertical slider from `GadgetListboxCreateScrollbar`;
+    /// a combo box gets a drop-down button, an edit field, and a hidden drop-down list from
+    /// `gogoGadgetComboBox`. Each part draws from the parent's own child-specific draw-data records,
+    /// which is what `winCreateFromScript` copies into them once the parts exist — and it is the
+    /// reason a layout carries `COMBOBOXEDITBOX*`, `LISTBOX*SLIDER*`, and `SLIDERTHUMB*` arrays at
+    /// all.
+    fn synthesise_children(&mut self, id: UiControlId, depth: usize) -> Result<(), UiLayoutError> {
+        let control = &self.controls[id.0];
+        let UiRect { width, height, .. } = control.rect;
+        match control.kind {
+            UiControlKind::Slider { .. } => self.add_slider_thumb(id, depth)?,
+            UiControlKind::ListBox { .. } if control.list_box_scroll_bar => {
+                self.add_scroll_bar(id, depth, width, height)?;
+            }
+            UiControlKind::ComboBox { .. } => self.add_combo_box_parts(id, depth, width, height)?,
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Reproduces the thumb `gogoGadgetSlider` gives every slider it creates.
+    fn add_slider_thumb(&mut self, id: UiControlId, depth: usize) -> Result<(), UiLayoutError> {
+        // The same function sets `WIN_STATUS_TAB_STOP` on the slider itself, whatever the layout
+        // declared, and the thumb inherits that status alongside `DRAGGABLE`.
+        self.controls[id.0].status = self.controls[id.0].status.with(UiStatus::TAB_STOP);
+        let width = self.controls[id.0].rect.width;
+        let rect = if self.controls[id.0].family() == UiControlFamily::HorizontalSlider {
+            UiRect {
+                x: 0,
+                y: HORIZONTAL_SLIDER_THUMB_POSITION,
+                width: HORIZONTAL_SLIDER_THUMB_WIDTH,
+                height: HORIZONTAL_SLIDER_THUMB_HEIGHT,
+            }
+        } else {
+            // The vertical thumb is one pixel taller than it is wide, from the source's
+            // `width, width + 1` argument pair.
+            UiRect {
+                x: 0,
+                y: 0,
+                width,
+                height: width + 1,
+            }
+        };
+        self.add_gadget_child(
+            id,
+            depth,
+            UiGadgetRole::SliderThumb,
+            rect,
+            UiControlKind::PushButton,
+            "PUSHBUTTON",
+            [
+                WndDrawDataSlot::SliderThumbEnabled,
+                WndDrawDataSlot::SliderThumbDisabled,
+                WndDrawDataSlot::SliderThumbHilite,
+            ],
+            GadgetChildStatus {
+                set: UiStatus::ENABLED.with(UiStatus::DRAGGABLE),
+                clear: UiStatus::HIDDEN,
+            },
+            None,
+        )?;
+        Ok(())
+    }
+
+    /// Reproduces the three parts `gogoGadgetComboBox` builds, and the scroll bar inside its list.
+    fn add_combo_box_parts(
+        &mut self,
+        id: UiControlId,
+        depth: usize,
+        width: i32,
+        height: i32,
+    ) -> Result<(), UiLayoutError> {
+        let editable = matches!(
+            self.controls[id.0].kind,
+            UiControlKind::ComboBox { editable: true, .. }
+        );
+        {
+            // Shared by all three parts: the parts are never borders and never start hidden,
+            // however the combo box itself was declared.
+            let strip = UiStatus::BORDER.with(UiStatus::HIDDEN);
+            self.add_gadget_child(
+                id,
+                depth,
+                UiGadgetRole::ComboBoxDropDownButton,
+                UiRect {
+                    x: width - GADGET_BUTTON_WIDTH,
+                    y: 0,
+                    width: GADGET_BUTTON_WIDTH,
+                    height,
+                },
+                UiControlKind::PushButton,
+                "PUSHBUTTON",
+                [
+                    WndDrawDataSlot::ComboBoxDropDownButtonEnabled,
+                    WndDrawDataSlot::ComboBoxDropDownButtonDisabled,
+                    WndDrawDataSlot::ComboBoxDropDownButtonHilite,
+                ],
+                GadgetChildStatus {
+                    set: UiStatus::ACTIVE.with(UiStatus::ENABLED),
+                    clear: strip,
+                },
+                None,
+            )?;
+            self.add_gadget_child(
+                id,
+                depth,
+                UiGadgetRole::ComboBoxEditBox,
+                UiRect {
+                    x: 0,
+                    y: 0,
+                    width: width - GADGET_BUTTON_WIDTH,
+                    height,
+                },
+                UiControlKind::TextEntry {
+                    text: String::new(),
+                    caret: 0,
+                    max_length: self.combo_box_max_chars(id),
+                    secret: false,
+                },
+                "ENTRYFIELD",
+                [
+                    WndDrawDataSlot::ComboBoxEditBoxEnabled,
+                    WndDrawDataSlot::ComboBoxEditBoxDisabled,
+                    WndDrawDataSlot::ComboBoxEditBoxHilite,
+                ],
+                GadgetChildStatus {
+                    // A non-editable combo box's field refuses input; the source leaves its
+                    // `NO_FOCUS` companion commented out, so focus still reaches it.
+                    set: if editable {
+                        UiStatus::default()
+                    } else {
+                        UiStatus::NO_INPUT
+                    },
+                    clear: strip,
+                },
+                // `winInstData.m_textLabelString = "Entry"`, a literal rather than a CSF label.
+                Some("Entry".to_owned()),
+            )?;
+            self.add_combo_box_list(id, depth, width, height, strip)?;
+        }
+        Ok(())
+    }
+
+    /// Builds the drop-down list `gogoGadgetComboBox` creates last, and the scroll bar inside it.
+    fn add_combo_box_list(
+        &mut self,
+        id: UiControlId,
+        depth: usize,
+        width: i32,
+        height: i32,
+        strip: UiStatus,
+    ) -> Result<(), UiLayoutError> {
+        let list = self.add_gadget_child(
+            id,
+            depth,
+            UiGadgetRole::ComboBoxListBox,
+            // The drop-down hangs directly below the closed box and repeats its height.
+            UiRect {
+                x: 0,
+                y: height,
+                width,
+                height,
+            },
+            UiControlKind::ListBox {
+                rows: Vec::new(),
+                selected: Vec::new(),
+                scroll_top: 0,
+                // `cData->listboxData->listLength = 10` in `winCreateFromScript`.
+                visible_rows: 10,
+                multi_select: false,
+            },
+            "SCROLLLISTBOX",
+            [
+                WndDrawDataSlot::ComboBoxListBoxEnabled,
+                WndDrawDataSlot::ComboBoxListBoxDisabled,
+                WndDrawDataSlot::ComboBoxListBoxHilite,
+            ],
+            GadgetChildStatus {
+                set: UiStatus::ABOVE.with(UiStatus::ONE_LINE),
+                // The list is created without the combo box's `IMAGE` bit and is hidden immediately
+                // afterwards by `winHide( TRUE )`.
+                clear: strip.with(UiStatus::IMAGE),
+            },
+            None,
+        )?;
+        // `winHide( TRUE )` immediately after creation: the list is built visible and then hidden,
+        // which is why its status carries no `HIDDEN` bit while its live state does.
+        self.set_hidden(list, true);
+        // That list is created with `scrollBar = 1`, so it builds a scroll bar of its own. Its parts
+        // read the *combo box's* `LISTBOX*` and `SLIDERTHUMB*` records, so the list has to carry
+        // them down for its own gadget creation to find.
+        self.controls[list.0].list_box_scroll_bar = true;
+        self.inherit_slots(
+            list,
+            id,
+            &[
+                WndDrawDataSlot::ListBoxEnabledUpButton,
+                WndDrawDataSlot::ListBoxDisabledUpButton,
+                WndDrawDataSlot::ListBoxHiliteUpButton,
+                WndDrawDataSlot::ListBoxEnabledDownButton,
+                WndDrawDataSlot::ListBoxDisabledDownButton,
+                WndDrawDataSlot::ListBoxHiliteDownButton,
+                WndDrawDataSlot::ListBoxEnabledSlider,
+                WndDrawDataSlot::ListBoxDisabledSlider,
+                WndDrawDataSlot::ListBoxHiliteSlider,
+                WndDrawDataSlot::SliderThumbEnabled,
+                WndDrawDataSlot::SliderThumbDisabled,
+                WndDrawDataSlot::SliderThumbHilite,
+            ],
+        );
+        let list_rect = self.controls[list.0].rect;
+        self.add_scroll_bar(list, depth + 1, list_rect.width, list_rect.height)
+    }
+
+    /// Copies draw-data records from one control onto another under the same slot names.
+    ///
+    /// `winCreateFromScript` reads every child-part array of the window it is creating into file
+    /// statics, then hands each one to whichever descendant draws it — so a scroll bar's thumb takes
+    /// its art from the list box two levels above it, not from the slider that owns it. Carrying the
+    /// records down keeps that reach without a global.
+    fn inherit_slots(&mut self, child: UiControlId, owner: UiControlId, slots: &[WndDrawDataSlot]) {
+        let inherited: Vec<_> = self.controls[owner.0]
+            .draw_data
+            .iter()
+            .filter(|(slot, _)| slots.contains(slot))
+            .cloned()
+            .collect();
+        self.controls[child.0].draw_data.extend(inherited);
+    }
+
+    /// Reproduces `GadgetListboxCreateScrollbar` for one list box.
+    ///
+    /// `top` and `bottom` in the source allow for a list title, but no retail layout gives a scroll
+    /// list box any text and a combo box's internal list is created with none, so the title branch
+    /// is unreachable here. It is the only part of this function that would need font metrics, and
+    /// [`UiDiagnosticKind::UntitledScrollBarAssumed`] reports a layout that reaches it.
+    fn add_scroll_bar(
+        &mut self,
+        id: UiControlId,
+        depth: usize,
+        width: i32,
+        height: i32,
+    ) -> Result<(), UiLayoutError> {
+        if self.controls[id.0]
+            .text_label
+            .as_ref()
+            .is_some_and(|text| !text.is_empty())
+        {
+            self.diagnostics.push(UiDiagnostic {
+                control: id,
+                kind: UiDiagnosticKind::UntitledScrollBarAssumed,
+            });
+        }
+        let (top, bottom) = (0, height);
+        // The parts are always image-drawn, never bordered, hidden, or input-refusing, whatever the
+        // list box declared.
+        let status = GadgetChildStatus {
+            set: UiStatus::IMAGE
+                .with(UiStatus::ACTIVE)
+                .with(UiStatus::ENABLED),
+            clear: UiStatus::BORDER
+                .with(UiStatus::HIDDEN)
+                .with(UiStatus::NO_INPUT),
+        };
+        self.add_gadget_child(
+            id,
+            depth,
+            UiGadgetRole::ListBoxUpButton,
+            UiRect {
+                x: width - GADGET_BUTTON_WIDTH - 2,
+                y: top + 2,
+                width: GADGET_BUTTON_WIDTH,
+                height: GADGET_BUTTON_HEIGHT,
+            },
+            UiControlKind::PushButton,
+            "PUSHBUTTON",
+            [
+                WndDrawDataSlot::ListBoxEnabledUpButton,
+                WndDrawDataSlot::ListBoxDisabledUpButton,
+                WndDrawDataSlot::ListBoxHiliteUpButton,
+            ],
+            status,
+            None,
+        )?;
+        self.add_gadget_child(
+            id,
+            depth,
+            UiGadgetRole::ListBoxDownButton,
+            UiRect {
+                x: width - GADGET_BUTTON_WIDTH - 2,
+                y: top + bottom - GADGET_BUTTON_HEIGHT - 2,
+                width: GADGET_BUTTON_WIDTH,
+                height: GADGET_BUTTON_HEIGHT,
+            },
+            UiControlKind::PushButton,
+            "PUSHBUTTON",
+            [
+                WndDrawDataSlot::ListBoxEnabledDownButton,
+                WndDrawDataSlot::ListBoxDisabledDownButton,
+                WndDrawDataSlot::ListBoxHiliteDownButton,
+            ],
+            status,
+            None,
+        )?;
+        let slider = self.add_gadget_child(
+            id,
+            depth,
+            UiGadgetRole::ListBoxSlider,
+            UiRect {
+                x: width - GADGET_BUTTON_WIDTH - 2,
+                y: top + GADGET_BUTTON_HEIGHT + 3,
+                width: GADGET_BUTTON_WIDTH,
+                height: bottom - (2 * GADGET_BUTTON_HEIGHT) - 6,
+            },
+            UiControlKind::Slider {
+                minimum: 0,
+                // `gogoGadgetSlider` widens an empty range rather than dividing by zero, and the
+                // scroll bar hands it a zeroed `SliderData`.
+                maximum: 1,
+                value: 0,
+            },
+            "VERTSLIDER",
+            [
+                WndDrawDataSlot::ListBoxEnabledSlider,
+                WndDrawDataSlot::ListBoxDisabledSlider,
+                WndDrawDataSlot::ListBoxHiliteSlider,
+            ],
+            status,
+            None,
+        )?;
+        // The slider is a slider, so it builds a thumb — but the `SLIDERTHUMB*` records belong to
+        // the list box, so they have to reach the slider before it creates one.
+        self.inherit_slots(
+            slider,
+            id,
+            &[
+                WndDrawDataSlot::SliderThumbEnabled,
+                WndDrawDataSlot::SliderThumbDisabled,
+                WndDrawDataSlot::SliderThumbHilite,
+            ],
+        );
+        self.synthesise_children(slider, depth + 1)
+    }
+
+    /// Returns a combo box's declared `MAXCHARS`, which its edit field is created with.
+    fn combo_box_max_chars(&self, id: UiControlId) -> usize {
+        match self.controls[id.0].kind {
+            UiControlKind::ComboBox { max_chars, .. } => max_chars,
+            _ => 0,
+        }
+    }
+
+    /// Pushes one synthesised gadget child and returns its id.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one child's complete construction; the caller reads as the source function it                   reproduces"
+    )]
+    fn add_gadget_child(
+        &mut self,
+        parent: UiControlId,
+        depth: usize,
+        role: UiGadgetRole,
+        rect: UiRect,
+        kind: UiControlKind,
+        window_type: &str,
+        slots: [WndDrawDataSlot; 3],
+        status: GadgetChildStatus,
+        text_label: Option<String>,
+    ) -> Result<UiControlId, UiLayoutError> {
+        if depth + 1 >= self.limits.max_depth {
+            return Err(UiLayoutError::TooDeep {
+                limit: self.limits.max_depth,
+            });
+        }
+        if self.controls.len() >= self.limits.max_controls {
+            return Err(UiLayoutError::TooManyControls {
+                limit: self.limits.max_controls,
+            });
+        }
+        let id = UiControlId(self.controls.len());
+        let owner = &self.controls[parent.0];
+        let child_status = owner.status.without(status.clear).with(status.set);
+        // Each part's own enabled/disabled/hilite arrays are the parent's records for that part,
+        // copied across by `winCreateFromScript` once the part exists.
+        let draw_data = [
+            WndDrawDataSlot::Enabled,
+            WndDrawDataSlot::Disabled,
+            WndDrawDataSlot::Hilite,
+        ]
+        .into_iter()
+        .zip(slots)
+        .filter_map(|(own, from)| {
+            owner
+                .draw_data
+                .iter()
+                .find(|(slot, _)| *slot == from)
+                .map(|(_, data)| (own, data.clone()))
+        })
+        .collect();
+        let name = owner
+            .name
+            .as_ref()
+            .map(|name| format!("{name}{}", role.name_suffix()));
+        // The parts inherit the gadget's font and text colours, which is what `gogoGadgetComboBox`
+        // copies explicitly and what `winCreate` gives the rest by default.
+        let font = owner.font.clone();
+        let text_colors = owner.text_colors;
+        self.controls.push(UiControl {
+            id,
+            parent: Some(parent),
+            children: Vec::new(),
+            depth: depth + 1,
+            name,
+            window_type: window_type.to_owned(),
+            rect,
+            image_offset: None,
+            status: child_status,
+            hidden: child_status.contains(UiStatus::HIDDEN),
+            enabled: child_status.contains(UiStatus::ENABLED),
+            hovered: false,
+            pressed: false,
+            text_label,
+            tooltip_label: None,
+            font,
+            header_template: None,
+            system_callback: None,
+            input_callback: None,
+            draw_callback: None,
+            draw_data,
+            text_colors,
+            kind,
+            role: Some(role),
+            list_box_scroll_bar: false,
+        });
+        self.controls[parent.0].children.push(id);
         Ok(id)
     }
 
@@ -1052,7 +1617,7 @@ impl UiLayout {
             Some(WndGadgetData::ListBox(data)) => {
                 Self::list_box_kind(data, id, self.limits, &mut diagnostics)
             }
-            Some(WndGadgetData::ComboBox(data)) => Self::combo_box_kind(*data),
+            Some(WndGadgetData::ComboBox(data)) => Self::combo_box_kind(*data, self.limits),
             Some(WndGadgetData::TextEntry(data)) => {
                 Self::text_entry_kind(*data, id, self.limits, &mut diagnostics)
             }
@@ -1118,13 +1683,16 @@ impl UiLayout {
         }
     }
 
-    fn combo_box_kind(data: WndComboBoxData) -> UiControlKind {
+    fn combo_box_kind(data: WndComboBoxData, limits: UiLimits) -> UiControlKind {
         UiControlKind::ComboBox {
             entries: Vec::new(),
             selected: None,
             open: false,
             max_display: usize::try_from(data.maximum_display().max(0)).unwrap_or(0),
             editable: data.is_editable(),
+            max_chars: usize::try_from(data.maximum_characters().max(0))
+                .unwrap_or(0)
+                .min(limits.max_text_length),
         }
     }
 

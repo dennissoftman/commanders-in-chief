@@ -2145,9 +2145,14 @@ where
                 ("uncomposed_art", (*family).to_owned())
             }
         };
+        // The control id is what a layout report can be looked up by; the frame-item index alone
+        // identifies nothing outside this run.
+        let control = diagnostic
+            .control()
+            .map_or_else(|| "-".to_owned(), |control| control.index().to_string());
         writeln!(
             report,
-            "ui-render-diagnostic\t{}\t{kind}\t{detail}",
+            "ui-render-diagnostic\t{}\t{control}\t{kind}\t{detail}",
             diagnostic.item()
         )?;
     }

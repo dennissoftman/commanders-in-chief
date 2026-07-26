@@ -191,6 +191,26 @@ land under the active milestone heading.
   `GadgetStaticTextDraw` now draws colour-only even while declaring `IMAGE`, and the ubiquitous
   `"[None]"` correctly leaves the status bit deciding.
 
+- Added gadget child creation to the retained UI runtime, so the controls the original builds at
+  gadget-creation time now exist instead of being silently absent. A slider gains a draggable thumb,
+  a scroll list box that asks for a scroll bar gains an up button, a down button, and a vertical
+  slider, and a combo box gains a drop-down button, an edit field, and a hidden drop-down list —
+  which, being a list box created with a scroll bar, builds one of its own. This is what all the
+  `COMBOBOXEDITBOX*`, `COMBOBOXDROPDOWNBUTTON*`, `COMBOBOXLISTBOX*`, `LISTBOX*UPBUTTON`/`DOWNBUTTON`/
+  `SLIDER`, and `SLIDERTHUMB*` draw-data records in a layout are for; until now nothing read them.
+  The retail Options menu's Resolution, Detail, and IP combo boxes rendered as bare black rectangles
+  and now render as retail draws them, and a list box shows its scroll arrows and thumb. Across the
+  Zero Hour corpus this adds 958 controls. Every part's size is a source literal applied to an
+  already-scaled parent, so a scroll button stays 21 pixels wide at every resolution, and each part
+  takes its art from the records of the window that declared them — which for a scroll bar's thumb
+  is the list box two levels above its slider, not the slider itself. Sliders and their thumbs also
+  gain the `TABSTOP` the creation code sets on them, so a layout's tab list is larger than its
+  declared `TABSTOP` count suggests. `cic-inspect ui-layout` reports each part in a new `role`
+  column.
+- Added the control id to every `cic-inspect ui-render` diagnostic. They previously reported only a
+  frame-item index, which nothing else in the tool is keyed by, so an unbound-image or uncomposed-art
+  report could not be traced back to the control it came from.
+
 ### Fixed
 
 - Fixed the whole-control border being drawn from the wrong rule, which was both adding outlines the
@@ -204,7 +224,10 @@ land under the active milestone heading.
   outline are tested independently, so one being undefined still leaves the other. Rendering the
   retail Options menu showed both halves of the old error at once: every check box wore a salmon
   outline, and the panel frames dividing Display, Audio, Control, and Network were missing because
-  those windows take the colour path without declaring `BORDER`.
+  those windows take the colour path without declaring `BORDER`. `WIN_STATUS_BORDER` does drive a
+  second, ornamental border, tiled from mapped images by the window manager rather than by any draw
+  procedure; that is a separate feature this project does not implement, and its check-box and
+  slider cases draw nothing regardless.
 - Fixed push buttons that declare a single image drawing nothing.
   `W3DGadgetPushButtonImageDraw` chooses between two procedures on whether the *enabled* slot
   declares a middle image, and only the three-piece side was implemented; the other side,

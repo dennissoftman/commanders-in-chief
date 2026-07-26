@@ -30,6 +30,6 @@ pub use frame::{
 };
 pub use input::{UiEvent, UiKey, UiMouseButton};
 pub use retained::{
-    UiControl, UiControlId, UiControlKind, UiDiagnostic, UiDiagnosticKind, UiLayout, UiLayoutError,
-    UiLimits, UiPoint, UiPresentation, UiRect, UiScalePolicy, UiStatus, UiViewport,
+    UiControl, UiControlId, UiControlKind, UiDiagnostic, UiDiagnosticKind, UiGadgetRole, UiLayout,
+    UiLayoutError, UiLimits, UiPoint, UiPresentation, UiRect, UiScalePolicy, UiStatus, UiViewport,
 };

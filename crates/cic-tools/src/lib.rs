@@ -1122,14 +1122,14 @@ pub fn render_ui_layout(layout: &UiLayout) -> String {
 
     output.push_str(
         "ui_control\tid\tdepth\tparent\tname\ttype\tx\ty\twidth\theight\tscreen_x\tscreen_y\t\
-         hidden\tenabled\tstatus\tkind\ttext\n",
+         hidden\tenabled\tstatus\tkind\trole\ttext\n",
     );
     for control in layout.controls() {
         let origin = layout.screen_origin(control.id());
         let rect = control.rect();
         writeln!(
             output,
-            "ui_control\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:#010x}\t{}\t{}",
+            "ui_control\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:#010x}\t{}\t{}\t{}",
             control.id().index(),
             control.depth(),
             control
@@ -1147,6 +1147,9 @@ pub fn render_ui_layout(layout: &UiLayout) -> String {
             control.is_enabled(),
             control.status().bits(),
             ui_control_kind_name(control.kind()),
+            control
+                .gadget_role()
+                .map_or("-", cic_ui::UiGadgetRole::name),
             control.text_label().unwrap_or("-")
         )
         .expect("writing to a String cannot fail");
@@ -1207,6 +1210,10 @@ pub fn render_ui_layout(layout: &UiLayout) -> String {
             UiDiagnosticKind::TextLengthClamped { declared, applied } => {
                 ("text_length_clamped", format!("{declared} to {applied}"))
             }
+            UiDiagnosticKind::UntitledScrollBarAssumed => (
+                "untitled_scroll_bar_assumed",
+                "scroll bar laid out without a title inset".to_owned(),
+            ),
         };
         writeln!(
             output,

@@ -97,20 +97,25 @@ were invisible. Every remaining diagnostic traces to retail's own data: an image
 defines, or a control the source itself draws nothing for. Full numbers are in
 [docs/milestones/r4-wnd-shell.md](docs/milestones/r4-wnd-shell.md).
 
-**Gadget child creation is the next verified step**, and it is what that verification turned up. A
-combo box's draw procedure paints only a background and a title; its edit box, drop-down button, and
-list box are separate child windows `GadgetComboBoxCreate` builds at creation, and a list box's
-scroll bar is the same. `cic-ui` builds none of them, so `OptionsMenu.wnd`'s Resolution and Detail
-combos render as bare black rectangles and roughly 100 controls per edition report uncomposed art.
-The layouts already carry the children's art in the `COMBOBOXEDITBOX*`, `COMBOBOXDROPDOWNBUTTON*`,
-`COMBOBOXLISTBOX*`, and `LISTBOX*UPBUTTON`/`DOWNBUTTON`/`SLIDER` records, so this is retained-runtime
-work in `cic-ui` rather than anything the presentation layer can fix.
+Gadget child creation followed, completing Gate 5's retained runtime. `cic-ui` now builds the
+windows the original's creation code builds and no layout declares: a thumb for every slider, an up
+button, down button, and slider for a list box that asks for a scroll bar, and a drop-down button,
+edit field, and hidden drop-down list for a combo box. That is 958 extra controls across the Zero
+Hour corpus, and `OptionsMenu.wnd`'s combos now render as retail draws them. The subtle part is that
+a part's art is not on its parent — a scroll bar's thumb reads `SLIDERTHUMB*` from the list box two
+levels above it — because the original bridges that distance through file statics.
 
-Two smaller pieces remain queued behind it: the rest of Gate 4 — bounded `WindowTransition`,
+**Gate 7's shell stack is the next verified step**: allowlisted typed callbacks, push/pop/
+bring-forward/hide semantics, and transition groups. It is what hides the subpanels a retail menu
+overlays today — rendering `MainMenu.wnd` shows every subpanel at once, because retail hides them
+from menu code rather than through `STATUS` — and it is the direct prerequisite for Gate 8's
+main-menu artifact.
+
+Two smaller pieces remain queued alongside it. The rest of Gate 4 is bounded `WindowTransition`,
 `MouseCursor`, and `ShellMenuScheme` subsets, which live in the same INI family and reuse the shared
-lexer — and Gate 7's shell stack, which is what hides the subpanels a retail menu overlays today:
-rendering `MainMenu.wnd` currently shows every subpanel at once, because retail hides them from menu
-code rather than through `STATUS`.
+lexer. And the ornamental border is unimplemented: `WIN_STATUS_BORDER` makes the window manager tile
+a frame from hardcoded `BorderTop`/`BorderCorner__`-style mapped images, which is a different border
+from the colour-path outline and is drawn by no draw procedure.
 
 Separately, [docs/formats/csf.md](docs/formats/csf.md) records the language-selection mechanism
 against the pinned source, for the planned goal of shipping languages the original game never had.

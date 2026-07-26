@@ -361,9 +361,21 @@ alone:
   into every unused draw-data entry. The test is that value, not the alpha channel.
 - The two colours are tested independently, so an undefined border still leaves the fill and an
   undefined fill still leaves the outline. The fill is inset by the outline's pixel either way.
-- `WIN_STATUS_BORDER` (`0x00001000`) exists in `GameWindow.h` and **no draw procedure reads it**.
-  Nothing about a border is conditioned on it. Correspondingly, no `...ImageDraw` procedure outlines
-  anything at all: art on the image path carries its own edges.
+- `WIN_STATUS_BORDER` (`0x00001000`) does not gate this outline. **No draw procedure reads that bit
+  at all**, so nothing in the colour path is conditioned on it. Correspondingly, no `...ImageDraw`
+  procedure outlines anything: art on the image path carries its own edges.
+
+`WIN_STATUS_BORDER` does have a reader, but it is a different border and a different layer, and
+this project does not implement it yet. `GameWindowManager::drawWindow` calls the window's own
+`winDrawBorder()` when the bit is set and `SEE_THRU` is not — after its children for most styles,
+*before* them for `GWS_SCROLL_LISTBOX`. `W3DGameWindow::winDrawBorder` draws an ornamental frame out
+of mapped images, not out of any draw-data colour: `blitBorderRect` tiles `BorderTop`, `BorderLeft`,
+`BorderRight`, `BorderBottom`, their `...Short` halves, and the four `BorderCorner__` pieces, all
+looked up by hardcoded name. It selects geometry by scanning the style mask from bit 0 upward and
+stopping at the first match, so the lowest set style bit decides, and two of those cases draw
+nothing at all — `GWS_CHECK_BOX` matches and returns, and both slider cases have their blit
+commented out. That is why removing this project's incorrect colour-path border from check boxes
+left them correct rather than under-drawn.
 
 This corrects a rule recorded earlier in this project, which gated the border on `WIN_STATUS_BORDER`
 and drew it on both paths. Rendering the retail Options menu showed both halves of the error at
@@ -375,6 +387,47 @@ Where a family's own indices declare nothing, each source procedure returns earl
 This project reproduces that and records a diagnostic naming the family, rather than staging a
 placeholder: a placeholder there would invent a control retail never shows. Placeholders stay for a
 genuinely unresolved resource, which is a different failure.
+
+## Gadget child creation
+
+Three of the original's gadget-creation functions build child windows that no layout declares, and
+those children are what most of a layout's draw-data records exist to dress. All three are
+reproduced in `cic-ui` from the pinned revision.
+
+- `gogoGadgetSlider` gives every slider a draggable thumb push button. A horizontal thumb is
+  `HORIZONTAL_SLIDER_THUMB_WIDTH` by `_HEIGHT` — 13 by 16 from `Gadget.h` — at
+  `HORIZONTAL_SLIDER_THUMB_POSITION`, which `GadgetSlider.h` defines as the height times two thirds
+  under integer division, so 10. A vertical thumb is the slider's own width by that width plus one.
+- `GadgetListboxCreateScrollbar`, called when `LISTBOXDATA` asks for `SCROLLBAR`, adds an up button,
+  a down button, and a vertical slider, all 21 pixels wide two pixels in from the right edge, the
+  buttons 22 tall and the slider filling `bottom - 2 * buttonHeight - 6` between them.
+- `gogoGadgetComboBox` adds a drop-down button 21 pixels wide at the box's full height, an edit
+  field filling the remaining width and carrying the literal text `"Entry"`, and a drop-down list
+  hanging directly below the closed box at its own height. The list is created with `scrollBar = 1`,
+  so it builds a scroll bar of its own, and `winHide( TRUE )` hides it immediately.
+
+Five facts about that construction are reproduced rather than tidied:
+
+- Every size above is a literal applied to an already-scaled parent rectangle, so gadget parts stay
+  the same pixel size at every resolution while the gadget around them grows.
+- Each part's status is the gadget's with bits masked out and others forced on — `BORDER` and
+  `HIDDEN` always cleared, the scroll bar additionally clearing `NO_INPUT` and forcing `IMAGE`, and
+  a non-editable combo box's field gaining `NO_INPUT`. Its `NO_FOCUS` companion is commented out in
+  the source, so focus still reaches that field.
+- `gogoGadgetSlider` sets `WIN_STATUS_TAB_STOP` on the slider *and* the thumb inherits it, so every
+  slider in a layout contributes two tab stops that the file never declared. That is why the Zero
+  Hour corpus's nine declared `TABSTOP` controls understate the real tab list.
+- `winCreateFromScript` copies each part's arrays into it *after* creation, through file-scope
+  statics holding the records of the window being created. A scroll bar's thumb therefore reads
+  `SLIDERTHUMB*` from the list box two levels above it, and a combo box's internal scroll bar reads
+  `LISTBOX*` and `SLIDERTHUMB*` from the combo box, not from the slider or list that owns it.
+  `cic-ui` carries those records down the tree at creation instead of using a global.
+- `gogoGadgetComboBox` computes a font height and `top`/`bottom` for a list title and then uses none
+  of them, and declares a `buttonHeight` of 22 that its drop-down button ignores in favour of the
+  box's full height. `GadgetListboxCreateScrollbar`'s title inset is real, but no retail layout
+  gives a scroll list box any text and a combo box's internal list is created with none, so it is
+  the one part of this that would need font metrics and it is unreachable; a layout that reached it
+  would be reported rather than mislaid.
 
 Gate 4's transition, cursor, and menu-scheme subsets and everything else recorded above remain
 design-only.

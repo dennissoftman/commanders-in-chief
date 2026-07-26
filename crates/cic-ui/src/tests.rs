@@ -7,9 +7,9 @@
 use cic_formats::{WndColor, WndDrawDataSlot, WndLimits, parse_wnd};
 
 use crate::{
-    UiClipPolicy, UiControlFamily, UiControlKind, UiEvent, UiFrameItem, UiKey, UiLayout,
-    UiLayoutError, UiLimits, UiMouseButton, UiPoint, UiPresentation, UiRect, UiScalePolicy,
-    UiStatus, UiTextAlign, UiViewport,
+    UiClipPolicy, UiControlFamily, UiControlId, UiControlKind, UiEvent, UiFrameItem, UiGadgetRole,
+    UiKey, UiLayout, UiLayoutError, UiLimits, UiMouseButton, UiPoint, UiPresentation, UiRect,
+    UiScalePolicy, UiStatus, UiTextAlign, UiViewport,
 };
 
 fn viewport(width: i32, height: i32) -> UiViewport {
@@ -132,6 +132,8 @@ WINDOW
   STATUS = ENABLED;
   LISTBOXDATA = LENGTH: 2, AUTOSCROLL: 0, AUTOPURGE: 0, SCROLLBAR: 1,
                 MULTISELECT: 0, COLUMNS: 1, FORCESELECT: 0;
+  LISTBOXENABLEDUPBUTTONDRAWDATA = {up_button};
+  SLIDERTHUMBENABLEDDRAWDATA = {thumb};
 END
 CHILD
 WINDOW
@@ -143,6 +145,8 @@ WINDOW
   STATUS = ENABLED;
   COMBOBOXDATA = ISEDITABLE: 0, MAXCHARS: 8, MAXDISPLAY: 3, ASCIIONLY: 0,
                  LETTERSANDNUMBERS: 0;
+  COMBOBOXDROPDOWNBUTTONENABLEDDRAWDATA = {drop_button};
+  COMBOBOXEDITBOXENABLEDDRAWDATA = {edit_box};
 END
 CHILD
 WINDOW
@@ -194,6 +198,10 @@ END
         panel = draw_data("SynthPanel"),
         button_enabled = draw_data("SynthButtonEnabled"),
         button_hilite = draw_data("SynthButtonHilite"),
+        drop_button = draw_data("SynthDropButton"),
+        edit_box = draw_data("SynthEditBox"),
+        up_button = draw_data("SynthUpButton"),
+        thumb = draw_data("SynthThumb"),
     )
 }
 
@@ -206,6 +214,16 @@ fn instantiate(presentation: UiPresentation) -> UiLayout {
         document.diagnostics()
     );
     UiLayout::instantiate(&document, presentation, UiLimits::default()).expect("instantiate layout")
+}
+
+/// Returns the synthesised gadget part of a control, by role.
+fn part(layout: &UiLayout, owner: UiControlId, role: UiGadgetRole) -> UiControlId {
+    *layout
+        .control(owner)
+        .children()
+        .iter()
+        .find(|child| layout.control(**child).gadget_role() == Some(role))
+        .unwrap_or_else(|| panic!("{owner:?} should have a {} part", role.name()))
 }
 
 #[test]
@@ -538,23 +556,245 @@ fn text_entry_honors_its_declared_length_in_characters() {
 }
 
 #[test]
+fn a_combo_box_builds_the_three_parts_its_gadget_creation_makes() {
+    let layout = instantiate(classic(800, 600));
+    let combo = layout.find("SynthMenu.wnd:ComboSynth").expect("combo");
+    let rect = layout.control(combo).rect();
+    assert_eq!((rect.width, rect.height), (140, 30));
+
+    // Creation order is drop-down button, edit field, then list, and each part is parent-relative.
+    assert_eq!(
+        layout
+            .control(combo)
+            .children()
+            .iter()
+            .map(|child| layout.control(*child).gadget_role())
+            .collect::<Vec<_>>(),
+        [
+            Some(UiGadgetRole::ComboBoxDropDownButton),
+            Some(UiGadgetRole::ComboBoxEditBox),
+            Some(UiGadgetRole::ComboBoxListBox),
+        ]
+    );
+
+    // The button is a fixed 21 pixels wide against the box's full height, and the field takes the
+    // rest. Neither width scales with the layout.
+    let button = part(&layout, combo, UiGadgetRole::ComboBoxDropDownButton);
+    assert_eq!(
+        layout.control(button).rect(),
+        UiRect {
+            x: 119,
+            y: 0,
+            width: 21,
+            height: 30
+        }
+    );
+    let field = part(&layout, combo, UiGadgetRole::ComboBoxEditBox);
+    assert_eq!(
+        layout.control(field).rect(),
+        UiRect {
+            x: 0,
+            y: 0,
+            width: 119,
+            height: 30
+        }
+    );
+    // The field is created with the literal "Entry" and the box's `MAXCHARS`, and a non-editable
+    // combo box refuses input on it.
+    assert_eq!(layout.control(field).text_label(), Some("Entry"));
+    assert!(matches!(
+        layout.control(field).kind(),
+        UiControlKind::TextEntry { max_length: 8, .. }
+    ));
+    assert!(layout.control(field).status().contains(UiStatus::NO_INPUT));
+
+    // The drop-down hangs below the closed box, starts hidden, and drops the box's `IMAGE` bit.
+    let list = part(&layout, combo, UiGadgetRole::ComboBoxListBox);
+    assert_eq!(
+        layout.control(list).rect(),
+        UiRect {
+            x: 0,
+            y: 30,
+            width: 140,
+            height: 30
+        }
+    );
+    assert!(layout.control(list).is_hidden());
+    assert!(!layout.control(list).status().contains(UiStatus::IMAGE));
+    assert!(layout.control(list).status().contains(UiStatus::ABOVE));
+}
+
+#[test]
+fn a_scroll_list_box_builds_a_scroll_bar_with_a_thumb() {
+    let layout = instantiate(classic(800, 600));
+    let list = layout.find("SynthMenu.wnd:ListSynth").expect("list");
+    let rect = layout.control(list).rect();
+    assert_eq!((rect.width, rect.height), (140, 130));
+
+    let up = part(&layout, list, UiGadgetRole::ListBoxUpButton);
+    let down = part(&layout, list, UiGadgetRole::ListBoxDownButton);
+    let slider = part(&layout, list, UiGadgetRole::ListBoxSlider);
+    // All three sit in the same 21-pixel column two pixels in from the right edge; the buttons are
+    // 22 tall and the slider fills what is left between them.
+    assert_eq!(
+        layout.control(up).rect(),
+        UiRect {
+            x: 117,
+            y: 2,
+            width: 21,
+            height: 22
+        }
+    );
+    assert_eq!(
+        layout.control(down).rect(),
+        UiRect {
+            x: 117,
+            y: 106,
+            width: 21,
+            height: 22
+        }
+    );
+    assert_eq!(
+        layout.control(slider).rect(),
+        UiRect {
+            x: 117,
+            y: 25,
+            width: 21,
+            height: 80
+        }
+    );
+
+    // A vertical thumb is as wide as its slider and one pixel taller, and it is draggable.
+    let thumb = part(&layout, slider, UiGadgetRole::SliderThumb);
+    assert_eq!(
+        layout.control(thumb).rect(),
+        UiRect {
+            x: 0,
+            y: 0,
+            width: 21,
+            height: 22
+        }
+    );
+    assert!(layout.control(thumb).status().contains(UiStatus::DRAGGABLE));
+}
+
+#[test]
+fn a_horizontal_slider_thumb_uses_the_source_s_fixed_thumb_box() {
+    let layout = instantiate(classic(800, 600));
+    let slider = layout.find("SynthMenu.wnd:SliderSynth").expect("slider");
+    let thumb = part(&layout, slider, UiGadgetRole::SliderThumb);
+    // `HORIZONTAL_SLIDER_THUMB_WIDTH`/`_HEIGHT` are 13 by 16, and `_POSITION` is two thirds of the
+    // height under integer division.
+    assert_eq!(
+        layout.control(thumb).rect(),
+        UiRect {
+            x: 0,
+            y: 10,
+            width: 13,
+            height: 16
+        }
+    );
+}
+
+#[test]
+fn a_gadget_part_draws_from_its_parent_s_records_for_that_part() {
+    let layout = instantiate(classic(800, 600));
+    let combo = layout.find("SynthMenu.wnd:ComboSynth").expect("combo");
+    let button = part(&layout, combo, UiGadgetRole::ComboBoxDropDownButton);
+    // `winCreateFromScript` copies each part's arrays out of the parent once the part exists, so
+    // the button's own enabled slot is the combo box's drop-down-button enabled record.
+    let owner = layout
+        .control(combo)
+        .draw_entry(WndDrawDataSlot::ComboBoxDropDownButtonEnabled);
+    assert_eq!(
+        layout.control(button).draw_entry(WndDrawDataSlot::Enabled),
+        owner
+    );
+    assert!(owner.is_some());
+}
+
+#[test]
+fn a_scroll_bar_thumb_reads_the_thumb_records_of_the_list_box_above_its_slider() {
+    let layout = instantiate(classic(800, 600));
+    let list = layout.find("SynthMenu.wnd:ListSynth").expect("list");
+    let slider = part(&layout, list, UiGadgetRole::ListBoxSlider);
+    let thumb = part(&layout, slider, UiGadgetRole::SliderThumb);
+
+    // `SLIDERTHUMBENABLEDDRAWDATA` is written on the list box, two levels above the thumb, and the
+    // slider between them declares nothing of its own. `winCreateFromScript` bridges that gap
+    // through file statics; reading only the immediate parent would leave the thumb blank.
+    let declared = layout
+        .control(list)
+        .draw_entry(WndDrawDataSlot::SliderThumbEnabled);
+    assert_eq!(
+        layout.control(thumb).draw_entry(WndDrawDataSlot::Enabled),
+        declared
+    );
+    assert_eq!(
+        declared.and_then(|entry| entry.image().map(str::to_owned)),
+        Some("SynthThumb".to_owned())
+    );
+
+    // The up button reads the list box's own up-button record directly.
+    let up = part(&layout, list, UiGadgetRole::ListBoxUpButton);
+    assert_eq!(
+        layout
+            .control(up)
+            .draw_entry(WndDrawDataSlot::Enabled)
+            .and_then(|entry| entry.image().map(str::to_owned)),
+        Some("SynthUpButton".to_owned())
+    );
+}
+
+#[test]
 fn tab_traversal_visits_declared_stops_and_wraps() {
     let mut layout = instantiate(classic(800, 600));
     let button = layout.find("SynthMenu.wnd:ButtonSynth").expect("button");
     let entry = layout.find("SynthMenu.wnd:EntrySynth").expect("entry");
     let check = layout.find("SynthMenu.wnd:CheckSynth").expect("check");
-    assert_eq!(layout.tab_order(), [button, entry, check]);
+    // Three controls declare `TABSTOP`, but they are not the whole order: `gogoGadgetSlider` sets
+    // the bit on every slider it creates and the thumb inherits it, so each slider in the layout —
+    // the declared one, the list box's scroll bar, and the scroll bar inside the combo box's
+    // drop-down list — contributes a stop and a thumb stop.
+    let slider = layout.find("SynthMenu.wnd:SliderSynth").expect("slider");
+    let list = layout.find("SynthMenu.wnd:ListSynth").expect("list");
+    let list_slider = part(&layout, list, UiGadgetRole::ListBoxSlider);
+    let combo = layout.find("SynthMenu.wnd:ComboSynth").expect("combo");
+    let combo_list = part(&layout, combo, UiGadgetRole::ComboBoxListBox);
+    let combo_slider = part(&layout, combo_list, UiGadgetRole::ListBoxSlider);
+    assert_eq!(
+        layout.tab_order(),
+        [
+            button,
+            entry,
+            check,
+            slider,
+            part(&layout, slider, UiGadgetRole::SliderThumb),
+            list_slider,
+            part(&layout, list_slider, UiGadgetRole::SliderThumb),
+            combo_slider,
+            part(&layout, combo_slider, UiGadgetRole::SliderThumb),
+        ]
+    );
 
+    // The combo box's drop-down list starts hidden, so the two stops inside it stay in the tab list
+    // but cannot hold focus until the list opens. The cycle visits the rest in order and wraps.
+    let reachable: Vec<_> = layout
+        .tab_order()
+        .iter()
+        .copied()
+        .filter(|stop| layout.is_effectively_visible(*stop))
+        .collect();
+    assert_eq!(reachable.len(), layout.tab_order().len() - 2);
+    assert!(!reachable.contains(&combo_slider));
+    for stop in &reachable {
+        layout.focus_next();
+        assert_eq!(layout.focus(), Some(*stop));
+    }
     layout.focus_next();
-    assert_eq!(layout.focus(), Some(button));
-    layout.focus_next();
-    assert_eq!(layout.focus(), Some(entry));
-    layout.focus_next();
-    assert_eq!(layout.focus(), Some(check));
-    layout.focus_next();
-    assert_eq!(layout.focus(), Some(button));
+    assert_eq!(layout.focus(), Some(reachable[0]));
     layout.focus_previous();
-    assert_eq!(layout.focus(), Some(check));
+    assert_eq!(layout.focus(), reachable.last().copied());
 
     // A disabled stop is skipped rather than trapping focus.
     layout.set_enabled(entry, false);

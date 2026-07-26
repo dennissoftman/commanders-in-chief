@@ -56,7 +56,8 @@
 
 use cic_formats::WndDrawDataSlot;
 use cic_ui::{
-    UiControlFamily, UiDrawState, UiFrame, UiFrameItem, UiRect, UiSlotImages, UiTextAlign,
+    UiControlFamily, UiControlId, UiDrawState, UiFrame, UiFrameItem, UiRect, UiSlotImages,
+    UiTextAlign,
 };
 
 /// One staged vertex: position in viewport pixels, texture coordinate, straight RGBA, and whether
@@ -257,6 +258,7 @@ pub enum UiStagingDiagnosticKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UiStagingDiagnostic {
     item: usize,
+    control: Option<UiControlId>,
     kind: UiStagingDiagnosticKind,
 }
 
@@ -265,6 +267,15 @@ impl UiStagingDiagnostic {
     #[must_use]
     pub const fn item(&self) -> usize {
         self.item
+    }
+
+    /// Returns the control the observation applies to, absent for a frame-level observation.
+    ///
+    /// A frame-item index alone cannot be looked up anywhere — the layout report is keyed by control
+    /// — so without this an art or resource complaint names nothing an author can act on.
+    #[must_use]
+    pub const fn control(&self) -> Option<UiControlId> {
+        self.control
     }
 
     /// Returns the observation detail.
@@ -431,11 +442,13 @@ impl StagedUiFrame {
                     if clips.pop().is_none() {
                         staged.diagnostics.push(UiStagingDiagnostic {
                             item: index,
+                            control: None,
                             kind: UiStagingDiagnosticKind::UnbalancedPopClip,
                         });
                     }
                 }
                 UiFrameItem::Quad {
+                    control,
                     rect,
                     slot,
                     color,
@@ -483,6 +496,7 @@ impl StagedUiFrame {
                             Composed::Unbound(name) => {
                                 staged.diagnostics.push(UiStagingDiagnostic {
                                     item: index,
+                                    control: Some(*control),
                                     kind: UiStagingDiagnosticKind::UnboundImage { name },
                                 });
                                 quads += 1;
@@ -503,6 +517,7 @@ impl StagedUiFrame {
                                 if !images.is_empty() {
                                     staged.diagnostics.push(UiStagingDiagnostic {
                                         item: index,
+                                        control: Some(*control),
                                         kind: UiStagingDiagnosticKind::UncomposedArt {
                                             family: family.name(),
                                         },
@@ -577,6 +592,7 @@ impl StagedUiFrame {
                         UiTextPolicy::Placeholder => {
                             staged.diagnostics.push(UiStagingDiagnostic {
                                 item: index,
+                                control: Some(run.control),
                                 kind: UiStagingDiagnosticKind::UnshapeableText {
                                     text: text.into_boxed_str(),
                                 },
@@ -600,6 +616,7 @@ impl StagedUiFrame {
         if !clips.is_empty() {
             staged.diagnostics.push(UiStagingDiagnostic {
                 item: frame.items().len(),
+                control: None,
                 kind: UiStagingDiagnosticKind::UnclosedClips { depth: clips.len() },
             });
         }

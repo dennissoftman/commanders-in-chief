@@ -193,7 +193,7 @@ because both depend on how retail actually writes its layouts rather than on any
 
 The first was the whole-control border. This project had gated it on `WIN_STATUS_BORDER` and drawn
 it on both draw paths. The pinned source does neither: no draw procedure reads that bit, and the
-border belongs to the colour path alone — `W3DGameWinDefaultDraw`, `W3DGadgetPushButtonDraw`,
+colour-path border belongs to the colour path alone — `W3DGameWinDefaultDraw`, `W3DGadgetPushButtonDraw`,
 `W3DGadgetCheckBoxDraw`, and `W3DGadgetComboBoxDraw` each open a one-pixel rectangle and then fill
 one pixel inside it, while every matching `...ImageDraw` outlines nothing. The retail Options menu
 showed both halves of the error together: check boxes wore a salmon outline the original never
@@ -201,6 +201,16 @@ draws, and the panel frames dividing Display, Audio, Control, and Network were m
 those windows take the colour path without declaring `BORDER`. The colour comparison is against
 `GAME_COLOR_UNDEFINED` — `0x00FFFFFF`, exactly the `255 255 255 0` retail writes into every unused
 entry — and the fill and the outline are tested separately.
+
+Reading further to implement the next gate turned up what `WIN_STATUS_BORDER` actually drives, and
+it is a second, unimplemented border rather than the one above. `GameWindowManager::drawWindow`
+calls `winDrawBorder()` when the bit is set, and `W3DGameWindow::winDrawBorder` tiles an ornamental
+frame from hardcoded mapped images — `BorderTop`, `BorderLeft`, `BorderRight`, `BorderBottom`, their
+`...Short` halves, and four `BorderCorner__` pieces — choosing geometry by the lowest set style bit.
+Two of those style cases deliberately draw nothing, `GWS_CHECK_BOX` and both sliders, which is why
+removing the wrong colour-path border from check boxes left them correct rather than bare. This
+project draws no ornamental border at all; it is recorded here as a known gap, not as something the
+border fix addressed.
 
 The second was a push-button path that had been read but not implemented.
 `W3DGadgetPushButtonImageDraw` branches on whether the *enabled* slot declares a middle image, and
@@ -223,6 +233,9 @@ earlier figures they cover every family rather than push buttons and backgrounds
 | Layouts with no diagnostic at all | 61 | 61 |
 | Diagnostics | 141 | 129 |
 
+Those figures predate gadget child creation, which adds the parts a layout never declares; the pass
+after it is tabulated further down.
+
 Only the quad count moves with the viewport, which is what a repeating-piece composition should do;
 batches, text runs, and the complete diagnostic list are identical at both viewports in both
 editions. Rendering the whole Zero Hour corpus twice produced the same 79 capture hashes both times.
@@ -240,17 +253,73 @@ Every remaining diagnostic was traced to a fact about retail data rather than to
   `ChallengeMenu.wnd`'s general-portrait buttons and one in `GeneralsExpPoints.wnd`, which declare
   art in the disabled slot only and take their enabled portrait from challenge-mode code. Generals
   has none.
-- `UncomposedArt` on `Simple` — 105 in Zero Hour, 102 in Generals — is overwhelmingly combo boxes
-  and list boxes, and it points at the one substantial gap this pass found.
+- `UncomposedArt` on `Simple` — 105 in Zero Hour, 102 in Generals — is mostly combo boxes whose own
+  entry 0 declares no background image, which their draw procedure also draws nothing for.
 
-That gap is gadget child creation, and it belongs to the retained runtime rather than to
-presentation. A combo box's own draw procedure paints only a background and a title; its edit box,
-drop-down button, and list box are separate child windows that `GadgetComboBoxCreate` builds when
-the gadget is created, and a list box's scroll bar is the same. The WND already carries their art —
-that is what `COMBOBOXEDITBOX*DRAWDATA`, `COMBOBOXDROPDOWNBUTTON*DRAWDATA`, `COMBOBOXLISTBOX*DRAWDATA`,
-and the `LISTBOX*UPBUTTON`/`DOWNBUTTON`/`SLIDER` records are for — and `cic-ui` instantiates none of
-it, so `OptionsMenu.wnd`'s Resolution and Detail combos render as bare black rectangles. Nothing in
-the presentation layer can fix that; the children have to exist first.
+Separately, this pass found one substantial gap that no diagnostic named, because the missing
+controls were missing entirely: gadget child creation. It belongs to the retained runtime rather
+than to presentation. A combo box's own draw procedure paints only a background and a title; its
+edit box, drop-down button, and list box are separate child windows that `gogoGadgetComboBox` builds
+when the gadget is created, and a list box's scroll bar is the same. The WND already carries their
+art — that is what `COMBOBOXEDITBOX*DRAWDATA`, `COMBOBOXDROPDOWNBUTTON*DRAWDATA`,
+`COMBOBOXLISTBOX*DRAWDATA`, and the `LISTBOX*UPBUTTON`/`DOWNBUTTON`/`SLIDER` records are for — and
+`cic-ui` instantiated none of it, so `OptionsMenu.wnd`'s Resolution and Detail combos rendered as
+bare black rectangles. That gap is now closed; see below.
+
+Gadget child creation closes that gap, and it belongs to Gate 5's retained runtime. `cic-ui` now
+reproduces the three creation functions that build windows no layout declares: `gogoGadgetSlider`
+gives every slider a draggable thumb, `GadgetListboxCreateScrollbar` gives a list box that asks for
+one an up button, a down button, and a vertical slider, and `gogoGadgetComboBox` gives a combo box a
+drop-down button, an edit field, and a hidden drop-down list — which, being a list box created with
+a scroll bar, builds a scroll bar of its own. Every size is a source literal applied to an
+already-scaled parent, so a scroll button stays 21 pixels wide at every resolution. The full
+derivation is in [docs/provenance/wnd.md](../provenance/wnd.md).
+
+Over the Zero Hour corpus that adds 958 controls: 115 combo boxes contribute three parts each, 151
+list boxes carry a scroll bar (36 declared plus the 115 inside combo boxes), and 160 sliders carry a
+thumb (nine declared plus the 151 scroll bars). The combo-box count matches Gate 5's census exactly.
+Staged quads rise from 11,021 to 12,450 in Zero Hour and 6,624 to 7,846 in Generals, and
+`OptionsMenu.wnd`'s Resolution, Detail, and IP combos now render as retail draws them — a gold edit
+field with a drop-down arrow beside it — while `MapSelectMenu.wnd`'s list box gains its arrows and
+thumb.
+
+Three findings came out of building it:
+
+- Where a part's art lives is not where the part is. `winCreateFromScript` copies each part's arrays
+  in through file-scope statics holding the records of the window being created, so a scroll bar's
+  thumb reads `SLIDERTHUMB*` from the list box two levels above its slider, and a combo box's
+  internal scroll bar reads `LISTBOX*` and `SLIDERTHUMB*` from the combo box. Reading only the
+  immediate parent leaves those parts blank, which is exactly how the first attempt here rendered
+  before the records were carried down the tree.
+- `gogoGadgetSlider` sets `WIN_STATUS_TAB_STOP` on every slider it creates and the thumb inherits
+  it, so each slider contributes two tab stops the file never declared. Gate 5's measurement that
+  the Zero Hour corpus declares only nine `TABSTOP` controls therefore understates the real tab
+  list; keyboard traversal still needs project-owned order, but not because the list is nearly
+  empty.
+- Two new unresolved image names surfaced, `VSliderEnabledTopEnd` and `VsliderThumbEnabled`, both
+  demanded by scroll-bar parts that now exist. Neither is a lookup failure — the catalog already
+  matches case-insensitively — they are more of retail's own undefined names, the same gap Gate 4
+  measured, and they stage visible placeholders.
+
+The corpus after gadget child creation, over the same four passes:
+
+| Measure | Zero Hour | Generals |
+| --- | --- | --- |
+| Layouts rendered | 79 of 80 | 77 of 78 |
+| Synthesised gadget parts | 958 | — |
+| Staged quads at 1280x720 | 12,450 | 7,846 |
+| Staged quads at 1920x1080 | 18,368 | 11,171 |
+| Batches | 300 | 293 |
+| Shaped text runs | 626 | 650 |
+| Layouts with no diagnostic at all | 58 | 57 |
+| Diagnostics | 153 | 142 |
+
+Batches, text runs, and the complete diagnostic list are again identical at both viewports, and only
+the quad count moves with the viewport.
+
+Staging diagnostics now carry the control they belong to. They previously reported only a frame-item
+index, which nothing else in the tool is keyed by, so an art or resource complaint could not be
+traced to a control at all; that is what first hid which controls the `Simple` reports covered.
 
 One compatibility fact belongs to Gates 7 and 8 rather than to presentation: rendering
 `Menus/MainMenu.wnd` shows every subpanel at once, with labels overlapping. Retail hides those
