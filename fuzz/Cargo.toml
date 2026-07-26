@@ -41,5 +41,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "wnd"
+path = "fuzz_targets/wnd.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

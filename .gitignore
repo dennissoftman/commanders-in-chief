@@ -3,5 +3,11 @@ fuzz/artifacts/
 fuzz/corpus/
 *.profraw
 *.tmp
+# Renderer captures. `cic-inspect *-render` writes into the working directory when no
+# output path is given, and a capture of a user-owned layout or map is retail-derived
+# output that must never be committed.
+*.png
+*.ppm
+!docs/**/*.png
 .idea/
 .vscode/

@@ -148,7 +148,7 @@ All commands accept the global options `[--zh] [--game-dir <path>] [--profile <p
 | `map-objects <path>` | `ObjectsList` placements as immutable data |
 | `map-sides <path>` | Sides, teams, build lists, and the complete nested script tree |
 | `map-view <path>` | Interactive real-time-strategy view of the staged scene |
-| `map-view --output <out.png\|out.ppm> <path>` | The same scene rendered once offscreen, plus its RGBA hash |
+| `map-view --output <out.png> <path>` | The same scene rendered once offscreen, plus its RGBA hash |
 
 `map-view` takes `[--modern]`, `[--pixels-per-cell <pixels>]`, `[--terrain-policy <legacy\|modern>]`,
 `[--time <seconds>]` in either mode, plus `[--yaw <degrees>]`, `[--height <units>]`,
@@ -164,7 +164,7 @@ lighting contribution.
 | `w3d-mesh <path> <top-level-index>` | Report one top-level mesh |
 | `w3d-export [--gltf] <path> [<out.glb\|out.gltf>]` | Export to glTF 2.0 |
 | `w3d-view <path>` | Interactive animated model viewer |
-| `w3d-render <path> [<out.ppm>]` | Deterministic textured capture plus RGBA hash |
+| `w3d-render <path> [<out.png>]` | Deterministic textured capture plus RGBA hash |
 
 `w3d-render` takes `[--animation <index>] [--frame <frame>] [--time <seconds>]
 [--rotation <radians>]`.
@@ -174,7 +174,19 @@ lighting contribution.
 | Command | Purpose |
 | --- | --- |
 | `wnd <path>` | Source-order inventory of the decoded WND hierarchy, fields, and diagnostics |
-| `wnd-render <path> [<out.ppm>]` | Surface-free capture of every window rectangle plus RGBA hash |
+| `wnd-render <path> [<out.png>]` | Surface-free capture of every window rectangle plus RGBA hash |
+| `wnd-patch <path> <patch>... -- [<mount>...]` | Report a patch overlay's operations, provenance, and resulting hierarchy |
+| `ui-resources <path>` | Resolve the mapped images, fonts, header templates, and CSF labels a layout names |
+| `ui-layout <path>` | Instantiate a layout for a viewport and report the retained tree, tab order, and frame order |
+| `ui-render <path> [<out.png>]` | Deterministic UI capture plus RGBA hash, with staged quad/batch/text counts |
+
+`ui-resources` takes `[--texture-size <pixels>]`. `ui-layout` takes
+`[--viewport <width>x<height>] [--scale <classic\|modern>]`, and `ui-render` adds
+`[--clip <none\|parent>]` and a repeatable `[--font <file>]` — without a font it stages visible text
+placeholders rather than falling back to a host face, so captures stay reproducible.
+
+`wnd-render` is a Gate 1 proof-of-pipeline only: flat coloured rectangles, no images, text, or
+gadget visuals. `ui-render` is the real presentation path.
 
 ### Renderer boundary
 
@@ -182,10 +194,10 @@ The renderer boundary can be exercised on its own, with no parser, filesystem, o
 resources involved:
 
 ```powershell
-cargo run -p cic-render --example headless_capture -- target/synthetic-capture.ppm
+cargo run -p cic-render --example headless_capture -- target/synthetic-capture.png
 ```
 
-It produces a window-free PPM and RGBA SHA-256 from an explicit pose.
+It produces a window-free PNG and RGBA SHA-256 from an explicit pose.
 
 ## Resources, profiles, and mods
 
@@ -330,7 +342,7 @@ cargo run -p cic-tools -- w3d-export art/w3d/model.w3d
 cargo run -p cic-tools -- w3d-export --gltf art/w3d/model.w3d preview.gltf
 cargo run -p cic-tools -- --zh w3d-export art/w3d/model_skn.w3d custom-name.glb
 cargo run -p cic-tools -- w3d-view art/w3d/model.w3d
-cargo run -p cic-tools -- w3d-render --animation 0 --frame 10 --time 0.5 art/w3d/model.w3d model-capture.ppm
+cargo run -p cic-tools -- w3d-render --animation 0 --frame 10 --time 0.5 art/w3d/model.w3d model-capture.png
 ```
 
 ### Export format
@@ -380,19 +392,29 @@ all explicit arguments.
 R4 is active and adds bounded WND/UI ingestion plus a navigable `wgpu` main-menu and skirmish demo,
 so map compatibility can be inspected through the intended shell before simulation exists.
 
-**Available now** (Gate 1):
+**Available now** (Gates 1 through 6):
 
-- A bounded, unknown-preserving WND decoder for file/layout versions, the layout block, and the
-  complete `WINDOW` / `CHILD` hierarchy. Unrecognized keywords surface as non-fatal diagnostics
-  instead of disappearing.
-- `wnd`, a stable source-order inventory report.
-- `wnd-render`, a surface-free proof-of-pipeline capture staging each window rectangle as a flat
-  colored quad through the existing headless renderer.
+- A bounded, unknown-preserving WND decoder covering the file and layout versions, the layout block,
+  the complete `WINDOW` / `CHILD` hierarchy, and every established per-gadget field — all 21
+  draw-data arrays, the seven gadget `DATA` records, fonts, state colours, and header templates.
+  Unrecognized keywords surface as non-fatal diagnostics instead of disappearing.
+- A versioned WND patch overlay layer that edits a definition after parsing, with per-field
+  provenance and the user-owned bytes left untouched.
+- Bounded decoders for the UI definition resources a layout names — mapped images, header
+  templates, and the language/font policy — resolved through the VFS alongside the CSF decoder.
+- `cic-ui`, the retained runtime: source-exact creation-resolution layout, layered hit testing,
+  focus and tab order, per-family control invariants, and the child windows the original's gadget
+  creation builds but no layout declares — a slider's thumb, a list box's scroll bar, and a combo
+  box's drop-down button, edit field, and drop-down list.
+- `cic-render`'s custom `wgpu` UI backend: batched quads, nested clipping, explicit colour space,
+  shaped Unicode text through `cosmic-text`/`glyphon`, per-family gadget art composed from each
+  family's own source draw procedure, and surface-free deterministic capture.
+- The reports above: `wnd`, `wnd-patch`, `ui-resources`, `ui-layout`, and `ui-render`.
 
-**Planned for the rest of R4:** user-owned mapped images, explicit fonts, and CSF labels; the
-retained `cic-ui` runtime; main-menu navigation into skirmish setup and map selection with R3
-previews and spawn markers; and a bounded declarative WND patch layer that adds modern window-mode,
-resolution, refresh-rate, and UI-scale controls with apply/confirm and timeout rollback.
+**Planned for the rest of R4:** the shell stack — allowlisted typed callbacks, menu push/pop, and
+transition groups; main-menu navigation into skirmish setup and map selection with R3 previews and
+spawn markers; and modern window-mode, resolution, refresh-rate, and UI-scale controls introduced by
+patch, with apply/confirm and timeout rollback.
 
 Patches are applied as a pure transformation from one immutable WND definition to another, after
 parse and before UI instantiation — the user-owned WND bytes are never modified. Callback names

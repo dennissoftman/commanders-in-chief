@@ -11,38 +11,49 @@ use cic_formats::{
     BridgeDefinition, BridgeTowerSlot, CsfLimits, MapLightingError, MapLimits, MapScenarioError,
     MapScenarioLimits, MapWaterError, ObjectDefinition, ObjectDrawKind, ObjectIniLimits,
     OptionsIniLimits, RoadDefinition, RoadIniLimits, TerrainIniLimits, W3dFile, W3dLimits,
-    W3dMeshLimits, W3dModelDecodePolicy, W3dSceneLimits, WaterIniLimits, WndLimits,
-    compose_static_w3d_model, decode_map_blend, decode_map_height, decode_map_lighting,
-    decode_map_polygons, decode_map_sides, decode_map_water, decode_map_world_objects,
-    decode_static_mesh, decode_w3d_model_set_with_policy, parse_csf, parse_map, parse_object_ini,
-    parse_options_ini, parse_road_ini, parse_terrain_ini, parse_w3d, parse_water_ini, parse_wnd,
-    w3d_model_hierarchy_name,
+    W3dMeshLimits, W3dModelDecodePolicy, W3dSceneLimits, WaterIniLimits, WndLimits, WndPatchLimits,
+    apply_wnd_patches, compose_static_w3d_model, decode_map_blend, decode_map_height,
+    decode_map_lighting, decode_map_polygons, decode_map_sides, decode_map_water,
+    decode_map_world_objects, decode_static_mesh, decode_w3d_model_set_with_policy, parse_csf,
+    parse_map, parse_object_ini, parse_options_ini, parse_road_ini, parse_terrain_ini, parse_w3d,
+    parse_water_ini, parse_wnd, parse_wnd_patch, w3d_model_hierarchy_name,
 };
 use cic_render::{
     AnimatedModel, BridgeTowerPlacement, Capture, HeadlessRenderer, MapPresentationFrame, MapScene,
     MapViewCamera, MapViewPasses, ModelFrame, StagedBoundaryFence, StagedMapOverlays,
     StagedMapScene, StagedRoads, StagedStaticScenery, StagedStaticSceneryModel, StagedTerrain,
-    StagedWater, StagedWndScene, StaticSceneryDiagnostic, StaticSceneryDiagnosticKind,
-    StaticSceneryInstance, TerrainCompatibilityPolicy, TerrainLighting, TerrainStagingOptions,
-    TextureId, TextureResourceManager, TreeSwayPresentation, WaterAppearance, WaterCausticSequence,
-    WaterPresentationPolicy, WaterSurfaceTexture, bridge_tower_placements, run_map_view,
-    run_model_viewer,
+    StagedUiFrame, StagedWater, StagedWndScene, StaticSceneryDiagnostic,
+    StaticSceneryDiagnosticKind, StaticSceneryInstance, TerrainCompatibilityPolicy,
+    TerrainLighting, TerrainStagingOptions, TextureId, TextureResourceManager,
+    TreeSwayPresentation, UiImageBinding, UiStagingDiagnosticKind, UiStagingLimits, UiTextPolicy,
+    UiTexturePage, WaterAppearance, WaterCausticSequence, WaterPresentationPolicy,
+    WaterSurfaceTexture, bridge_tower_placements, run_map_view, run_model_viewer,
 };
 use cic_tools::resource::{
-    GameEdition, MountProfile, MountProfileLimits, ResourceKind, StoredLocations, config_path,
-    discover_options_ini, discover_steam_locations, resolve_archives, resolve_options_ini_path,
-    validate_installation,
+    DEFAULT_LANGUAGE, GameEdition, MountProfile, MountProfileLimits, ResourceKind, StoredLocations,
+    config_path, discover_options_ini, discover_steam_locations, resolve_archives_for_language,
+    resolve_options_ini_path, validate_installation,
+};
+use cic_tools::ui_resources::{
+    DEFAULT_MAPPED_IMAGE_TEXTURE_SIZE, LocalizationResources, UiResourceLimits,
+    collect_ui_resource_demand, load_localization_resources, load_mapped_image_catalog,
+    resolve_ui_resources,
 };
 use cic_tools::{
     GltfTextureRequest, encode_capture_png, encode_map_height_png, pack_w3d_glb, render_csf,
     render_manifest, render_map, render_map_blend, render_map_height, render_map_lighting,
     render_map_polygons, render_map_sides, render_map_water, render_map_world_objects,
-    render_options_ini, render_w3d, render_w3d_gltf, render_w3d_mesh, render_wnd,
+    render_options_ini, render_ui_layout, render_ui_resources, render_w3d, render_w3d_gltf,
+    render_w3d_mesh, render_wnd, render_wnd_patch,
+};
+use cic_ui::{
+    UiClipPolicy, UiFrame, UiFrameItem, UiLayout, UiLimits, UiPresentation, UiScalePolicy,
+    UiViewport,
 };
 use cic_vfs::{BigLimits, Vfs, VirtualPath};
 
 const USAGE: &str = "Usage:\n\
-  cic-inspect [--zh] [--game-dir <path>] [--profile <profile>] [--mod <mount>]... <command> ...\n\
+  cic-inspect [--zh] [--game-dir <path>] [--language <name>] [--profile <profile>] [--mod <mount>]... <command> ...\n\
   cic-inspect config show\n\
   cic-inspect config set <generals-dir|zero-hour-dir|generals-options-ini|zero-hour-options-ini> <path>\n\
   cic-inspect [--zh] [--options-ini <path>] options\n\
@@ -57,14 +68,17 @@ const USAGE: &str = "Usage:\n\
   cic-inspect map-objects <virtual-path> <mount> [<mount> ...]\n\
   cic-inspect map-object-draws <virtual-path> <mount> [<mount> ...]\n\
   cic-inspect map-sides <virtual-path> <mount> [<mount> ...]\n\
-  cic-inspect map-view [--modern] [--output <file.png|file.ppm>] [--size <pixels|WxH>] [--yaw <degrees>] [--height <units>] [--focus <x>,<y>] [--overlays <on|off>] [--shadows <on|off>] [--occlusion <on|off>] [--pixels-per-cell <pixels>] [--terrain-policy <legacy|modern>] [--time <seconds>] <virtual-path> [<mount> ...]\n\
+  cic-inspect map-view [--modern] [--output <file.png>] [--size <pixels|WxH>] [--yaw <degrees>] [--height <units>] [--focus <x>,<y>] [--overlays <on|off>] [--shadows <on|off>] [--occlusion <on|off>] [--pixels-per-cell <pixels>] [--terrain-policy <legacy|modern>] [--time <seconds>] <virtual-path> [<mount> ...]\n\
   cic-inspect w3d <virtual-path> <mount> [<mount> ...]\n\
   cic-inspect w3d-mesh <virtual-path> <top-level-index> <mount> [<mount> ...]\n\
   cic-inspect w3d-view <virtual-path> [<mount> ...]\n\
-  cic-inspect w3d-render [--animation <index>] [--frame <frame>] [--time <seconds>] [--rotation <radians>] <virtual-path> [<output.ppm>] [<mount> ...]\n\
+  cic-inspect w3d-render [--animation <index>] [--frame <frame>] [--time <seconds>] [--rotation <radians>] <virtual-path> [<output.png>] [<mount> ...]\n\
   cic-inspect w3d-export [--gltf] <virtual-path> [<output.glb|output.gltf>] [<mount> ...]\n\
   cic-inspect wnd <virtual-path> <mount> [<mount> ...]\n\
-  cic-inspect wnd-render <virtual-path> [<output.ppm>] [<mount> ...]\n\
+  cic-inspect wnd-render <virtual-path> [<output.png>] [<mount> ...]\n\
+  cic-inspect wnd-patch <virtual-path> <patch> [<patch> ...] -- [<mount> ...]\n\
+  cic-inspect ui-resources [--texture-size <pixels>] <virtual-path> [<mount> ...]\n\
+  cic-inspect ui-layout [--viewport <width>x<height>] [--scale <classic|modern>] <virtual-path> [<mount> ...]\n\
 Each mount is a directory or BIG archive. Mounts are applied from left to right; later mounts override earlier mounts.";
 
 const MAX_ENCODED_IMAGE_BYTES: usize = 256 * 1_024 * 1_024;
@@ -80,6 +94,7 @@ struct CliOptions {
     edition: GameEdition,
     edition_explicit: bool,
     game_dir: Option<PathBuf>,
+    language: String,
     options_ini: Option<PathBuf>,
     profile: Option<PathBuf>,
     mods: Vec<PathBuf>,
@@ -213,6 +228,10 @@ fn run(arguments: impl IntoIterator<Item = String>) -> Result<String, Box<dyn Er
             Ok(render_wnd(&document))
         }
         "wnd-render" => render_wnd_capture(&mut arguments, &options),
+        "wnd-patch" => report_wnd_patch(&mut arguments, &options),
+        "ui-resources" => report_ui_resources(&mut arguments, &options),
+        "ui-layout" => report_ui_layout(&mut arguments, &options),
+        "ui-render" => render_ui_capture(&mut arguments, &options),
         _ => Err(format!("unknown command {command:?}").into()),
     }
 }
@@ -227,6 +246,7 @@ where
         edition: GameEdition::Generals,
         edition_explicit: false,
         game_dir: None,
+        language: DEFAULT_LANGUAGE.to_owned(),
         options_ini: None,
         profile: None,
         mods: Vec::new(),
@@ -249,6 +269,20 @@ where
                 options.options_ini = Some(PathBuf::from(
                     arguments.next().ok_or("--options-ini requires a path")?,
                 ));
+            }
+            "--language" => {
+                arguments.next();
+                let language = arguments.next().ok_or("--language requires a name")?;
+                if language.is_empty()
+                    || !language
+                        .chars()
+                        .all(|character| character.is_ascii_alphanumeric())
+                {
+                    return Err(
+                        "--language must be an ASCII alphanumeric name such as English".into(),
+                    );
+                }
+                options.language = language;
             }
             "--profile" => {
                 arguments.next();
@@ -758,13 +792,17 @@ fn parse_focus(value: &str) -> Result<[f32; 2], Box<dyn Error>> {
     Ok([x.trim().parse::<f32>()?, y.trim().parse::<f32>()?])
 }
 
-/// Encodes a capture as PNG or PPM, chosen by the output extension.
+/// Encodes a capture as PNG. Every capture in the tool is PNG, so the extension is checked rather
+/// than dispatched on, to catch a path that meant something else.
 fn encode_capture(capture: &Capture, path: &Path) -> Result<Vec<u8>, Box<dyn Error>> {
-    match path.extension().map(std::ffi::OsStr::to_ascii_lowercase) {
-        Some(extension) if extension == "ppm" => Ok(capture.ppm()),
-        Some(extension) if extension == "png" => Ok(encode_capture_png(capture)?),
-        _ => Err(format!("capture output {} must end in .png or .ppm", path.display()).into()),
+    if path
+        .extension()
+        .map(std::ffi::OsStr::to_ascii_lowercase)
+        .is_none_or(|extension| extension != "png")
+    {
+        return Err(format!("capture output {} must end in .png", path.display()).into());
     }
+    Ok(encode_capture_png(capture)?)
 }
 
 fn load_staged_map_scene(
@@ -1886,18 +1924,18 @@ where
     let (output_path, mounts) = if remaining.first().is_some_and(|candidate| {
         Path::new(candidate)
             .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("ppm"))
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
     }) {
         (PathBuf::from(&remaining[0]), remaining[1..].to_vec())
     } else {
-        (default_render_path(&resource_path)?, remaining)
+        (default_render_path(&resource_path, "png")?, remaining)
     };
     if !output_path
         .extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("ppm"))
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
     {
-        return Err("W3D render capture requires a .ppm output path".into());
+        return Err("W3D render capture requires a .png output path".into());
     }
     let vfs = mount_all(
         "w3d-render",
@@ -1911,7 +1949,7 @@ where
     let explicit_frame = ModelFrame::new(animation, frame, mapper_time_seconds, rotation)?;
     let renderer = pollster::block_on(HeadlessRenderer::new())?;
     let capture = renderer.capture_animated_model(512, 512, &staged, explicit_frame)?;
-    fs::write(&output_path, capture.ppm())?;
+    fs::write(&output_path, encode_capture_png(&capture)?)?;
     Ok(format!(
         "adapter\t{}\nanimation\t{}\nframe\t{}\nmapper_time_seconds\t{}\nvertices\t{}\nindices\t{}\ndraws\t{}\nmaterials\t{}\ntextures\t{}\nrgba_sha256\t{}\nwrote\t{}\n",
         renderer.adapter_info().name,
@@ -1944,18 +1982,18 @@ where
     let (output_path, mounts) = if remaining.first().is_some_and(|candidate| {
         Path::new(candidate)
             .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("ppm"))
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
     }) {
         (PathBuf::from(&remaining[0]), remaining[1..].to_vec())
     } else {
-        (default_render_path(&resource_path)?, remaining)
+        (default_render_path(&resource_path, "png")?, remaining)
     };
     if !output_path
         .extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("ppm"))
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
     {
-        return Err("WND render capture requires a .ppm output path".into());
+        return Err("WND render capture requires a .png output path".into());
     }
     let vfs = mount_all("wnd-render", &mounts, options, ResourceKind::Wnd)?;
     let entry = vfs
@@ -1967,7 +2005,9 @@ where
     let scene = StagedWndScene::from_document(&document)?;
     let renderer = pollster::block_on(HeadlessRenderer::new())?;
     let capture = renderer.capture_wnd_scene(&scene, [0.05, 0.05, 0.08, 1.0])?;
-    fs::write(&output_path, capture.ppm())?;
+    // The reported hash is taken over the capture's RGBA bytes, before encoding, so the
+    // container format does not affect determinism.
+    fs::write(&output_path, encode_capture_png(&capture)?)?;
     let [width, height] = scene.canvas();
     Ok(format!(
         "adapter\t{}\ncanvas_width\t{width}\ncanvas_height\t{height}\nwindows\t{}\nvertices\t{}\nindices\t{}\nrgba_sha256\t{}\nwrote\t{}\n",
@@ -1980,11 +2020,434 @@ where
     ))
 }
 
-fn default_render_path(resource_path: &VirtualPath) -> Result<PathBuf, Box<dyn Error>> {
+/// Reports the effect of one or more patch overlays without writing a patched WND.
+///
+/// Patch files are read from the host filesystem rather than the VFS: they are
+/// project-owned or profile-owned data, not resources inside a game archive.
+fn report_wnd_patch<I>(
+    arguments: &mut std::iter::Peekable<I>,
+    options: &CliOptions,
+) -> Result<String, Box<dyn Error>>
+where
+    I: Iterator<Item = String>,
+{
+    let resource_name = arguments
+        .next()
+        .ok_or("wnd-patch requires a virtual path")?;
+    let resource_path = VirtualPath::new(&resource_name)?;
+
+    let mut patch_paths = Vec::new();
+    let mut mounts = Vec::new();
+    while let Some(argument) = arguments.next() {
+        if argument == "--patch" {
+            patch_paths.push(
+                arguments
+                    .next()
+                    .ok_or("--patch requires a file path")?
+                    .clone(),
+            );
+        } else {
+            mounts.push(argument);
+        }
+    }
+    if patch_paths.is_empty() {
+        return Err("wnd-patch requires at least one --patch <file>".into());
+    }
+
+    let vfs = mount_all("wnd-patch", &mounts, options, ResourceKind::Wnd)?;
+    let entry = vfs
+        .resolve(&resource_path)
+        .ok_or_else(|| format!("resource not found: {resource_path}"))?;
+    let limits = WndLimits::default();
+    let bytes = entry.read(limits.maximum_file_bytes)?;
+    let document = parse_wnd(&bytes, limits)?;
+
+    let patch_limits = WndPatchLimits::default();
+    let mut patches = Vec::with_capacity(patch_paths.len());
+    for path in &patch_paths {
+        let patch_bytes = fs::read(path)?;
+        patches.push(parse_wnd_patch(path, &patch_bytes, patch_limits)?);
+    }
+
+    let overlaid = apply_wnd_patches(&document, resource_path.as_str(), &patches, limits)?;
+    Ok(render_wnd_patch(&patches, &overlaid))
+}
+
+/// Renders one retained layout to a deterministic PNG plus an RGBA SHA-256 hash.
+///
+/// Every presentation input is explicit: viewport, scale policy, language, texture-size selection,
+/// and the font files used for shaping. Nothing reads the host display, a host font, or a clock, so
+/// two runs with the same inputs produce the same bytes. Without `--font` the capture stages visible
+/// text placeholders instead of falling back to a platform face.
+#[allow(clippy::too_many_lines)]
+fn render_ui_capture<I>(
+    arguments: &mut std::iter::Peekable<I>,
+    options: &CliOptions,
+) -> Result<String, Box<dyn Error>>
+where
+    I: Iterator<Item = String>,
+{
+    let mut viewport = UiViewport::new(800, 600)?;
+    let mut scale = UiScalePolicy::Classic;
+    let mut texture_size = DEFAULT_MAPPED_IMAGE_TEXTURE_SIZE;
+    let mut font_paths: Vec<PathBuf> = Vec::new();
+    let mut clip = UiClipPolicy::None;
+    while arguments
+        .peek()
+        .is_some_and(|argument| argument.starts_with("--"))
+    {
+        match arguments.next().expect("peeked ui-render option").as_str() {
+            "--viewport" => {
+                let value = arguments
+                    .next()
+                    .ok_or("--viewport requires <width>x<height>")?;
+                let (width, height) = value
+                    .split_once('x')
+                    .ok_or("--viewport requires <width>x<height>")?;
+                viewport = UiViewport::new(width.parse::<i32>()?, height.parse::<i32>()?)?;
+            }
+            "--scale" => {
+                scale = match arguments
+                    .next()
+                    .ok_or("--scale requires classic or modern")?
+                    .as_str()
+                {
+                    "classic" => UiScalePolicy::Classic,
+                    "modern" => UiScalePolicy::Modern,
+                    other => return Err(format!("unknown scale policy {other:?}").into()),
+                };
+            }
+            "--texture-size" => {
+                texture_size = arguments
+                    .next()
+                    .ok_or("--texture-size requires a pixel count")?
+                    .parse::<u32>()?;
+            }
+            "--font" => {
+                font_paths.push(PathBuf::from(
+                    arguments.next().ok_or("--font requires a file path")?,
+                ));
+            }
+            "--clip" => {
+                clip = match arguments
+                    .next()
+                    .ok_or("--clip requires none or parent")?
+                    .as_str()
+                {
+                    "none" => UiClipPolicy::None,
+                    "parent" => UiClipPolicy::ClipToParent,
+                    other => return Err(format!("unknown clip policy {other:?}").into()),
+                };
+            }
+            option => return Err(format!("unknown ui-render option {option:?}").into()),
+        }
+    }
+    let resource_name = arguments
+        .next()
+        .ok_or("ui-render requires a virtual path")?;
+    let mut output_path = None;
+    let mut mounts = Vec::new();
+    for argument in arguments.by_ref() {
+        if output_path.is_none() && argument.to_ascii_lowercase().ends_with(".png") {
+            output_path = Some(PathBuf::from(argument));
+        } else {
+            mounts.push(argument);
+        }
+    }
+
+    let vfs = mount_all("ui-render", &mounts, options, ResourceKind::Ui)?;
+    let resource_path = VirtualPath::new(&resource_name)?;
+    let entry = vfs
+        .resolve(&resource_path)
+        .ok_or_else(|| format!("resource not found: {resource_path}"))?;
+    let wnd_limits = WndLimits::default();
+    let bytes = entry.read(wnd_limits.maximum_file_bytes)?;
+    let document = parse_wnd(&bytes, wnd_limits)?;
+    let layout = UiLayout::instantiate(
+        &document,
+        UiPresentation::new(viewport, scale),
+        UiLimits::default(),
+    )?;
+
+    let resource_limits = UiResourceLimits::default();
+    let catalog = load_mapped_image_catalog(&vfs, texture_size, resource_limits)?;
+    let localization = load_localization_resources(&vfs, &options.language, resource_limits)?;
+
+    // Text is resolved through the localization table before staging, so a label becomes its
+    // localized string and a literal or unresolved label stays exactly as authored.
+    let frame = layout
+        .frame(clip)
+        .with_resolved_text(&|label| localized_text(&localization, label));
+
+    let mut pages: Vec<UiTexturePage> = Vec::new();
+    let mut page_indices: BTreeMap<String, usize> = BTreeMap::new();
+    let mut bindings: BTreeMap<String, UiImageBinding> = BTreeMap::new();
+    for image in collect_frame_images(&frame) {
+        let Some(cataloged) = catalog.find(image.as_bytes()) else {
+            continue;
+        };
+        let texture = String::from_utf8_lossy(cataloged.image().texture_bytes()).into_owned();
+        if texture.is_empty() {
+            continue;
+        }
+        let page = if let Some(page) = page_indices.get(&texture) {
+            *page
+        } else {
+            {
+                let Ok((path, encoded)) = resolve_texture(&vfs, texture.as_bytes()) else {
+                    continue;
+                };
+                // TGA carries no magic bytes, so the format comes from the resolved path rather
+                // than from guessing, exactly as the terrain and model paths do.
+                let decoded = decode_viewer_texture(&encoded, image_format(&path)?)?;
+                let page =
+                    UiTexturePage::new(decoded.width(), decoded.height(), decoded.into_raw())?;
+                pages.push(page);
+                let index = pages.len() - 1;
+                page_indices.insert(texture.clone(), index);
+                index
+            }
+        };
+        let (width, height) = cataloged.image().image_size();
+        bindings.insert(
+            image,
+            UiImageBinding {
+                page,
+                uv: cataloged.image().uv(),
+                size: [width, height],
+            },
+        );
+    }
+
+    let fonts = font_paths
+        .iter()
+        .map(fs::read)
+        .collect::<Result<Vec<Vec<u8>>, _>>()?;
+    let text_policy = if fonts.is_empty() {
+        UiTextPolicy::Placeholder
+    } else {
+        UiTextPolicy::Shape
+    };
+    let staged = StagedUiFrame::from_frame(
+        &frame,
+        [
+            u32::try_from(viewport.width())?,
+            u32::try_from(viewport.height())?,
+        ],
+        text_policy,
+        UiStagingLimits::default(),
+        &|name| bindings.get(name).copied(),
+    )?;
+
+    let renderer = pollster::block_on(HeadlessRenderer::new())?;
+    let mut font_set = if fonts.is_empty() {
+        None
+    } else {
+        Some(renderer.create_ui_font_set(&fonts)?)
+    };
+    let capture =
+        renderer.capture_ui_frame(&staged, &pages, font_set.as_mut(), [0.0, 0.0, 0.0, 1.0])?;
+
+    let path = output_path.unwrap_or(default_render_path(&resource_path, "png")?);
+    let png = encode_capture_png(&capture)?;
+    fs::write(&path, &png)?;
+    let mut report = format!(
+        "ui-render\t{}\t{}\t{}\t{}\t{}\n",
+        path.display(),
+        capture.width(),
+        capture.height(),
+        png.len(),
+        capture.sha256()
+    );
+    writeln!(
+        report,
+        "ui-render-detail\tquads={}\tbatches={}\ttext_runs={}\tpages={}\tfonts={}",
+        staged.vertices().len() / 4,
+        staged.batches().len(),
+        staged.text().len(),
+        pages.len(),
+        fonts.len()
+    )?;
+    for diagnostic in staged.diagnostics() {
+        let (kind, detail) = match diagnostic.kind() {
+            UiStagingDiagnosticKind::UnboundImage { name } => ("unbound_image", name.to_string()),
+            UiStagingDiagnosticKind::UnbalancedPopClip => ("unbalanced_pop_clip", "-".to_owned()),
+            UiStagingDiagnosticKind::UnclosedClips { depth } => {
+                ("unclosed_clips", depth.to_string())
+            }
+            UiStagingDiagnosticKind::UnshapeableText { text } => {
+                ("unshapeable_text", text.to_string())
+            }
+            UiStagingDiagnosticKind::UncomposedArt { family } => {
+                ("uncomposed_art", (*family).to_owned())
+            }
+        };
+        // The control id is what a layout report can be looked up by; the frame-item index alone
+        // identifies nothing outside this run.
+        let control = diagnostic
+            .control()
+            .map_or_else(|| "-".to_owned(), |control| control.index().to_string());
+        writeln!(
+            report,
+            "ui-render-diagnostic\t{}\t{control}\t{kind}\t{detail}",
+            diagnostic.item()
+        )?;
+    }
+    Ok(report)
+}
+
+/// Returns every distinct mapped-image name a frame can draw, in first-use order.
+///
+/// Every entry of every slot is collected, not just the current state's background: a family that
+/// composes pieces reads later indices, and a selected radio button or a horizontal slider reads a
+/// slot its current state did not select, so binding less would silently disable composition.
+fn collect_frame_images(frame: &UiFrame) -> Vec<String> {
+    let mut names = Vec::new();
+    for item in frame.items() {
+        if let UiFrameItem::Quad { images, .. } = item {
+            for image in images.names() {
+                if !names.iter().any(|name| name == image) {
+                    names.push(image.to_owned());
+                }
+            }
+        }
+    }
+    names
+}
+
+/// Returns a label's localized string, or `None` for a literal or unresolved label.
+fn localized_text(localization: &LocalizationResources, label: &str) -> Option<String> {
+    let (_, csf) = localization.labels()?;
+    csf.labels()
+        .iter()
+        .find(|entry| entry.name_bytes().eq_ignore_ascii_case(label.as_bytes()))
+        .and_then(|entry| entry.strings().first())
+        .map(|string| string.text().to_owned())
+}
+
+/// Reports one layout instantiated as a retained control tree for an explicit viewport.
+///
+/// The viewport and scale policy are explicit rather than read from the host display, so the report
+/// is reproducible on any machine.
+fn report_ui_layout<I>(
+    arguments: &mut std::iter::Peekable<I>,
+    options: &CliOptions,
+) -> Result<String, Box<dyn Error>>
+where
+    I: Iterator<Item = String>,
+{
+    let mut viewport = UiViewport::new(800, 600)?;
+    let mut scale = UiScalePolicy::Classic;
+    while arguments
+        .peek()
+        .is_some_and(|argument| argument.starts_with("--"))
+    {
+        match arguments.next().expect("peeked ui-layout option").as_str() {
+            "--viewport" => {
+                let value = arguments
+                    .next()
+                    .ok_or("--viewport requires <width>x<height>")?;
+                let (width, height) = value
+                    .split_once('x')
+                    .ok_or("--viewport requires <width>x<height>")?;
+                viewport = UiViewport::new(width.parse::<i32>()?, height.parse::<i32>()?)?;
+            }
+            "--scale" => {
+                scale = match arguments
+                    .next()
+                    .ok_or("--scale requires classic or modern")?
+                    .as_str()
+                {
+                    "classic" => UiScalePolicy::Classic,
+                    "modern" => UiScalePolicy::Modern,
+                    other => return Err(format!("unknown scale policy {other:?}").into()),
+                };
+            }
+            option => return Err(format!("unknown ui-layout option {option:?}").into()),
+        }
+    }
+    let resource_name = arguments
+        .next()
+        .ok_or("ui-layout requires a virtual path")?;
+    let mounts = arguments.collect::<Vec<_>>();
+    let vfs = mount_all("ui-layout", &mounts, options, ResourceKind::Wnd)?;
+    let resource_path = VirtualPath::new(&resource_name)?;
+    let entry = vfs
+        .resolve(&resource_path)
+        .ok_or_else(|| format!("resource not found: {resource_path}"))?;
+    let limits = WndLimits::default();
+    let bytes = entry.read(limits.maximum_file_bytes)?;
+    let document = parse_wnd(&bytes, limits)?;
+    let layout = UiLayout::instantiate(
+        &document,
+        UiPresentation::new(viewport, scale),
+        UiLimits::default(),
+    )?;
+    Ok(render_ui_layout(&layout))
+}
+
+/// Reports which UI definition resources one layout names and how each one resolves.
+///
+/// The mount set is the `Ui` profile, which adds the INI, texture, and selected-language
+/// localization archives to the window archives, because header templates, fonts, and labels live
+/// under `Data/<Language>/` rather than in the window archive.
+fn report_ui_resources<I>(
+    arguments: &mut std::iter::Peekable<I>,
+    options: &CliOptions,
+) -> Result<String, Box<dyn Error>>
+where
+    I: Iterator<Item = String>,
+{
+    let mut texture_size = DEFAULT_MAPPED_IMAGE_TEXTURE_SIZE;
+    while arguments
+        .peek()
+        .is_some_and(|argument| argument.starts_with("--"))
+    {
+        match arguments
+            .next()
+            .expect("peeked ui-resources option")
+            .as_str()
+        {
+            "--texture-size" => {
+                texture_size = arguments
+                    .next()
+                    .ok_or("--texture-size requires a pixel count")?
+                    .parse::<u32>()?;
+            }
+            option => return Err(format!("unknown ui-resources option {option:?}").into()),
+        }
+    }
+    let resource_name = arguments
+        .next()
+        .ok_or("ui-resources requires a virtual path")?;
+    let mounts = arguments.collect::<Vec<_>>();
+    let vfs = mount_all("ui-resources", &mounts, options, ResourceKind::Ui)?;
+    let resource_path = VirtualPath::new(&resource_name)?;
+    let entry = vfs
+        .resolve(&resource_path)
+        .ok_or_else(|| format!("resource not found: {resource_path}"))?;
+    let limits = WndLimits::default();
+    let bytes = entry.read(limits.maximum_file_bytes)?;
+    let document = parse_wnd(&bytes, limits)?;
+
+    let resource_limits = UiResourceLimits::default();
+    let catalog = load_mapped_image_catalog(&vfs, texture_size, resource_limits)?;
+    let localization = load_localization_resources(&vfs, &options.language, resource_limits)?;
+    let demand = collect_ui_resource_demand(&document);
+    let resolution = resolve_ui_resources(demand, &catalog, &localization, &|texture| {
+        resolve_texture_path(&vfs, texture.as_bytes())
+    });
+    Ok(render_ui_resources(&catalog, &localization, &resolution))
+}
+
+fn default_render_path(
+    resource_path: &VirtualPath,
+    extension: &str,
+) -> Result<PathBuf, Box<dyn Error>> {
     let stem = Path::new(resource_path.as_str())
         .file_stem()
         .ok_or("render resource path has no file name")?;
-    Ok(PathBuf::from(stem).with_extension("ppm"))
+    Ok(PathBuf::from(stem).with_extension(extension))
 }
 
 fn load_composed_model(
@@ -2391,6 +2854,21 @@ fn resolve_texture(vfs: &Vfs, raw_name: &[u8]) -> Result<(VirtualPath, Vec<u8>),
     resolve_image(vfs, raw_name, "art/textures")
 }
 
+/// Returns the mounted virtual path of a named texture without reading it.
+///
+/// Mapped-image definitions name a texture file, not a path; the same candidate order used for
+/// loading resolves it, so a report and a render agree on which file a definition refers to.
+fn resolve_texture_path(vfs: &Vfs, raw_name: &[u8]) -> Option<VirtualPath> {
+    let name = std::str::from_utf8(raw_name).ok()?;
+    for candidate in image_candidates(name, "art/textures") {
+        let path = VirtualPath::new(&candidate).ok()?;
+        if vfs.resolve(&path).is_some() {
+            return Some(path);
+        }
+    }
+    None
+}
+
 fn resolve_image(
     vfs: &Vfs,
     raw_name: &[u8],
@@ -2398,11 +2876,20 @@ fn resolve_image(
 ) -> Result<(VirtualPath, Vec<u8>), Box<dyn Error>> {
     let name = std::str::from_utf8(raw_name)
         .map_err(|_| "texture name is not UTF-8 and cannot be mapped to the VFS")?;
+    for candidate in image_candidates(name, resource_directory) {
+        let path = VirtualPath::new(&candidate)?;
+        if let Some(entry) = vfs.resolve(&path) {
+            return Ok((path, entry.read(MAX_ENCODED_IMAGE_BYTES)?));
+        }
+    }
+    Err(format!("referenced texture not found in mounted resources: {name}").into())
+}
+
+/// Returns the ordered, deduplicated candidate paths for one referenced image name.
+fn image_candidates(name: &str, resource_directory: &str) -> Vec<String> {
     let normalized = name.replace('\\', "/");
-    let basename = normalized
-        .rsplit('/')
-        .next()
-        .ok_or("texture name is empty")?;
+    let basename = normalized.rsplit('/').next().unwrap_or("").to_owned();
+    let basename = basename.as_str();
     let mut candidates = vec![
         normalized.clone(),
         format!("{resource_directory}/{normalized}"),
@@ -2428,18 +2915,13 @@ fn resolve_image(
             }
         }
     }
-    let mut checked = Vec::new();
+    let mut checked: Vec<String> = Vec::new();
     for candidate in candidates {
-        if checked.contains(&candidate) {
-            continue;
-        }
-        checked.push(candidate.clone());
-        let path = VirtualPath::new(&candidate)?;
-        if let Some(entry) = vfs.resolve(&path) {
-            return Ok((path, entry.read(MAX_ENCODED_IMAGE_BYTES)?));
+        if !checked.contains(&candidate) {
+            checked.push(candidate);
         }
     }
-    Err(format!("referenced texture not found in mounted resources: {name}").into())
+    checked
 }
 
 fn mount_all(
@@ -2459,7 +2941,12 @@ fn mount_all(
         }
         paths
     } else if mounts.is_empty() {
-        resolve_archives(options.edition, kind, options.game_dir.as_deref())?
+        resolve_archives_for_language(
+            options.edition,
+            kind,
+            options.game_dir.as_deref(),
+            &options.language,
+        )?
     } else {
         mounts.iter().map(PathBuf::from).collect()
     };

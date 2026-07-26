@@ -2,18 +2,26 @@
 
 mod gltf;
 pub mod resource;
+pub mod ui_resources;
 
 pub use gltf::{GltfTextureRequest, W3dGlbError, W3dGltfBundle, pack_w3d_glb, render_w3d_gltf};
 
 use std::fmt::Write;
 
+use crate::ui_resources::{
+    LocalizationResources, MappedImageCatalog, UiResourceBinding, UiResourceKind,
+    UiResourceResolution,
+};
 use cic_formats::{
-    CsfFile, MapBlendData, MapDictionary, MapDictionaryValue, MapFile, MapHeightField,
-    MapLightingData, MapPolygonData, MapScript, MapScriptAction, MapScriptParameterValue,
-    MapSidesData, MapWaterData, MapWorldObjects, OptionsIni, W3dChunk, W3dFile, W3dStaticMesh,
-    W3dVector3, WndDiagnosticKind, WndDocument, WndWindow, w3d_chunk_name,
+    CsfFile, LanguageFontRole, MapBlendData, MapDictionary, MapDictionaryValue, MapFile,
+    MapHeightField, MapLightingData, MapPolygonData, MapScript, MapScriptAction,
+    MapScriptParameterValue, MapSidesData, MapWaterData, MapWorldObjects, OptionsIni,
+    PatchedWndDocument, UiIniDiagnosticKind, W3dChunk, W3dFile, W3dStaticMesh, W3dVector3,
+    WndCallbackKind, WndDiagnosticKind, WndDocument, WndDrawDataSlot, WndGadgetData, WndPatch,
+    WndPatchOperation, WndWindow, w3d_chunk_name,
 };
 use cic_render::Capture;
+use cic_ui::{UiClipPolicy, UiControlKind, UiDiagnosticKind, UiFrameItem, UiLayout, UiScalePolicy};
 use cic_vfs::Vfs;
 
 /// Formats winning VFS entries as deterministic tab-separated records.
@@ -309,16 +317,7 @@ pub fn encode_map_height_png(height: &MapHeightField) -> Result<Vec<u8>, png::En
 ///
 /// Returns a PNG encoding error if the validated capture cannot be encoded.
 pub fn encode_capture_png(capture: &Capture) -> Result<Vec<u8>, png::EncodingError> {
-    let mut output = Vec::new();
-    {
-        let mut encoder = png::Encoder::new(&mut output, capture.width(), capture.height());
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        encoder.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
-        let mut writer = encoder.write_header()?;
-        writer.write_image_data(capture.rgba())?;
-    }
-    Ok(output)
+    capture.png()
 }
 
 /// Formats decoded MAP blend, edge, and cliff values in stable source order.
@@ -1043,9 +1042,18 @@ pub fn render_wnd(document: &WndDocument) -> String {
         .expect("writing to a String cannot fail");
     }
     output.push_str(
-        "window\tpath\tdepth\tid\twindow_type\tupper_left_x\tupper_left_y\tbottom_right_x\tbottom_right_y\tcreation_width\tcreation_height\n",
+        "window\tpath\tdepth\tid\tname\twindow_type\tupper_left_x\tupper_left_y\tbottom_right_x\tbottom_right_y\tcreation_width\tcreation_height\n",
     );
     output.push_str("window_field\tpath\tname\tvalue\tline\n");
+    output.push_str("window_flag\tpath\tfield\tname\tknown\n");
+    output.push_str("window_callback\tpath\tkind\tname\n");
+    output.push_str("window_property\tpath\tproperty\tvalue\n");
+    output.push_str("window_font\tpath\tname\tsize\tbold\n");
+    output.push_str("window_text_color\tpath\tstate\tred\tgreen\tblue\talpha\n");
+    output.push_str(
+        "window_draw_entry\tpath\tslot\tindex\timage\tred\tgreen\tblue\talpha\tborder_red\tborder_green\tborder_blue\tborder_alpha\n",
+    );
+    output.push_str("window_gadget_data\tpath\tgadget\tproperty\tvalue\n");
     let mut path = Vec::new();
     for (index, window) in document.windows().iter().enumerate() {
         path.push(index);
@@ -1062,6 +1070,17 @@ pub fn render_wnd(document: &WndDocument) -> String {
             WndDiagnosticKind::UnrecognizedValue { field, value } => {
                 ("unrecognized_value", format!("{field}={value}"))
             }
+            WndDiagnosticKind::MissingChildKeyword => ("missing_child_keyword", "-".to_owned()),
+            WndDiagnosticKind::MalformedField { field, reason } => {
+                ("malformed_field", format!("{field}: {reason}"))
+            }
+            WndDiagnosticKind::DuplicateWindowName {
+                name,
+                first_window_id,
+            } => (
+                "duplicate_window_name",
+                format!("{name} (first declared by window {first_window_id})"),
+            ),
         };
         writeln!(
             output,
@@ -1070,6 +1089,489 @@ pub fn render_wnd(document: &WndDocument) -> String {
         )
         .expect("writing to a String cannot fail");
     }
+    output
+}
+
+/// Formats a retained layout instantiated for one viewport: the control tree with resolved
+/// rectangles and live state, the tab order, the frame submission order, and any diagnostics.
+///
+/// Rows carry names, geometry, and counts. This is the report an acceptance check compares when a
+/// modded layout changes, without rendering it.
+#[must_use]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one straight-line report writer per row family; splitting it would separate each \
+              header from the rows it describes"
+)]
+pub fn render_ui_layout(layout: &UiLayout) -> String {
+    let presentation = layout.presentation();
+    let mut output = String::from("ui_layout\twidth\theight\tscale\tcontrols\ttab_stops\n");
+    writeln!(
+        output,
+        "ui_layout\t{}\t{}\t{}\t{}\t{}",
+        presentation.viewport.width(),
+        presentation.viewport.height(),
+        match presentation.scale {
+            UiScalePolicy::Classic => "classic",
+            UiScalePolicy::Modern => "modern",
+        },
+        layout.controls().len(),
+        layout.tab_order().len()
+    )
+    .expect("writing to a String cannot fail");
+
+    output.push_str(
+        "ui_control\tid\tdepth\tparent\tname\ttype\tx\ty\twidth\theight\tscreen_x\tscreen_y\t\
+         hidden\tenabled\tstatus\tkind\trole\ttext\n",
+    );
+    for control in layout.controls() {
+        let origin = layout.screen_origin(control.id());
+        let rect = control.rect();
+        writeln!(
+            output,
+            "ui_control\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:#010x}\t{}\t{}\t{}",
+            control.id().index(),
+            control.depth(),
+            control
+                .parent()
+                .map_or_else(|| "-".to_owned(), |parent| parent.index().to_string()),
+            control.name().unwrap_or("-"),
+            control.window_type(),
+            rect.x,
+            rect.y,
+            rect.width,
+            rect.height,
+            origin.x,
+            origin.y,
+            control.is_hidden(),
+            control.is_enabled(),
+            control.status().bits(),
+            ui_control_kind_name(control.kind()),
+            control
+                .gadget_role()
+                .map_or("-", cic_ui::UiGadgetRole::name),
+            control.text_label().unwrap_or("-")
+        )
+        .expect("writing to a String cannot fail");
+    }
+
+    output.push_str("ui_tab_stop\torder\tid\tname\n");
+    for (order, id) in layout.tab_order().iter().enumerate() {
+        writeln!(
+            output,
+            "ui_tab_stop\t{order}\t{}\t{}",
+            id.index(),
+            layout.control(*id).name().unwrap_or("-")
+        )
+        .expect("writing to a String cannot fail");
+    }
+
+    output.push_str("ui_frame_item\torder\tkind\tid\tdetail\n");
+    for (order, item) in layout.frame(UiClipPolicy::None).items().iter().enumerate() {
+        let (kind, id, detail) = match item {
+            UiFrameItem::PushClip { rect } => (
+                "push_clip",
+                "-".to_owned(),
+                format!("{}x{}+{}+{}", rect.width, rect.height, rect.x, rect.y),
+            ),
+            UiFrameItem::PopClip => ("pop_clip", "-".to_owned(), "-".to_owned()),
+            UiFrameItem::Quad {
+                control,
+                slot,
+                images,
+                family,
+                ..
+            } => (
+                "quad",
+                control.index().to_string(),
+                format!(
+                    "{}\t{}\t{}",
+                    wnd_draw_slot_name(*slot),
+                    images.image(*slot, 0).unwrap_or("-"),
+                    family.name()
+                ),
+            ),
+            UiFrameItem::Text(run) => ("text", run.control.index().to_string(), run.label.clone()),
+        };
+        writeln!(output, "ui_frame_item\t{order}\t{kind}\t{id}\t{detail}")
+            .expect("writing to a String cannot fail");
+    }
+
+    output.push_str("ui_layout_diagnostic\tid\tkind\tdetail\n");
+    for diagnostic in layout.diagnostics() {
+        let (kind, detail) = match diagnostic.kind() {
+            UiDiagnosticKind::UnmappedStatus { name } => ("unmapped_status", name.to_string()),
+            UiDiagnosticKind::InvertedSliderBounds { minimum, maximum } => {
+                ("inverted_slider_bounds", format!("{minimum}..{maximum}"))
+            }
+            UiDiagnosticKind::ListRowsClamped { declared, applied } => {
+                ("list_rows_clamped", format!("{declared} to {applied}"))
+            }
+            UiDiagnosticKind::TextLengthClamped { declared, applied } => {
+                ("text_length_clamped", format!("{declared} to {applied}"))
+            }
+            UiDiagnosticKind::UntitledScrollBarAssumed => (
+                "untitled_scroll_bar_assumed",
+                "scroll bar laid out without a title inset".to_owned(),
+            ),
+        };
+        writeln!(
+            output,
+            "ui_layout_diagnostic\t{}\t{kind}\t{detail}",
+            diagnostic.control().index()
+        )
+        .expect("writing to a String cannot fail");
+    }
+    output
+}
+
+fn ui_control_kind_name(kind: &UiControlKind) -> &'static str {
+    match kind {
+        UiControlKind::PushButton => "push_button",
+        UiControlKind::RadioButton { .. } => "radio_button",
+        UiControlKind::CheckBox { .. } => "check_box",
+        UiControlKind::Slider { .. } => "slider",
+        UiControlKind::ListBox { .. } => "list_box",
+        UiControlKind::ComboBox { .. } => "combo_box",
+        UiControlKind::TextEntry { .. } => "text_entry",
+        UiControlKind::StaticText { .. } => "static_text",
+        UiControlKind::ProgressBar { .. } => "progress_bar",
+        UiControlKind::TabControl { .. } => "tab_control",
+        UiControlKind::Generic => "generic",
+    }
+}
+
+/// Formats UI resource resolution for one layout: which definition files loaded, which demands
+/// bound to which definitions, and which did not resolve.
+///
+/// No retail definition content is embedded: rows carry names, virtual paths, and counts, which is
+/// what a compatibility check needs.
+#[must_use]
+pub fn render_ui_resources(
+    catalog: &MappedImageCatalog,
+    localization: &LocalizationResources,
+    resolution: &UiResourceResolution,
+) -> String {
+    let mut output = String::new();
+    render_ui_language(&mut output, localization);
+    render_ui_definition_files(&mut output, catalog, localization);
+    render_ui_fonts(&mut output, localization);
+    render_ui_bindings(&mut output, resolution);
+    render_ui_definition_diagnostics(&mut output, catalog, localization);
+    output
+}
+
+fn render_ui_language(output: &mut String, localization: &LocalizationResources) {
+    output.push_str("ui_language\tname\tfont_size_method\tfont_adjustment\tlabels\n");
+    let text = localization.text();
+    writeln!(
+        output,
+        "ui_language\t{}\t{}\t{}\t{}",
+        localization.language(),
+        text.resolution_font_size_method().name(),
+        text.resolution_font_adjustment(),
+        localization.labels().map_or_else(
+            || "-".to_owned(),
+            |(path, csf)| format!("{path}:{}", csf.labels().len())
+        )
+    )
+    .expect("writing to a String cannot fail");
+}
+
+fn render_ui_definition_files(
+    output: &mut String,
+    catalog: &MappedImageCatalog,
+    localization: &LocalizationResources,
+) {
+    output.push_str("ui_definition_file\tkind\tpath\tdefinitions\n");
+    for file in catalog.files() {
+        writeln!(
+            output,
+            "ui_definition_file\tmapped_image\t{}\t{}",
+            file.path(),
+            file.definitions()
+        )
+        .expect("writing to a String cannot fail");
+    }
+    for file in localization.text_files() {
+        writeln!(
+            output,
+            "ui_definition_file\tlanguage\t{}\t{}",
+            file.path(),
+            file.definitions()
+        )
+        .expect("writing to a String cannot fail");
+    }
+    for (path, ini) in localization.header_template_files() {
+        writeln!(
+            output,
+            "ui_definition_file\theader_template\t{path}\t{}",
+            ini.templates().len()
+        )
+        .expect("writing to a String cannot fail");
+    }
+
+    output.push_str("ui_unselected_file\tpath\n");
+    for path in catalog.unselected_files() {
+        writeln!(output, "ui_unselected_file\t{path}").expect("writing to a String cannot fail");
+    }
+
+    output.push_str("ui_definition_override\tname\tsuperseded\twinner\n");
+    for entry in catalog.overrides() {
+        writeln!(
+            output,
+            "ui_definition_override\t{}\t{}\t{}",
+            String::from_utf8_lossy(entry.name_bytes()),
+            entry.previous(),
+            entry.winner()
+        )
+        .expect("writing to a String cannot fail");
+    }
+}
+
+fn render_ui_fonts(output: &mut String, localization: &LocalizationResources) {
+    let text = localization.text();
+    output.push_str("ui_font_role\trole\tfamily\tsize\tbold\tdeclared\n");
+    for role in LanguageFontRole::ALL {
+        let font = text.font(role);
+        writeln!(
+            output,
+            "ui_font_role\t{}\t{}\t{}\t{}\t{}",
+            role.field_name(),
+            String::from_utf8_lossy(font.name_bytes()),
+            font.size(),
+            font.bold(),
+            font.is_declared()
+        )
+        .expect("writing to a String cannot fail");
+    }
+    output.push_str("ui_font_file\tname\n");
+    for file in text.local_font_files() {
+        writeln!(output, "ui_font_file\t{}", String::from_utf8_lossy(file))
+            .expect("writing to a String cannot fail");
+    }
+}
+
+fn render_ui_bindings(output: &mut String, resolution: &UiResourceResolution) {
+    output.push_str("ui_summary\tkind\tresolved\tmissing\n");
+    for kind in [
+        UiResourceKind::MappedImage,
+        UiResourceKind::Font,
+        UiResourceKind::HeaderTemplate,
+        UiResourceKind::Label,
+    ] {
+        let (resolved, missing) = resolution.counts(kind);
+        writeln!(
+            output,
+            "ui_summary\t{}\t{resolved}\t{missing}",
+            kind.row_name()
+        )
+        .expect("writing to a String cannot fail");
+    }
+
+    output.push_str("ui_resource\tkind\tname\tstatus\tsites\tdetail\n");
+    output.push_str("ui_resource_site\tkind\tname\twindow_id\twindow\trecord\n");
+    for resource in resolution.resources() {
+        let demand = resource.demand();
+        let (status, detail) = ui_binding_row(resource.binding());
+        writeln!(
+            output,
+            "ui_resource\t{}\t{}\t{status}\t{}\t{detail}",
+            demand.kind().row_name(),
+            demand.name(),
+            demand.sites().len()
+        )
+        .expect("writing to a String cannot fail");
+        for site in demand.sites() {
+            writeln!(
+                output,
+                "ui_resource_site\t{}\t{}\t{}\t{}\t{}",
+                demand.kind().row_name(),
+                demand.name(),
+                site.window_id(),
+                site.window_name().unwrap_or("-"),
+                site.detail()
+            )
+            .expect("writing to a String cannot fail");
+        }
+    }
+}
+
+fn ui_binding_row(binding: &UiResourceBinding) -> (&'static str, String) {
+    match binding {
+        UiResourceBinding::Image {
+            definition,
+            texture,
+            texture_path,
+            size,
+        } => (
+            if texture_path.is_some() {
+                "resolved"
+            } else {
+                "texture_missing"
+            },
+            format!(
+                "{definition}\t{texture}\t{}\t{}x{}",
+                texture_path
+                    .as_ref()
+                    .map_or_else(|| "-".to_owned(), ToString::to_string),
+                size.0,
+                size.1
+            ),
+        ),
+        UiResourceBinding::HeaderTemplate {
+            definition,
+            font,
+            point,
+            bold,
+        } => ("resolved", format!("{definition}\t{font}\t{point}\t{bold}")),
+        UiResourceBinding::Font {
+            role,
+            local_font_file,
+        } => (
+            "resolved",
+            format!(
+                "{}\t{}",
+                role.unwrap_or("unicode_font_name"),
+                local_font_file.as_deref().unwrap_or("-")
+            ),
+        ),
+        UiResourceBinding::Label { definition } => ("resolved", definition.to_string()),
+        UiResourceBinding::Missing => ("missing", "-".to_owned()),
+    }
+}
+
+fn render_ui_definition_diagnostics(
+    output: &mut String,
+    catalog: &MappedImageCatalog,
+    localization: &LocalizationResources,
+) {
+    output.push_str("ui_definition_diagnostic\tpath\tline\tkind\tdetail\n");
+    let files = catalog
+        .files()
+        .iter()
+        .chain(localization.text_files().iter());
+    for file in files {
+        for diagnostic in file.diagnostics() {
+            let (kind, detail) = ui_ini_diagnostic_row(diagnostic.kind());
+            writeln!(
+                output,
+                "ui_definition_diagnostic\t{}\t{}\t{kind}\t{detail}",
+                file.path(),
+                diagnostic.line()
+            )
+            .expect("writing to a String cannot fail");
+        }
+    }
+    for (path, ini) in localization.header_template_files() {
+        for diagnostic in ini.diagnostics() {
+            let (kind, detail) = ui_ini_diagnostic_row(diagnostic.kind());
+            writeln!(
+                output,
+                "ui_definition_diagnostic\t{path}\t{}\t{kind}\t{detail}",
+                diagnostic.line()
+            )
+            .expect("writing to a String cannot fail");
+        }
+    }
+}
+
+fn ui_ini_diagnostic_row(kind: &UiIniDiagnosticKind) -> (&'static str, String) {
+    match kind {
+        UiIniDiagnosticKind::UnknownBlock { keyword } => ("unknown_block", keyword.to_string()),
+        UiIniDiagnosticKind::UnknownField { field } => ("unknown_field", field.to_string()),
+        UiIniDiagnosticKind::MalformedField { field, reason } => {
+            ("malformed_field", format!("{field}: {reason}"))
+        }
+        UiIniDiagnosticKind::DuplicateDefinition { name, first_line } => (
+            "duplicate_definition",
+            format!("{name} first declared on line {first_line}"),
+        ),
+    }
+}
+
+/// Formats the effect of applied patch overlays: what each patch declared, what it wrote,
+/// and the resulting hierarchy. The source WND is never rewritten.
+#[must_use]
+pub fn render_wnd_patch(patches: &[WndPatch], result: &PatchedWndDocument) -> String {
+    let mut output = String::from("patch\tname\ttarget\tversion\toperations\n");
+    for patch in patches {
+        writeln!(
+            output,
+            "patch\t{}\t{}\t{}\t{}",
+            patch.name(),
+            patch.target(),
+            patch.version(),
+            patch.steps().len()
+        )
+        .expect("writing to a String cannot fail");
+    }
+    output.push_str("operation\tpatch\tline\tkind\tcontrol\tdetail\n");
+    for patch in patches {
+        for step in patch.steps() {
+            let (kind, control, detail) = match step.operation() {
+                WndPatchOperation::RequireWindow { control } => {
+                    ("require-window", &**control, String::new())
+                }
+                WndPatchOperation::RequireField {
+                    control,
+                    field,
+                    value,
+                } => ("require-field", &**control, format!("{field}={value}")),
+                WndPatchOperation::SetField {
+                    control,
+                    field,
+                    value,
+                } => ("set-field", &**control, format!("{field}={value}")),
+                WndPatchOperation::AddField {
+                    control,
+                    field,
+                    value,
+                } => ("add-field", &**control, format!("{field}={value}")),
+                WndPatchOperation::SetRect { control, rect } => {
+                    let (left, top) = rect.upper_left();
+                    let (right, bottom) = rect.bottom_right();
+                    let (width, height) = rect.creation_resolution();
+                    (
+                        "set-rect",
+                        &**control,
+                        format!("{left} {top} {right} {bottom} {width} {height}"),
+                    )
+                }
+                WndPatchOperation::Reorder { control, index } => {
+                    ("reorder", &**control, index.to_string())
+                }
+                WndPatchOperation::Reparent {
+                    control,
+                    parent,
+                    index,
+                } => ("reparent", &**control, format!("{parent} at {index}")),
+                WndPatchOperation::InsertWindow { parent, index, .. } => {
+                    ("insert-window", &**parent, format!("at {index}"))
+                }
+            };
+            writeln!(
+                output,
+                "operation\t{}\t{}\t{kind}\t{control}\t{detail}",
+                patch.name(),
+                step.line()
+            )
+            .expect("writing to a String cannot fail");
+        }
+    }
+    output.push_str("provenance\tcontrol\tfield\tpatch\tline\n");
+    for record in result.provenance() {
+        writeln!(
+            output,
+            "provenance\t{}\t{}\t{}\t{}",
+            record.control(),
+            record.field(),
+            record.patch(),
+            record.line()
+        )
+        .expect("writing to a String cannot fail");
+    }
+    output.push_str(&render_wnd(result.document()));
     output
 }
 
@@ -1085,10 +1587,11 @@ fn render_wnd_window(output: &mut String, window: &WndWindow, path: &mut Vec<usi
     let (creation_width, creation_height) = rect.creation_resolution();
     writeln!(
         output,
-        "window\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        "window\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
         path_text,
         path.len() - 1,
         window.id(),
+        window.name().unwrap_or("-"),
         window.window_type(),
         upper_left_x,
         upper_left_y,
@@ -1109,10 +1612,236 @@ fn render_wnd_window(output: &mut String, window: &WndWindow, path: &mut Vec<usi
         )
         .expect("writing to a String cannot fail");
     }
+    render_wnd_typed_fields(output, window, &path_text);
     for (index, child) in window.children().iter().enumerate() {
         path.push(index);
         render_wnd_window(output, child, path);
         path.pop();
+    }
+}
+
+/// Emits the typed view of a window's fields, so a modded layout can be compared field by
+/// field without rendering it. Each record also appears verbatim as a `window_field` row.
+fn render_wnd_typed_fields(output: &mut String, window: &WndWindow, path_text: &str) {
+    for (field, flags) in [("STATUS", window.status()), ("STYLE", window.style())] {
+        for flag in flags {
+            writeln!(
+                output,
+                "window_flag\t{path_text}\t{field}\t{}\t{}",
+                flag.name(),
+                if flag.is_known() { "yes" } else { "no" }
+            )
+            .expect("writing to a String cannot fail");
+        }
+    }
+    for (kind, label) in [
+        (WndCallbackKind::System, "system"),
+        (WndCallbackKind::Input, "input"),
+        (WndCallbackKind::Tooltip, "tooltip"),
+        (WndCallbackKind::Draw, "draw"),
+    ] {
+        if let Some(name) = window.callbacks().get(kind) {
+            writeln!(output, "window_callback\t{path_text}\t{label}\t{name}")
+                .expect("writing to a String cannot fail");
+        }
+    }
+    for (property, value) in [
+        ("header_template", window.header_template()),
+        ("text", window.text()),
+        ("tooltip_text", window.tooltip_text()),
+    ] {
+        if let Some(value) = value {
+            writeln!(output, "window_property\t{path_text}\t{property}\t{value}")
+                .expect("writing to a String cannot fail");
+        }
+    }
+    if let Some(delay) = window.tooltip_delay() {
+        writeln!(
+            output,
+            "window_property\t{path_text}\ttooltip_delay\t{delay}"
+        )
+        .expect("writing to a String cannot fail");
+    }
+    if let Some((x, y)) = window.image_offset() {
+        writeln!(
+            output,
+            "window_property\t{path_text}\timage_offset\t{x} {y}"
+        )
+        .expect("writing to a String cannot fail");
+    }
+    if let Some(font) = window.font() {
+        writeln!(
+            output,
+            "window_font\t{path_text}\t{}\t{}\t{}",
+            font.name(),
+            font.size(),
+            if font.bold() { "yes" } else { "no" }
+        )
+        .expect("writing to a String cannot fail");
+    }
+    if let Some(colors) = window.text_colors() {
+        for (state, color) in [
+            ("enabled", colors.enabled()),
+            ("enabled_border", colors.enabled_border()),
+            ("disabled", colors.disabled()),
+            ("disabled_border", colors.disabled_border()),
+            ("hilite", colors.hilite()),
+            ("hilite_border", colors.hilite_border()),
+        ] {
+            let [red, green, blue, alpha] = color.channels();
+            writeln!(
+                output,
+                "window_text_color\t{path_text}\t{state}\t{red}\t{green}\t{blue}\t{alpha}"
+            )
+            .expect("writing to a String cannot fail");
+        }
+    }
+    for (slot, data) in window.draw_data() {
+        for (index, entry) in data.entries().iter().enumerate() {
+            let [red, green, blue, alpha] = entry.color().channels();
+            let [border_red, border_green, border_blue, border_alpha] =
+                entry.border_color().channels();
+            writeln!(
+                output,
+                "window_draw_entry\t{path_text}\t{}\t{index}\t{}\t{red}\t{green}\t{blue}\t{alpha}\t{border_red}\t{border_green}\t{border_blue}\t{border_alpha}",
+                wnd_draw_slot_name(*slot),
+                entry.image().unwrap_or("-")
+            )
+            .expect("writing to a String cannot fail");
+        }
+    }
+    if let Some(data) = window.gadget_data() {
+        render_wnd_gadget_data(output, data, path_text);
+    }
+}
+
+fn render_wnd_gadget_data(output: &mut String, data: &WndGadgetData, path_text: &str) {
+    let mut write = |gadget: &str, property: &str, value: String| {
+        writeln!(
+            output,
+            "window_gadget_data\t{path_text}\t{gadget}\t{property}\t{value}"
+        )
+        .expect("writing to a String cannot fail");
+    };
+    match data {
+        WndGadgetData::ListBox(list) => {
+            write("list_box", "length", list.length().to_string());
+            write("list_box", "auto_scroll", list.auto_scroll().to_string());
+            write(
+                "list_box",
+                "scroll_if_at_end",
+                list.scroll_if_at_end()
+                    .map_or_else(|| "absent".to_owned(), |value| value.to_string()),
+            );
+            write("list_box", "auto_purge", list.auto_purge().to_string());
+            write("list_box", "scroll_bar", list.scroll_bar().to_string());
+            write("list_box", "multi_select", list.multi_select().to_string());
+            write("list_box", "columns", list.columns().to_string());
+            for (index, width) in list.column_widths().iter().enumerate() {
+                write(
+                    "list_box",
+                    &format!("column_width_{index}"),
+                    width.to_string(),
+                );
+            }
+            write("list_box", "force_select", list.force_select().to_string());
+        }
+        WndGadgetData::ComboBox(combo) => {
+            write("combo_box", "is_editable", combo.is_editable().to_string());
+            write(
+                "combo_box",
+                "maximum_characters",
+                combo.maximum_characters().to_string(),
+            );
+            write(
+                "combo_box",
+                "maximum_display",
+                combo.maximum_display().to_string(),
+            );
+            write("combo_box", "ascii_only", combo.ascii_only().to_string());
+            write(
+                "combo_box",
+                "letters_and_numbers_only",
+                combo.letters_and_numbers_only().to_string(),
+            );
+        }
+        WndGadgetData::Slider(slider) => {
+            write("slider", "minimum", slider.minimum().to_string());
+            write("slider", "maximum", slider.maximum().to_string());
+        }
+        WndGadgetData::RadioButtonGroup(group) => {
+            write("radio_button", "group", group.to_string());
+        }
+        WndGadgetData::TextEntry(entry) => {
+            write(
+                "text_entry",
+                "maximum_length",
+                entry.maximum_length().to_string(),
+            );
+            write("text_entry", "secret_text", entry.secret_text().to_string());
+            write(
+                "text_entry",
+                "numerical_only",
+                entry.numerical_only().to_string(),
+            );
+            write(
+                "text_entry",
+                "alphanumerical_only",
+                entry.alphanumerical_only().to_string(),
+            );
+            write("text_entry", "ascii_only", entry.ascii_only().to_string());
+        }
+        WndGadgetData::StaticTextCentered(centered) => {
+            write("static_text", "centered", centered.to_string());
+        }
+        WndGadgetData::TabControl(tabs) => {
+            write(
+                "tab_control",
+                "tab_orientation",
+                tabs.tab_orientation().to_string(),
+            );
+            write("tab_control", "tab_edge", tabs.tab_edge().to_string());
+            write("tab_control", "tab_width", tabs.tab_width().to_string());
+            write("tab_control", "tab_height", tabs.tab_height().to_string());
+            write("tab_control", "tab_count", tabs.tab_count().to_string());
+            write("tab_control", "pane_border", tabs.pane_border().to_string());
+            for (index, disabled) in tabs.pane_disabled().iter().enumerate() {
+                write(
+                    "tab_control",
+                    &format!("pane_disabled_{index}"),
+                    disabled.to_string(),
+                );
+            }
+        }
+    }
+}
+
+pub(crate) fn wnd_draw_slot_name(slot: WndDrawDataSlot) -> &'static str {
+    match slot {
+        WndDrawDataSlot::Enabled => "enabled",
+        WndDrawDataSlot::Disabled => "disabled",
+        WndDrawDataSlot::Hilite => "hilite",
+        WndDrawDataSlot::ListBoxEnabledUpButton => "list_box_enabled_up_button",
+        WndDrawDataSlot::ListBoxDisabledUpButton => "list_box_disabled_up_button",
+        WndDrawDataSlot::ListBoxHiliteUpButton => "list_box_hilite_up_button",
+        WndDrawDataSlot::ListBoxEnabledDownButton => "list_box_enabled_down_button",
+        WndDrawDataSlot::ListBoxDisabledDownButton => "list_box_disabled_down_button",
+        WndDrawDataSlot::ListBoxHiliteDownButton => "list_box_hilite_down_button",
+        WndDrawDataSlot::ListBoxEnabledSlider => "list_box_enabled_slider",
+        WndDrawDataSlot::ListBoxDisabledSlider => "list_box_disabled_slider",
+        WndDrawDataSlot::ListBoxHiliteSlider => "list_box_hilite_slider",
+        WndDrawDataSlot::SliderThumbEnabled => "slider_thumb_enabled",
+        WndDrawDataSlot::SliderThumbDisabled => "slider_thumb_disabled",
+        WndDrawDataSlot::SliderThumbHilite => "slider_thumb_hilite",
+        WndDrawDataSlot::ComboBoxDropDownButtonEnabled => "combo_box_drop_down_button_enabled",
+        WndDrawDataSlot::ComboBoxDropDownButtonDisabled => "combo_box_drop_down_button_disabled",
+        WndDrawDataSlot::ComboBoxDropDownButtonHilite => "combo_box_drop_down_button_hilite",
+        WndDrawDataSlot::ComboBoxEditBoxEnabled => "combo_box_edit_box_enabled",
+        WndDrawDataSlot::ComboBoxEditBoxDisabled => "combo_box_edit_box_disabled",
+        WndDrawDataSlot::ComboBoxEditBoxHilite => "combo_box_edit_box_hilite",
+        WndDrawDataSlot::ComboBoxListBoxEnabled => "combo_box_list_box_enabled",
+        WndDrawDataSlot::ComboBoxListBoxDisabled => "combo_box_list_box_disabled",
+        WndDrawDataSlot::ComboBoxListBoxHilite => "combo_box_list_box_hilite",
     }
 }
 
