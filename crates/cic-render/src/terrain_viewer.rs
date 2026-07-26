@@ -518,10 +518,7 @@ impl TerrainViewerApplication {
             return [0.0; 2];
         };
         #[allow(clippy::cast_possible_truncation)]
-        let offset = [
-            (cursor.x - anchor.x) as f32,
-            (cursor.y - anchor.y) as f32,
-        ];
+        let offset = [(cursor.x - anchor.x) as f32, (cursor.y - anchor.y) as f32];
         let distance = offset[0].hypot(offset[1]);
         if distance <= SCROLL_ANCHOR_DEAD_ZONE_PIXELS {
             return [0.0; 2];
@@ -751,7 +748,8 @@ impl TerrainInput {
 
     /// Held scroll keys as a camera pan request, `x` right and `y` forward.
     fn pan(self) -> [f32; 2] {
-        let axis = |negative: u8, positive: u8| match (self.active(negative), self.active(positive)) {
+        let axis = |negative: u8, positive: u8| match (self.active(negative), self.active(positive))
+        {
             (true, false) => -1.0,
             (false, true) => 1.0,
             _ => 0.0,
@@ -4852,13 +4850,16 @@ fn multiply_matrix(left: [[f32; 4]; 4], right: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
 /// Packs one cascade for the caster passes, which each see a single cascade at a time.
 fn cascade_uniform_bytes(cascade: ShadowCascade, time: f32) -> [u8; 80] {
     let mut bytes = [0; 80];
-    for (target, value) in bytes.chunks_exact_mut(4).zip(
-        cascade
-            .matrix
-            .into_iter()
-            .flatten()
-            .chain([time, cascade.depth_range, cascade.texel_world, 0.0]),
-    ) {
+    for (target, value) in
+        bytes
+            .chunks_exact_mut(4)
+            .zip(cascade.matrix.into_iter().flatten().chain([
+                time,
+                cascade.depth_range,
+                cascade.texel_world,
+                0.0,
+            ]))
+    {
         target.copy_from_slice(&value.to_le_bytes());
     }
     bytes
@@ -4956,11 +4957,7 @@ fn matrix_bits(matrix: [[f32; 4]; 4]) -> [u32; 16] {
 }
 
 fn add(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {
-    [
-        left[0] + right[0],
-        left[1] + right[1],
-        left[2] + right[2],
-    ]
+    [left[0] + right[0], left[1] + right[1], left[2] + right[2]]
 }
 
 fn subtract(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {
@@ -5017,9 +5014,8 @@ fn ray_distance_for_view_depth(
 mod tests {
     use super::{
         ROAD_DEPTH_BIAS, SHADOW_CASCADE_BYTES, SHADOW_CASCADE_COUNT, SHADOW_CASTER_HEADROOM,
-        SHADOW_UNIFORM_BYTES,
-        SOURCE_ROAD_MIP_LEVELS, SceneShadow, ShadowCascade, TerrainCamera, TerrainInput,
-        cascade_uniform_bytes, create_composite_layout, create_depth_resolve_layout,
+        SHADOW_UNIFORM_BYTES, SOURCE_ROAD_MIP_LEVELS, SceneShadow, ShadowCascade, TerrainCamera,
+        TerrainInput, cascade_uniform_bytes, create_composite_layout, create_depth_resolve_layout,
         create_depth_resolve_pipeline, create_fullscreen_pipeline, create_lighting_layout,
         create_shadow_layout, gray_mip, look_to, multiply_matrix, orthographic, perspective,
         quantize_cascade_extent, ray_distance_for_view_depth, scene_shadow, shadow_uniform_bytes,
@@ -5183,11 +5179,7 @@ mod tests {
                 "cascade {index} slice must match its standalone packing"
             );
             assert_eq!(
-                u32::from_le_bytes(
-                    bytes[base + 64..base + 68]
-                        .try_into()
-                        .expect("time bytes")
-                ),
+                u32::from_le_bytes(bytes[base + 64..base + 68].try_into().expect("time bytes")),
                 2.5_f32.to_bits()
             );
             assert_eq!(
@@ -5259,7 +5251,9 @@ mod tests {
         let shadow = scene_shadow(camera, 16.0 / 9.0, TerrainLighting::preview());
         let extents = shadow.cascades.map(|cascade| cascade.texel_world);
         assert!(
-            extents.iter().all(|extent| extent.is_finite() && *extent > 0.0),
+            extents
+                .iter()
+                .all(|extent| extent.is_finite() && *extent > 0.0),
             "every cascade needs a usable texel extent: {extents:?}"
         );
         assert!(
@@ -5417,7 +5411,10 @@ mod tests {
         let pose = rts.pose();
         let derived = TerrainCamera::from_pose(pose, 10_000.0);
         for (value, expected) in derived.position.into_iter().zip(pose.eye) {
-            assert!((value - expected).abs() < 1.0e-4, "eye survived: {derived:?}");
+            assert!(
+                (value - expected).abs() < 1.0e-4,
+                "eye survived: {derived:?}"
+            );
         }
         for (value, expected) in derived.forward().into_iter().zip(pose.forward) {
             assert!(

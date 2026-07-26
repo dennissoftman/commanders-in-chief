@@ -260,12 +260,7 @@ impl RtsCamera {
     ///
     /// `delta_seconds` is real elapsed time; the source per-logic-frame adjust rate is converted so
     /// smoothing feels identical regardless of present rate.
-    pub fn update(
-        &mut self,
-        intent: CameraIntent,
-        delta_seconds: f32,
-        ground: &impl GroundHeight,
-    ) {
+    pub fn update(&mut self, intent: CameraIntent, delta_seconds: f32, ground: &impl GroundHeight) {
         let delta = if delta_seconds.is_finite() {
             delta_seconds.clamp(0.0, 0.25)
         } else {
@@ -391,7 +386,11 @@ impl RtsCamera {
         } else {
             [cosine, sine, -1.0]
         };
-        CameraPose { eye, focus, forward }
+        CameraPose {
+            eye,
+            focus,
+            forward,
+        }
     }
 }
 
@@ -438,9 +437,7 @@ fn wrap_angle(angle: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        CameraIntent, FlatGround, GroundHeight, RtsCamera, RtsCameraProfile, wrap_angle,
-    };
+    use super::{CameraIntent, FlatGround, GroundHeight, RtsCamera, RtsCameraProfile, wrap_angle};
 
     fn flat() -> FlatGround {
         FlatGround(0.0)
@@ -462,10 +459,25 @@ mod tests {
         exact(profile.maximum_height, 310.0, "MaxCameraHeight");
         exact(profile.adjust_speed, 0.3, "CameraAdjustSpeed");
         exact(profile.scroll_amount_cutoff, 50.0, "ScrollAmountCutoff");
-        exact(profile.keyboard_scroll_factor, 2.0, "KeyboardScrollSpeedFactor");
-        exact(profile.horizontal_scroll_factor, 1.6, "HorizontalScrollSpeedFactor");
-        exact(profile.vertical_scroll_factor, 2.0, "VerticalScrollSpeedFactor");
-        assert!(!profile.enforce_maximum_height, "EnforceMaxCameraHeight = No");
+        exact(
+            profile.keyboard_scroll_factor,
+            2.0,
+            "KeyboardScrollSpeedFactor",
+        );
+        exact(
+            profile.horizontal_scroll_factor,
+            1.6,
+            "HorizontalScrollSpeedFactor",
+        );
+        exact(
+            profile.vertical_scroll_factor,
+            2.0,
+            "VerticalScrollSpeedFactor",
+        );
+        assert!(
+            !profile.enforce_maximum_height,
+            "EnforceMaxCameraHeight = No"
+        );
     }
 
     #[test]
@@ -480,8 +492,8 @@ mod tests {
         assert!(pose.eye[0] < pose.focus[0]);
         assert!((pose.eye[1] - pose.focus[1]).abs() < 0.001);
         // The tilt is what the profile asked for.
-        let horizontal = (pose.forward[0] * pose.forward[0] + pose.forward[1] * pose.forward[1])
-            .sqrt();
+        let horizontal =
+            (pose.forward[0] * pose.forward[0] + pose.forward[1] * pose.forward[1]).sqrt();
         let tilt = (-pose.forward[2]).atan2(horizontal).to_degrees();
         assert!((tilt - 37.5).abs() < 0.01, "tilt was {tilt}");
     }
@@ -757,7 +769,8 @@ mod tests {
             0.1,
             &flat(),
         );
-        let travelled = |position: [f32; 2]| (position[0] * position[0] + position[1] * position[1]).sqrt();
+        let travelled =
+            |position: [f32; 2]| (position[0] * position[0] + position[1] * position[1]).sqrt();
         assert!(
             (travelled(straight) - travelled(diagonal.focus_xy())).abs() < 0.001,
             "diagonal panning must not outrun axis panning"
@@ -810,7 +823,10 @@ mod tests {
             1.0 / 30.0,
             &flat(),
         );
-        assert!((camera.yaw() - profile.yaw).abs() < 0.001, "yaw resets at once");
+        assert!(
+            (camera.yaw() - profile.yaw).abs() < 0.001,
+            "yaw resets at once"
+        );
         // Height is smoothed rather than snapped, so let it settle.
         for _ in 0..60 {
             camera.update(CameraIntent::default(), 1.0 / 30.0, &flat());
@@ -839,7 +855,10 @@ mod tests {
         );
         let pose = camera.pose();
         assert!(pose.eye.iter().all(|value| value.is_finite()), "{pose:?}");
-        assert!(pose.forward.iter().all(|value| value.is_finite()), "{pose:?}");
+        assert!(
+            pose.forward.iter().all(|value| value.is_finite()),
+            "{pose:?}"
+        );
         assert!(camera.height().is_finite());
         assert!(camera.yaw().is_finite());
     }

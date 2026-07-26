@@ -509,8 +509,11 @@ where
                 } else {
                     "missing-definition"
                 };
-                writeln!(report, "{display}\t{count}\t{state}\t-\t{shrubbery}\tfalse\t-")
-                    .expect("writing to a String cannot fail");
+                writeln!(
+                    report,
+                    "{display}\t{count}\t{state}\t-\t{shrubbery}\tfalse\t-"
+                )
+                .expect("writing to a String cannot fail");
             }
         }
     }
