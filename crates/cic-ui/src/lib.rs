@@ -24,7 +24,10 @@ mod retained;
 #[cfg(test)]
 mod tests;
 
-pub use frame::{UiClipPolicy, UiControlFamily, UiFrame, UiFrameItem, UiTextAlign, UiTextRun};
+pub use frame::{
+    UI_MAX_TABS, UiClipPolicy, UiControlFamily, UiDrawState, UiFrame, UiFrameItem, UiSlotImages,
+    UiTabGeometry, UiTextAlign, UiTextRun,
+};
 pub use input::{UiEvent, UiKey, UiMouseButton};
 pub use retained::{
     UiControl, UiControlId, UiControlKind, UiDiagnostic, UiDiagnosticKind, UiLayout, UiLayoutError,

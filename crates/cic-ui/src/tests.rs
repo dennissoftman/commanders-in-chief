@@ -7,8 +7,9 @@
 use cic_formats::{WndColor, WndDrawDataSlot, WndLimits, parse_wnd};
 
 use crate::{
-    UiClipPolicy, UiControlKind, UiEvent, UiFrameItem, UiKey, UiLayout, UiLayoutError, UiLimits,
-    UiMouseButton, UiPoint, UiPresentation, UiRect, UiScalePolicy, UiStatus, UiViewport,
+    UiClipPolicy, UiControlFamily, UiControlKind, UiEvent, UiFrameItem, UiKey, UiLayout,
+    UiLayoutError, UiLimits, UiMouseButton, UiPoint, UiPresentation, UiRect, UiScalePolicy,
+    UiStatus, UiTextAlign, UiViewport,
 };
 
 fn viewport(width: i32, height: i32) -> UiViewport {
@@ -28,7 +29,8 @@ fn draw_data(image: &str) -> String {
 }
 
 /// A synthetic two-level menu: a panel holding a button, an entry field, a check box, two radio
-/// buttons in one group, a slider, a list box, and a combo box.
+/// buttons in one group, a slider, a list box, a combo box, a tab control, and three static texts
+/// that differ only in which draw procedure they name.
 ///
 /// One literal fixture is clearer than several assembled fragments, so its length is deliberate.
 #[expect(
@@ -142,6 +144,50 @@ WINDOW
   COMBOBOXDATA = ISEDITABLE: 0, MAXCHARS: 8, MAXDISPLAY: 3, ASCIIONLY: 0,
                  LETTERSANDNUMBERS: 0;
 END
+CHILD
+WINDOW
+  WINDOWTYPE = TABCONTROL;
+  SCREENRECT = UPPERLEFT: 340 260,
+               BOTTOMRIGHT: 480 400,
+               CREATIONRESOLUTION: 800 600;
+  NAME = "SynthMenu.wnd:TabsSynth";
+  STATUS = ENABLED+IMAGE;
+  TABCONTROLDATA = TABORIENTATION: 1, TABEDGE: 3, TABWIDTH: 40, TABHEIGHT: 20,
+                   TABCOUNT: 2, PANEBORDER: 4, PANEDISABLED: 2 0 0;
+END
+CHILD
+WINDOW
+  WINDOWTYPE = STATICTEXT;
+  SCREENRECT = UPPERLEFT: 120 320,
+               BOTTOMRIGHT: 300 340,
+               CREATIONRESOLUTION: 800 600;
+  NAME = "SynthMenu.wnd:ColorSynth";
+  STATUS = ENABLED+IMAGE;
+  DRAWCALLBACK = "GadgetStaticTextDraw";
+  STATICTEXTDATA = CENTERED: 0;
+END
+CHILD
+WINDOW
+  WINDOWTYPE = STATICTEXT;
+  SCREENRECT = UPPERLEFT: 120 350,
+               BOTTOMRIGHT: 300 370,
+               CREATIONRESOLUTION: 800 600;
+  NAME = "SynthMenu.wnd:ImageSynth";
+  STATUS = ENABLED;
+  DRAWCALLBACK = "GadgetStaticTextImageDraw";
+  STATICTEXTDATA = CENTERED: 0;
+END
+CHILD
+WINDOW
+  WINDOWTYPE = STATICTEXT;
+  SCREENRECT = UPPERLEFT: 120 380,
+               BOTTOMRIGHT: 300 400,
+               CREATIONRESOLUTION: 800 600;
+  NAME = "SynthMenu.wnd:NoneSynth";
+  STATUS = ENABLED+IMAGE;
+  DRAWCALLBACK = "[None]";
+  STATICTEXTDATA = CENTERED: 0;
+END
 ENDALLCHILDREN
 END
 "#,
@@ -167,7 +213,7 @@ fn instantiation_preserves_hierarchy_and_source_order() {
     let layout = instantiate(classic(800, 600));
     assert_eq!(layout.roots().len(), 1);
     let panel = layout.roots()[0];
-    assert_eq!(layout.control(panel).children().len(), 8);
+    assert_eq!(layout.control(panel).children().len(), 12);
     let names: Vec<&str> = layout
         .control(panel)
         .children()
@@ -185,6 +231,10 @@ fn instantiation_preserves_hierarchy_and_source_order() {
             "SynthMenu.wnd:SliderSynth",
             "SynthMenu.wnd:ListSynth",
             "SynthMenu.wnd:ComboSynth",
+            "SynthMenu.wnd:TabsSynth",
+            "SynthMenu.wnd:ColorSynth",
+            "SynthMenu.wnd:ImageSynth",
+            "SynthMenu.wnd:NoneSynth",
         ]
     );
     assert!(layout.duplicate_names().is_empty());
@@ -539,9 +589,9 @@ fn the_frame_submits_parents_before_children_and_selects_the_state_slot() {
             UiFrameItem::Quad {
                 control,
                 slot,
-                image,
+                images,
                 ..
-            } => Some((*control, *slot, image.clone())),
+            } => Some((*control, *slot, images.image(*slot, 0).map(str::to_owned))),
             _ => None,
         })
         .collect();
@@ -556,8 +606,9 @@ fn the_frame_submits_parents_before_children_and_selects_the_state_slot() {
     let frame = layout.frame(UiClipPolicy::None);
     assert!(frame.items().iter().any(|item| matches!(
         item,
-        UiFrameItem::Quad { control, slot: WndDrawDataSlot::Hilite, image: Some(image), .. }
-            if *control == button && image == "SynthButtonHilite"
+        UiFrameItem::Quad { control, slot: WndDrawDataSlot::Hilite, images, .. }
+            if *control == button
+                && images.image(WndDrawDataSlot::Hilite, 0) == Some("SynthButtonHilite")
     )));
 
     // Disabling selects the disabled slot, which this control does not declare, so it draws
@@ -567,8 +618,8 @@ fn the_frame_submits_parents_before_children_and_selects_the_state_slot() {
     let frame = layout.frame(UiClipPolicy::None);
     assert!(frame.items().iter().any(|item| matches!(
         item,
-        UiFrameItem::Quad { control, slot: WndDrawDataSlot::Disabled, image: None, color: None, .. }
-            if *control == button
+        UiFrameItem::Quad { control, slot: WndDrawDataSlot::Disabled, images, color: None, .. }
+            if *control == button && images.image(WndDrawDataSlot::Disabled, 0).is_none()
     )));
 }
 
@@ -694,5 +745,149 @@ fn instantiation_is_deterministic_for_the_same_inputs() {
     assert_eq!(
         first.frame(UiClipPolicy::None),
         second.frame(UiClipPolicy::None)
+    );
+}
+
+#[test]
+fn each_control_reports_the_family_whose_composition_rules_apply() {
+    let layout = instantiate(classic(800, 600));
+    let family = |name: &str| {
+        layout
+            .control(layout.find(name).expect("named control"))
+            .family()
+    };
+    assert_eq!(
+        family("SynthMenu.wnd:ButtonSynth"),
+        UiControlFamily::PushButton
+    );
+    assert_eq!(
+        family("SynthMenu.wnd:RadioFirst"),
+        UiControlFamily::RadioButton
+    );
+    assert_eq!(
+        family("SynthMenu.wnd:CheckSynth"),
+        UiControlFamily::CheckBox
+    );
+    assert_eq!(
+        family("SynthMenu.wnd:EntrySynth"),
+        UiControlFamily::TextEntry
+    );
+    // Both slider orientations decode one `SLIDERDATA`, so the declared window type is what
+    // separates them.
+    assert_eq!(
+        family("SynthMenu.wnd:SliderSynth"),
+        UiControlFamily::HorizontalSlider
+    );
+    // A list box, a combo box, and the panel all draw one stretched image.
+    assert_eq!(family("SynthMenu.wnd:ListSynth"), UiControlFamily::Simple);
+    assert_eq!(family("SynthMenu.wnd:ComboSynth"), UiControlFamily::Simple);
+}
+
+#[test]
+fn the_selected_bit_means_pressed_checked_or_chosen_by_family() {
+    let mut layout = instantiate(classic(800, 600));
+    let button = layout.find("SynthMenu.wnd:ButtonSynth").expect("button");
+    let check = layout.find("SynthMenu.wnd:CheckSynth").expect("check box");
+    let radio = layout
+        .find("SynthMenu.wnd:RadioFirst")
+        .expect("radio button");
+    assert!(!layout.control(button).is_selected());
+    assert!(!layout.control(check).is_selected());
+    assert!(!layout.control(radio).is_selected());
+
+    layout.pointer_pressed(UiPoint::new(150, 90), UiMouseButton::Left);
+    assert!(layout.control(button).is_selected());
+    layout.toggle_check(check);
+    assert!(layout.control(check).is_selected());
+    layout.select_radio(radio);
+    assert!(layout.control(radio).is_selected());
+}
+
+#[test]
+fn the_draw_callback_name_decides_the_image_path_before_the_status_bit() {
+    let layout = instantiate(classic(800, 600));
+    // The panel declares `IMAGE` and names no draw callback, so the status bit decides.
+    let panel = layout.roots()[0];
+    assert!(layout.control(panel).is_image_draw());
+    // The button declares neither, so it draws colour only.
+    let button = layout.find("SynthMenu.wnd:ButtonSynth").expect("button");
+    assert!(!layout.control(button).is_image_draw());
+    // A named procedure overrides the bit in both directions, and `"[None]"` is not a procedure.
+    let colored = layout
+        .find("SynthMenu.wnd:ColorSynth")
+        .expect("static text");
+    assert_eq!(
+        layout.control(colored).draw_callback(),
+        Some("GadgetStaticTextDraw")
+    );
+    assert!(!layout.control(colored).is_image_draw());
+    let imaged = layout
+        .find("SynthMenu.wnd:ImageSynth")
+        .expect("static text");
+    assert!(layout.control(imaged).is_image_draw());
+    let none = layout.find("SynthMenu.wnd:NoneSynth").expect("static text");
+    assert_eq!(layout.control(none).draw_callback(), Some("[None]"));
+    assert!(layout.control(none).is_image_draw());
+}
+
+#[test]
+fn a_check_box_indents_its_label_past_its_box_while_a_radio_button_centres() {
+    let layout = instantiate(classic(800, 600));
+    let align = |name: &str| {
+        layout
+            .control(layout.find(name).expect("named control"))
+            .text_align()
+    };
+    // `drawCheckBoxText` centres only vertically and starts the label one control-height in.
+    assert_eq!(
+        align("SynthMenu.wnd:CheckSynth"),
+        UiTextAlign::CenteredBesideBox
+    );
+    assert_eq!(align("SynthMenu.wnd:RadioFirst"), UiTextAlign::Centered);
+    assert_eq!(align("SynthMenu.wnd:ButtonSynth"), UiTextAlign::Centered);
+    assert_eq!(align("SynthMenu.wnd:EntrySynth"), UiTextAlign::TopLeft);
+}
+
+#[test]
+fn a_tab_control_retains_its_declared_strip_and_moves_the_active_tab_with_the_pane() {
+    let mut layout = instantiate(classic(800, 600));
+    let tabs = layout.find("SynthMenu.wnd:TabsSynth").expect("tab control");
+    let UiControlFamily::TabControl(geometry) = layout.control(tabs).family() else {
+        panic!("tab control family");
+    };
+    assert_eq!(geometry.count, 2);
+    assert_eq!((geometry.width, geometry.height), (40, 20));
+    assert_eq!(geometry.pane_border, 4);
+    assert_eq!(geometry.active, 0);
+
+    assert!(layout.select_tab_pane(tabs, 1));
+    let UiControlFamily::TabControl(moved) = layout.control(tabs).family() else {
+        panic!("tab control family");
+    };
+    assert_eq!(moved.active, 1);
+    // An index outside the declared panes is refused rather than clamped.
+    assert!(!layout.select_tab_pane(tabs, 2));
+}
+
+#[test]
+fn every_slot_travels_with_a_quad_so_a_composition_can_read_the_one_it_needs() {
+    let layout = instantiate(classic(800, 600));
+    let button = layout.find("SynthMenu.wnd:ButtonSynth").expect("button");
+    let images = layout.control(button).slot_images();
+    assert_eq!(
+        images.image(WndDrawDataSlot::Enabled, 0),
+        Some("SynthButtonEnabled")
+    );
+    assert_eq!(
+        images.image(WndDrawDataSlot::Hilite, 0),
+        Some("SynthButtonHilite")
+    );
+    assert_eq!(images.image(WndDrawDataSlot::Disabled, 0), None);
+    // An index past the record's own entries is absent rather than out of range.
+    assert_eq!(images.image(WndDrawDataSlot::Enabled, 8), None);
+    assert!(!images.is_empty());
+    assert_eq!(
+        images.names().collect::<Vec<_>>(),
+        ["SynthButtonEnabled", "SynthButtonHilite"]
     );
 }

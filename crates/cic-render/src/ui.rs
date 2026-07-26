@@ -3,22 +3,46 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
 // The batching scheme, vertex format, clip handling, placeholder policy, and capture path are
-// original project presentation. Two things are not, and are derived from Electronic Arts' GPL-3.0
-// source release, GeneralsGameCode revision 9f7abb866f5afd446db14149979e744c7216baaf:
+// original project presentation. The per-family draw-data composition is not: it is derived from
+// Electronic Arts' GPL-3.0 source release, GeneralsGameCode revision
+// 9f7abb866f5afd446db14149979e744c7216baaf. Each family's entry indices come from its accessors in
+// `Core/GameEngine/Include/GameClient/Gadget<Family>.h` and its geometry from the matching
+// `Core/GameEngineDevice/Source/W3DDevice/GameClient/GUI/Gadget/W3D<Family>.cpp`:
 //
-// - `ButtonPieces`' entry indices come from
-//   `Core/GameEngine/Include/GameClient/GadgetPushButton.h`, whose accessors fix the unselected art
-//   at entries 0, 5, 6 and the pushed art at 1, 3, 4.
-// - `push_button_three`'s geometry comes from
-//   `Core/GameEngineDevice/Source/W3DDevice/GameClient/GUI/Gadget/W3DPushButton.cpp`
-//   (`W3DGadgetPushButtonImageDraw`, `W3DGadgetPushButtonImageDrawThree`): the middle-image test
-//   that selects the three-piece path, the repeating-centre loop, the partial final piece, the
-//   ends-last draw order, and the `centerWidth <= 0` half-and-half branch. The partial piece trims
-//   texture coordinates where the source sets a clip region, which samples the same pixels.
+// - Push button: `GadgetPushButton.h` fixes the unselected art at entries 0, 5, 6 and the pushed
+//   art at 1, 3, 4; `W3DPushButton.cpp` (`W3DGadgetPushButtonImageDrawThree`) fixes the repeating
+//   centre, the partial final piece, the ends-last order, and the `centerWidth <= 0` branch.
+// - Radio button: `GadgetRadioButton.h` fixes 0, 1, 2 per slot and the selected triple at hilite
+//   3, 4, 5; `W3DRadioButton.cpp` (`W3DGadgetRadioButtonImageDraw`) fixes the geometry, including
+//   its selected-first state order and its right end running to the control's own right edge.
+// - Check box: `GadgetCheckBox.h` fixes the unchecked box at 1 and the checked box at 2;
+//   `W3DCheckBox.cpp` (`W3DGadgetCheckBoxImageDraw`) draws only that box, three pixels down and
+//   six shorter than the control, with the background image commented out in the source itself.
+// - Text entry: `GadgetTextEntry.h` fixes left 0, right 1, centre 2, small centre 3;
+//   `W3DTextEntry.cpp` (`W3DGadgetTextEntryImageDraw`) fixes the whole-centre loop and the
+//   deliberately overrunning small-centre loop that the right end then covers.
+// - Vertical slider: `GadgetSlider.h` fixes top 0, bottom 1, centre 2, small centre 3;
+//   `W3DVerticalSlider.cpp` (`W3DGadgetVerticalSliderImageDraw`) fixes the stacked geometry and the
+//   half-and-half branch taken when the two ends alone are taller than the control.
+// - Horizontal slider: `W3DHorizontalSlider.cpp` (`W3DGadgetHorizontalSliderImageDraw`) draws a row
+//   of tick squares whose art comes from fixed slots — fill and blank from the disabled slot,
+//   highlight from the hilite slot — whatever the control's own state, scaled by the display width
+//   against a 800-pixel reference.
+// - Progress bar: `GadgetProgressBar.h` fixes background left 0, right 1, centre 2 and bar right 5,
+//   centre 6; `W3DProgressBar.cpp` (`W3DGadgetProgressBarImageDraw`) fixes the three-piece
+//   background and the bar inset ten pixels horizontally and five vertically.
+// - Tab control: `GadgetTabControl.h` fixes the background at 0 and the eight tabs at 1 through 8;
+//   `W3DTabControl.cpp` (`W3DGadgetTabControlImageDraw`) and `GadgetTabControl.cpp`
+//   (`GadgetTabControlComputeTabRegion`) fix the strip's origin and per-tab state selection.
+// - Every other family — list box, combo box, static text, plain windows — draws one stretched
+//   image from entry 0, which is `W3DGameWindow.cpp`'s `W3DGameWinDefaultDraw` and the identical
+//   openings of `W3DListBox.cpp`, `W3DComboBox.cpp`, and `W3DStaticText.cpp`.
 //
-// The untinted-image rule follows the same file: `winDrawImage` takes no colour argument there, so a
-// slot's `COLOR` belongs to the colour-only draw path. No C++ was copied or translated line by line.
-// The draw order this layer preserves comes from `cic-ui`, which documents its own provenance.
+// A partial repeating piece trims texture coordinates where the source sets a clip region, which
+// samples the same pixels without a state change. The untinted-image rule follows the same files:
+// `winDrawImage` takes no colour argument, so a slot's `COLOR` belongs to the colour-only draw path.
+// No C++ was copied or translated line by line. The draw order this layer preserves comes from
+// `cic-ui`, which documents its own provenance.
 
 //! Batched staging of a retained-UI frame into renderer-ready geometry.
 //!
@@ -30,7 +54,10 @@
 //! shaped at render time by the font set the caller supplies, because deterministic captures must
 //! never fall back to host fonts.
 
-use cic_ui::{UiControlFamily, UiFrame, UiFrameItem, UiRect, UiTextAlign};
+use cic_formats::WndDrawDataSlot;
+use cic_ui::{
+    UiControlFamily, UiDrawState, UiFrame, UiFrameItem, UiRect, UiSlotImages, UiTextAlign,
+};
 
 /// One staged vertex: position in viewport pixels, texture coordinate, straight RGBA, and whether
 /// the fragment samples its page.
@@ -212,11 +239,12 @@ pub enum UiStagingDiagnosticKind {
         /// How many remained open.
         depth: usize,
     },
-    /// A control declares `IMAGE` and carries slot images, but not at the index this layer composes
-    /// for its family. A visible placeholder was staged rather than a misleading colour fill.
-    UncomposedFamily {
-        /// The family whose composition rules are not implemented yet.
-        window_type: Box<str>,
+    /// A control takes an image-drawing path and carries slot art, but declares nothing at the
+    /// indices its own family reads. Nothing was staged, which is the source's own early return,
+    /// so this records art the layout will never show.
+    UncomposedArt {
+        /// The family whose indices found nothing.
+        family: &'static str,
     },
     /// A text run was staged as a placeholder bar because no font set can shape it.
     UnshapeableText {
@@ -409,68 +437,87 @@ impl StagedUiFrame {
                 }
                 UiFrameItem::Quad {
                     rect,
-                    image,
+                    slot,
                     color,
                     border_color,
                     border,
-                    entries,
+                    images,
                     image_offset,
                     family,
-                    selected,
-                    image_status,
+                    state,
+                    image_draw,
                     ..
                 } => {
-                    // A push button whose middle piece is present composes three pieces; the
-                    // source falls back to the single stretched background otherwise.
-                    if *family == UiControlFamily::PushButton
-                        && let Some(pieces) = ButtonPieces::resolve(entries, *selected, bind_image)
-                    {
-                        quads += staged.push_button_three(
+                    if *image_draw {
+                        // One extra quad of headroom, so a repeating piece that would overrun the
+                        // limit is staged and reported rather than silently truncated.
+                        let budget = limits.max_quads.saturating_sub(quads).saturating_add(1);
+                        let composed = compose(
+                            *family,
                             *rect,
                             *image_offset,
-                            &pieces,
-                            scissor,
-                            quads,
-                            limits,
-                        )?;
-                        continue;
-                    }
-                    let binding = image.as_deref().map(|name| (name, bind_image(name)));
-                    let (page, uv, fill) = match binding {
-                        Some((name, None)) => {
-                            staged.diagnostics.push(UiStagingDiagnostic {
-                                item: index,
-                                kind: UiStagingDiagnosticKind::UnboundImage {
-                                    name: name.to_owned().into_boxed_str(),
-                                },
-                            });
-                            (None, [0.0; 4], UI_PLACEHOLDER_COLOR)
+                            images,
+                            *state,
+                            *slot,
+                            canvas,
+                            budget,
+                            bind_image,
+                        );
+                        match composed {
+                            // A composed piece draws untinted: the source's `winDrawImage` takes no
+                            // colour, and a slot's `COLOR` belongs to the colour-only fill path.
+                            // Retail leaves an unused red in that field beside a valid image, so
+                            // multiplying by it turns every textured control red.
+                            Composed::Pieces(pieces) => {
+                                for (piece_rect, binding) in pieces {
+                                    quads += 1;
+                                    staged.push_piece(
+                                        piece_rect,
+                                        &binding,
+                                        [255, 255, 255, 255],
+                                        scissor,
+                                        quads,
+                                        limits,
+                                    )?;
+                                }
+                            }
+                            Composed::Unbound(name) => {
+                                staged.diagnostics.push(UiStagingDiagnostic {
+                                    item: index,
+                                    kind: UiStagingDiagnosticKind::UnboundImage { name },
+                                });
+                                quads += 1;
+                                staged.push_quad(
+                                    *rect,
+                                    [0.0; 4],
+                                    UI_PLACEHOLDER_COLOR,
+                                    None,
+                                    scissor,
+                                    quads,
+                                    limits,
+                                )?;
+                            }
+                            // The source's draw procedures return early when their own indices hold
+                            // nothing, so nothing draws. Art at other indices would never appear,
+                            // which is worth reporting even though the result is correct.
+                            Composed::Undeclared => {
+                                if !images.is_empty() {
+                                    staged.diagnostics.push(UiStagingDiagnostic {
+                                        item: index,
+                                        kind: UiStagingDiagnosticKind::UncomposedArt {
+                                            family: family.name(),
+                                        },
+                                    });
+                                }
+                            }
                         }
-                        // An image draw is untinted: the source's `winDrawImage` takes no colour,
-                        // and a slot's `COLOR` belongs to the colour-only fill path. Retail leaves
-                        // an unused red in that field beside a valid image, so multiplying by it
-                        // turns every textured control red.
-                        Some((_, Some(binding))) => {
-                            (Some(binding.page), binding.uv, [255, 255, 255, 255])
+                    } else {
+                        let fill = color.map_or([0, 0, 0, 0], channels);
+                        if fill[3] > 0 {
+                            quads += 1;
+                            staged
+                                .push_quad(*rect, [0.0; 4], fill, None, scissor, quads, limits)?;
                         }
-                        // A control declaring `IMAGE` whose slot has no entry-0 image keeps its art
-                        // at other indices, which only its own family's composition reads. Filling
-                        // with the slot's colour would paint retail's unused red over the control,
-                        // so a placeholder plus a diagnostic names it instead.
-                        None if *image_status && entries.iter().any(Option::is_some) => {
-                            staged.diagnostics.push(UiStagingDiagnostic {
-                                item: index,
-                                kind: UiStagingDiagnosticKind::UncomposedFamily {
-                                    window_type: format!("{family:?}").into_boxed_str(),
-                                },
-                            });
-                            (None, [0.0; 4], UI_PLACEHOLDER_COLOR)
-                        }
-                        None => (None, [0.0; 4], color.map_or([0, 0, 0, 0], channels)),
-                    };
-                    if fill[3] > 0 {
-                        quads += 1;
-                        staged.push_quad(*rect, uv, fill, page, scissor, quads, limits)?;
                     }
                     // The original draws a border only for a control declaring `BORDER`; a border
                     // colour on its own is inert, and most retail controls carry one.
@@ -549,140 +596,6 @@ impl StagedUiFrame {
             });
         }
         Ok(staged)
-    }
-
-    /// Stages a push button's three pieces and returns how many quads it added.
-    ///
-    /// Reproduces `W3DGadgetPushButtonImageDrawThree`: the centre repeats in whole pieces from the
-    /// left end's right edge, a final partial piece is clipped to the remaining width, and the two
-    /// ends draw last so they sit over the centre. When the ends alone do not fit — the source's
-    /// `centerWidth <= 0` branch — each end takes half the control instead.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one straight-line reproduction of the source's piece geometry; splitting it would                   separate the two branches the source itself writes together"
-    )]
-    fn push_button_three(
-        &mut self,
-        rect: UiRect,
-        image_offset: (i32, i32),
-        pieces: &ButtonPieces,
-        scissor: Option<UiRect>,
-        quads: usize,
-        limits: UiStagingLimits,
-    ) -> Result<usize, UiStagingError> {
-        // Composed pieces draw untinted, like every other image draw.
-        let tint = [255, 255, 255, 255];
-        let (x_offset, y_offset) = image_offset;
-        let left_width = pieces.left.size[0];
-        let right_width = pieces.right.size[0];
-        let left_end_x = rect.x + left_width + x_offset;
-        let right_start_x = rect.x + rect.width - right_width + x_offset;
-        let top = rect.y + y_offset;
-        let mut added = 0;
-
-        if right_start_x - left_end_x <= 0 {
-            let split = rect.x + x_offset + rect.width / 2;
-            added += 1;
-            self.push_piece(
-                UiRect {
-                    x: rect.x + x_offset,
-                    y: top,
-                    width: split - (rect.x + x_offset),
-                    height: rect.height + y_offset,
-                },
-                &pieces.left,
-                tint,
-                scissor,
-                quads + added,
-                limits,
-            )?;
-            added += 1;
-            self.push_piece(
-                UiRect {
-                    x: split,
-                    y: top,
-                    width: rect.x + rect.width - split,
-                    height: rect.height,
-                },
-                &pieces.right,
-                tint,
-                scissor,
-                quads + added,
-                limits,
-            )?;
-            return Ok(added);
-        }
-
-        let centre_width = pieces.centre.size[0].max(1);
-        let mut x = left_end_x;
-        while x + centre_width <= right_start_x {
-            added += 1;
-            self.push_piece(
-                UiRect {
-                    x,
-                    y: top,
-                    width: centre_width,
-                    height: rect.height + y_offset,
-                },
-                &pieces.centre,
-                tint,
-                scissor,
-                quads + added,
-                limits,
-            )?;
-            x += centre_width;
-        }
-        if x < right_start_x {
-            // The source draws a whole piece under a clip region ending at the right end's start;
-            // trimming the texture coordinates instead reaches the same pixels without a state
-            // change, and keeps the batch intact.
-            added += 1;
-            let trimmed = pieces
-                .centre
-                .trimmed_to_width(right_start_x - x, centre_width);
-            self.push_piece(
-                UiRect {
-                    x,
-                    y: top,
-                    width: right_start_x - x,
-                    height: rect.height + y_offset,
-                },
-                &trimmed,
-                tint,
-                scissor,
-                quads + added,
-                limits,
-            )?;
-        }
-        added += 1;
-        self.push_piece(
-            UiRect {
-                x: rect.x + x_offset,
-                y: top,
-                width: left_width,
-                height: rect.height + y_offset,
-            },
-            &pieces.left,
-            tint,
-            scissor,
-            quads + added,
-            limits,
-        )?;
-        added += 1;
-        self.push_piece(
-            UiRect {
-                x: right_start_x,
-                y: top,
-                width: right_width,
-                height: rect.height,
-            },
-            &pieces.right,
-            tint,
-            scissor,
-            quads + added,
-            limits,
-        )?;
-        Ok(added)
     }
 
     fn push_piece(
@@ -848,36 +761,779 @@ impl StagedUiFrame {
     }
 }
 
-/// The three images a push button composes, resolved for its current state.
-///
-/// `GadgetPushButton.h` fixes the indices: unselected art is left 0, middle 5, right 6, and the
-/// pushed art is left 1, middle 3, right 4. The source only takes the three-piece path when the
-/// middle image is present, so a definition supplying no middle keeps the stretched background.
-struct ButtonPieces {
-    left: UiImageBinding,
-    centre: UiImageBinding,
-    right: UiImageBinding,
+/// One composed piece: where it draws, and the page region it samples.
+type Piece = (UiRect, UiImageBinding);
+
+/// What one family's composition produced for one control.
+enum Composed {
+    /// Pieces to stage, in the order the source draws them, so a later piece covers an earlier one.
+    Pieces(Vec<Piece>),
+    /// A declared mapped image the caller could not bind. Geometry depends on the bound piece's
+    /// pixel size, so nothing could be composed and the control stages a placeholder instead.
+    Unbound(Box<str>),
+    /// The family's own indices declare no image, which is where each source draw procedure
+    /// returns early. Nothing draws.
+    Undeclared,
 }
 
-impl ButtonPieces {
-    fn resolve(
-        entries: &[Option<String>],
-        selected: bool,
-        bind_image: &dyn Fn(&str) -> Option<UiImageBinding>,
-    ) -> Option<Self> {
-        let (left, centre, right) = if selected { (1, 3, 4) } else { (0, 5, 6) };
-        let bind = |index: usize| -> Option<UiImageBinding> {
-            entries
-                .get(index)
-                .and_then(Option::as_deref)
-                .and_then(bind_image)
-        };
-        Some(Self {
-            left: bind(left)?,
-            centre: bind(centre)?,
-            right: bind(right)?,
-        })
+/// Resolves a control's declared image names into bound page regions, remembering the first name
+/// that failed to bind so an unresolved resource stays visible.
+struct SlotBinder<'a> {
+    images: &'a UiSlotImages,
+    bind: &'a dyn Fn(&str) -> Option<UiImageBinding>,
+    unbound: Option<Box<str>>,
+}
+
+impl<'a> SlotBinder<'a> {
+    fn new(images: &'a UiSlotImages, bind: &'a dyn Fn(&str) -> Option<UiImageBinding>) -> Self {
+        Self {
+            images,
+            bind,
+            unbound: None,
+        }
     }
+
+    /// Returns one slot entry's bound region, absent when the entry declares nothing or its name
+    /// does not bind.
+    fn image(&mut self, slot: WndDrawDataSlot, index: usize) -> Option<UiImageBinding> {
+        let name = self.images.image(slot, index)?;
+        let binding = (self.bind)(name);
+        if binding.is_none() && self.unbound.is_none() {
+            self.unbound = Some(name.into());
+        }
+        binding
+    }
+
+    /// Turns a family's collected pieces into a result, distinguishing "the layout declares nothing
+    /// here" from "the layout declares art that would not bind".
+    fn finish(self, pieces: Option<Vec<Piece>>) -> Composed {
+        match (pieces, self.unbound) {
+            (Some(pieces), _) if !pieces.is_empty() => Composed::Pieces(pieces),
+            (_, Some(name)) => Composed::Unbound(name),
+            _ => Composed::Undeclared,
+        }
+    }
+}
+
+/// The display width the source's horizontal slider scales its tick squares against.
+///
+/// `W3DHorizontalSlider.cpp` divides `TheDisplay->getWidth()` by `DEFAULT_DISPLAY_WIDTH`.
+const DEFAULT_DISPLAY_WIDTH: f32 = 800.0;
+
+/// Composes one control's slot art into the pieces its family draws.
+///
+/// Every branch reproduces the matching `W3DGadget*ImageDraw`, including which slot each piece
+/// comes from: those are not always the control's current state slot, and the header comment
+/// records the source for each.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one control's complete composition input; a struct would only move the same fields                   behind another name"
+)]
+fn compose(
+    family: UiControlFamily,
+    rect: UiRect,
+    image_offset: (i32, i32),
+    images: &UiSlotImages,
+    state: UiDrawState,
+    slot: WndDrawDataSlot,
+    canvas: [u32; 2],
+    budget: usize,
+    bind: &dyn Fn(&str) -> Option<UiImageBinding>,
+) -> Composed {
+    let mut binder = SlotBinder::new(images, bind);
+    let pieces = match family {
+        UiControlFamily::PushButton => push_button(&mut binder, rect, image_offset, state, slot),
+        UiControlFamily::RadioButton => radio_button(&mut binder, rect, image_offset, state, slot),
+        UiControlFamily::CheckBox => check_box(&mut binder, rect, image_offset, state, slot),
+        UiControlFamily::TextEntry => text_entry(&mut binder, rect, image_offset, slot, budget),
+        UiControlFamily::VerticalSlider => {
+            vertical_slider(&mut binder, rect, image_offset, slot, budget)
+        }
+        UiControlFamily::HorizontalSlider => {
+            horizontal_slider(&mut binder, rect, state, canvas, budget)
+        }
+        UiControlFamily::ProgressBar => {
+            progress_bar(&mut binder, rect, image_offset, state, slot, budget)
+        }
+        UiControlFamily::TabControl(geometry) => {
+            tab_control(&mut binder, rect, image_offset, geometry, slot)
+        }
+        UiControlFamily::Simple => stretched(&mut binder, rect, image_offset, slot),
+    };
+    binder.finish(pieces)
+}
+
+/// `W3DGameWinDefaultDraw`'s image path, shared by list boxes, combo boxes, and static text: one
+/// entry-0 image covering the control from its image offset.
+fn stretched(
+    binder: &mut SlotBinder<'_>,
+    rect: UiRect,
+    image_offset: (i32, i32),
+    slot: WndDrawDataSlot,
+) -> Option<Vec<Piece>> {
+    let image = binder.image(slot, 0)?;
+    Some(vec![(offset_rect(rect, image_offset), image)])
+}
+
+/// `W3DGadgetPushButtonImageDrawThree`.
+fn push_button(
+    binder: &mut SlotBinder<'_>,
+    rect: UiRect,
+    image_offset: (i32, i32),
+    state: UiDrawState,
+    slot: WndDrawDataSlot,
+) -> Option<Vec<Piece>> {
+    // `GadgetPushButton.h`: unselected art is left 0, middle 5, right 6; pushed art is 1, 3, 4.
+    let (left, centre, right) = if state.selected { (1, 3, 4) } else { (0, 5, 6) };
+    let left = binder.image(slot, left)?;
+    let centre = binder.image(slot, centre)?;
+    let right = binder.image(slot, right)?;
+    let (x_offset, y_offset) = image_offset;
+    let top = rect.y + y_offset;
+    let left_end = rect.x + left.size[0] + x_offset;
+    let right_start = rect.x + rect.width - right.size[0] + x_offset;
+
+    // The source's `centerWidth <= 0` branch: with no room between the ends, each takes half.
+    if right_start - left_end <= 0 {
+        let split = rect.x + x_offset + rect.width / 2;
+        return Some(vec![
+            (
+                UiRect {
+                    x: rect.x + x_offset,
+                    y: top,
+                    width: split - (rect.x + x_offset),
+                    height: rect.height + y_offset,
+                },
+                left,
+            ),
+            (
+                UiRect {
+                    x: split,
+                    y: top,
+                    width: rect.x + rect.width - split,
+                    height: rect.height,
+                },
+                right,
+            ),
+        ]);
+    }
+
+    // The centre's pieces are a pixel taller per image offset than the ends, which is the source's
+    // own `end.y = start.y + size.y + yOffset` against the ends' plain `size.y`.
+    let mut pieces = trimmed_row(left_end, right_start, top, rect.height + y_offset, centre);
+    pieces.push((
+        UiRect {
+            x: rect.x + x_offset,
+            y: top,
+            width: left.size[0],
+            height: rect.height,
+        },
+        left,
+    ));
+    pieces.push((
+        UiRect {
+            x: right_start,
+            y: top,
+            width: right.size[0],
+            height: rect.height,
+        },
+        right,
+    ));
+    Some(pieces)
+}
+
+/// `W3DGadgetRadioButtonImageDraw`.
+fn radio_button(
+    binder: &mut SlotBinder<'_>,
+    rect: UiRect,
+    image_offset: (i32, i32),
+    state: UiDrawState,
+    slot: WndDrawDataSlot,
+) -> Option<Vec<Piece>> {
+    // A selected radio button reads the hilite slot's second triple whatever its enablement,
+    // because the source tests `WIN_STATE_SELECTED` before it tests the enabled bit.
+    let (slot, base) = if state.selected {
+        (WndDrawDataSlot::Hilite, 3)
+    } else {
+        (slot, 0)
+    };
+    let left = binder.image(slot, base)?;
+    let centre = binder.image(slot, base + 1)?;
+    let right = binder.image(slot, base + 2)?;
+    let (x_offset, y_offset) = image_offset;
+    let top = rect.y + y_offset;
+    let left_end = rect.x + left.size[0] + x_offset;
+    let right_start = rect.x + rect.width - right.size[0] + x_offset;
+
+    let mut pieces = trimmed_row(left_end, right_start, top, rect.height, centre);
+    pieces.push((
+        UiRect {
+            x: rect.x + x_offset,
+            y: top,
+            width: left.size[0],
+            height: rect.height,
+        },
+        left,
+    ));
+    // The right end runs to the control's own right edge rather than to its image width, which is
+    // the source's `end.x = origin.x + size.x`.
+    pieces.push((
+        UiRect {
+            x: right_start,
+            y: top,
+            width: rect.x + rect.width - right_start,
+            height: rect.height,
+        },
+        right,
+    ));
+    Some(pieces)
+}
+
+/// `W3DGadgetCheckBoxImageDraw`, whose background image the source itself leaves commented out.
+fn check_box(
+    binder: &mut SlotBinder<'_>,
+    rect: UiRect,
+    image_offset: (i32, i32),
+    state: UiDrawState,
+    slot: WndDrawDataSlot,
+) -> Option<Vec<Piece>> {
+    let image = binder.image(slot, if state.selected { 2 } else { 1 })?;
+    let side = rect.height - 6;
+    Some(vec![(
+        UiRect {
+            x: rect.x + image_offset.0,
+            y: rect.y + 3,
+            width: side,
+            height: side,
+        },
+        image,
+    )])
+}
+
+/// `W3DGadgetTextEntryImageDraw`.
+fn text_entry(
+    binder: &mut SlotBinder<'_>,
+    rect: UiRect,
+    image_offset: (i32, i32),
+    slot: WndDrawDataSlot,
+    budget: usize,
+) -> Option<Vec<Piece>> {
+    let left = binder.image(slot, 0)?;
+    let right = binder.image(slot, 1)?;
+    let centre = binder.image(slot, 2)?;
+    let small = binder.image(slot, 3)?;
+    let (x_offset, y_offset) = image_offset;
+    let top = rect.y + y_offset;
+    let left_end = rect.x + left.size[0] + x_offset;
+    let right_start = rect.x + rect.width - right.size[0] + x_offset;
+
+    let mut pieces = whole_row(left_end, right_start, top, rect.height, centre, budget);
+    let filled = pieces
+        .last()
+        .map_or(left_end, |(rect, _)| rect.x + rect.width);
+    // The source deliberately draws one small piece more than fits, overrunning into where the
+    // right end will draw over it.
+    pieces.extend(overrun_row(
+        filled,
+        right_start,
+        top,
+        rect.height,
+        small,
+        budget,
+    ));
+    pieces.push((
+        UiRect {
+            x: rect.x + x_offset,
+            y: top,
+            width: left.size[0],
+            height: rect.height,
+        },
+        left,
+    ));
+    pieces.push((
+        UiRect {
+            x: right_start,
+            y: top,
+            width: right.size[0],
+            height: rect.height,
+        },
+        right,
+    ));
+    Some(pieces)
+}
+
+/// `W3DGadgetVerticalSliderImageDraw`.
+fn vertical_slider(
+    binder: &mut SlotBinder<'_>,
+    rect: UiRect,
+    image_offset: (i32, i32),
+    slot: WndDrawDataSlot,
+    budget: usize,
+) -> Option<Vec<Piece>> {
+    let top_image = binder.image(slot, 0)?;
+    let bottom_image = binder.image(slot, 1)?;
+    let centre = binder.image(slot, 2)?;
+    let small = binder.image(slot, 3)?;
+    let (x_offset, y_offset) = image_offset;
+    let left = rect.x + x_offset;
+
+    // The source's "the two ends alone are taller than the control" branch: each end takes half.
+    if top_image.size[1] + bottom_image.size[1] >= rect.height {
+        let split = rect.y + rect.height / 2;
+        return Some(vec![
+            (
+                UiRect {
+                    x: left,
+                    y: rect.y + y_offset,
+                    width: top_image.size[0],
+                    height: split - (rect.y + y_offset),
+                },
+                top_image,
+            ),
+            (
+                UiRect {
+                    x: left,
+                    y: split,
+                    width: bottom_image.size[0],
+                    height: rect.y + y_offset + rect.height - split,
+                },
+                bottom_image,
+            ),
+        ]);
+    }
+
+    let top_end = rect.y + top_image.size[1] + y_offset;
+    let bottom_start = rect.y + rect.height - bottom_image.size[1] + y_offset;
+    let mut pieces = whole_column(top_end, bottom_start, left, centre, budget);
+    let filled = pieces
+        .last()
+        .map_or(top_end, |(rect, _)| rect.y + rect.height);
+    pieces.extend(overrun_column(filled, bottom_start, left, small, budget));
+    pieces.push((
+        UiRect {
+            x: left,
+            y: rect.y + y_offset,
+            width: top_image.size[0],
+            height: top_image.size[1],
+        },
+        top_image,
+    ));
+    pieces.push((
+        UiRect {
+            x: left,
+            y: bottom_start,
+            width: bottom_image.size[0],
+            height: bottom_image.size[1],
+        },
+        bottom_image,
+    ));
+    Some(pieces)
+}
+
+/// `W3DGadgetHorizontalSliderImageDraw`, a row of tick squares filled up to the current position.
+///
+/// Two things here are the source's, not this project's: the art comes from fixed slots whatever
+/// the control's own state — fill and blank from the disabled slot, highlight from the hilite slot
+/// — and the square's size scales with the display width against a 800-pixel reference rather than
+/// with the control.
+fn horizontal_slider(
+    binder: &mut SlotBinder<'_>,
+    rect: UiRect,
+    state: UiDrawState,
+    canvas: [u32; 2],
+    budget: usize,
+) -> Option<Vec<Piece>> {
+    let fill = binder.image(WndDrawDataSlot::Disabled, 0)?;
+    let blank = binder.image(WndDrawDataSlot::Disabled, 1)?;
+    let highlight = binder.image(WndDrawDataSlot::Hilite, 0);
+
+    #[expect(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        reason = "viewport widths and piece sizes are small integers, and the source truncates here                   too"
+    )]
+    let box_width = ((fill.size[0] as f32)
+        * (f32::from(u16::try_from(canvas[0]).unwrap_or(u16::MAX)))
+        / DEFAULT_DISPLAY_WIDTH) as i32;
+    let box_width = box_width.max(1);
+    let padding = 2;
+
+    let span = if state.maximum > state.minimum {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "slider bounds are small integers"
+        )]
+        let fraction =
+            (state.value - state.minimum) as f32 / (state.maximum - state.minimum) as f32;
+        #[expect(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            reason = "control widths are small integers"
+        )]
+        let scaled = (fraction * rect.width as f32) as i32;
+        rect.x + scaled
+    } else {
+        rect.x
+    };
+
+    let mut boxes = 0;
+    let mut selected = 0;
+    let mut start = rect.x;
+    let mut end = start + box_width;
+    while end < rect.x + rect.width && boxes < budget {
+        if start <= span && state.value != state.minimum {
+            selected += 1;
+        }
+        start = end + padding;
+        end = start + box_width;
+        boxes += 1;
+    }
+
+    // The row is centred in whatever width the whole squares did not cover.
+    let covered = end - rect.x - box_width;
+    let origin_x = rect.x + (rect.width - covered) / 2;
+    let mut pieces = Vec::new();
+    if state.hilited
+        && let Some(highlight) = highlight
+    {
+        let side = box_width + padding;
+        for index in 0..=boxes {
+            pieces.push((
+                UiRect {
+                    x: origin_x - side / 2 + i32::try_from(index).unwrap_or(0) * side,
+                    y: rect.y + box_width / 3,
+                    width: side,
+                    height: side,
+                },
+                highlight,
+            ));
+        }
+    }
+    for index in 0..boxes {
+        let image = if index < selected { fill } else { blank };
+        pieces.push((
+            UiRect {
+                x: origin_x + i32::try_from(index).unwrap_or(0) * (box_width + padding),
+                y: rect.y,
+                width: box_width,
+                height: box_width,
+            },
+            image,
+        ));
+    }
+    Some(pieces)
+}
+
+/// `W3DGadgetProgressBarImageDraw`: a three-piece background with the bar drawn inside it.
+fn progress_bar(
+    binder: &mut SlotBinder<'_>,
+    rect: UiRect,
+    image_offset: (i32, i32),
+    state: UiDrawState,
+    slot: WndDrawDataSlot,
+    budget: usize,
+) -> Option<Vec<Piece>> {
+    let left = binder.image(slot, 0)?;
+    let right = binder.image(slot, 1)?;
+    let centre = binder.image(slot, 2)?;
+    let bar_right = binder.image(slot, 5)?;
+    let bar_centre = binder.image(slot, 6)?;
+    let (x_offset, y_offset) = image_offset;
+    let top = rect.y + y_offset;
+    let left_end = rect.x + left.size[0] + x_offset;
+    let right_start = rect.x + rect.width - right.size[0] + x_offset;
+
+    let mut pieces = trimmed_row(left_end, right_start, top, rect.height, centre);
+    pieces.push((
+        UiRect {
+            x: rect.x + x_offset,
+            y: top,
+            width: left.size[0],
+            height: rect.height,
+        },
+        left,
+    ));
+    pieces.push((
+        UiRect {
+            x: right_start,
+            y: top,
+            width: right.size[0],
+            height: rect.height,
+        },
+        right,
+    ));
+
+    // The bar sits ten pixels inside the background horizontally and five vertically, and the
+    // source fills the rest of the track with the bar's right piece rather than leaving it empty.
+    let bar_width = ((rect.width - 20) * state.value.clamp(0, 100)) / 100;
+    let filled = bar_width / bar_centre.size[0].max(1);
+    let track = (rect.width - 20) / bar_centre.size[0].max(1);
+    let bar_top = rect.y + y_offset + 5;
+    let bar_height = rect.height - 10;
+    let mut x = rect.x + 10;
+    for _ in 0..filled.min(i32::try_from(budget).unwrap_or(i32::MAX)) {
+        pieces.push((
+            UiRect {
+                x,
+                y: bar_top,
+                width: bar_centre.size[0],
+                height: bar_height,
+            },
+            bar_centre,
+        ));
+        x += bar_centre.size[0];
+    }
+    for _ in 0..(track - filled)
+        .max(0)
+        .min(i32::try_from(budget).unwrap_or(i32::MAX))
+    {
+        pieces.push((
+            UiRect {
+                x,
+                y: bar_top,
+                width: bar_right.size[0],
+                height: bar_height,
+            },
+            bar_right,
+        ));
+        x += bar_right.size[0].max(1);
+    }
+    Some(pieces)
+}
+
+/// `W3DGadgetTabControlImageDraw` over `GadgetTabControlComputeTabRegion`.
+fn tab_control(
+    binder: &mut SlotBinder<'_>,
+    rect: UiRect,
+    image_offset: (i32, i32),
+    geometry: cic_ui::UiTabGeometry,
+    slot: WndDrawDataSlot,
+) -> Option<Vec<Piece>> {
+    // The background is the default draw's entry-0 image; a tab control with none still draws its
+    // tabs, so an absent background is not the family's early return.
+    let mut pieces = Vec::new();
+    if let Some(background) = binder.image(slot, 0) {
+        pieces.push((offset_rect(rect, image_offset), background));
+    }
+
+    let count = i32::try_from(geometry.count).unwrap_or(0);
+    let horizontal = geometry.edge == TAB_EDGE_TOP || geometry.edge == TAB_EDGE_BOTTOM;
+    // `TP_CENTER` is 0, `TP_TOPLEFT` 1, and `TP_BOTTOMRIGHT` 2; the spare space goes before the
+    // strip, half of it when centred.
+    let spare = if horizontal {
+        rect.width - 2 * geometry.pane_border - count * geometry.width
+    } else {
+        rect.height - 2 * geometry.pane_border - count * geometry.height
+    };
+    let shift = match geometry.orientation {
+        TAB_ORIENTATION_CENTER => spare / 2,
+        TAB_ORIENTATION_BOTTOM_RIGHT => spare,
+        _ => 0,
+    };
+    let (mut x, mut y) = match geometry.edge {
+        TAB_EDGE_BOTTOM => (
+            rect.x + geometry.pane_border + shift,
+            rect.y + rect.height - geometry.pane_border - geometry.height,
+        ),
+        TAB_EDGE_RIGHT => (
+            rect.x + rect.width - geometry.pane_border - geometry.width,
+            rect.y + geometry.pane_border + shift,
+        ),
+        TAB_EDGE_LEFT => (
+            rect.x + geometry.pane_border,
+            rect.y + geometry.pane_border + shift,
+        ),
+        _ => (
+            rect.x + geometry.pane_border + shift,
+            rect.y + geometry.pane_border,
+        ),
+    };
+    let (step_x, step_y) = if horizontal {
+        (geometry.width, 0)
+    } else {
+        (0, geometry.height)
+    };
+
+    for tab in 0..geometry.count {
+        let tab_slot = if geometry.disabled[tab] {
+            WndDrawDataSlot::Disabled
+        } else if tab == geometry.active {
+            WndDrawDataSlot::Hilite
+        } else {
+            WndDrawDataSlot::Enabled
+        };
+        if let Some(image) = binder.image(tab_slot, tab + 1) {
+            pieces.push((
+                UiRect {
+                    x,
+                    y,
+                    width: geometry.width,
+                    height: geometry.height,
+                },
+                image,
+            ));
+        }
+        x += step_x;
+        y += step_y;
+    }
+    (!pieces.is_empty()).then_some(pieces)
+}
+
+/// `TABEDGE`'s `TP_TOP_SIDE`.
+const TAB_EDGE_TOP: i32 = 3;
+/// `TABEDGE`'s `TP_RIGHT_SIDE`.
+const TAB_EDGE_RIGHT: i32 = 4;
+/// `TABEDGE`'s `TP_LEFT_SIDE`.
+const TAB_EDGE_LEFT: i32 = 5;
+/// `TABEDGE`'s `TP_BOTTOM_SIDE`.
+const TAB_EDGE_BOTTOM: i32 = 6;
+/// `TABORIENTATION`'s `TP_CENTER`.
+const TAB_ORIENTATION_CENTER: i32 = 0;
+/// `TABORIENTATION`'s `TP_BOTTOMRIGHT`.
+const TAB_ORIENTATION_BOTTOM_RIGHT: i32 = 2;
+
+/// Returns a rectangle moved by a control's `IMAGEOFFSET`.
+const fn offset_rect(rect: UiRect, image_offset: (i32, i32)) -> UiRect {
+    UiRect {
+        x: rect.x + image_offset.0,
+        y: rect.y + image_offset.1,
+        ..rect
+    }
+}
+
+/// Repeats a piece rightwards, trimming the final partial one to the remaining width.
+///
+/// The source draws that final piece whole under a clip region ending at `to`; trimming texture
+/// coordinates samples exactly the same pixels without a clip state change, keeping the batch
+/// intact. Unbounded repetition cannot happen: the piece is at least one pixel wide, and the caller
+/// staging these hits the quad limit before a wide control can produce an unbounded list.
+fn trimmed_row(from: i32, to: i32, top: i32, height: i32, piece: UiImageBinding) -> Vec<Piece> {
+    let width = piece.size[0].max(1);
+    let mut pieces = Vec::new();
+    let mut x = from;
+    while x + width <= to {
+        pieces.push((
+            UiRect {
+                x,
+                y: top,
+                width,
+                height,
+            },
+            piece,
+        ));
+        x += width;
+    }
+    if x < to {
+        pieces.push((
+            UiRect {
+                x,
+                y: top,
+                width: to - x,
+                height,
+            },
+            piece.trimmed_to_width(to - x, width),
+        ));
+    }
+    pieces
+}
+
+/// Repeats a piece rightwards in whole pieces only, leaving any remainder to the caller.
+fn whole_row(
+    from: i32,
+    to: i32,
+    top: i32,
+    height: i32,
+    piece: UiImageBinding,
+    budget: usize,
+) -> Vec<Piece> {
+    let width = piece.size[0].max(1);
+    let mut pieces = Vec::new();
+    let mut x = from;
+    while x + width <= to && pieces.len() < budget {
+        pieces.push((
+            UiRect {
+                x,
+                y: top,
+                width,
+                height,
+            },
+            piece,
+        ));
+        x += width;
+    }
+    pieces
+}
+
+/// Repeats a piece rightwards one piece past the gap, which is the source's own `pieces + 1`: the
+/// overrun draws under the end piece the caller adds afterwards.
+fn overrun_row(
+    from: i32,
+    to: i32,
+    top: i32,
+    height: i32,
+    piece: UiImageBinding,
+    budget: usize,
+) -> Vec<Piece> {
+    let width = piece.size[0].max(1);
+    let count = ((to - from) / width + 1).max(0);
+    (0..count.min(i32::try_from(budget).unwrap_or(i32::MAX)))
+        .map(|index| {
+            (
+                UiRect {
+                    x: from + index * width,
+                    y: top,
+                    width,
+                    height,
+                },
+                piece,
+            )
+        })
+        .collect()
+}
+
+/// [`whole_row`] stacked downwards.
+fn whole_column(from: i32, to: i32, left: i32, piece: UiImageBinding, budget: usize) -> Vec<Piece> {
+    let height = piece.size[1].max(1);
+    let mut pieces = Vec::new();
+    let mut y = from;
+    while y + height <= to && pieces.len() < budget {
+        pieces.push((
+            UiRect {
+                x: left,
+                y,
+                width: piece.size[0],
+                height,
+            },
+            piece,
+        ));
+        y += height;
+    }
+    pieces
+}
+
+/// [`overrun_row`] stacked downwards.
+fn overrun_column(
+    from: i32,
+    to: i32,
+    left: i32,
+    piece: UiImageBinding,
+    budget: usize,
+) -> Vec<Piece> {
+    let height = piece.size[1].max(1);
+    let count = ((to - from) / height + 1).max(0);
+    (0..count.min(i32::try_from(budget).unwrap_or(i32::MAX)))
+        .map(|index| {
+            (
+                UiRect {
+                    x: left,
+                    y: from + index * height,
+                    width: piece.size[0],
+                    height,
+                },
+                piece,
+            )
+        })
+        .collect()
 }
 
 impl UiImageBinding {
@@ -967,58 +1623,22 @@ mod tests {
         UiTextPolicy,
     };
     use cic_formats::{WndLimits, parse_wnd};
-    use cic_ui::{UiClipPolicy, UiLayout, UiLimits, UiPresentation, UiScalePolicy, UiViewport};
+    use cic_ui::{
+        UiClipPolicy, UiFrame, UiLayout, UiLimits, UiPresentation, UiScalePolicy, UiViewport,
+    };
+
+    /// An original synthetic layout declaring every family this layer composes, each with art at
+    /// the indices its own source draw procedure reads. No retail data appears here.
+    const SYNTHETIC_GADGETS: &str = include_str!("../tests/fixtures/synthetic-gadgets.wnd");
 
     fn layout(width: i32, height: i32) -> UiLayout {
-        let source = r#"FILE_VERSION = 2;
-STARTLAYOUTBLOCK
-  LAYOUTINIT = "[None]";
-  LAYOUTUPDATE = "[None]";
-  LAYOUTSHUTDOWN = "[None]";
-ENDLAYOUTBLOCK
-WINDOW
-  WINDOWTYPE = USER;
-  SCREENRECT = UPPERLEFT: 0 0,
-               BOTTOMRIGHT: 400 300,
-               CREATIONRESOLUTION: 800 600;
-  NAME = "SynthMenu.wnd:PanelSynth";
-  STATUS = ENABLED;
-  ENABLEDDRAWDATA = IMAGE: SynthPanel, COLOR: 10 20 30 255, BORDERCOLOR: 1 2 3 255,
-    IMAGE: NoImage, COLOR: 0 0 0 0, BORDERCOLOR: 0 0 0 0,
-    IMAGE: NoImage, COLOR: 0 0 0 0, BORDERCOLOR: 0 0 0 0,
-    IMAGE: NoImage, COLOR: 0 0 0 0, BORDERCOLOR: 0 0 0 0,
-    IMAGE: NoImage, COLOR: 0 0 0 0, BORDERCOLOR: 0 0 0 0,
-    IMAGE: NoImage, COLOR: 0 0 0 0, BORDERCOLOR: 0 0 0 0,
-    IMAGE: NoImage, COLOR: 0 0 0 0, BORDERCOLOR: 0 0 0 0,
-    IMAGE: NoImage, COLOR: 0 0 0 0, BORDERCOLOR: 0 0 0 0,
-    IMAGE: NoImage, COLOR: 0 0 0 0, BORDERCOLOR: 0 0 0 0;
-CHILD
-WINDOW
-  WINDOWTYPE = PUSHBUTTON;
-  SCREENRECT = UPPERLEFT: 20 20,
-               BOTTOMRIGHT: 120 60,
-               CREATIONRESOLUTION: 800 600;
-  NAME = "SynthMenu.wnd:ButtonSynth";
-  STATUS = ENABLED;
-  TEXT = "GUI:SynthButton";
-  FONT = NAME: "Synth Sans", SIZE: 11, BOLD: 0;
-  TEXTCOLOR = ENABLED: 255 255 255 255, ENABLEDBORDER: 0 0 0 255,
-              DISABLED: 128 128 128 255, DISABLEDBORDER: 0 0 0 255,
-              HILITE: 255 255 0 255, HILITEBORDER: 0 0 0 255;
-  ENABLEDDRAWDATA = IMAGE: SynthMissing, COLOR: 255 255 255 255, BORDERCOLOR: 0 0 0 0,
-    IMAGE: NoImage, COLOR: 0 0 0 0, BORDERCOLOR: 0 0 0 0,
-    IMAGE: NoImage, COLOR: 0 0 0 0, BORDERCOLOR: 0 0 0 0,
-    IMAGE: NoImage, COLOR: 0 0 0 0, BORDERCOLOR: 0 0 0 0,
-    IMAGE: NoImage, COLOR: 0 0 0 0, BORDERCOLOR: 0 0 0 0,
-    IMAGE: NoImage, COLOR: 0 0 0 0, BORDERCOLOR: 0 0 0 0,
-    IMAGE: NoImage, COLOR: 0 0 0 0, BORDERCOLOR: 0 0 0 0,
-    IMAGE: NoImage, COLOR: 0 0 0 0, BORDERCOLOR: 0 0 0 0,
-    IMAGE: NoImage, COLOR: 0 0 0 0, BORDERCOLOR: 0 0 0 0;
-END
-ENDALLCHILDREN
-END
-"#;
-        let document = parse_wnd(source.as_bytes(), WndLimits::default()).expect("decode layout");
+        let document =
+            parse_wnd(SYNTHETIC_GADGETS.as_bytes(), WndLimits::default()).expect("decode layout");
+        assert!(
+            document.diagnostics().is_empty(),
+            "synthetic fixture should decode cleanly: {:?}",
+            document.diagnostics()
+        );
         let viewport = UiViewport::new(width, height).expect("positive viewport");
         UiLayout::instantiate(
             &document,
@@ -1028,37 +1648,248 @@ END
         .expect("instantiate layout")
     }
 
+    /// Binds every synthetic image. `SynthPanel` sits on its own page so batching is observable.
     fn bind_synth(name: &str) -> Option<UiImageBinding> {
-        (name == "SynthPanel").then_some(UiImageBinding {
-            page: 0,
-            uv: [0.0, 0.0, 0.5, 0.25],
-            size: [64, 32],
+        let size = match name {
+            "SynthPanel" => [64, 32],
+            "SynthEnd" => [10, 24],
+            "SynthMiddle" => [8, 24],
+            "SynthBox" | "SynthPicked" => [4, 6],
+            _ => return None,
+        };
+        Some(UiImageBinding {
+            page: usize::from(name == "SynthPanel"),
+            uv: [0.0, 0.0, 1.0, 1.0],
+            size,
         })
     }
 
+    fn stage(frame: &UiFrame, canvas: [u32; 2]) -> StagedUiFrame {
+        StagedUiFrame::from_frame(
+            frame,
+            canvas,
+            UiTextPolicy::Shape,
+            UiStagingLimits::default(),
+            &bind_synth,
+        )
+        .expect("stage frame")
+    }
+
+    /// Returns the staged quads as `(x, y, width, height)`, in submission order.
+    fn quads(staged: &StagedUiFrame) -> Vec<(i32, i32, i32, i32)> {
+        staged
+            .vertices()
+            .chunks_exact(4)
+            .map(|corners| {
+                let [left, top] = corners[0].position();
+                let [right, bottom] = corners[2].position();
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "staged positions come from integer pixel rectangles"
+                )]
+                (
+                    left as i32,
+                    top as i32,
+                    (right - left) as i32,
+                    (bottom - top) as i32,
+                )
+            })
+            .collect()
+    }
+
+    /// Hides every sibling of one named control, so the staged quads after the panel's own five
+    /// belong to that control alone.
+    fn isolate(layout: &mut UiLayout, name: &str) -> cic_ui::UiControlId {
+        let wanted = layout
+            .find(&format!("SynthMenu.wnd:{name}"))
+            .expect("named control");
+        for child in layout.control(layout.roots()[0]).children().to_vec() {
+            if child != wanted {
+                layout.set_hidden(child, true);
+            }
+        }
+        wanted
+    }
+
+    /// The panel stages one fill plus its four border edges before any child.
+    const PANEL_QUADS: usize = 5;
+
+    /// Returns the quads a named control stages, with the panel's own removed.
+    fn control_quads(name: &str) -> Vec<(i32, i32, i32, i32)> {
+        let mut layout = layout(800, 600);
+        isolate(&mut layout, name);
+        let staged = stage(&layout.frame(UiClipPolicy::None), [800, 600]);
+        quads(&staged).split_off(PANEL_QUADS)
+    }
+
     #[test]
-    fn staging_batches_by_page_and_reports_an_unbound_image() {
+    fn a_push_button_composes_its_ends_over_a_repeating_centre() {
+        // Ends are ten pixels wide and the centre eight, so the eighty pixels between them take ten
+        // whole centres with nothing left to trim, and both ends draw last.
+        let pieces = control_quads("ButtonSynth");
+        assert_eq!(pieces.len(), 12);
+        assert_eq!(pieces[0], (30, 20, 8, 40));
+        assert_eq!(pieces[9], (102, 20, 8, 40));
+        assert_eq!(pieces[10], (20, 20, 10, 40));
+        assert_eq!(pieces[11], (110, 20, 10, 40));
+    }
+
+    #[test]
+    fn a_selected_radio_button_reads_the_hilite_slot_while_enabled() {
+        let mut layout = layout(800, 600);
+        let radio = isolate(&mut layout, "RadioSynth");
+        let unselected = stage(&layout.frame(UiClipPolicy::None), [800, 600]);
+        layout.select_radio(radio);
+        let selected = stage(&layout.frame(UiClipPolicy::None), [800, 600]);
+
+        // Both states compose three pieces, but the selected one reads the hilite slot's second
+        // triple — whose centre is a narrower image — so the piece count changes with it.
+        assert!(!unselected.vertices().is_empty());
+        assert_ne!(
+            quads(&unselected).split_off(PANEL_QUADS),
+            quads(&selected).split_off(PANEL_QUADS)
+        );
+        assert!(selected.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn a_check_box_draws_only_its_box_inset_from_the_left() {
+        // The source draws no background for a check box: only the box, three pixels down and six
+        // shorter than the control, at the control's own left edge.
+        assert_eq!(control_quads("CheckSynth"), [(20, 113, 24, 24)]);
+    }
+
+    #[test]
+    fn a_text_entry_fills_its_seam_with_the_small_centre_piece() {
+        let pieces = control_quads("EntrySynth");
+        // Twelve whole eight-pixel centres between the two ten-pixel ends, then four-pixel small
+        // centres overrunning by one under the right end, then both ends.
+        assert_eq!(pieces[0], (150, 20, 8, 30));
+        assert_eq!(pieces[11], (238, 20, 8, 30));
+        assert_eq!(pieces[12], (246, 20, 4, 30));
+        assert_eq!(pieces[pieces.len() - 2], (140, 20, 10, 30));
+        assert_eq!(pieces[pieces.len() - 1], (250, 20, 10, 30));
+    }
+
+    #[test]
+    fn a_vertical_slider_stacks_its_pieces_and_halves_them_when_the_ends_do_not_fit() {
+        let pieces = control_quads("VerticalSynth");
+        assert_eq!(pieces[0], (280, 44, 8, 24));
+        assert_eq!(pieces[pieces.len() - 2], (280, 20, 10, 24));
+        assert_eq!(pieces[pieces.len() - 1], (280, 116, 10, 24));
+
+        // A 30-pixel track cannot hold its own two 24-pixel ends, so each takes half instead.
+        assert_eq!(
+            control_quads("ShortSynth"),
+            [(310, 20, 10, 15), (310, 35, 10, 15)]
+        );
+    }
+
+    #[test]
+    fn a_horizontal_slider_fills_tick_squares_up_to_its_position() {
+        let mut layout = layout(800, 600);
+        let slider = isolate(&mut layout, "HorizontalSynth");
+        let empty =
+            quads(&stage(&layout.frame(UiClipPolicy::None), [800, 600])).split_off(PANEL_QUADS);
+        assert_eq!(layout.set_slider_value(slider, 5), Some(5));
+        let half =
+            quads(&stage(&layout.frame(UiClipPolicy::None), [800, 600])).split_off(PANEL_QUADS);
+
+        // The tick count depends only on the control's width, so moving the slider changes which
+        // squares are filled rather than how many there are.
+        assert!(!empty.is_empty());
+        assert_eq!(empty, half);
+        // A four-pixel square at the 800-pixel reference width stays four pixels, is square, and
+        // sits two pixels of padding from the next.
+        assert_eq!(empty[0].2, 4);
+        assert_eq!(empty[0].3, 4);
+        assert_eq!(empty[1].0 - empty[0].0, 6);
+    }
+
+    #[test]
+    fn a_progress_bar_draws_its_bar_inside_its_background() {
+        let mut layout = layout(800, 600);
+        let bar = isolate(&mut layout, "ProgressSynth");
+        assert_eq!(layout.set_progress(bar, 50), Some(50));
+        let pieces =
+            quads(&stage(&layout.frame(UiClipPolicy::None), [800, 600])).split_off(PANEL_QUADS);
+        // Every bar piece sits ten pixels inside the background horizontally and five vertically.
+        let bar_pieces: Vec<_> = pieces.iter().filter(|piece| piece.1 == 185).collect();
+        assert!(!bar_pieces.is_empty());
+        for piece in &bar_pieces {
+            assert!(piece.0 >= 30);
+            assert_eq!(piece.3, 14);
+        }
+    }
+
+    #[test]
+    fn a_tab_control_draws_its_background_then_one_image_per_declared_tab() {
+        // `TABEDGE: 3` is the top side and `TABORIENTATION: 1` the top left, so the two 40x20 tabs
+        // start at the four-pixel pane border and run rightwards.
+        assert_eq!(
+            control_quads("TabsSynth"),
+            [(240, 150, 140, 100), (244, 154, 40, 20), (284, 154, 40, 20),]
+        );
+    }
+
+    #[test]
+    fn art_at_an_index_the_family_never_reads_is_reported_and_not_painted() {
         let layout = layout(800, 600);
+        let staged = stage(&layout.frame(UiClipPolicy::None), [800, 600]);
+        assert!(staged.diagnostics().iter().any(|diagnostic| matches!(
+            diagnostic.kind(),
+            UiStagingDiagnosticKind::UncomposedArt { family } if *family == "Simple"
+        )));
+        // Nothing is painted for it: the source's own draw procedure returns early there, so a
+        // placeholder would invent a control retail never shows.
+        assert!(!quads(&staged).iter().any(|piece| piece.1 == 260));
+    }
+
+    #[test]
+    fn the_draw_callback_name_decides_the_image_path_over_the_status_bit() {
+        let layout = layout(800, 600);
+        let staged = stage(&layout.frame(UiClipPolicy::None), [800, 600]);
+        // `ColorSynth` declares `IMAGE` and a bound entry-0 image, but names the colour-only
+        // procedure, so it stages an untextured fill in the slot's own colour.
+        let colored = staged
+            .vertices()
+            .chunks_exact(4)
+            .find(|corners| (corners[0].position()[1] - 292.0).abs() < 0.5)
+            .expect("colour-only control");
+        assert!(!colored[0].is_textured());
+        assert!(colored[0].color()[3] > 0.9);
+    }
+
+    #[test]
+    fn an_unbound_image_stages_a_visible_placeholder_and_reports_it() {
+        let mut layout = layout(800, 600);
+        isolate(&mut layout, "ButtonSynth");
         let frame = layout.frame(UiClipPolicy::None);
         let staged = StagedUiFrame::from_frame(
             &frame,
             [800, 600],
             UiTextPolicy::Shape,
             UiStagingLimits::default(),
-            &bind_synth,
+            &|name| (name != "SynthMiddle").then(|| bind_synth(name)).flatten(),
         )
         .expect("stage frame");
-
-        // The panel binds its page, so its quad is textured; the button's image does not resolve, so
-        // a placeholder is staged instead and reported.
-        assert!(staged.vertices()[0].is_textured());
-        assert_eq!(staged.batches()[0].page(), Some(0));
         assert!(staged.diagnostics().iter().any(|diagnostic| matches!(
             diagnostic.kind(),
-            UiStagingDiagnosticKind::UnboundImage { name } if &**name == "SynthMissing"
+            UiStagingDiagnosticKind::UnboundImage { name } if &**name == "SynthMiddle"
         )));
-        // The panel declares a border, so four one-pixel edges follow its fill in the same batch
-        // family; the untextured edges break the batch away from the textured page.
+        // One placeholder covers the whole control, because piece geometry needs the bound size.
+        assert_eq!(quads(&staged).split_off(PANEL_QUADS), [(20, 20, 100, 40)]);
+    }
+
+    #[test]
+    fn staging_batches_by_page_and_carries_text_runs() {
+        let layout = layout(800, 600);
+        let staged = stage(&layout.frame(UiClipPolicy::None), [800, 600]);
+
+        assert!(staged.vertices()[0].is_textured());
+        assert_eq!(staged.batches()[0].page(), Some(1));
+        // The panel declares a border, so four one-pixel untextured edges follow its fill and
+        // break the batch away from the textured page.
         assert!(staged.batches().len() >= 2);
         assert_eq!(
             staged.indices().len(),
@@ -1068,7 +1899,6 @@ END
                 .map(|batch| batch.index_count() as usize)
                 .sum::<usize>()
         );
-        // One text run is staged for shaping rather than turned into geometry.
         assert_eq!(staged.text().len(), 1);
         assert_eq!(staged.text()[0].text, "GUI:SynthButton");
         assert_eq!(staged.text()[0].family, "Synth Sans");
@@ -1078,22 +1908,13 @@ END
     #[test]
     fn clips_intersect_and_become_batch_boundaries() {
         let layout = layout(800, 600);
-        let frame = layout.frame(UiClipPolicy::ClipToParent);
-        let staged = StagedUiFrame::from_frame(
-            &frame,
-            [800, 600],
-            UiTextPolicy::Shape,
-            UiStagingLimits::default(),
-            &bind_synth,
-        )
-        .expect("stage clipped frame");
+        let staged = stage(&layout.frame(UiClipPolicy::ClipToParent), [800, 600]);
         let scissored: Vec<_> = staged
             .batches()
             .iter()
             .filter_map(|batch| batch.scissor())
             .collect();
         assert!(!scissored.is_empty());
-        // Every clipped batch sits inside the panel, which is the only clip in this layout.
         for rect in scissored {
             assert!(rect.x >= 0 && rect.y >= 0);
             assert!(rect.width <= 400 && rect.height <= 300);
@@ -1109,14 +1930,7 @@ END
     fn placeholder_text_policy_stages_a_visible_bar_and_a_diagnostic() {
         let layout = layout(800, 600);
         let frame = layout.frame(UiClipPolicy::None);
-        let shaped = StagedUiFrame::from_frame(
-            &frame,
-            [800, 600],
-            UiTextPolicy::Shape,
-            UiStagingLimits::default(),
-            &bind_synth,
-        )
-        .expect("stage frame");
+        let shaped = stage(&frame, [800, 600]);
         let placeholder = StagedUiFrame::from_frame(
             &frame,
             [800, 600],
@@ -1137,22 +1951,8 @@ END
     fn staging_is_deterministic_and_bounded() {
         let layout = layout(1920, 1080);
         let frame = layout.frame(UiClipPolicy::None);
-        let first = StagedUiFrame::from_frame(
-            &frame,
-            [1920, 1080],
-            UiTextPolicy::Shape,
-            UiStagingLimits::default(),
-            &bind_synth,
-        )
-        .expect("stage frame");
-        let second = StagedUiFrame::from_frame(
-            &frame,
-            [1920, 1080],
-            UiTextPolicy::Shape,
-            UiStagingLimits::default(),
-            &bind_synth,
-        )
-        .expect("stage frame");
+        let first = stage(&frame, [1920, 1080]);
+        let second = stage(&frame, [1920, 1080]);
         assert_eq!(first, second);
         assert_eq!(first.vertex_bytes(), second.vertex_bytes());
         assert_eq!(

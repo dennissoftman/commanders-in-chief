@@ -30,15 +30,165 @@ pub enum UiClipPolicy {
 ///
 /// A presentation layer needs this because the source composes a draw-data record's nine entries
 /// per family: a push button's ends and repeating centre come from different indices than a
-/// slider's track pieces. The retained control knows its family; the frame carries it so the
-/// renderer does not have to reach back into the layout.
+/// slider's track pieces, and each family's `W3DGadget*ImageDraw` reads its own slots. The retained
+/// control knows its family; the frame carries it so the renderer does not have to reach back into
+/// the layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UiControlFamily {
     /// `PUSHBUTTON`, whose art is authored as a left end, a repeating centre, and a right end.
     PushButton,
-    /// Any other family, whose base visual is one image stretched across the control.
+    /// `RADIOBUTTON`, three pieces at its own indices, with a selected button drawing from the
+    /// hilite slot's second triple whatever its enablement.
+    RadioButton,
+    /// `CHECKBOX`, one square box image inset from the control's left edge.
+    CheckBox,
+    /// `ENTRYFIELD`, a horizontal four-piece frame: two ends, a repeating centre, and a narrower
+    /// centre that fills the remaining seam.
+    TextEntry,
+    /// `VERTICALSLIDER`, the same four pieces stacked.
+    VerticalSlider,
+    /// `HORIZONTALSLIDER`, a row of repeating tick squares filled up to the current position.
+    HorizontalSlider,
+    /// `PROGRESSBAR`, a three-piece background with a repeating bar drawn inside it.
+    ProgressBar,
+    /// `TABCONTROL`, a stretched background plus one image per declared tab.
+    TabControl(UiTabGeometry),
+    /// Any other family — list boxes, combo boxes, static text, and plain windows — whose base
+    /// visual is the slot's first image stretched across the control.
     #[default]
     Simple,
+}
+
+impl UiControlFamily {
+    /// Returns a stable name for reports and diagnostics, without a tab control's geometry.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::PushButton => "PushButton",
+            Self::RadioButton => "RadioButton",
+            Self::CheckBox => "CheckBox",
+            Self::TextEntry => "TextEntry",
+            Self::VerticalSlider => "VerticalSlider",
+            Self::HorizontalSlider => "HorizontalSlider",
+            Self::ProgressBar => "ProgressBar",
+            Self::TabControl(_) => "TabControl",
+            Self::Simple => "Simple",
+        }
+    }
+}
+
+/// A tab control's declared tab strip, which its composition needs and no other family has.
+///
+/// The values come from `TABCONTROLDATA`; the derived tab origin reproduces
+/// `GadgetTabControlComputeTabRegion`. No retail layout declares a tab control, so this rests on
+/// source evidence alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct UiTabGeometry {
+    /// `TABORIENTATION`: `0` centre, `1` top left, `2` bottom right.
+    pub orientation: i32,
+    /// `TABEDGE`: `3` top, `4` right, `5` left, `6` bottom.
+    pub edge: i32,
+    /// One tab's width in creation-resolution pixels.
+    pub width: i32,
+    /// One tab's height in creation-resolution pixels.
+    pub height: i32,
+    /// How many tabs exist, at most [`UI_MAX_TABS`].
+    pub count: usize,
+    /// The inset the strip and its panes sit inside.
+    pub pane_border: i32,
+    /// Which tab is active, and so draws hilited.
+    pub active: usize,
+    /// Which tabs are disabled, indexed the same as `count`.
+    pub disabled: [bool; UI_MAX_TABS],
+}
+
+/// How many tabs a `TABCONTROL` may declare.
+///
+/// `Gadget.h` sizes the pane array at `NUM_TAB_PANES = 8`.
+pub const UI_MAX_TABS: usize = 8;
+
+/// Live control state the per-family compositions read.
+///
+/// The source's draw procedures branch on the window's `WIN_STATUS_ENABLED` bit and the instance's
+/// `WIN_STATE_HILITED`/`WIN_STATE_SELECTED` bits, then read family-specific user data. This carries
+/// exactly that much, so a composition never needs the retained tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct UiDrawState {
+    /// Whether the control and every ancestor are enabled.
+    pub enabled: bool,
+    /// Whether the control draws hilited, which is hover or press on an enabled control.
+    pub hilited: bool,
+    /// The source's `WIN_STATE_SELECTED`: held down for a push button, checked for a check box,
+    /// the group's choice for a radio button.
+    pub selected: bool,
+    /// A slider's position or a progress bar's percentage.
+    pub value: i32,
+    /// A slider's inclusive lower bound.
+    pub minimum: i32,
+    /// A slider's inclusive upper bound.
+    pub maximum: i32,
+}
+
+/// Every mapped-image name a control declares, addressed the way the source addresses it.
+///
+/// A draw procedure picks both a slot and an entry index — a selected radio button reads the hilite
+/// slot even while enabled, and a horizontal slider reads the disabled slot in every state — so a
+/// frame that carried only the current state's slot could not express those. All three slots travel
+/// together and the composition selects, exactly as `W3DGadget*ImageDraw` does.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct UiSlotImages {
+    enabled: Vec<Option<String>>,
+    disabled: Vec<Option<String>>,
+    hilite: Vec<Option<String>>,
+}
+
+impl UiSlotImages {
+    /// Creates a table from one control's three slots, each in entry order.
+    #[must_use]
+    pub const fn new(
+        enabled: Vec<Option<String>>,
+        disabled: Vec<Option<String>>,
+        hilite: Vec<Option<String>>,
+    ) -> Self {
+        Self {
+            enabled,
+            disabled,
+            hilite,
+        }
+    }
+
+    /// Returns one slot's image name at an entry index, absent when the entry declares none.
+    #[must_use]
+    pub fn image(&self, slot: WndDrawDataSlot, index: usize) -> Option<&str> {
+        self.slot(slot).get(index)?.as_deref()
+    }
+
+    /// Returns one slot's image names in entry order.
+    #[must_use]
+    pub fn slot(&self, slot: WndDrawDataSlot) -> &[Option<String>] {
+        match slot {
+            WndDrawDataSlot::Disabled => &self.disabled,
+            WndDrawDataSlot::Hilite => &self.hilite,
+            _ => &self.enabled,
+        }
+    }
+
+    /// Returns whether any slot declares any image.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        [&self.enabled, &self.disabled, &self.hilite]
+            .into_iter()
+            .all(|slot| slot.iter().all(Option::is_none))
+    }
+
+    /// Returns every declared image name, enabled slot first then disabled then hilite, each in
+    /// entry order.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        [&self.enabled, &self.disabled, &self.hilite]
+            .into_iter()
+            .flatten()
+            .filter_map(Option::as_deref)
+    }
 }
 
 /// How a text run is positioned inside its rectangle.
@@ -49,6 +199,9 @@ pub enum UiTextAlign {
     TopLeft,
     /// Centred on both axes, which is what `drawButtonText` does for a push button.
     Centered,
+    /// Vertically centred and indented from the left by the control's own height, which is where
+    /// `drawCheckBoxText` puts a check box's label so it clears the box image.
+    CenteredBesideBox,
 }
 
 /// One shaped text run a frame asks the renderer to draw.
@@ -87,10 +240,10 @@ pub enum UiFrameItem {
         /// The absolute rectangle.
         rect: UiRect,
         /// Which draw-data slot the control's current state selected.
+        ///
+        /// A composition still reads other slots where its source procedure does; this is the slot
+        /// the plain state selection lands on, and the one the colours below come from.
         slot: WndDrawDataSlot,
-        /// The mapped-image name for the slot's first entry, absent when it declares `NoImage`
-        /// or the control declares no draw data for the slot.
-        image: Option<String>,
         /// The slot's fill colour, absent when the control declares no draw data for the slot.
         color: Option<WndColor>,
         /// The slot's border colour, absent when the control declares no draw data for the slot.
@@ -98,18 +251,21 @@ pub enum UiFrameItem {
         /// Whether the control declares `BORDER`, which is what makes the original draw its border
         /// and corners at all. A colour alone does not.
         border: bool,
-        /// Every image name in the selected slot, in entry order, so a presentation layer can
-        /// compose the pieces its family declares. Entry 0 is the whole-control background.
-        entries: Vec<Option<String>>,
+        /// Every image name the control declares, by slot and entry index, so a family's
+        /// composition can read the slots its own draw procedure reads.
+        images: UiSlotImages,
         /// The control's `IMAGEOFFSET`, which the source adds to every piece's position.
         image_offset: (i32, i32),
         /// Which family's composition rules apply.
         family: UiControlFamily,
-        /// Whether the control is currently held down, which selects the pushed art.
-        selected: bool,
-        /// Whether the control declares `IMAGE`, which is what makes the original take an
-        /// image-drawing path at all instead of filling with the slot's colour.
-        image_status: bool,
+        /// The live state that family's composition branches on.
+        state: UiDrawState,
+        /// Whether the control takes an image-drawing path at all.
+        ///
+        /// The discriminator is the retained draw-callback name — an `...ImageDraw` variant against
+        /// a plain `...Draw` — because that name is what the original binds as the draw procedure.
+        /// A control naming no draw callback falls back to its `IMAGE` status bit.
+        image_draw: bool,
     },
     /// A control's text.
     Text(UiTextRun),
@@ -180,15 +336,19 @@ impl UiLayout {
                 control: id,
                 rect,
                 slot,
-                image: entry.and_then(|entry| entry.image()).map(str::to_owned),
                 color: entry.map(WndDrawEntry::color),
                 border_color: entry.map(WndDrawEntry::border_color),
                 border: control.status().contains(UiStatus::BORDER),
-                entries: control.draw_entry_images(slot),
+                images: control.slot_images(),
                 image_offset: control.image_offset().unwrap_or((0, 0)),
                 family: control.family(),
-                selected: control.is_pressed(),
-                image_status: control.status().contains(UiStatus::IMAGE),
+                state: UiDrawState {
+                    enabled: self.is_effectively_enabled(id),
+                    hilited: slot == WndDrawDataSlot::Hilite,
+                    selected: control.is_selected(),
+                    ..control.draw_bounds()
+                },
+                image_draw: control.is_image_draw(),
             });
             if let Some(run) = self.text_run(id, rect) {
                 frame.items.push(UiFrameItem::Text(run));
