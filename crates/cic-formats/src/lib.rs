@@ -20,6 +20,7 @@ mod w3d_material;
 mod w3d_mesh;
 mod w3d_scene;
 mod water_ini;
+mod window_transitions_ini;
 mod wnd;
 mod wnd_patch;
 
@@ -91,6 +92,10 @@ pub use w3d_scene::{
 pub use water_ini::{
     WaterIni, WaterIniError, WaterIniLimits, WaterRgba8, WaterSetIni, WaterTransparencyIni,
     parse_water_ini, parse_water_transparency_ini,
+};
+pub use window_transitions_ini::{
+    TransitionGroupDef, TransitionStyle, TransitionWindowDef, WindowTransitionsIni,
+    parse_window_transitions_ini,
 };
 pub use wnd::{
     WND_DRAW_DATA_ENTRIES, WND_TAB_PANES, WndCallbackKind, WndCallbacks, WndColor, WndComboBoxData,

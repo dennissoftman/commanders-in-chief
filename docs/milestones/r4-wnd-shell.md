@@ -326,6 +326,124 @@ One compatibility fact belongs to Gates 7 and 8 rather than to presentation: ren
 subpanels from menu code, not through `STATUS`, so a correct main menu needs the shell stack's
 show/hide semantics — the layout alone does not describe which subpanel is visible.
 
+Gate 7 (safe callbacks, shell stack, and transitions) is implemented. Three new `cic-ui` modules and
+one new `cic-formats` decoder cover it, and the format-level derivation lives in
+[docs/formats/wnd.md](../formats/wnd.md).
+
+The callback allowlist did not need inventing: the original already has one. `FunctionLexicon` holds
+nine fixed `{name, function}` tables keyed by `nameToKey`, a name absent from the searched table
+yields a null pointer, and nothing ever calls it. `cic-ui` carries those nine tables as data and
+classifies a retained name as `established`, the explicit `[None]` placeholder, or `unknown`; the last
+two are inert here exactly as they were inert there. Routing a callback to an action is separate and
+project-owned: `UiActionAllowlist` maps an authored control name to a `UiDemoAction` — push or pop a
+screen, show or hide a control, set a transition group, leave the demo — and a control absent from it
+routes nothing however established its callback name is.
+
+`UiShell` reproduces `Shell`'s sixteen-screen pseudo-stack, including the two-phase push and pop whose
+purpose is animation: pushing records a pending push, runs the current top's shutdown, and links the
+new screen only when that shutdown reports back. Because this project never calls a resolved function,
+the protocol is exposed rather than hidden — a push returns a typed shutdown event and the caller
+decides when that shutdown is finished — so a capture steps the whole sequence with no clock involved.
+`cic-inspect ui-shell` drives such a script and reports each step's events plus the resulting stack,
+draw order, and visibility.
+
+Bounded `WindowTransitions.ini` decoding landed with it, which is the transition part of Gate 4's
+remainder and the prerequisite for the transition runtime. It reuses the shared UI INI lexer and
+covers groups, `FireOnce`, and the nested `Window` sub-blocks, with all fifteen `TransitionStyleNames`
+styles and each one's frame length.
+
+Measured against both installed editions:
+
+| Measure | Zero Hour | Generals |
+| --- | --- | --- |
+| Layouts swept for callbacks | 80 | 78 |
+| Retained callback names | 6,908 | 6,350 |
+| Names no lexicon table carries | 6 | 5 |
+| Distinct record-and-name pairs | 223 | 217 |
+| Transition groups | 56 | 55 |
+| Transition windows | 381 | 379 |
+| Transition INI diagnostics | 0 | 0 |
+
+Every unknown name is retail's own gap rather than a decoding failure: `MarketingScreenInit`,
+`MarketingScreenUpdate`, `MarketingScreenShutdown`, `SinglePlayerLoadScreenShutdown` twice, and, in
+Zero Hour only, `ChallengeLoadScreenShutdown`. All are layout-level names the shipped client's lexicon
+never registers, so those screens' init, update, or shutdown did nothing in the original either.
+
+Four findings came out of building it, and the first changed existing behaviour:
+
+- **Hit testing ran back to front.** The original's window manager stores windows in reverse file
+  order — `winCreate` links every new window at the head of its list, and `addWindowToParent`'s
+  append-at-end variant is commented out — so `getWindowUnderCursor` and `winPointInChild`, which walk
+  from the head, test the *last* window in the file first. That is also the front-most window, since
+  `winRepaint` draws from the tail backwards. Gate 5 walked both lists in file order, which resolves
+  overlapping siblings backwards. Fixed, with a synthetic fixture pinning it. Rendering was already
+  correct, and only overlapping siblings could tell the difference, which is why it survived the Gate 6
+  sweeps.
+- **The three layered passes belong to the shell, not to a layout.** They run over the manager's single
+  global window list, so with several screens up a pass has to span all of them. `UiShell::hit_test`
+  owns the passes and delegates only the descent.
+- **Quote handling differs between window and layout callbacks.** A window callback is read by scanning
+  to the first `"` and taking what is inside; a layout callback is read with `strtok(buffer, " =")` and
+  never has a quote stripped. Retail writes the former quoted and the latter bare, so both resolve — but
+  a modded file that quotes a `LAYOUTINIT` produces a name no table carries, in the original as much as
+  here.
+- **Two callback records search every table.** `gameWinDrawFunc` and `winLayoutInitFunc` default to
+  `TABLE_ANY`, and that is the only reason `W3DGadgetPushButtonImageDraw` and `W3DMainMenuInit` resolve
+  at all: both live in device tables the pinned accessors never look in.
+
+One smaller fact: Zero Hour's lexicon is a strict superset of base Generals', adding only the five
+`ChallengeMenu*` entries and `PopupHostGameUpdate`, with identical device tables. No retail Generals
+layout names any of the six, so both corpora classify identically today; classification is still
+edition-parameterized for modded content.
+
+The transition runtime completed the gate. `UiTransitionHandler` reproduces the handler's scheduling —
+current, pending, and the two draw groups, set/reverse/remove, fire-once, and the accumulator that
+steps every whole frame it crosses so a discrete state machine cannot skip a state — over each of the
+fifteen styles' own per-frame machine of hidden-state changes and draw states. Time is the caller's:
+the source multiplies its frame pacer's ratio by the user's transition-speed preference, and this takes
+that scale as an argument so a capture advances exactly one frame. Draws are renderer-neutral records;
+executing them in `cic-render` is separate work, so transitions run and report but do not yet reach a
+surface.
+
+`cic-inspect ui-transitions --run` arms every group, loads the layouts its window names point at, and
+steps it to completion under a bounded budget:
+
+| Measure | Zero Hour | Generals |
+| --- | --- | --- |
+| Groups stepped | 56 | 55 |
+| Declared windows | 381 | 379 |
+| Windows naming a control | 379 | 377 |
+| Unresolved windows | 0 | 0 |
+| Groups that never finish | 4 | 4 |
+| Frames stepped | 1,008 | 996 |
+| Draw records produced | 3,047 | 3,029 |
+
+Every window of every retail group resolves. Two source conditions account for the rest, and building
+the sweep is what found them:
+
+- **A group naming a missing window never finishes**, because the arm that would set the flag tests the
+  window first. No retail group is in that state once its own layouts are loaded, but a modded one
+  could be, and it is reported rather than silently hung.
+- **`TYPETEXT` cannot finish when its label is under thirty characters.** It sets its finished flag only
+  on the state numbered by its declared length of thirty, while arming shortens the length to the
+  label's character count and the per-window frame filter refuses anything past it. That is exactly the
+  four unfinished groups in each edition — the difficulty screen's `StaticTextSelectDifficulty`, armed
+  for twenty frames. `COUNTUP` shortens identically and does finish, because it carries one extra
+  assignment at its armed length that `TYPETEXT` lacks, which is what makes this look like an oversight
+  in the original rather than a design.
+
+Three further source facts shaped the implementation. Two styles animate no window at all —
+`SCREENFADE` covers the viewport, `CONTROLBARARROW` slides the control bar's own arrow — and retail
+writes both with no `WinName`, so an absent name is not a missing window. Three styles pair with a
+companion window and hand over to it, found by fixed name for `MAINMENUSCALEUP` or by suffixing the
+animated window's own decorated name for the other two, and leave themselves unarmed when it is
+missing. And reversing walks `BUTTONFLASH`'s wash back out through mirrored draw states rather than
+replaying it forwards.
+
+`CONTROLBARARROW` runs its state machine but reports its draw: the arrow image comes from the
+control-bar definitions, which are neither a WND nor a mapped image, and it belongs to the in-game bar
+rather than to the shell. Audio cues are reported rather than played, R4 having no audio.
+
 The Gate 3 patch work was verified end to end against the retail `OptionsMenu.wnd`: the stock
 `ComboBoxResolution` is
 reused and repositioned while a project-owned refresh-rate combo is inserted beside it. That is
@@ -438,8 +556,8 @@ source WND bytes are edited and no renderer path searches for special window nam
    a new immutable definition with per-field provenance; preserve the source document unchanged.
    Missing required targets, duplicate inserted IDs, cycles, limit excess, and invalid gadget data
    are structured errors. Version 1 has no wildcards, arbitrary callbacks, or imperative code.
-4. **UI resource resolution (definitions implemented; transitions, cursors, and schemes pending).**
-   Add bounded mapped-image, font/language, transition/scheme, cursor,
+4. **UI resource resolution (definitions and transition groups implemented; cursors and schemes
+   pending).** Add bounded mapped-image, font/language, transition/scheme, cursor,
    and required menu-definition subsets. Resolve CSF labels through the existing localization
    decoder and images/fonts through the VFS. Missing resources use visible placeholders and stable
    diagnostics; system-font fallback is opt-in and never used by deterministic captures.
@@ -452,7 +570,8 @@ source WND bytes are edited and no renderer path searches for special window nam
    scissor rectangles, cursors, and shaped Unicode text over either a 2D background or an R3 scene.
    Support source alpha and explicit color-space handling, bounded atlases, batched stable draws,
    explicit transition time, and surface-free deterministic capture.
-7. **Safe callbacks, shell stack, and transitions.** Retain source system/input/draw/tooltip and
+7. **Safe callbacks, shell stack, and transitions (implemented).** Retain source
+   system/input/draw/tooltip and
    layout callback names, then route only allowlisted demo actions through typed events. Implement
    push/pop/bring-forward/hide semantics and established transition groups without invoking MAP
    scripts or arbitrary symbols. Unknown callbacks remain reportable and inert.

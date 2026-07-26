@@ -256,6 +256,20 @@ pub struct WndColor {
 }
 
 impl WndColor {
+    /// Builds a colour from explicit channel bytes.
+    ///
+    /// A decoded colour comes from a `COLOR:`/`BORDERCOLOR:` record; this exists for the project-owned
+    /// callers that compose one, such as a transition drawing a stand-in at a computed alpha.
+    #[must_use]
+    pub const fn from_rgba(red: u8, green: u8, blue: u8, alpha: u8) -> Self {
+        Self {
+            red,
+            green,
+            blue,
+            alpha,
+        }
+    }
+
     /// Returns the channel bytes in `R`, `G`, `B`, `A` order.
     #[must_use]
     pub const fn channels(self) -> [u8; 4] {

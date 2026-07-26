@@ -18,12 +18,20 @@
 //! - **Order is stable.** Source order controls the tree, hit testing, focus traversal, and draw
 //!   submission; no iteration depends on a host hash or a clock.
 
+mod callbacks;
 mod frame;
 mod input;
 mod retained;
+mod shell;
 #[cfg(test)]
 mod tests;
+mod transitions;
 
+pub use callbacks::{
+    UI_CALLBACK_SLOTS, UI_CALLBACK_TABLES, UiActionAllowlist, UiCallbackBinding, UiCallbackEdition,
+    UiCallbackSlot, UiCallbackTable, UiDemoAction, ZERO_HOUR_ONLY_NAMES, classify_callback,
+    classify_callback_in, is_none_callback,
+};
 pub use frame::{
     UI_MAX_TABS, UiClipPolicy, UiControlFamily, UiDrawState, UiFrame, UiFrameItem, UiSlotImages,
     UiTabGeometry, UiTextAlign, UiTextRun,
@@ -32,4 +40,9 @@ pub use input::{UiEvent, UiKey, UiMouseButton};
 pub use retained::{
     UiControl, UiControlId, UiControlKind, UiDiagnostic, UiDiagnosticKind, UiGadgetRole, UiLayout,
     UiLayoutError, UiLimits, UiPoint, UiPresentation, UiRect, UiScalePolicy, UiStatus, UiViewport,
+};
+pub use shell::{UI_MAX_SHELL_STACK, UiScreen, UiScreenId, UiShell, UiShellError, UiShellEvent};
+pub use transitions::{
+    UI_TRANSITION_FRAMES_PER_SECOND, UiTransitionDiagnostic, UiTransitionDiagnosticKind,
+    UiTransitionDraw, UiTransitionHandler, UiTransitionStep, UiTransitionTarget,
 };

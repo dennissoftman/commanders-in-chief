@@ -495,6 +495,7 @@ tokens and a continuation of exactly one character is dropped (`"Synth 0"` reads
 | `mapped_image_ini.rs` | `MappedImage <Name>` | `Texture`, `TextureWidth`, `TextureHeight`, `Coords`, `Status` |
 | `header_template_ini.rs` | `HeaderTemplate <Name>` | `Font`, `Point`, `Bold` |
 | `language_ini.rs` | `Language` (unnamed singleton) | 25 fields: 17 font roles plus `UnicodeFontName`, `LocalFontFile`, `MilitaryCaptionSpeed`, `MilitaryCaptionDelayMS`, `UseHardWordWrap`, `ResolutionFontAdjustment`, `ResolutionFontSizeMethod` |
+| `window_transitions_ini.rs` | `WindowTransition <Name>` | `FireOnce` plus repeated `Window` sub-blocks of `WinName`, `Style`, `FrameDelay` |
 
 Mapped-image lookup is case-insensitive because the source keys its collection through a lowercased
 name key; header-template lookup is case-sensitive because the source compares names directly. Both
@@ -518,6 +519,136 @@ file order — the order fonts are actually registered in.
 Default limits are 4 MiB per file, 100,000 lines, 4,096 bytes per line, 16,384 definitions per file,
 255-byte names, 1,024-byte values, and 256 entries per repeated field. Resolution adds 4,096
 definition files per directory tree and 65,536 catalog definitions.
+
+### Window transition groups
+
+`Data/INI/WindowTransitions.ini` names groups of windows to animate together. A group is a list of
+`Window` sub-blocks, each naming one window by its **decorated** `<layout>:<control>` name, one style
+from a fixed fifteen-entry vocabulary, and a frame delay. `FireOnce = Yes` marks a group that clears
+itself after finishing; a group without it stays current, and the handler reverses it when another
+group is set, which is how a menu's forward animation plays backwards on the way out.
+
+The style vocabulary is `TransitionStyleNames`, and each style's length is its own `*TRANSITION_END`
+constant, in frames of the source's fixed thirty-per-second transition clock:
+
+| Style | Frames | Style | Frames | Style | Frames |
+| --- | --- | --- | --- | --- | --- |
+| `FLASH` | 8 | `TYPETEXT` | 30 | `MAINMENUMEDIUMSCALEUP` | 3 |
+| `BUTTONFLASH` | 17 | `SCREENFADE` | 30 | `MAINMENUSMALLSCALEDOWN` | 6 |
+| `WINFADE` | 10 | `COUNTUP` | 30 | `CONTROLBARARROW` | 22 |
+| `WINSCALEUP` | 6 | `FULLFADE` | 10 | `SCORESCALEUP` | 6 |
+| `MAINMENUSCALEUP` | 5 | `TEXTONFRAME` | 1 | `REVERSESOUND` | 2 |
+
+`TYPETEXT` and `COUNTUP` shorten that length at creation from their window's own text rather than from
+the definition — one frame per character, or per one, hundred, or thousand of the integer counted to —
+so the table gives the declared maximum for them. `COUNTUP` runs no frames at all when its window
+starts hidden.
+
+Three lookup rules differ from the rest of the INI family, and each is reproduced. A style name is
+compared case-insensitively, because `parseLookupList` reaches `scanIndexList`. A group name is
+compared case-insensitively when a caller asks for it, because `findGroup` uses `compareNoCase`. A
+window name is compared **case-sensitively**, because the handler turns it into a name key through
+`nameToKey`, which compares with `strcmp` — the same key a WND `NAME` record produces.
+
+A repeated group name behaves unlike every other UI definition family: `getNewGroup` refuses to
+allocate a second group with an existing name and returns nothing, so the source parses the repeated
+definition's fields into no group at all. The later definition is therefore dropped whole rather than
+merged, and this decoder reports it.
+
+#### Measured transition coverage
+
+Both installed editions decode with **zero diagnostics**: Zero Hour declares 56 groups over 381
+windows, base Generals 55 groups over 379. Fourteen of the fifteen styles are exercised;
+`MAINMENUSMALLSCALEDOWN` is declared by no retail group in either edition. `FLASH` (117 windows) and
+`BUTTONFLASH` (77) dominate, and `COUNTUP`'s 56 windows all belong to one group — the score screen.
+Four further `TYPETEXT` windows are present but commented out, which the decoder correctly ignores.
+
+`cic-inspect ui-transitions` reports the inventory, per-style census, and diagnostics; it defaults to
+`Data/INI/WindowTransitions.ini` and accepts any other virtual path for a modded file.
+
+#### Implemented transition runtime
+
+`UiTransitionHandler` reproduces `GameWindowTransitionsHandler`. At most one group is current, one
+waits behind it, and two more still have something to draw — the group that drew last frame, kept so
+an outgoing group's final frame is not dropped. Setting a group while one runs reverses the running
+one, unless it is fire-once or already reversed, and queues the new one; setting it *immediately*
+skips the running one to its end instead. A fire-once group clears itself on finishing, and so does a
+reversed one once it has run back out.
+
+Timing is the caller's. The source advances a real-valued accumulator by
+`getBaseOverUpdateFpsRatio() * m_gameWindowTransitionSpeedMultiplier` and then steps **every whole
+frame the accumulator crossed**, precisely so a discrete state machine cannot skip a state when the
+present rate dips. That stepping is reproduced with the scale as an argument, so a deterministic
+capture passes `1.0` and advances exactly one frame with no clock involved.
+
+Each window inside a group carries its own `FrameDelay`, and a frame outside `delay ..= delay +
+length` is not delivered to it at all. That filter is what makes several of the facts below matter.
+
+Every style follows one shape. Arming captures the target's screen rectangle, runs the start frame
+*backwards* so the start state applies, then clears the finished flag and faces forward. A frame then
+hides or shows windows and selects a draw state; the draw state is what produces output, and the real
+window is hidden for most of the animation because the transition is drawing a stand-in over it.
+Skipping is `update(END)`. Four behaviours are worth naming:
+
+- **Two styles animate no window at all.** `SCREENFADE` covers the viewport and `CONTROLBARARROW`
+  slides the control bar's own arrow, and retail writes both with no `WinName`. An absent name is
+  therefore not a missing window.
+- **Three styles pair with a companion window** and hand over to it at the end. `MAINMENUSCALEUP`
+  names `MainMenu.wnd:WinGrowMarker` outright and copies the animated window's *disabled* art onto it;
+  the medium and small variants append `Medium` or `Small` to the animated window's own decorated name.
+  A style whose companion is missing returns from arming unarmed — never finishing, never drawing.
+- **Two styles shorten their own length from data.** `TYPETEXT` runs one frame per character of the
+  label it types, and `COUNTUP` one frame per one, hundred, or thousand of the integer it counts to, so
+  a group's total frames depend on its text rather than on its definition.
+- **Two styles produce no draw**, because their effect is retained state rather than an overlay:
+  `COUNTUP` rewrites its own label in place, and `TEXTONFRAME` only unhides one.
+
+Draws are renderer-neutral records rather than immediate calls: a filled and/or outlined rectangle, one
+of a control's own images scaled into an arbitrary rectangle, a style-named mapped image such as the
+button flash's `Gradient`, a push button's three-piece art at one alpha, or a partially typed label.
+`drawTypeText` places that label using the *complete* string's measured size, so a centred label stays
+anchored where the finished text will sit instead of sliding as characters arrive. Executing these
+records in the renderer is separate work; the runtime is complete and produces them, and nothing draws
+them to a surface yet.
+
+Audio is reported, not played: R4 has no audio, so each cue a frame fires — `GUIBoarderFadeIn`,
+`GUIButtonsFadeIn`, `GUITypeText`, `GUIScoreScreenTick`, and the rest — becomes an observation naming
+the event and the frame it belongs to.
+
+##### Measured transition-runtime coverage
+
+`cic-inspect ui-transitions --run` arms every group in a file, loads the layouts its window names point
+at, and steps it to completion under a bounded frame budget. Both installed editions resolve
+completely:
+
+| Measure | Zero Hour | Generals |
+| --- | --- | --- |
+| Groups stepped | 56 | 55 |
+| Declared windows | 381 | 379 |
+| Windows naming a control | 379 | 377 |
+| Unresolved windows | 0 | 0 |
+| Groups that never finish | 4 | 4 |
+| Frames stepped | 1,008 | 996 |
+| Draw records produced | 3,047 | 3,029 |
+
+Two source conditions account for everything that is not a clean finish, and both are reported where
+they happen rather than worked around:
+
+- A group naming a window no loaded layout carries **never finishes**, because the arm that would set
+  the flag tests the window first. No retail group is in this state once each group's own layouts are
+  loaded.
+- `TYPETEXT` sets its finished flag only on the state numbered by its **declared** length of thirty,
+  but arming shortens the length to the label's character count and the per-window frame filter refuses
+  anything past it. A label under thirty characters therefore never delivers the state that would
+  finish it, and its group runs forever. This is what the four unfinished groups in each edition are:
+  the difficulty screen's `StaticTextSelectDifficulty`, armed for twenty frames. `COUNTUP` shortens
+  identically and *does* finish, because it carries one extra assignment at its armed length that
+  `TYPETEXT` lacks — which is what makes this look like an oversight in the original rather than a
+  design.
+
+`CONTROLBARARROW` runs its state machine but reports its draw instead of composing it: the arrow comes
+from the control-bar definitions, which are neither a WND nor a mapped image, and it belongs to the
+in-game bar rather than to the shell.
 
 ## Custom `wgpu` presentation
 
@@ -645,12 +776,26 @@ both axes and centres the result, letterboxing the authored composition instead 
 `getWindowUnderCursor` establishes a layered search that is reproduced exactly. Top-level windows
 are searched in three passes — `ABOVE` first, then windows with none of `ABOVE`/`BELOW`/`HIDDEN`,
 then `BELOW` — and the first whose region contains the point descends through `winPointInChild`,
-which walks children in **source order** and returns the first visible, enabled child containing the
-point, recursing into it. A hidden or disabled child that contains the point is skipped and iteration
-continues with its later siblings, so a click falls through to the parent rather than being swallowed.
-A control declaring `NO_INPUT` discards the result. Every edge test is inclusive on both ends
-(`x >= left && x <= left + width`), which decides which of two adjacent controls a boundary click
-reaches. While a control holds the mouse the search is confined to it.
+which returns the first visible, enabled child containing the point and recurses into it. A hidden or
+disabled child that contains the point is skipped and iteration continues with the next child, so a
+click falls through to the parent rather than being swallowed. A control declaring `NO_INPUT` discards
+the result. Every edge test is inclusive on both ends (`x >= left && x <= left + width`), which
+decides which of two adjacent controls a boundary click reaches. While a control holds the mouse the
+search is confined to it.
+
+Both walks run in **reverse file order**, which is a consequence of how the window manager stores
+windows rather than of the search itself. `winCreate` links every new window at the head of its list
+— the top-level list through `linkWindow`, a child list through `addWindowToParent`, whose
+append-at-end variant is commented out — so a layout's lists are the reverse of its file order, and
+`winBringToTop` pulls from the layout tail specifically to preserve that. `getWindowUnderCursor` and
+`winPointInChild` then walk from the head, so the last window in the file is tested first. That is
+also the front-most window: `winRepaint` draws from the tail backwards, which puts the last window in
+the file on top. Only overlapping siblings can tell the difference, which is why this went unnoticed
+until the shell needed one search spanning several layouts.
+
+When more than one layout is up, the three passes belong to the shell rather than to a layout, because
+the original runs them over the window manager's single global list. `UiShell::hit_test` therefore
+walks its own draw order front to back inside each pass, delegating the descent to the owning layout.
 
 ### Implemented focus and tab traversal
 
@@ -708,6 +853,86 @@ once corpus-wide.
 Control state changes produce typed UI events. Callback fields are looked up only in an application
 allowlist. Unknown callback names are inert. Layout update names do not create a general scripting
 language, and MAP scripts are never dispatched by the UI runtime.
+
+### Implemented safe callbacks
+
+The original resolves an authored callback name exactly once, at creation, through
+`FunctionLexicon`: nine fixed tables of `{name, function}` pairs, keyed by `nameToKey`, which compares
+with `strcmp`. A name absent from the searched table yields a null pointer that is simply never
+called. That mechanism *is* the allowlist this gate needs, so `cic-ui` carries the same nine tables as
+data and classifies a retained name as `established`, the explicit `[None]` placeholder, or `unknown`
+— the last two being inert here exactly as they were inert there.
+
+Two of the seven WND callback records search every table rather than their own, because
+`gameWinDrawFunc` and `winLayoutInitFunc` default to `TABLE_ANY`. That is the only reason a control's
+`W3DGadgetPushButtonImageDraw` or a layout's `W3DMainMenuInit` resolves at all: both live in device
+tables — `TABLE_GAME_WIN_DEVICEDRAW` and `TABLE_WIN_LAYOUT_DEVICEINIT` — that the pinned accessors
+never look in. An every-table search walks tables in `TableIndex` order and takes the first match, so a
+name that appears in two tables resolves to the earlier one. Every other record is pinned to one
+table, which means the same spelling in the wrong record resolves to nothing.
+
+The two editions compile separate copies of these tables and Zero Hour's are a strict superset: it
+adds `ChallengeMenuInit`, `ChallengeMenuInput`, `ChallengeMenuShutdown`, `ChallengeMenuSystem`,
+`ChallengeMenuUpdate`, and `PopupHostGameUpdate`. Device tables are identical. No retail Generals
+layout names any of the six, so both corpora classify identically today; classification is still
+edition-parameterized, because a modded layout need not be so tidy.
+
+One asymmetry in the source's own parsing survives here. A **window** callback is read by scanning to
+the first `"` and taking what is inside, so `SYSTEMCALLBACK = "MainMenuSystem"` yields
+`MainMenuSystem`. A **layout** callback is read with `strtok(buffer, " =")` and never has a quote
+stripped, so a quoted `LAYOUTINIT` would produce a name no table carries. Retail writes window
+callbacks quoted and layout callbacks bare, so both resolve; a modded file that quotes a layout
+callback is inert in the original as much as here, and the retained value keeps its quotes to say so.
+
+Routing a callback to an action is separate and project-owned. `UiActionAllowlist` maps an authored
+control name — decorated for one layout, undecorated to cover every menu's Back — to a
+`UiDemoAction`: push or pop a screen, show or hide a control, set a transition group, or leave the
+demo. A control absent from the allowlist routes nothing however established its callback name is,
+which is what keeps a presentation-only milestone from starting a game.
+
+#### Measured callback coverage
+
+Across both installed corpora, **6,908 retained names in Zero Hour's 80 layouts and 6,350 in
+Generals' 78** classify with **six and five unknowns respectively**, and every one of those is
+retail's own gap rather than a decoding failure: `MarketingScreenInit`, `MarketingScreenUpdate`,
+`MarketingScreenShutdown`, `SinglePlayerLoadScreenShutdown` (twice), and, in Zero Hour only,
+`ChallengeLoadScreenShutdown`. All six are layout-level names the shipped client's lexicon never
+registers, so those screens' init, update, or shutdown did nothing in the original either. The Zero
+Hour corpus exercises 223 distinct record-and-name pairs, Generals 217.
+
+`cic-inspect ui-callbacks <layout>` reports every name with its slot, binding, and resolving table.
+
+### Implemented shell stack
+
+`Shell` is a sixteen-screen pseudo-stack over window layouts, reproduced in `UiShell`. Its push and
+pop are two-phase, and the reason is animation: pushing records a *pending push*, runs the current
+top's shutdown, and links the new screen only when that shutdown reports back through
+`shutdownComplete`, which lets a layout animate itself away first. Popping is the same shape with a
+*pending pop*. `popImmediate` deliberately leaves the pending flag clear, tells the shutdown an
+immediate pop is coming, and unlinks as soon as it returns. A push over an empty or already-hidden top
+short-circuits straight to `shutdownComplete`, so it completes in one call.
+
+Since this project never calls a resolved function, the protocol is exposed rather than hidden: a push
+returns a typed shutdown event carrying the retained callback name, and the caller calls
+`shutdown_complete` when it considers that shutdown finished. A deterministic capture therefore steps
+the whole sequence explicitly, with no clock involved.
+
+Three further behaviours are reproduced. `Shell::hide` walks the entire stack rather than only the
+top, and each layout's own `hide` walks the file's top-level windows — the set
+`winCreateFromScript` puts in the layout, in file order — with children following because a hidden
+parent hides its subtree. `Shell::update` runs every screen's update whether or not it is on top or
+visible, starting at the top index and counting down. And the stack is not the draw order: the stack
+is navigation history, while z-order lives in the window manager's list, which `bringForward`
+reorders. `UiShell` keeps a separate draw order for exactly that reason, so a screen can be on top of
+the stack while another screen draws over it. `doPush` brings the pushed screen forward; `doPop` does
+not, because the source's call there is commented out.
+
+`cic-inspect ui-shell --step ...` drives an explicit script — `push:<path>`, `pop`, `pop-immediate`,
+`complete`, `complete-for-push`, `update`, `hide`, `show`, `show-shell`, `hide-shell`,
+`forward:<index>` — and reports each step's events plus the resulting stack, draw order, and
+visibility. Against the installed Zero Hour layouts, Main Menu → Options → back → Skirmish Options →
+back runs with every layout callback resolving as established, and the report is byte-identical
+across runs.
 
 ## Rendering policy
 

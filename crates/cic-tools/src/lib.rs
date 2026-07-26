@@ -16,12 +16,17 @@ use cic_formats::{
     CsfFile, LanguageFontRole, MapBlendData, MapDictionary, MapDictionaryValue, MapFile,
     MapHeightField, MapLightingData, MapPolygonData, MapScript, MapScriptAction,
     MapScriptParameterValue, MapSidesData, MapWaterData, MapWorldObjects, OptionsIni,
-    PatchedWndDocument, UiIniDiagnosticKind, W3dChunk, W3dFile, W3dStaticMesh, W3dVector3,
-    WndCallbackKind, WndDiagnosticKind, WndDocument, WndDrawDataSlot, WndGadgetData, WndPatch,
-    WndPatchOperation, WndWindow, w3d_chunk_name,
+    PatchedWndDocument, TransitionStyle, UiIniDiagnosticKind, W3dChunk, W3dFile, W3dStaticMesh,
+    W3dVector3, WindowTransitionsIni, WndCallbackKind, WndDiagnosticKind, WndDocument,
+    WndDrawDataSlot, WndGadgetData, WndPatch, WndPatchOperation, WndWindow, w3d_chunk_name,
 };
 use cic_render::Capture;
-use cic_ui::{UiClipPolicy, UiControlKind, UiDiagnosticKind, UiFrameItem, UiLayout, UiScalePolicy};
+use cic_ui::{
+    UI_CALLBACK_SLOTS, UiCallbackBinding, UiCallbackEdition, UiCallbackSlot, UiClipPolicy,
+    UiControlKind, UiDiagnosticKind, UiFrameItem, UiLayout, UiScalePolicy, UiScreenId, UiShell,
+    UiShellEvent, UiTransitionDiagnostic, UiTransitionDiagnosticKind, UiTransitionDraw,
+    classify_callback_in,
+};
 use cic_vfs::Vfs;
 
 /// Formats winning VFS entries as deterministic tab-separated records.
@@ -1487,6 +1492,555 @@ fn ui_ini_diagnostic_row(kind: &UiIniDiagnosticKind) -> (&'static str, String) {
             "duplicate_definition",
             format!("{name} first declared on line {first_line}"),
         ),
+    }
+}
+
+/// Formats every retained callback name in one layout with what the original's function lexicon
+/// would have resolved it to.
+///
+/// This is the compatibility view of R4's callback boundary: names are data here, so the interesting
+/// question is which of them the original could have dispatched at all. A name reported `unknown` is
+/// inert in this project and was inert in the original too, because no table carried it. `edition`
+/// selects which build's lexicon answers, since Zero Hour registers six names base Generals does
+/// not.
+#[must_use]
+pub fn render_ui_callbacks(path: &str, edition: UiCallbackEdition, layout: &UiLayout) -> String {
+    let mut output = String::from("ui_callback_file\tpath\tcontrols\tnames\tunknown\n");
+    let mut rows: Vec<(UiCallbackSlot, String, Option<usize>, Option<String>)> = Vec::new();
+    for slot in [
+        UiCallbackSlot::LayoutInit,
+        UiCallbackSlot::LayoutUpdate,
+        UiCallbackSlot::LayoutShutdown,
+    ] {
+        let name = match slot {
+            UiCallbackSlot::LayoutInit => layout.layout_init_callback(),
+            UiCallbackSlot::LayoutUpdate => layout.layout_update_callback(),
+            _ => layout.layout_shutdown_callback(),
+        };
+        if let Some(name) = name {
+            rows.push((slot, name.to_owned(), None, None));
+        }
+    }
+    for control in layout.controls() {
+        for slot in [
+            UiCallbackSlot::System,
+            UiCallbackSlot::Input,
+            UiCallbackSlot::Tooltip,
+            UiCallbackSlot::Draw,
+        ] {
+            let name = match slot {
+                UiCallbackSlot::System => control.system_callback(),
+                UiCallbackSlot::Input => control.input_callback(),
+                UiCallbackSlot::Tooltip => control.tooltip_callback(),
+                _ => control.draw_callback(),
+            };
+            if let Some(name) = name {
+                rows.push((
+                    slot,
+                    name.to_owned(),
+                    Some(control.id().index()),
+                    control.name().map(str::to_owned),
+                ));
+            }
+        }
+    }
+    let unknown = rows
+        .iter()
+        .filter(|(slot, name, _, _)| {
+            classify_callback_in(edition, *slot, name) == UiCallbackBinding::Unknown
+        })
+        .count();
+    writeln!(
+        output,
+        "ui_callback_file\t{path}\t{}\t{}\t{unknown}",
+        layout.controls().len(),
+        rows.len()
+    )
+    .expect("writing to a String cannot fail");
+
+    output.push_str("ui_callback\tslot\trecord\tname\tbinding\ttable\tcontrol_id\tcontrol\n");
+    for (slot, name, control_id, control_name) in &rows {
+        let binding = classify_callback_in(edition, *slot, name);
+        let table = match binding {
+            UiCallbackBinding::Established { table } => table.row_name(),
+            UiCallbackBinding::None | UiCallbackBinding::Unknown => "-",
+        };
+        writeln!(
+            output,
+            "ui_callback\t{}\t{}\t{name}\t{}\t{table}\t{}\t{}",
+            slot.row_name(),
+            slot.record_name(),
+            binding.row_name(),
+            control_id.map_or_else(|| "-".to_owned(), |id| id.to_string()),
+            control_name.as_deref().unwrap_or("-")
+        )
+        .expect("writing to a String cannot fail");
+    }
+
+    output.push_str("ui_callback_summary\tslot\tnames\testablished\tnone\tunknown\n");
+    for slot in UI_CALLBACK_SLOTS {
+        let mut names = 0_usize;
+        let mut established = 0_usize;
+        let mut placeholder = 0_usize;
+        let mut missing = 0_usize;
+        for (candidate, name, _, _) in &rows {
+            if *candidate != slot {
+                continue;
+            }
+            names += 1;
+            match classify_callback_in(edition, slot, name) {
+                UiCallbackBinding::Established { .. } => established += 1,
+                UiCallbackBinding::None => placeholder += 1,
+                UiCallbackBinding::Unknown => missing += 1,
+            }
+        }
+        writeln!(
+            output,
+            "ui_callback_summary\t{}\t{names}\t{established}\t{placeholder}\t{missing}",
+            slot.row_name()
+        )
+        .expect("writing to a String cannot fail");
+    }
+    output
+}
+
+/// Formats the result of a scripted shell navigation: the events each step produced, then the
+/// resulting stack, draw order, and per-screen visibility.
+#[must_use]
+pub fn render_ui_shell(steps: &[(String, Vec<UiShellEvent>)], shell: &UiShell) -> String {
+    let mut output = String::from("ui_shell_step\tindex\tcommand\tevents\n");
+    for (index, (command, events)) in steps.iter().enumerate() {
+        writeln!(
+            output,
+            "ui_shell_step\t{index}\t{command}\t{}",
+            events.len()
+        )
+        .expect("writing to a String cannot fail");
+    }
+
+    output.push_str("ui_shell_event\tstep\tkind\tscreen\tdetail\n");
+    for (index, (_, events)) in steps.iter().enumerate() {
+        for event in events {
+            let (kind, screen, detail) = ui_shell_event_row(event);
+            writeln!(
+                output,
+                "ui_shell_event\t{index}\t{kind}\t{screen}\t{detail}"
+            )
+            .expect("writing to a String cannot fail");
+        }
+    }
+
+    output.push_str("ui_shell_screen\tindex\tpath\thidden\tcontrols\tdraw_position\n");
+    let draw_order = shell.draw_order();
+    for (index, screen) in shell.screens().iter().enumerate() {
+        let position = draw_order
+            .iter()
+            .position(|candidate| candidate.index() == index);
+        writeln!(
+            output,
+            "ui_shell_screen\t{index}\t{}\t{}\t{}\t{}",
+            screen.path(),
+            screen.layout().is_hidden(),
+            screen.layout().controls().len(),
+            position.map_or_else(|| "-".to_owned(), |position| position.to_string())
+        )
+        .expect("writing to a String cannot fail");
+    }
+
+    output.push_str("ui_shell_state\tscreens\ttop\thidden\tpending\n");
+    writeln!(
+        output,
+        "ui_shell_state\t{}\t{}\t{}\t{}",
+        shell.screen_count(),
+        shell.top().map_or("-", cic_ui::UiScreen::path),
+        shell.is_hidden(),
+        shell.is_operation_pending()
+    )
+    .expect("writing to a String cannot fail");
+    output
+}
+
+fn ui_shell_event_row(event: &UiShellEvent) -> (&'static str, String, String) {
+    let screen_text = |screen: UiScreenId| screen.index().to_string();
+    match event {
+        UiShellEvent::ScreenPushed { screen, path } => {
+            ("screen_pushed", screen_text(*screen), path.clone())
+        }
+        UiShellEvent::ScreenPopped { path } => ("screen_popped", "-".to_owned(), path.clone()),
+        UiShellEvent::LayoutInit {
+            screen,
+            callback,
+            binding,
+        } => (
+            "layout_init",
+            screen_text(*screen),
+            ui_callback_detail(callback.as_deref(), *binding),
+        ),
+        UiShellEvent::LayoutUpdate {
+            screen,
+            callback,
+            binding,
+        } => (
+            "layout_update",
+            screen_text(*screen),
+            ui_callback_detail(callback.as_deref(), *binding),
+        ),
+        UiShellEvent::LayoutShutdown {
+            screen,
+            callback,
+            binding,
+            immediate,
+        } => (
+            "layout_shutdown",
+            screen_text(*screen),
+            format!(
+                "{}\timmediate={immediate}",
+                ui_callback_detail(callback.as_deref(), *binding)
+            ),
+        ),
+        UiShellEvent::BroughtForward { screen } => {
+            ("brought_forward", screen_text(*screen), String::new())
+        }
+        UiShellEvent::VisibilityChanged { hidden } => (
+            "visibility_changed",
+            "-".to_owned(),
+            format!("hidden={hidden}"),
+        ),
+    }
+}
+
+fn ui_callback_detail(callback: Option<&str>, binding: Option<UiCallbackBinding>) -> String {
+    match (callback, binding) {
+        (Some(name), Some(binding)) => format!("{name}\t{}", binding.row_name()),
+        _ => "-\t-".to_owned(),
+    }
+}
+
+/// One group's outcome from a transition sweep.
+#[derive(Debug, Clone)]
+pub struct TransitionRunOutcome {
+    /// The group's name.
+    pub group: String,
+    /// How many windows it declares.
+    pub windows: usize,
+    /// How many of those name a window at all; the two window-less styles name none.
+    pub named: usize,
+    /// How many resolved to a control in a loaded layout, counting the window-less blocks.
+    pub resolved: usize,
+    /// The layouts its windows name, in the order first seen.
+    pub layouts: Vec<String>,
+    /// The frame the group declared it would finish on, after arming.
+    pub declared_frames: i32,
+    /// How many frames were actually stepped before it reported finished.
+    pub stepped_frames: i32,
+    /// Whether it reported finished within the frame budget.
+    pub finished: bool,
+    /// How many draw records it produced across the run.
+    pub draws: usize,
+    /// Every observation, deduplicated by kind and window.
+    pub diagnostics: Vec<TransitionRunNote>,
+}
+
+/// One deduplicated observation from a transition sweep.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransitionRunNote {
+    /// The decorated window name it belongs to.
+    pub window: String,
+    /// A stable kind name.
+    pub kind: &'static str,
+    /// The detail, or a dash.
+    pub detail: String,
+    /// How many times it occurred.
+    pub count: usize,
+}
+
+/// Formats the outcome of running every transition group, one row per group.
+///
+/// This is the compatibility view of the transition runtime: whether each retail group's windows
+/// resolve in the layouts they name, whether it runs to completion, and what it draws on the way.
+#[must_use]
+pub fn render_transition_run(path: &str, outcomes: &[TransitionRunOutcome]) -> String {
+    let mut output =
+        String::from("ui_transition_run\tpath\tgroups\tunfinished\twindows\tnamed\tunresolved\n");
+    let windows: usize = outcomes.iter().map(|outcome| outcome.windows).sum();
+    let named: usize = outcomes.iter().map(|outcome| outcome.named).sum();
+    let resolved: usize = outcomes.iter().map(|outcome| outcome.resolved).sum();
+    let unfinished = outcomes.iter().filter(|outcome| !outcome.finished).count();
+    writeln!(
+        output,
+        "ui_transition_run\t{path}\t{}\t{unfinished}\t{windows}\t{named}\t{}",
+        outcomes.len(),
+        windows - resolved
+    )
+    .expect("writing to a String cannot fail");
+
+    output.push_str(
+        "ui_transition_group_run\tgroup\twindows\tnamed\tresolved\tdeclared_frames\t\
+         stepped_frames\tfinished\tdraws\tlayouts\n",
+    );
+    for outcome in outcomes {
+        writeln!(
+            output,
+            "ui_transition_group_run\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            outcome.group,
+            outcome.windows,
+            outcome.named,
+            outcome.resolved,
+            outcome.declared_frames,
+            outcome.stepped_frames,
+            outcome.finished,
+            outcome.draws,
+            if outcome.layouts.is_empty() {
+                "-".to_owned()
+            } else {
+                outcome.layouts.join(",")
+            }
+        )
+        .expect("writing to a String cannot fail");
+    }
+
+    output.push_str("ui_transition_note\tgroup\twindow\tkind\tcount\tdetail\n");
+    for outcome in outcomes {
+        for note in &outcome.diagnostics {
+            writeln!(
+                output,
+                "ui_transition_note\t{}\t{}\t{}\t{}\t{}",
+                outcome.group, note.window, note.kind, note.count, note.detail
+            )
+            .expect("writing to a String cannot fail");
+        }
+    }
+    output
+}
+
+/// Collapses a run's observations into stable, counted rows.
+#[must_use]
+pub fn summarize_transition_diagnostics(
+    diagnostics: &[UiTransitionDiagnostic],
+) -> Vec<TransitionRunNote> {
+    let mut rows: Vec<TransitionRunNote> = Vec::new();
+    for diagnostic in diagnostics {
+        let (kind, detail) = match diagnostic.kind() {
+            UiTransitionDiagnosticKind::WindowNotFound { name } => {
+                ("window_not_found", name.to_string())
+            }
+            UiTransitionDiagnosticKind::CompanionNotFound { name } => {
+                ("companion_not_found", name.to_string())
+            }
+            UiTransitionDiagnosticKind::UnsupportedDraw { style, reason } => {
+                ("unsupported_draw", format!("{}: {reason}", style.name()))
+            }
+            UiTransitionDiagnosticKind::NeverFinishes {
+                style,
+                declared_length,
+                armed_length,
+            } => (
+                "never_finishes",
+                format!(
+                    "{}: armed for {armed_length} frames but finishes only on state {declared_length}",
+                    style.name()
+                ),
+            ),
+            UiTransitionDiagnosticKind::AudioCue { event } => ("audio_cue", event.to_string()),
+        };
+        let window = diagnostic.window().to_owned();
+        match rows
+            .iter_mut()
+            .find(|row| row.window == window && row.kind == kind && row.detail == detail)
+        {
+            Some(row) => row.count += 1,
+            None => rows.push(TransitionRunNote {
+                window,
+                kind,
+                detail,
+                count: 1,
+            }),
+        }
+    }
+    rows
+}
+
+/// Formats one transition draw as a stable row detail.
+#[must_use]
+pub fn transition_draw_row(draw: &UiTransitionDraw) -> (&'static str, String) {
+    match draw {
+        UiTransitionDraw::Rect {
+            rect,
+            fill,
+            outline,
+            outline_width,
+        } => (
+            "rect",
+            format!(
+                "{},{} {}x{}\tfill={}\toutline={}\twidth={outline_width}",
+                rect.x,
+                rect.y,
+                rect.width,
+                rect.height,
+                fill.map_or_else(|| "-".to_owned(), render_color),
+                outline.map_or_else(|| "-".to_owned(), render_color)
+            ),
+        ),
+        UiTransitionDraw::ControlImage {
+            target,
+            slot,
+            entry,
+            rect,
+            color,
+        } => (
+            "control_image",
+            format!(
+                "screen={} control={} slot={slot:?} entry={entry} {},{} {}x{}\tcolor={}",
+                target.screen.index(),
+                target.control.index(),
+                rect.x,
+                rect.y,
+                rect.width,
+                rect.height,
+                render_color(*color)
+            ),
+        ),
+        UiTransitionDraw::NamedImage { image, rect, color } => (
+            "named_image",
+            format!(
+                "{image} {},{} {}x{}\tcolor={}",
+                rect.x,
+                rect.y,
+                rect.width,
+                rect.height,
+                render_color(*color)
+            ),
+        ),
+        UiTransitionDraw::PushButtonPieces { target, alpha } => (
+            "push_button_pieces",
+            format!(
+                "screen={} control={} alpha={alpha}",
+                target.screen.index(),
+                target.control.index()
+            ),
+        ),
+        UiTransitionDraw::TypedText { target, text } => (
+            "typed_text",
+            format!(
+                "screen={} control={} {text:?}",
+                target.screen.index(),
+                target.control.index()
+            ),
+        ),
+    }
+}
+
+fn render_color(color: cic_formats::WndColor) -> String {
+    let [red, green, blue, alpha] = color.channels();
+    format!("{red} {green} {blue} {alpha}")
+}
+
+/// Formats decoded transition groups as a deterministic tab-separated inventory.
+///
+/// Rows carry group and window names, the established style each window runs, and frame counts,
+/// which is what a compatibility check of a user-owned or modded `WindowTransitions.ini` needs. The
+/// style census reports how much of the vocabulary a file actually exercises.
+#[must_use]
+pub fn render_window_transitions(path: &str, ini: &WindowTransitionsIni) -> String {
+    let mut output = String::from("ui_transition_file\tpath\tgroups\twindows\tdiagnostics\n");
+    let windows: usize = ini.groups().iter().map(|group| group.windows().len()).sum();
+    writeln!(
+        output,
+        "ui_transition_file\t{path}\t{}\t{windows}\t{}",
+        ini.groups().len(),
+        ini.diagnostics().len()
+    )
+    .expect("writing to a String cannot fail");
+
+    output.push_str("ui_transition_group\tname\tline\tfire_once\twindows\ttotal_frames\n");
+    output
+        .push_str("ui_transition_window\tgroup\tindex\twindow\tstyle\tframe_delay\ttotal_frames\n");
+    for group in ini.groups() {
+        let name = String::from_utf8_lossy(group.name_bytes());
+        writeln!(
+            output,
+            "ui_transition_group\t{name}\t{}\t{}\t{}\t{}",
+            group.line(),
+            group.fire_once(),
+            group.windows().len(),
+            group.total_frames()
+        )
+        .expect("writing to a String cannot fail");
+        for (index, window) in group.windows().iter().enumerate() {
+            writeln!(
+                output,
+                "ui_transition_window\t{name}\t{index}\t{}\t{}\t{}\t{}",
+                render_optional_bytes(window.window_name_bytes()),
+                window.style().name(),
+                window.frame_delay(),
+                window.total_frames()
+            )
+            .expect("writing to a String cannot fail");
+        }
+    }
+
+    output.push_str("ui_transition_style\tstyle\tframe_length\twindows\tgroups\n");
+    for style in TRANSITION_STYLES {
+        let mut window_count = 0_usize;
+        let mut group_count = 0_usize;
+        for group in ini.groups() {
+            let declared = group
+                .windows()
+                .iter()
+                .filter(|window| window.style() == style)
+                .count();
+            window_count += declared;
+            if declared > 0 {
+                group_count += 1;
+            }
+        }
+        writeln!(
+            output,
+            "ui_transition_style\t{}\t{}\t{window_count}\t{group_count}",
+            style.name(),
+            style.declared_frame_length()
+        )
+        .expect("writing to a String cannot fail");
+    }
+
+    output.push_str("ui_transition_diagnostic\tline\tkind\tdetail\n");
+    for diagnostic in ini.diagnostics() {
+        let (kind, detail) = ui_ini_diagnostic_row(diagnostic.kind());
+        writeln!(
+            output,
+            "ui_transition_diagnostic\t{}\t{kind}\t{detail}",
+            diagnostic.line()
+        )
+        .expect("writing to a String cannot fail");
+    }
+    output
+}
+
+/// Every established transition style, in `TransitionStyleNames` order.
+const TRANSITION_STYLES: [TransitionStyle; 15] = [
+    TransitionStyle::Flash,
+    TransitionStyle::ButtonFlash,
+    TransitionStyle::WinFade,
+    TransitionStyle::WinScaleUp,
+    TransitionStyle::MainMenuScaleUp,
+    TransitionStyle::TypeText,
+    TransitionStyle::ScreenFade,
+    TransitionStyle::CountUp,
+    TransitionStyle::FullFade,
+    TransitionStyle::TextOnFrame,
+    TransitionStyle::MainMenuMediumScaleUp,
+    TransitionStyle::MainMenuSmallScaleDown,
+    TransitionStyle::ControlBarArrow,
+    TransitionStyle::ScoreScaleUp,
+    TransitionStyle::ReverseSound,
+];
+
+/// Renders raw name bytes, or a dash when the definition declared none.
+fn render_optional_bytes(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        "-".to_owned()
+    } else {
+        String::from_utf8_lossy(bytes).into_owned()
     }
 }
 

@@ -64,6 +64,44 @@ land under the active milestone heading.
 
 ### Added
 
+- Added the transition runtime (`UiTransitionHandler`), which runs the decoded groups over the retained
+  shell: one current group, one queued behind it, and the two that still have something to draw, with
+  set, reverse, remove, skip, and fire-once semantics. Timing belongs to the caller — the source
+  multiplies its frame pacer's ratio by the user's transition-speed preference, and this takes that
+  scale as an argument — and every whole frame the accumulator crosses is stepped, so a discrete state
+  machine cannot skip a state at any present rate. All fifteen styles are implemented, including the
+  three that pair with a companion window and the two that shorten their own length from the text they
+  animate. Draws are renderer-neutral records; `cic-render` does not execute them yet, so transitions
+  run and report but do not reach a surface.
+- Added `cic-inspect ui-transitions --run`, which arms every group in a transition file, loads the
+  layouts its window names point at, steps it to completion, and reports what resolved, how long it
+  took, what it drew, and every observation. Both installed editions resolve every window of every
+  group: 379 named windows across Zero Hour's 56 groups and 377 across Generals' 55, none unresolved.
+- Added a retained shell stack (`UiShell`) reproducing the original's sixteen-screen pseudo-stack:
+  push, pop, immediate pop, show-shell, hide-shell, hiding every screen, updates from the stack top
+  downwards, and a draw order separate from the stack so bringing a screen forward does not change
+  navigation history. The two-phase push and pop are exposed rather than hidden — a push returns the
+  current top's shutdown as a typed event and the caller reports when that shutdown finished — so a
+  navigation sequence can be stepped deterministically with no clock involved.
+- Added safe callback classification. The original's own allowlist is `FunctionLexicon`'s nine fixed
+  name tables, where a name absent from the searched table yields a pointer nothing ever calls; those
+  tables are now carried as data, and every retained WND callback name resolves to established, the
+  explicit `[None]` placeholder, or unknown. The last two are inert, and reportable. Classification is
+  edition-aware, because Zero Hour registers six names base Generals does not. A separate
+  project-owned action allowlist decides which controls may run a typed demo action, so a control with
+  a perfectly valid retail callback name still does nothing unless it was listed.
+- Added a bounded `Data/INI/WindowTransitions.ini` decoder over the existing shared UI INI lexer,
+  covering named groups, `FireOnce`, and the nested `Window` sub-blocks, with all fifteen established
+  transition styles and each one's frame length. Both installed editions decode with no diagnostics:
+  56 groups over 381 windows in Zero Hour, 55 over 379 in base Generals.
+- Added `cic-inspect ui-callbacks`, which reports every retained callback name in a layout with its
+  slot, binding, and resolving table; `cic-inspect ui-shell`, which drives an explicit push/pop script
+  over real layouts and reports each step's events plus the resulting stack, draw order, and
+  visibility; and `cic-inspect ui-transitions`, which reports a transition file's groups, per-style
+  census, and diagnostics.
+- Controls now retain their `TOOLTIPCALLBACK` name alongside the system, input, and draw names, and a
+  layout retains its own `LAYOUTINIT`, `LAYOUTUPDATE`, and `LAYOUTSHUTDOWN` names.
+
 - Modern water now has a moving surface instead of a flat sheet. Source water areas triangulate into
   a handful of very long slivers with no interior vertices at all — gla01's entire lake is one
   seven-point polygon at a constant height, five triangles over about 1340 by 1430 world units — so
@@ -345,6 +383,19 @@ land under the active milestone heading.
   report could not be traced back to the control it came from.
 
 ### Fixed
+
+- Two source conditions that stop a transition group finishing are now reported instead of hanging
+  silently. A group naming a window no loaded layout carries never finishes, because the arm that
+  would set the flag tests the window first. And `TYPETEXT` cannot finish when its label is under
+  thirty characters: it finishes only on the state numbered by its declared length, while arming
+  shortens that length to the character count and the per-window frame filter refuses anything past
+  it. That is four retail groups in each edition — the difficulty screen's label. `COUNTUP` shortens
+  identically and does finish, thanks to one extra assignment `TYPETEXT` lacks.
+- Hit testing searched top-level windows and children in file order, but the original's window manager
+  links every new window at the head of its list, so it tests the last window in the file first — which
+  is also the front-most one, since drawing runs from the tail backwards. Overlapping siblings
+  therefore resolved backwards. Only overlapping siblings could tell the difference, which is why the
+  earlier per-layout render sweeps did not surface it.
 
 - Fixed the whole-control border being drawn from the wrong rule, which was both adding outlines the
   original never draws and omitting ones it does. This project had gated the border on the

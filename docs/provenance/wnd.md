@@ -62,14 +62,44 @@
   - `Core/GameEngine/Include/GameClient/GlobalLanguage.h`
   - `Core/GameEngine/Source/GameClient/GlobalLanguage.cpp`
   - `GeneralsMD/Code/GameEngine/Source/GameClient/GameClient.cpp` (`TheMappedImageCollection->load( 512 )`)
-- Callback-name and shell/navigation evidence:
-  - `Generals/Code/GameEngine/Include/Common/FunctionLexicon.h`
-  - `Generals/Code/GameEngine/Source/Common/System/FunctionLexicon.cpp`
-  - `Generals/Code/GameEngine/Include/GameClient/Shell.h`
-  - `Generals/Code/GameEngine/Source/GameClient/GUI/Shell/Shell.cpp`
-  - `Core/GameEngine/Include/GameClient/GameWindowTransitions.h`
+- Callback-name and shell/navigation evidence. The lexicon and shell are compiled per edition; the
+  Zero Hour copies are the ones read, and the two lexicons differ only in that Zero Hour registers
+  six further names:
+  - `GeneralsMD/Code/GameEngine/Include/Common/FunctionLexicon.h` (`TableIndex`, the default table of
+    each typed accessor)
+  - `GeneralsMD/Code/GameEngine/Source/Common/System/FunctionLexicon.cpp` (all seven base tables,
+    `loadTable`, `keyToFunc`, `findFunction`, `init`)
+  - `Generals/Code/GameEngine/Source/Common/System/FunctionLexicon.cpp` (the base-game tables, for
+    the edition difference)
+  - `GeneralsMD/Code/GameEngineDevice/Source/W3DDevice/Common/System/W3DFunctionLexicon.cpp` (the
+    device draw and device layout-init tables, `W3DFunctionLexicon::init`)
+  - `GeneralsMD/Code/GameEngine/Source/Common/NameKeyGenerator.cpp` (`nameToKey`, which compares with
+    `strcmp`, so a callback lookup is case-sensitive)
+  - `GeneralsMD/Code/GameEngine/Include/GameClient/Shell.h` (the documented push and pop sequences,
+    `MAX_SHELL_STACK`)
+  - `GeneralsMD/Code/GameEngine/Source/GameClient/GUI/Shell/Shell.cpp` (`push`, `pop`, `popImmediate`,
+    `doPush`, `doPop`, `shutdownComplete`, `showShell`, `hideShell`, `hide`, `update`, `top`,
+    `linkScreen`, `unlinkScreen`, `findScreenByFilename`, `getScreenLayout`)
+  - `Core/GameEngine/Include/GameClient/WindowLayout.h`
+  - `Core/GameEngine/Source/GameClient/GUI/WindowLayout.cpp` (`hide`, `bringForward`, `load`,
+    `addWindow`, `removeWindow`)
+  - `Core/GameEngine/Source/GameClient/GUI/GameWindow.cpp` (`winBringToTop`, `winHide`,
+    `winPointInChild`)
+  - `GeneralsMD/Code/GameEngine/Source/GameClient/GUI/GameWindowManager.cpp` (`linkWindow`,
+    `addWindowToParent`, `addWindowToParentAtEnd`, `windowHiding`, `winRepaint`,
+    `getWindowUnderCursor`)
+  - `GeneralsMD/Code/GameEngine/Source/GameClient/GUI/GameWindowManagerScript.cpp`
+    (`parseSystemCallback`, `parseInputCallback`, `parseTooltipCallback`, `parseDrawCallback`,
+    `parseInit`, `parseUpdate`, `parseShutdown`, `parseLayoutBlock`, whose differing quote handling
+    is why a layout callback keeps its quotes and a window callback does not)
+  - `Core/GameEngine/Include/GameClient/GameWindowTransitions.h` (`TransitionStyleNames`, every
+    `*TRANSITION_END` constant, `TransitionWindow`, `TransitionGroup`)
   - `Core/GameEngine/Source/GameClient/GUI/GameWindowTransitions.cpp`
-  - `Generals/Code/GameEngine/Source/GameClient/GUI/GameWindowTransitionsStyles.cpp`
+    (`INI::parseWindowTransitions`, the group parse table, `parseWindow`, `getNewGroup`, `findGroup`,
+    `TransitionWindow::getTotalFrames`)
+  - `GeneralsMD/Code/GameEngine/Source/GameClient/GUI/GameWindowTransitionsStyles.cpp` (every style's
+    constructor, `init`, `update`, `draw`, `reverse`, and `skip`, plus the `drawTypeText` and
+    `PushButtonImageDrawThree` helpers)
 - Main-menu and R3 map-selection integration evidence:
   - `Generals/Code/GameEngine/Source/GameClient/GUI/GUICallbacks/Menus/MainMenu.cpp`
   - `Generals/Code/GameEngine/Source/GameClient/GUI/GUICallbacks/Menus/SkirmishGameOptionsMenu.cpp`
