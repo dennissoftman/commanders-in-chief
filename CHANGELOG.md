@@ -119,6 +119,39 @@ land under the active milestone heading.
 
 ### Added
 
+- Added modern display settings. The original's whole display API is a resolution, a bit depth, and
+  one `windowed` boolean, so a monitor selector, a borderless mode, a refresh rate, and a UI scale
+  independent of render resolution are all new — and all arrive through a bounded WND patch rather
+  than through hardcoded window names.
+
+  `cic-ui` owns the model: an immutable display-mode catalog that sorts and deduplicates whatever a
+  platform adapter reports, keeps refresh in millihertz exactly as advertised so 59.94 Hz never
+  collapses into 60, and raises a capability gap where a backend advertises no modes, no refresh, or
+  nothing presentable rather than fabricating a value. The three window modes differ in what the
+  player may actually choose: windowed keeps any client size and reports the desktop refresh,
+  borderless takes the desktop mode outright, and only exclusive fullscreen names an advertised
+  resolution and refresh pair. Apply is transactional and every timestamp is the caller's, so a
+  capture steps a timeout with no clock in the path; a late confirmation rolls back because the
+  dialog it answers is gone, and a refused request applies nothing.
+
+  `cic-render` enumerates real monitors into the same catalog, and `cic-tools` writes a project-owned
+  preferences file — beside the existing `config`, never into the user's `Options.ini` — only after a
+  confirmed apply, with that rule enforced in one place instead of at each call site.
+- Added `crates/cic-tools/patches/options-modern-display.wndpatch`, the project-owned overlay that
+  puts those controls on the retail Options page. It reuses the stock `ComboBoxResolution` rather
+  than replacing it and reparents it in beside the four new ones. There is no free space on the main
+  page, so the settings go into `WinAdvancedDisplayOptions` — the full-size panel retail ships hidden
+  for exactly this — and showing it, hiding the main page behind it, and hiding two legacy sliders are
+  all `STATUS` edits, so every window and field survives in the patched document and no user-owned
+  byte changes.
+- Added profile-driven patch selection, which the format documentation had listed as the patch
+  mechanism's remaining integration step. `select_wnd_patches` picks the patches in an ordered set
+  that target one document, and `ui-menu --patch` applies them at instantiation and reports the
+  provenance of every field they wrote.
+- Added `cic-inspect ui-display`, which drives the display transaction against a catalog built from
+  `--monitor` and `--mode` and stepped by explicit millisecond stamps, so the whole run is
+  reproducible. `--enumerate` reads the host display instead and says so in its own row, being the
+  one path that cannot be.
 - Added `cic-inspect ui-menu`, a scripted navigation session over the user-owned main menu, and with
   it the working main-menu artifact. It loads `Menus/MainMenu.wnd` with its mapped images, fonts, and
   localized labels, applies the screen's initial hidden set, then drives explicit steps —
@@ -459,6 +492,10 @@ land under the active milestone heading.
 
 ### Fixed
 
+- Corrected two stale facts about `wnd-patch`. Its usage line advertised positional patch arguments
+  (`<patch> [<patch>...] --`) when the command has always taken `--patch <file>`, and the worked
+  example in `docs/formats/wnd.md` writes `target Menus/OptionsMenu.wnd` where the comparison is
+  against the document's full virtual path, so the example as printed does not apply to anything.
 - Hovering any control drew it hilited, but the original hilites a control only when it declares
   `MOUSETRACK`. Nothing in the window manager sets `WIN_STATE_HILITED`: each gadget family's input
   handler sets it on mouse-enter, and every one of them tests `GWS_MOUSE_TRACK` first, so a window

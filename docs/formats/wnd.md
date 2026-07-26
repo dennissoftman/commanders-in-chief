@@ -298,7 +298,7 @@ beginning a bare token starts a comment.
 ```text
 # Reposition the stock resolution combo and give it a modern label.
 version 1
-target Menus/OptionsMenu.wnd
+target Window/Menus/OptionsMenu.wnd
 
 require-window "OptionsMenu.wnd:ComboBoxResolution"
 require-field  "OptionsMenu.wnd:ComboBoxResolution" STATUS "ENABLED"
@@ -331,8 +331,10 @@ rather than dropping the subtree.
 control name** (`File.wnd:Control`). Windows whose control part is empty are never matched: several
 windows in one layout share that spelling, so targeting one would be ambiguous.
 
-`target` is compared against the document's virtual path case-insensitively with `\` normalized to
-`/`, so a patch matches regardless of how the VFS spells the path.
+`target` is compared against the document's *complete* virtual path, case-insensitively and with `\`
+normalized to `/`, so a patch matches regardless of how the VFS spells the path — but a shell layout
+really is `Window/Menus/<file>.wnd` there, not the `Menus/<file>.wnd` that `Shell::push` is called
+with. A patch naming the shorter form matches nothing and is a target mismatch.
 
 Patches apply in slice order and operations within a patch apply in file order, so a later patch
 observes an earlier one's result. Applying returns a **new** document; the parsed source value is
@@ -353,8 +355,12 @@ Version 1 deliberately has no selectors or wildcards, and cannot delete source r
 code, or introduce unregistered callback behavior. Hiding a source control is a visible `STATUS`
 edit rather than destructive deletion.
 
-Profile-driven patch selection — naming patch files in a profile and layering them in VFS mount
-order — is the remaining integration step; the apply engine already applies an ordered slice.
+Profile-driven patch selection is implemented. `cic_tools::select_wnd_patches` returns the patches in
+an ordered set that target one document, by the same normalized comparison, and the caller applies
+that subset — selection is separate because the apply engine deliberately *refuses* a patch aimed at
+a different document rather than skipping it, which a profile carrying overlays for several layouts
+would otherwise trip over immediately. `cic-inspect ui-menu --patch` takes such a set and reports the
+provenance of every field written into every layout it loaded.
 
 Patch files are selected explicitly by the active profile and then layered in VFS mount/file order;
 operations apply in file order. Every resulting field and inserted subtree retains source/patch

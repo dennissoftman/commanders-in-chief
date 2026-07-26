@@ -523,6 +523,65 @@ wound forward. Every staging observation across both runs is `uncomposed_art`, a
 found nothing at its own indices and so drew nothing, matching the source's early return; not one is a
 missing image or font.
 
+Gate 9 (modern Options and display settings) is implemented. The original's whole display API is
+`Display.h`'s `setDisplayMode( width, height, bitDepth, windowed )` — a resolution, a bit depth, and
+one boolean — so there is no monitor selector, no borderless mode, no refresh rate at all, and no UI
+scale independent of render resolution to reproduce. All four are project design, added through a
+bounded WND patch so no user-owned byte changes.
+
+`cic-ui`'s `display` module owns the model. A `UiDisplayCatalog` is immutable and deterministically
+ordered — monitors by key then source index, modes by monitor, width, height, refresh millihertz, bit
+depth, then source index — and drops exact duplicates, which some backends advertise. Refresh is
+millihertz exactly as reported and 59.94 Hz never collapses into 60, because exclusive fullscreen has
+to name one of them. A backend advertising no modes, no refresh, or nothing above the presentable
+minimum raises a capability gap rather than being given a fabricated value.
+
+The three window modes differ in what the player may choose, not only in how the window is
+decorated, and that is why they are one enumeration rather than two booleans:
+
+| Mode | Resolution | Refresh |
+| --- | --- | --- |
+| Windowed | Any client size at or above the minimum; a window need not be an advertised mode | The desktop's, reported not selected |
+| Borderless desktop | The monitor's desktop mode, whatever was asked for | The desktop's, reported not selected |
+| Exclusive fullscreen | Must name an advertised mode | Must name an advertised rate for that mode |
+
+Apply is transactional and time is the caller's throughout, so a capture steps a timeout with no
+clock anywhere in the path. Only a confirmation inside the window makes a selection accepted; a
+confirmation that arrives late rolls back instead, because the dialog it answers is gone. A refused
+request applies nothing and leaves the accepted selection untouched. `persist_confirmed_display`
+enforces the rule that only a confirmed outcome is written — every other outcome writes nothing —
+rather than leaving each caller to remember it, and preferences go to a project-owned file beside the
+existing `config` rather than into the user's `Options.ini`.
+
+The patch is the other half. There is no free space on the Options page: the 800x600 canvas is full,
+and — a compatibility finding worth recording on its own — the controls retail authored past x=800,
+including `CheckLanguageFilter`, `ButtonKeyboardOptions`, and the four camera check boxes, are
+off-screen at *every* Classic-scaled viewport, 4:3 included. So the settings go into
+`WinAdvancedDisplayOptions`, the full-size panel retail ships hidden for exactly this purpose. The
+stock `ComboBoxResolution` is reused rather than replaced and reparented in beside them, so the
+complete display settings read as one group. Showing the panel, hiding the main page behind it, and
+hiding two legacy sliders are all `STATUS` edits, so every window and field survives in the patched
+document and a different profile can leave them alone.
+
+Profile-driven patch selection landed with it, which the format doc listed as the patch mechanism's
+remaining integration step: `select_wnd_patches` picks the patches in an ordered set that target one
+document, and `ui-menu --patch` applies them at instantiation with per-field provenance in the report.
+
+Verified two ways. `cic-inspect ui-display` drives the transaction against an injected catalog: six
+advertised modes deduplicate to five, a timeout rolls back at exactly one millisecond past the
+deadline, a confirmed apply is the only step that writes preferences, an unadvertised refresh is
+refused without disturbing the accepted selection, and decline and platform failure both restore it.
+`--enumerate` reads the real display instead — 138 modes across 27 presentable resolutions on the
+development machine — and is the one path that is not reproducible, reported as such in its own row.
+The patched Options page renders at 1280x720 with the reused resolution combo beside all four new
+controls and zero staging diagnostics.
+
+What Gate 9 does not have is a window. The charter asks for apply through `winit` surface
+reconfiguration behind a timed confirmation dialog; the transaction, the catalog, the platform
+adapter, and the persistence rule are all in place and tested, but nothing yet drives them from an
+interactive shell, because no interactive UI viewer exists. That belongs with Gate 11's complete
+navigation loop and is listed there.
+
 **Scope:** Boundedly decode the complete source-established WND grammar and the UI definition
 resources required by it, then present those values through a retained, non-gameplay UI runtime.
 Cover nested layouts, exact creation rectangles, resolution scaling, status/style flags, draw and
@@ -653,7 +712,8 @@ source WND bytes are edited and no renderer path searches for special window nam
    subpanels, Back, Options, Skirmish navigation, and safe Exit. When configured,
    compose the R3-rendered shell MAP as a non-simulating 3D background beneath the UI. No retail
    capture is checked in.
-9. **Modern Options/display settings.** Load `Menus/OptionsMenu.wnd`, reuse its established
+9. **Modern Options/display settings (implemented; interactive apply pending).** Load
+   `Menus/OptionsMenu.wnd`, reuse its established
    `ComboBoxResolution`, and apply a bounded project patch that adds missing monitor, window-mode,
    refresh-rate, and UI-scale labels/controls without changing user-owned bytes. Enumerate platform
    modes into a stable catalog. Windowed and borderless use explicit desktop/presentation refresh
@@ -668,6 +728,8 @@ source WND bytes are edited and no renderer path searches for special window nam
    Start validation result. This UI must expose unsupported MAP versions/resources visibly instead
    of hiding incompatible maps.
 11. **R4 closure.** Inventory every user-owned WND in the selected profile under parser limits,
+   drive the display transaction from an interactive `winit` shell so a mode change really
+   reconfigures the surface behind a timed confirmation dialog,
    exercise all control families and patch operations synthetically, verify the complete main-menu,
    settings, and skirmish navigation loop at multiple aspect ratios/refresh catalogs, and document
    fields/callbacks that remain retained-but-inert until R5 or later.

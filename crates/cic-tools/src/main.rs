@@ -28,8 +28,10 @@ use cic_render::{
     TerrainLighting, TerrainStagingOptions, TextureId, TextureResourceManager,
     TreeSwayPresentation, UiImageBinding, UiStagingDiagnosticKind, UiStagingLimits, UiTextPolicy,
     UiTexturePage, WaterAppearance, WaterCausticSequence, WaterPresentationPolicy,
-    WaterSurfaceTexture, bridge_tower_placements, run_map_view, run_model_viewer,
+    WaterSurfaceTexture, bridge_tower_placements, enumerate_display_catalog, run_map_view,
+    run_model_viewer,
 };
+use cic_tools::preferences::persist_confirmed_display;
 use cic_tools::resource::{
     DEFAULT_LANGUAGE, GameEdition, MountProfile, MountProfileLimits, ResourceKind, StoredLocations,
     config_path, discover_options_ini, discover_steam_locations, resolve_archives_for_language,
@@ -44,18 +46,20 @@ use cic_tools::ui_resources::{
     resolve_ui_resources,
 };
 use cic_tools::{
-    GltfTextureRequest, TransitionRunOutcome, encode_capture_png, encode_map_height_png,
-    pack_w3d_glb, render_csf, render_manifest, render_map, render_map_blend, render_map_height,
-    render_map_lighting, render_map_polygons, render_map_sides, render_map_water,
-    render_map_world_objects, render_options_ini, render_transition_run, render_ui_callbacks,
-    render_ui_layout, render_ui_menu, render_ui_resources, render_ui_shell, render_w3d,
-    render_w3d_gltf, render_w3d_mesh, render_window_transitions, render_wnd, render_wnd_patch,
-    select_wnd_patches, summarize_transition_diagnostics,
+    DisplayStepOutcome, GltfTextureRequest, TransitionRunOutcome, encode_capture_png,
+    encode_map_height_png, pack_w3d_glb, render_csf, render_manifest, render_map, render_map_blend,
+    render_map_height, render_map_lighting, render_map_polygons, render_map_sides,
+    render_map_water, render_map_world_objects, render_options_ini, render_transition_run,
+    render_ui_callbacks, render_ui_display, render_ui_layout, render_ui_menu, render_ui_resources,
+    render_ui_shell, render_w3d, render_w3d_gltf, render_w3d_mesh, render_window_transitions,
+    render_wnd, render_wnd_patch, select_wnd_patches, summarize_transition_diagnostics,
 };
 use cic_ui::{
-    UiCallbackEdition, UiClipPolicy, UiDemoAction, UiEvent, UiFrame, UiFrameItem, UiKey, UiLayout,
-    UiLimits, UiMouseButton, UiPoint, UiPresentation, UiScalePolicy, UiScreen, UiScreenId, UiShell,
-    UiShellEvent, UiTransitionHandler, UiViewport,
+    UI_DISPLAY_CONFIRM_TIMEOUT_MS, UI_MIN_CLIENT_HEIGHT, UI_MIN_CLIENT_WIDTH, UiCallbackEdition,
+    UiClipPolicy, UiDemoAction, UiDisplayCatalog, UiDisplayOutcome, UiDisplaySelection,
+    UiDisplayTransaction, UiEvent, UiFrame, UiFrameItem, UiKey, UiLayout, UiLimits, UiMonitor,
+    UiMouseButton, UiPoint, UiPresentation, UiScaleChoice, UiScalePolicy, UiScreen, UiScreenId,
+    UiShell, UiShellEvent, UiTransitionHandler, UiVideoMode, UiViewport, UiWindowMode,
 };
 use cic_vfs::{BigLimits, Vfs, VirtualPath};
 
@@ -256,6 +260,7 @@ fn run(arguments: impl IntoIterator<Item = String>) -> Result<String, Box<dyn Er
         "ui-callbacks" => report_ui_callbacks(&mut arguments, &options),
         "ui-shell" => report_ui_shell(&mut arguments, &options),
         "ui-menu" => report_ui_menu(&mut arguments, &options),
+        "ui-display" => report_ui_display(&mut arguments, &options),
         "ui-transitions" => report_ui_transitions(&mut arguments, &options),
         "ui-resources" => report_ui_resources(&mut arguments, &options),
         "ui-layout" => report_ui_layout(&mut arguments, &options),
@@ -2948,6 +2953,208 @@ where
         &session.bindings.allowlist,
         &session.provenance,
         &session.shell,
+    ))
+}
+
+/// Drives an explicit display-settings script against an injected mode catalog.
+///
+/// Gate 9's deterministic half. The catalog, the starting selection, and every timestamp are named
+/// on the command line, so nothing reads a host monitor or a clock: `--monitor` and `--mode` build
+/// the catalog, `--step` drives it, and the millisecond stamps in `request`, `confirm`, and `poll`
+/// are the only time that exists. With `--enumerate` the catalog comes from the real platform
+/// instead, which is the one mode that is not reproducible and is reported as such.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one arm per step kind; the option loop and the script loop are one command's contract"
+)]
+fn report_ui_display<I>(
+    arguments: &mut std::iter::Peekable<I>,
+    _options: &CliOptions,
+) -> Result<String, Box<dyn Error>>
+where
+    I: Iterator<Item = String>,
+{
+    let mut monitors: Vec<UiMonitor> = Vec::new();
+    let mut modes: Vec<UiVideoMode> = Vec::new();
+    let mut specs: Vec<String> = Vec::new();
+    let mut enumerate = false;
+    let mut timeout_ms = UI_DISPLAY_CONFIRM_TIMEOUT_MS;
+    let mut preferences_path: Option<PathBuf> = None;
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--monitor" => {
+                // <key>:<name>
+                let value = arguments
+                    .next()
+                    .ok_or("--monitor requires <key>[:<name>]")?;
+                let (key, name) = value.split_once(':').unwrap_or((value.as_str(), ""));
+                let index = monitors.len();
+                let name = if name.is_empty() { key } else { name };
+                monitors.push(UiMonitor::new(key, name, index));
+            }
+            "--mode" => {
+                // <monitor>:<width>x<height>@<refresh-millihertz>[:<bit-depth>]
+                let value = arguments
+                    .next()
+                    .ok_or("--mode requires <monitor>:<width>x<height>@<millihertz>")?;
+                modes.push(parse_video_mode(&value, modes.len())?);
+            }
+            "--step" => specs.push(arguments.next().ok_or("--step requires a spec")?),
+            "--timeout" => {
+                timeout_ms = arguments
+                    .next()
+                    .ok_or("--timeout requires milliseconds")?
+                    .parse::<u64>()?;
+            }
+            "--preferences" => {
+                preferences_path = Some(PathBuf::from(
+                    arguments
+                        .next()
+                        .ok_or("--preferences requires a file path")?,
+                ));
+            }
+            "--enumerate" => enumerate = true,
+            option => return Err(format!("unknown ui-display option {option:?}").into()),
+        }
+    }
+
+    let catalog = if enumerate {
+        if !monitors.is_empty() || !modes.is_empty() {
+            return Err(
+                "--enumerate reads the platform, so it takes no --monitor or --mode".into(),
+            );
+        }
+        // The one path that touches the host; everything downstream takes the immutable catalog.
+        enumerate_display_catalog()?
+    } else {
+        if monitors.is_empty() {
+            return Err("ui-display requires --monitor or --enumerate".into());
+        }
+        UiDisplayCatalog::new(monitors, modes)?
+    };
+
+    // The starting accepted selection is the catalog's own default, which is what a first run has
+    // before anything has been confirmed.
+    let default_monitor = catalog
+        .default_monitor()
+        .ok_or("the catalog carries no monitor")?
+        .key()
+        .to_owned();
+    let desktop = catalog.desktop_mode(&default_monitor);
+    let accepted = UiDisplaySelection {
+        monitor: default_monitor.clone(),
+        window_mode: UiWindowMode::Windowed,
+        resolution: desktop.map_or((UI_MIN_CLIENT_WIDTH, UI_MIN_CLIENT_HEIGHT), |mode| {
+            mode.resolution()
+        }),
+        refresh_millihertz: desktop.map_or(0, cic_ui::UiVideoMode::refresh_millihertz),
+        scale: UiScaleChoice::Automatic,
+    };
+    let mut transaction = UiDisplayTransaction::new(accepted).with_timeout_ms(timeout_ms);
+
+    let mut selection = transaction.accepted().clone();
+    let mut steps: Vec<(String, DisplayStepOutcome)> = Vec::new();
+    for spec in &specs {
+        let outcome = match spec.split_once(':') {
+            Some(("monitor", value)) => {
+                value.clone_into(&mut selection.monitor);
+                DisplayStepOutcome::Selected
+            }
+            Some(("window-mode", value)) => {
+                selection.window_mode = UiWindowMode::from_row_name(value)
+                    .ok_or_else(|| format!("unknown window mode {value:?}"))?;
+                DisplayStepOutcome::Selected
+            }
+            Some(("resolution", value)) => {
+                let (width, height) = value
+                    .split_once('x')
+                    .ok_or("a resolution operand is <width>x<height>")?;
+                selection.resolution = (width.parse::<u32>()?, height.parse::<u32>()?);
+                DisplayStepOutcome::Selected
+            }
+            Some(("refresh", value)) => {
+                selection.refresh_millihertz = value.parse::<u32>()?;
+                DisplayStepOutcome::Selected
+            }
+            Some(("scale", value)) => {
+                selection.scale = UiScaleChoice::from_row_name(value)
+                    .ok_or_else(|| format!("unknown ui scale {value:?}"))?;
+                DisplayStepOutcome::Selected
+            }
+            Some(("request", value)) => {
+                let now = value.parse::<u64>()?;
+                match transaction.request(&catalog, &selection, now) {
+                    Ok(outcome) => DisplayStepOutcome::Applied(outcome),
+                    Err(error) => DisplayStepOutcome::Refused(error.to_string()),
+                }
+            }
+            Some(("confirm", value)) => {
+                DisplayStepOutcome::Applied(transaction.confirm(value.parse::<u64>()?))
+            }
+            Some(("poll", value)) => {
+                DisplayStepOutcome::Applied(transaction.poll(value.parse::<u64>()?))
+            }
+            Some(("fail", value)) => DisplayStepOutcome::Applied(transaction.fail(value)),
+            Some((unknown, _)) => {
+                return Err(format!("unknown ui-display step {unknown:?}").into());
+            }
+            None => match spec.as_str() {
+                "decline" => DisplayStepOutcome::Applied(transaction.decline()),
+                unknown => return Err(format!("unknown ui-display step {unknown:?}").into()),
+            },
+        };
+        // Persisting is part of the step, because the rule under test is that only a confirmation
+        // writes anything. A run with no `--preferences` still reports what it would have written.
+        let persisted = match (&outcome, preferences_path.as_deref()) {
+            (DisplayStepOutcome::Applied(applied), Some(path)) => {
+                persist_confirmed_display(applied, path)?
+            }
+            (DisplayStepOutcome::Applied(applied), None) => {
+                matches!(applied, UiDisplayOutcome::Confirmed { .. })
+            }
+            _ => false,
+        };
+        steps.push((
+            spec.clone(),
+            if persisted {
+                DisplayStepOutcome::Persisted(Box::new(outcome))
+            } else {
+                outcome
+            },
+        ));
+    }
+
+    Ok(render_ui_display(
+        &catalog,
+        &steps,
+        transaction.accepted(),
+        enumerate,
+    ))
+}
+
+/// Parses `<monitor>:<width>x<height>@<millihertz>[:<bit-depth>]`.
+fn parse_video_mode(value: &str, source_index: usize) -> Result<UiVideoMode, Box<dyn Error>> {
+    let (monitor, rest) = value
+        .split_once(':')
+        .ok_or("a mode operand starts with <monitor>:")?;
+    let (geometry, tail) = match rest.split_once(':') {
+        Some((geometry, depth)) => (geometry, Some(depth)),
+        None => (rest, None),
+    };
+    let (size, refresh) = geometry
+        .split_once('@')
+        .ok_or("a mode operand is <width>x<height>@<millihertz>")?;
+    let (width, height) = size
+        .split_once('x')
+        .ok_or("a mode operand is <width>x<height>@<millihertz>")?;
+    let bit_depth = tail.map(str::parse::<u16>).transpose()?;
+    Ok(UiVideoMode::new(
+        monitor,
+        width.parse::<u32>()?,
+        height.parse::<u32>()?,
+        refresh.parse::<u32>()?,
+        bit_depth,
+        source_index,
     ))
 }
 

@@ -4,11 +4,11 @@
 
 R4 is active and its main-menu slice now runs end to end: the user-owned main menu loads, renders, and
 navigates to Options and Skirmish Options and back through the shell stack
-(see [docs/milestones/r4-wnd-shell.md](docs/milestones/r4-wnd-shell.md) Gate 8). Gates 1 through 8 are
+(see [docs/milestones/r4-wnd-shell.md](docs/milestones/r4-wnd-shell.md) Gates 8 and 9). Gates 1 through 9 are
 complete — bounded WND inventory and typed control decoding, patch overlays, UI resource resolution,
 the retained `cic-ui` runtime, custom `wgpu` presentation, safe callbacks with the shell stack and
-transitions, and the working main-menu artifact. The remaining slices add modern display settings and
-the skirmish/map-selection harness. R4 remains presentation-only: callbacks are allowlisted typed
+transitions, the working main-menu artifact, and modern display settings. The remaining slice is the
+skirmish/map-selection harness. R4 remains presentation-only: callbacks are allowlisted typed
 events, MAP scripts stay inert until R5, and project-owned post-parse patches augment rather than
 modify user-owned WND bytes.
 
@@ -163,18 +163,33 @@ reproduced. And hovering used to hilite any control, where the original hilites 
 declaring `MOUSETRACK`; that had been repainting the whole main-menu background whenever the pointer
 rested on it, and is fixed.
 
-**Gate 9's modern Options and display settings is the next verified step**: loading
-`Menus/OptionsMenu.wnd`, reusing its established `ComboBoxResolution`, and applying a bounded
-project-owned patch that adds monitor, window-mode, refresh-rate, and UI-scale controls without
-changing user-owned bytes, then applying a mode through a confirmation/rollback transaction against an
-injected catalog. The patch mechanism itself is already demonstrated end to end against this layout
-(Gate 3); profile-driven patch selection is the remaining integration step.
+Gate 9's modern Options and display settings is complete. `cic-ui` owns an immutable, deterministically
+ordered display-mode catalog and a transactional apply whose time is entirely the caller's; `cic-render`
+enumerates real monitors into that catalog; `cic-tools` persists a choice only after it is confirmed;
+and a checked-in project-owned patch adds monitor, window-mode, refresh-rate, and UI-scale controls to
+the retail Options page while reusing its stock `ComboBoxResolution`. Profile-driven patch selection
+landed with it, which the format doc had listed as the patch mechanism's remaining integration step.
 
-Four smaller pieces remain queued. Transition draws are renderer-neutral records that
-`cic-render` does not execute yet, so transitions run and report but do not reach a surface. Gate 8's
-optional shell-MAP background — composing the R3 scene beneath the UI — is not wired up. The rest
-of Gate 4 is bounded `MouseCursor` and `ShellMenuScheme` subsets, which live in the same INI family and
-reuse the shared lexer. And the ornamental border is unimplemented: `WIN_STATUS_BORDER` makes the
+Two findings from that pass. Retail's Options page has no free space at all — the 800x600 canvas is
+full, and the controls it authored past x=800 are off-screen at every Classic-scaled viewport, 4:3
+included — so the new settings went into `WinAdvancedDisplayOptions`, the full-size panel retail ships
+hidden for exactly this. And the three window modes differ in what the player may *choose*, not only in
+decoration: only exclusive fullscreen names an advertised resolution and refresh pair, while windowed
+and borderless report the desktop's rate rather than pretending to select one.
+
+**Gate 10's skirmish and map-selection harness is the next verified step**: loading the user-owned
+skirmish and map-select layouts and binding R3's deterministic map catalog, display names,
+preview/minimap, playable bounds, and `Player_n_Start` candidates to them, with demo slot editing and a
+non-executing Start validation. `SkirmishGameOptionsMenu.wnd` already loads and renders through the
+shell; what it has no data behind it yet is the map list, the preview, and the slots.
+
+Five smaller pieces remain queued. Five smaller pieces remain queued. Transition draws are renderer-neutral records that
+`cic-render` does not execute yet, so transitions run and report but do not reach a surface. There is
+no interactive UI viewer, so Gate 9's display transaction is driven only by a script and never yet by a
+real `winit` surface reconfiguration behind a timed dialog; that moved to Gate 11 with the rest of the
+complete navigation loop. Gate 8's optional shell-MAP background — composing the R3 scene beneath the
+UI — is not wired up. The rest of Gate 4 is bounded `MouseCursor` and `ShellMenuScheme` subsets, which
+live in the same INI family and reuse the shared lexer. And the ornamental border is unimplemented: `WIN_STATUS_BORDER` makes the
 window manager tile a frame from hardcoded `BorderTop`/`BorderCorner__`-style mapped images, which is a
 different border from the colour-path outline and is drawn by no draw procedure.
 

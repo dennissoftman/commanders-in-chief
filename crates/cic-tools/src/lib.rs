@@ -1,6 +1,7 @@
 //! Stable diagnostic report formatting.
 
 mod gltf;
+pub mod preferences;
 pub mod resource;
 pub mod shell_menu;
 pub mod ui_resources;
@@ -26,9 +27,10 @@ use cic_formats::{
 use cic_render::Capture;
 use cic_ui::{
     UI_CALLBACK_SLOTS, UiActionAllowlist, UiCallbackBinding, UiCallbackEdition, UiCallbackSlot,
-    UiClipPolicy, UiControlKind, UiDiagnosticKind, UiFrameItem, UiLayout, UiScalePolicy,
-    UiScreenId, UiShell, UiShellEvent, UiTransitionDiagnostic, UiTransitionDiagnosticKind,
-    UiTransitionDraw, classify_callback_in,
+    UiClipPolicy, UiControlKind, UiDiagnosticKind, UiDisplayCatalog, UiDisplayOutcome,
+    UiDisplaySelection, UiFrameItem, UiLayout, UiRollbackReason, UiScalePolicy, UiScreenId,
+    UiShell, UiShellEvent, UiTransitionDiagnostic, UiTransitionDiagnosticKind, UiTransitionDraw,
+    classify_callback_in,
 };
 use cic_vfs::Vfs;
 
@@ -1686,6 +1688,171 @@ pub fn select_wnd_patches(patches: &[WndPatch], document_path: &str) -> Vec<WndP
 /// Lower-cases a virtual path and normalizes separators, matching the apply engine's comparison.
 fn normalize_patch_target(path: &str) -> String {
     path.replace('\\', "/").to_ascii_lowercase()
+}
+
+/// What one display-settings step did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DisplayStepOutcome {
+    /// A selector moved. Nothing has been applied yet.
+    Selected,
+    /// The transaction acted.
+    Applied(UiDisplayOutcome),
+    /// The catalog could not offer the selection, so nothing was applied.
+    Refused(String),
+    /// The step was applied and its result was written to the preferences file.
+    Persisted(Box<DisplayStepOutcome>),
+}
+
+impl DisplayStepOutcome {
+    /// Returns a stable name and detail for a report.
+    #[must_use]
+    pub fn row(&self) -> (&'static str, String) {
+        match self {
+            Self::Selected => ("selected", String::new()),
+            Self::Refused(reason) => ("refused", reason.clone()),
+            Self::Persisted(inner) => {
+                let (kind, detail) = inner.row();
+                (
+                    "persisted",
+                    format!("{kind} {detail}").trim_end().to_owned(),
+                )
+            }
+            Self::Applied(outcome) => (
+                outcome.row_name(),
+                match outcome {
+                    UiDisplayOutcome::AwaitingConfirmation { deadline_ms } => {
+                        format!("deadline_ms={deadline_ms}")
+                    }
+                    UiDisplayOutcome::Confirmed { accepted } => describe_selection(accepted),
+                    UiDisplayOutcome::RolledBack { reason, restored } => format!(
+                        "{} restored={}",
+                        match reason {
+                            UiRollbackReason::TimedOut { elapsed_ms } => {
+                                format!("timed_out elapsed_ms={elapsed_ms}")
+                            }
+                            UiRollbackReason::Declined => "declined".to_owned(),
+                            UiRollbackReason::Failed { detail } => format!("failed={detail}"),
+                        },
+                        describe_selection(restored)
+                    ),
+                    UiDisplayOutcome::Idle => String::new(),
+                },
+            ),
+        }
+    }
+}
+
+/// Formats one selection as a single stable field.
+fn describe_selection(selection: &UiDisplaySelection) -> String {
+    format!(
+        "{} {} {}x{} {}mHz scale={}",
+        selection.monitor,
+        selection.window_mode.row_name(),
+        selection.resolution.0,
+        selection.resolution.1,
+        selection.refresh_millihertz,
+        selection.scale.row_name()
+    )
+}
+
+/// Formats a display-settings session: the catalog it ran against, then each step and the result.
+///
+/// The catalog is printed in full because it is an input: a reader checking a step's outcome has to
+/// be able to see which modes were on offer, and with `--enumerate` the catalog is the only thing
+/// that varies between machines.
+#[must_use]
+pub fn render_ui_display(
+    catalog: &UiDisplayCatalog,
+    steps: &[(String, DisplayStepOutcome)],
+    accepted: &UiDisplaySelection,
+    enumerated: bool,
+) -> String {
+    let mut output = String::from(
+        "ui_display_source	enumerated	monitors	modes
+",
+    );
+    writeln!(
+        output,
+        "ui_display_source	{enumerated}	{}	{}",
+        catalog.monitors().len(),
+        catalog.modes().len()
+    )
+    .expect("writing to a String cannot fail");
+
+    output.push_str(
+        "ui_display_monitor	key	name	source_index	resolutions
+",
+    );
+    for monitor in catalog.monitors() {
+        writeln!(
+            output,
+            "ui_display_monitor	{}	{}	{}	{}",
+            monitor.key(),
+            monitor.name(),
+            monitor.source_index(),
+            catalog.resolutions(monitor.key()).len()
+        )
+        .expect("writing to a String cannot fail");
+    }
+
+    output.push_str(
+        "ui_display_mode	monitor	width	height	refresh_millihertz	bit_depth
+",
+    );
+    for mode in catalog.modes() {
+        writeln!(
+            output,
+            "ui_display_mode	{}	{}	{}	{}	{}",
+            mode.monitor(),
+            mode.width(),
+            mode.height(),
+            mode.refresh_millihertz(),
+            mode.bit_depth()
+                .map_or_else(|| "-".to_owned(), |depth| depth.to_string())
+        )
+        .expect("writing to a String cannot fail");
+    }
+
+    // A capability gap is why a control is disabled, so it is reported even when empty.
+    output.push_str(
+        "ui_display_capability	kind	monitor
+",
+    );
+    for capability in catalog.capabilities() {
+        writeln!(
+            output,
+            "ui_display_capability	{}	{}",
+            capability.row_name(),
+            capability.monitor()
+        )
+        .expect("writing to a String cannot fail");
+    }
+
+    output.push_str(
+        "ui_display_step	index	command	outcome	detail
+",
+    );
+    for (index, (command, outcome)) in steps.iter().enumerate() {
+        let (kind, detail) = outcome.row();
+        writeln!(
+            output,
+            "ui_display_step	{index}	{command}	{kind}	{}",
+            if detail.is_empty() { "-" } else { &detail }
+        )
+        .expect("writing to a String cannot fail");
+    }
+
+    output.push_str(
+        "ui_display_accepted	selection
+",
+    );
+    writeln!(
+        output,
+        "ui_display_accepted	{}",
+        describe_selection(accepted)
+    )
+    .expect("writing to a String cannot fail");
+    output
 }
 
 /// Formats a scripted menu session: what each step did, then the allowlist and the resulting stack.

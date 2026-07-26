@@ -180,6 +180,7 @@ lighting contribution.
 | `ui-layout <path>` | Instantiate a layout for a viewport and report the retained tree, tab order, and frame order |
 | `ui-render <path> [<out.png>]` | Deterministic UI capture plus RGBA hash, with staged quad/batch/text counts |
 | `ui-menu --step <spec>...` | Drive the user-owned main menu through a scripted navigation session, capturing as it goes |
+| `ui-display --step <spec>...` | Drive display settings against an injected mode catalog, or `--enumerate` the host's |
 
 `ui-resources` takes `[--texture-size <pixels>]`. `ui-layout` takes
 `[--viewport <width>x<height>] [--scale <classic\|modern>]`, and `ui-render` adds
@@ -199,6 +200,26 @@ cargo run -p cic-tools --release -- --zh ui-menu --viewport 1280x720 --font C:/W
 
 The first capture shows the logo and nothing else, which is correct: the retail main menu hides every
 panel when it opens and reveals the default one on the player's first input.
+
+`ui-menu` also takes a repeatable `--patch <file>`, which is how a profile's WND overlays reach the
+layouts they target. `crates/cic-tools/patches/options-modern-display.wndpatch` adds monitor,
+window-mode, refresh-rate, and UI-scale controls to the retail Options page while reusing its stock
+resolution combo, without changing one byte of the user's WND:
+
+```bash
+cargo run -p cic-tools --release -- --zh ui-menu --viewport 1280x720 --font C:/Windows/Fonts/arial.ttf --capture-dir out --patch crates/cic-tools/patches/options-modern-display.wndpatch --step move:640,360 --step settle --step click:MainMenu.wnd:ButtonOptions --step settle --step capture:options.png
+```
+
+`ui-display` drives the settings behind those controls. The catalog comes from `--monitor
+<key>[:<name>]` and `--mode <monitor>:<width>x<height>@<millihertz>[:<depth>]`, and every timestamp is
+explicit, so a run is reproducible; steps are `monitor:`, `window-mode:`, `resolution:`, `refresh:`,
+`scale:`, `request:<ms>`, `confirm:<ms>`, `poll:<ms>`, `fail:<detail>`, and `decline`. Only a
+confirmation writes `--preferences`. `--enumerate` reads the host display instead, and is the one path
+here that is not reproducible:
+
+```bash
+cargo run -p cic-tools --release -- ui-display --enumerate --step poll:0
+```
 
 `wnd-render` is a Gate 1 proof-of-pipeline only: flat coloured rectangles, no images, text, or
 gadget visuals. `ui-render` is the real presentation path.

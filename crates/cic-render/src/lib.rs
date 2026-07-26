@@ -1,6 +1,7 @@
 //! Renderer boundary and deterministic headless capture support.
 
 mod boundary;
+mod display;
 mod lighting;
 mod map_overlay;
 mod map_scene;
@@ -26,6 +27,7 @@ use cic_formats::W3dStaticMesh;
 use sha2::{Digest, Sha256};
 
 pub use boundary::{BoundaryStagingError, BoundaryVertex, StagedBoundaryFence};
+pub use display::{display_catalog_from_monitors, enumerate_display_catalog};
 pub use lighting::{TerrainDirectionalLight, TerrainLighting};
 pub use map_overlay::{MapOverlayError, MapOverlayVertex, StagedMapOverlays};
 pub use map_scene::{
