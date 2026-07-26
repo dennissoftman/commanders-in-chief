@@ -224,7 +224,12 @@ cargo run -p cic-tools --release -- ui-display --enumerate --step poll:0
 
 `ui-view` is the interactive counterpart. It shares the whole session with `ui-menu` — same bindings,
 allowlist, shell stack, transitions, and patches — and differs only in where input comes from. Escape
-closes it, and it prints the same session report on exit plus the surface format and input counts:
+closes it, and it prints the same session report on exit plus the surface format and input counts.
+
+**Pass `--font`.** Like every other command here it never falls back to a host face, so without one
+each label is drawn as a placeholder bar and the menu comes up with unlabelled buttons; the window
+title says so when that happens. `--viewport` is worth passing too, since the default is the
+original's own 800x600.
 
 ```bash
 cargo run -p cic-tools --release -- --zh ui-view --viewport 1280x720 --font C:/Windows/Fonts/arial.ttf --patch crates/cic-tools/patches/options-modern-display.wndpatch

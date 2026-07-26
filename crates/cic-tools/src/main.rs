@@ -3125,7 +3125,14 @@ where
         pages_revision: 0,
         uploaded_pages: 0,
         text_policy,
-        status: "move the mouse to reveal the menu".to_owned(),
+        // A fontless run draws a placeholder bar per text run rather than falling back to a host
+        // face, which is right for a reproducible capture and baffling in a window: the menu comes
+        // up with unlabelled buttons and nothing says why. So the title says why.
+        status: if text_policy == UiTextPolicy::Placeholder {
+            "no --font given, so button text is placeholder bars".to_owned()
+        } else {
+            "move the mouse to reveal the menu".to_owned()
+        },
         exit: false,
         timeout_ms,
     };

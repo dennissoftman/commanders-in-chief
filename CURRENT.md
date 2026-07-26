@@ -183,6 +183,22 @@ preview/minimap, playable bounds, and `Player_n_Start` candidates to them, with 
 non-executing Start validation. `SkirmishGameOptionsMenu.wnd` already loads and renders through the
 shell; what it has no data behind it yet is the map list, the preview, and the slots.
 
+Three findings from driving `ui-view` by hand are open and are the first things to pick up:
+
+- **Combo boxes and text entries do not really work.** Clicking a combo toggles its drop-down, because
+  that is what `activate` does for the family, but nothing selects a row *inside* the open list: that
+  needs per-row hit testing against the drop-down's list box, which does not exist. Text entry has the
+  same shape of gap — `insert_text` reaches the focused control, but nothing gives a text entry focus
+  by clicking it in a way that then routes typing. Screen switching is the only interaction verified
+  end to end. This is the largest functional gap left in R4's shell.
+- **A font should not have to be passed by hand.** `ui-view` inherits the deterministic-capture rule
+  that no host font is ever discovered, so without `--font` every label is a placeholder bar. That
+  rule is right for `ui-render` and `ui-menu` and wrong for an interactive window: `ui-view` should
+  resolve the game's own declared `LocalFontFile` entries through the VFS first, fall back to an
+  explicit platform candidate list, and report which it used. Deterministic commands must keep
+  requiring an explicit font.
+- **A display change still has not been observed reaching the surface** (see the milestone file).
+
 Five smaller pieces remain queued. Five smaller pieces remain queued. Transition draws are renderer-neutral records that
 `cic-render` does not execute yet, so transitions run and report but do not reach a surface. The
 interactive shell viewer, `cic-inspect ui-view`, runs the menu in a real window with real input, but
