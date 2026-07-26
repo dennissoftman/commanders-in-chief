@@ -22,6 +22,8 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, OwnedDisplayHan
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
+use cic_camera::{CameraIntent, CameraPose, GroundHeight, RtsCamera, RtsCameraProfile};
+
 use crate::model::BlendMode;
 use crate::terrain::{TerrainDetailRequest, TerrainMipLevel, generate_srgb_mips};
 use crate::terrain_virtual::{
@@ -40,14 +42,21 @@ use crate::{
 const WINDOW_WIDTH: u32 = 1_280;
 const WINDOW_HEIGHT: u32 = 800;
 const CAMERA_UNIFORM_BYTES: u64 = 304;
-const SHADOW_CASCADE_COUNT: usize = 4;
+/// Pixels of pointer travel a rotate hold may accumulate and still count as a click.
+const ROTATE_CLICK_SLOP_PIXELS: f32 = 3.0;
+/// Cursor offset from the scroll anchor, in pixels, at which the scroll request reaches full rate.
+const SCROLL_ANCHOR_FULL_PIXELS: f32 = 180.0;
+/// Offset below which an anchored scroll stays still, so a press that barely moves does not creep.
+const SCROLL_ANCHOR_DEAD_ZONE_PIXELS: f32 = 6.0;
+
+const SHADOW_CASCADE_COUNT: usize = 5;
 /// `SHADOW_CASCADE_COUNT` as the array-layer count the texture and its views need. Must match.
-const SHADOW_CASCADE_LAYERS: u32 = 4;
+const SHADOW_CASCADE_LAYERS: u32 = 5;
 /// One `mat4x4` plus one `vec4` of parameters per cascade.
 const SHADOW_CASCADE_BYTES: u64 = 80;
 /// `SHADOW_CASCADE_BYTES * SHADOW_CASCADE_COUNT`, spelled as a `usize` so the packing routine can
 /// return a fixed-size array. A unit test pins it against the two constants it derives from.
-const SHADOW_UNIFORM_LEN: usize = 320;
+const SHADOW_UNIFORM_LEN: usize = 400;
 const SHADOW_UNIFORM_BYTES: u64 = SHADOW_UNIFORM_LEN as u64;
 /// Fractions of the shadowed view distance where each cascade ends: an even blend of a logarithmic
 /// and a uniform split.
@@ -61,12 +70,12 @@ const SHADOW_UNIFORM_BYTES: u64 = SHADOW_UNIFORM_LEN as u64;
 /// of units out, and front-loaded cascades land on almost nothing while the whole screen falls to
 /// the two coarsest. The blended split keeps density stepping by roughly a factor of two per
 /// cascade across the range that actually contains visible ground.
-const SHADOW_CASCADE_SPLITS: [f32; SHADOW_CASCADE_COUNT] = [0.13, 0.27, 0.47, 1.0];
+const SHADOW_CASCADE_SPLITS: [f32; SHADOW_CASCADE_COUNT] = [0.10, 0.21, 0.33, 0.51, 1.0];
 /// Cap on how far cascades chase the view, and the dominant control over outermost-cascade
 /// quality: the last cascade lands near `SHADOW_MAX_DISTANCE / 823` world units per texel. Raise it
 /// for more shadowed distance at the cost of blockier far shadows; lower it to sharpen them at the
 /// cost of distant geometry reading as unshadowed, which is a far softer failure than blocky.
-const SHADOW_MAX_DISTANCE: f32 = 800.0;
+const SHADOW_MAX_DISTANCE: f32 = 1_600.0;
 /// Extra world units each cascade's light camera is pulled back along the light, so that casters
 /// standing above the cascade's receiver region are still inside its depth range.
 ///
@@ -91,12 +100,12 @@ const SHADOW_CACHED_CASCADE_START: usize = 2;
 /// Occlusion is a single visibility scalar, so one 8-bit channel is enough and keeps the extra
 /// full-resolution target plus its blur ping-pong cheap.
 const AO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
-// Per-cascade extent. Three 2048-square layers cost 48 MiB as `Depth32Float`, less than the single
-// 4096-square whole-map slice this replaced, while the near cascade covers a small enough region to
-// land roughly an order of magnitude more texels on the ground the camera is actually looking at.
-// Each cascade derives its own bias from its own `texel_world`, so the near cascade is also biased
-// far more tightly than the far one.
-const SHADOW_MAP_EXTENT: u32 = 2_048;
+// Per-cascade extent. Five 3072-square layers cost 180 MiB as `Depth32Float`, which is the price of
+// shadows reaching far enough not to cut off visibly while the outermost cascade stays near the
+// density a single whole-map slice managed. Reuse keeps the bandwidth cost far below the memory
+// cost, since the outer cascades redraw only when their fit moves. Each cascade derives its own bias
+// from its own `texel_world`, so the near cascade is biased far more tightly than the far one.
+const SHADOW_MAP_EXTENT: u32 = 3_072;
 /// Hardware MSAA sample count for the opaque G-buffer geometry pass.
 const GBUFFER_SAMPLE_COUNT: u32 = 4;
 const MAX_FRAME_SECONDS: f32 = 0.1;
@@ -104,7 +113,6 @@ const CAMERA_VERTICAL_FOV: f32 = std::f32::consts::PI / 3.0;
 const TERRAIN_CELL_WORLD_SIZE: f32 = 10.0;
 const DETAIL_SCREEN_OVERSAMPLE: f32 = 1.75;
 const DETAIL_FADE_START_RATIO: f32 = 0.78;
-const CAMERA_VELOCITY_RESPONSE: f32 = 8.0;
 const SOURCE_ROAD_MIP_LEVELS: usize = 3;
 const ROAD_DEPTH_BIAS: wgpu::DepthBiasState = wgpu::DepthBiasState {
     constant: -2,
@@ -324,6 +332,7 @@ fn run_terrain_viewer_inner(
     application.error.map_or(Ok(()), Err)
 }
 
+#[allow(clippy::struct_excessive_bools)]
 struct TerrainViewerApplication {
     terrain: Arc<StagedTerrain>,
     roads: StagedRoads,
@@ -337,11 +346,31 @@ struct TerrainViewerApplication {
     display: OwnedDisplayHandle,
     window: Option<Arc<Window>>,
     gpu: Option<TerrainViewerGpu>,
+    /// Owns the movement model; the renderer never sees it directly.
+    rts_camera: RtsCamera,
+    /// Pose derived from `rts_camera` each frame, for the renderer and detail selection.
     camera: TerrainCamera,
-    initial_camera: TerrainCamera,
     detail_requests: Vec<TerrainDetailRequest>,
     input: TerrainInput,
-    right_drag: bool,
+    /// Middle-button rotate, as the original game does it.
+    rotate_drag: bool,
+    /// Whether the current middle-button hold has actually moved. A press and release without
+    /// movement resets rotation instead, which is what the original does.
+    rotate_drag_moved: bool,
+    /// Cursor position where a right-button scroll was anchored, if one is active.
+    ///
+    /// The original scrolls from an anchor rather than dragging the map: pressing plants an anchor,
+    /// and the cursor's offset from it is a continuous scroll velocity, so holding the cursor still
+    /// away from the anchor keeps scrolling. `DrawScrollAnchor` and `MoveScrollAnchor` in the source
+    /// options exist for exactly this gesture.
+    scroll_anchor: Option<PhysicalPosition<f64>>,
+    scroll_pressed: bool,
+    /// Rotation and zoom arrive as discrete events but are consumed once per frame, so they
+    /// accumulate here instead of being applied the moment they arrive.
+    pending_rotate: f32,
+    pending_zoom: f32,
+    reset_camera: bool,
+    reset_rotation: bool,
     cursor: Option<PhysicalPosition<f64>>,
     previous_frame: Instant,
     presentation_seconds: f32,
@@ -366,7 +395,18 @@ impl TerrainViewerApplication {
         fixed_frame: Option<MapPresentationFrame>,
     ) -> Result<Self, ViewerError> {
         let terrain = Arc::new(terrain);
-        let camera = TerrainCamera::for_terrain(&terrain);
+        let (minimum, maximum) = terrain.bounds();
+        let focus = [
+            (minimum[0] + maximum[0]) * 0.5,
+            (minimum[1] + maximum[1]) * 0.5,
+        ];
+        let far_plane = TerrainCamera::far_plane_for(&terrain);
+        let rts_camera = RtsCamera::new(
+            RtsCameraProfile::GENERALS_DEFAULT,
+            focus,
+            &StagedGround(&terrain),
+        );
+        let camera = TerrainCamera::from_pose(rts_camera.pose(), far_plane);
         let detail_requests = camera.detail_requests(&terrain, [WINDOW_WIDTH, WINDOW_HEIGHT])?;
         Ok(Self {
             terrain,
@@ -381,11 +421,18 @@ impl TerrainViewerApplication {
             display,
             window: None,
             gpu: None,
+            rts_camera,
             camera,
-            initial_camera: camera,
             detail_requests,
             input: TerrainInput::default(),
-            right_drag: false,
+            rotate_drag: false,
+            rotate_drag_moved: false,
+            scroll_anchor: None,
+            scroll_pressed: false,
+            pending_rotate: 0.0,
+            pending_zoom: 0.0,
+            reset_camera: false,
+            reset_rotation: false,
             cursor: None,
             previous_frame: Instant::now(),
             presentation_seconds: fixed_frame.map_or(0.0, MapPresentationFrame::seconds),
@@ -432,6 +479,101 @@ impl TerrainViewerApplication {
         self.gpu = Some(gpu);
         self.previous_frame = Instant::now();
         Ok(())
+    }
+
+    /// Middle button rotates and, on a click that never dragged, faces the camera back to its
+    /// starting yaw. Right button drags the view, which is the original's other way to scroll.
+    fn mouse_button(&mut self, state: ElementState, button: MouseButton) {
+        let pressed = state == ElementState::Pressed;
+        match button {
+            MouseButton::Middle => {
+                if pressed {
+                    self.rotate_drag = true;
+                    self.rotate_drag_moved = false;
+                } else {
+                    if self.rotate_drag && !self.rotate_drag_moved {
+                        self.reset_rotation = true;
+                    }
+                    self.rotate_drag = false;
+                }
+            }
+            MouseButton::Right => {
+                // Plant the anchor where the press landed and keep it until release. `self.cursor`
+                // is cleared below, so seed the anchor from the press position on the next move.
+                self.scroll_anchor = None;
+                self.scroll_pressed = pressed;
+            }
+            _ => return,
+        }
+        self.cursor = None;
+    }
+
+    /// Scroll request from the anchor offset, as a unit-capped direction and magnitude.
+    ///
+    /// Velocity rather than displacement: the offset from the anchor is sustained every frame while
+    /// the button is held, so holding the cursor still away from the anchor keeps scrolling. A dead
+    /// zone keeps a press that barely moves from creeping.
+    fn scroll_request(&self) -> [f32; 2] {
+        let (Some(anchor), Some(cursor)) = (self.scroll_anchor, self.cursor) else {
+            return [0.0; 2];
+        };
+        #[allow(clippy::cast_possible_truncation)]
+        let offset = [
+            (cursor.x - anchor.x) as f32,
+            (cursor.y - anchor.y) as f32,
+        ];
+        let distance = offset[0].hypot(offset[1]);
+        if distance <= SCROLL_ANCHOR_DEAD_ZONE_PIXELS {
+            return [0.0; 2];
+        }
+        let span = (SCROLL_ANCHOR_FULL_PIXELS - SCROLL_ANCHOR_DEAD_ZONE_PIXELS).max(1.0);
+        let magnitude = ((distance - SCROLL_ANCHOR_DEAD_ZONE_PIXELS) / span).clamp(0.0, 1.0);
+        let scale = magnitude / distance;
+        // Screen up is negative while the camera's forward pan axis is positive.
+        [offset[0] * scale, -offset[1] * scale]
+    }
+
+    fn cursor_moved(&mut self, position: PhysicalPosition<f64>) {
+        if let Some(previous) = self.cursor {
+            #[allow(clippy::cast_possible_truncation)]
+            let motion = [
+                (position.x - previous.x) as f32,
+                (position.y - previous.y) as f32,
+            ];
+            if self.rotate_drag {
+                if motion[0].abs() + motion[1].abs() > ROTATE_CLICK_SLOP_PIXELS {
+                    self.rotate_drag_moved = true;
+                }
+                self.pending_rotate -= motion[0];
+            }
+        }
+        if self.scroll_pressed && self.scroll_anchor.is_none() {
+            self.scroll_anchor = Some(position);
+        }
+        self.cursor = Some(position);
+    }
+
+    /// Feeds one frame of accumulated input to the camera model and republishes the pose.
+    ///
+    /// Rotation and zoom arrive as discrete events that can fire several times between frames, so
+    /// they are accumulated and consumed here rather than applied on arrival; that keeps a fast
+    /// scroll wheel from outrunning the frame rate.
+    fn advance_camera(&mut self, seconds: f32) {
+        let intent = CameraIntent {
+            pan: self.input.pan(),
+            drag: self.scroll_request(),
+            zoom: self.pending_zoom,
+            rotate: self.pending_rotate,
+            reset: self.reset_camera,
+            reset_rotation: self.reset_rotation,
+        };
+        self.pending_zoom = 0.0;
+        self.pending_rotate = 0.0;
+        self.reset_camera = false;
+        self.reset_rotation = false;
+        self.rts_camera
+            .update(intent, seconds, &StagedGround(&self.terrain));
+        self.camera = TerrainCamera::from_pose(self.rts_camera.pose(), self.camera.far_plane);
     }
 
     fn refresh_detail(&mut self) -> Result<(), ViewerError> {
@@ -489,7 +631,11 @@ impl ApplicationHandler for TerrainViewerApplication {
             }
             WindowEvent::Focused(false) => {
                 self.input = TerrainInput::default();
-                self.right_drag = false;
+                self.rotate_drag = false;
+                self.rotate_drag_moved = false;
+                self.scroll_anchor = None;
+                self.pending_rotate = 0.0;
+                self.pending_zoom = 0.0;
                 self.cursor = None;
             }
             WindowEvent::KeyboardInput { event, .. } => {
@@ -501,7 +647,7 @@ impl ApplicationHandler for TerrainViewerApplication {
                 if pressed && !event.repeat {
                     match code {
                         KeyCode::Escape => event_loop.exit(),
-                        KeyCode::KeyR => self.camera = self.initial_camera,
+                        KeyCode::KeyR => self.reset_camera = true,
                         KeyCode::KeyM
                             if self
                                 .gpu
@@ -517,26 +663,8 @@ impl ApplicationHandler for TerrainViewerApplication {
                     }
                 }
             }
-            WindowEvent::MouseInput {
-                state,
-                button: MouseButton::Right,
-                ..
-            } => {
-                self.right_drag = state == ElementState::Pressed;
-                self.cursor = None;
-            }
-            WindowEvent::CursorMoved { position, .. } => {
-                if self.right_drag
-                    && let Some(previous) = self.cursor
-                {
-                    #[allow(clippy::cast_possible_truncation)]
-                    self.camera.rotate(
-                        (position.x - previous.x) as f32,
-                        (position.y - previous.y) as f32,
-                    );
-                }
-                self.cursor = Some(position);
-            }
+            WindowEvent::MouseInput { state, button, .. } => self.mouse_button(state, button),
+            WindowEvent::CursorMoved { position, .. } => self.cursor_moved(position),
             WindowEvent::MouseWheel { delta, .. } => {
                 let amount = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y,
@@ -546,7 +674,7 @@ impl ApplicationHandler for TerrainViewerApplication {
                         y / 80.0
                     }
                 };
-                self.camera.dolly(amount);
+                self.pending_zoom += amount;
             }
             WindowEvent::RedrawRequested => {
                 let now = Instant::now();
@@ -558,7 +686,7 @@ impl ApplicationHandler for TerrainViewerApplication {
                 if self.fixed_frame.is_none() {
                     self.presentation_seconds += seconds;
                 }
-                self.camera.update(self.input, seconds);
+                self.advance_camera(seconds);
                 let result = self.refresh_detail().and_then(|()| {
                     self.gpu.as_mut().map_or(Ok(()), |gpu| {
                         gpu.render(self.camera, self.presentation_seconds, self.wireframe)
@@ -587,7 +715,7 @@ fn terrain_viewer_title(title: &str, wireframe: bool, wireframe_available: bool)
         ""
     };
     format!(
-        "{title}{mode} | WASD fly, Space/Ctrl vertical, Shift boost, RMB look, wheel move, R reset, {wireframe_help}Esc close"
+        "{title}{mode} | WASD/arrows scroll, RMB hold to scroll, wheel zoom, MMB rotate or click to face north, R reset, {wireframe_help}Esc close"
     )
 }
 
@@ -599,19 +727,15 @@ impl TerrainInput {
     const BACKWARD: u8 = 1 << 1;
     const LEFT: u8 = 1 << 2;
     const RIGHT: u8 = 1 << 3;
-    const UP: u8 = 1 << 4;
-    const DOWN: u8 = 1 << 5;
-    const BOOST: u8 = 1 << 6;
 
+    /// Scroll keys only. The camera holds a fixed tilt at a height above the terrain, so there is
+    /// nothing for the old free-flight vertical and boost keys to do.
     fn set(&mut self, code: KeyCode, pressed: bool) {
         let mask = match code {
-            KeyCode::KeyW => Self::FORWARD,
-            KeyCode::KeyS => Self::BACKWARD,
-            KeyCode::KeyA => Self::LEFT,
-            KeyCode::KeyD => Self::RIGHT,
-            KeyCode::Space => Self::UP,
-            KeyCode::ControlLeft | KeyCode::ControlRight => Self::DOWN,
-            KeyCode::ShiftLeft | KeyCode::ShiftRight => Self::BOOST,
+            KeyCode::KeyW | KeyCode::ArrowUp => Self::FORWARD,
+            KeyCode::KeyS | KeyCode::ArrowDown => Self::BACKWARD,
+            KeyCode::KeyA | KeyCode::ArrowLeft => Self::LEFT,
+            KeyCode::KeyD | KeyCode::ArrowRight => Self::RIGHT,
             _ => return,
         };
         if pressed {
@@ -624,45 +748,71 @@ impl TerrainInput {
     const fn active(self, mask: u8) -> bool {
         self.0 & mask != 0
     }
+
+    /// Held scroll keys as a camera pan request, `x` right and `y` forward.
+    fn pan(self) -> [f32; 2] {
+        let axis = |negative: u8, positive: u8| match (self.active(negative), self.active(positive)) {
+            (true, false) => -1.0,
+            (false, true) => 1.0,
+            _ => 0.0,
+        };
+        [
+            axis(Self::LEFT, Self::RIGHT),
+            axis(Self::BACKWARD, Self::FORWARD),
+        ]
+    }
 }
 
+/// Ground elevation for [`cic_camera`], backed by the staged heightfield.
+///
+/// The camera holds its height above the terrain beneath it, so it needs elevation lookups without
+/// depending on this crate's terrain type. `None` outside the map keeps the camera at its last known
+/// elevation rather than diving.
+struct StagedGround<'a>(&'a StagedTerrain);
+
+impl GroundHeight for StagedGround<'_> {
+    fn height_at(&self, x: f32, y: f32) -> Option<f32> {
+        self.0.height_at_world([x, y])
+    }
+}
+
+/// A resolved camera pose plus the projection depth the viewer draws with.
+///
+/// Controls no longer live here: [`cic_camera::RtsCamera`] owns the movement model so the game and a
+/// future editor share it, and this type is only what the renderer, the shadow cascades, and the
+/// terrain detail selection read.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct TerrainCamera {
     position: [f32; 3],
-    velocity: [f32; 3],
     yaw: f32,
     pitch: f32,
-    move_speed: f32,
     far_plane: f32,
 }
 
 impl TerrainCamera {
-    fn for_terrain(terrain: &StagedTerrain) -> Self {
+    /// Derives the pose the renderer needs from a camera pose.
+    ///
+    /// Yaw and pitch are recovered from the forward vector rather than carried alongside it, so
+    /// [`Self::forward`] reproduces the pose exactly and the detail-selection code that reasons
+    /// about them keeps working unchanged.
+    fn from_pose(pose: CameraPose, far_plane: f32) -> Self {
+        let forward = pose.forward;
+        let horizontal = forward[0].hypot(forward[1]);
+        Self {
+            position: pose.eye,
+            yaw: forward[1].atan2(forward[0]),
+            pitch: forward[2].atan2(horizontal),
+            far_plane,
+        }
+    }
+
+    /// Far plane for a map, generous enough that the horizon never clips.
+    fn far_plane_for(terrain: &StagedTerrain) -> f32 {
         let (minimum, maximum) = terrain.bounds();
-        let center = [
-            (minimum[0] + maximum[0]) * 0.5,
-            (minimum[1] + maximum[1]) * 0.5,
-            (minimum[2] + maximum[2]) * 0.5,
-        ];
         let horizontal_span = (maximum[0] - minimum[0])
             .max(maximum[1] - minimum[1])
             .max(100.0);
-        let distance = horizontal_span * 0.85;
-        let position = [
-            center[0] - distance * 0.65,
-            center[1] - distance * 0.65,
-            maximum[2] + distance * 0.55,
-        ];
-        let direction = subtract(center, position);
-        let horizontal = direction[0].hypot(direction[1]);
-        Self {
-            position,
-            velocity: [0.0; 3],
-            yaw: direction[1].atan2(direction[0]),
-            pitch: direction[2].atan2(horizontal),
-            move_speed: (horizontal_span * 0.35).max(50.0),
-            far_plane: (horizontal_span * 20.0).max(10_000.0),
-        }
+        (horizontal_span * 20.0).max(10_000.0)
     }
 
     fn forward(self) -> [f32; 3] {
@@ -672,69 +822,6 @@ impl TerrainCamera {
             pitch_cosine * self.yaw.sin(),
             self.pitch.sin(),
         ]
-    }
-
-    fn update(&mut self, input: TerrainInput, seconds: f32) {
-        let forward = self.forward();
-        let right = normalize([forward[1], -forward[0], 0.0]);
-        let mut movement = [0.0; 3];
-        if input.active(TerrainInput::FORWARD) {
-            add_scaled(&mut movement, forward, 1.0);
-        }
-        if input.active(TerrainInput::BACKWARD) {
-            add_scaled(&mut movement, forward, -1.0);
-        }
-        if input.active(TerrainInput::RIGHT) {
-            add_scaled(&mut movement, right, 1.0);
-        }
-        if input.active(TerrainInput::LEFT) {
-            add_scaled(&mut movement, right, -1.0);
-        }
-        if input.active(TerrainInput::UP) {
-            movement[2] += 1.0;
-        }
-        if input.active(TerrainInput::DOWN) {
-            movement[2] -= 1.0;
-        }
-        let mut target_velocity = [0.0; 3];
-        let length = dot(movement, movement).sqrt();
-        if length > f32::EPSILON {
-            let multiplier = if input.active(TerrainInput::BOOST) {
-                4.0
-            } else {
-                1.0
-            };
-            add_scaled(
-                &mut target_velocity,
-                movement,
-                self.move_speed * multiplier / length,
-            );
-        }
-        let decay = (-CAMERA_VELOCITY_RESPONSE * seconds).exp();
-        for ((position, velocity), target) in self
-            .position
-            .iter_mut()
-            .zip(&mut self.velocity)
-            .zip(target_velocity)
-        {
-            let difference = *velocity - target;
-            *position += target * seconds + difference * (1.0 - decay) / CAMERA_VELOCITY_RESPONSE;
-            *velocity = target + difference * decay;
-        }
-    }
-
-    fn rotate(&mut self, delta_x: f32, delta_y: f32) {
-        self.yaw -= delta_x * 0.004;
-        self.pitch = (self.pitch - delta_y * 0.004).clamp(-1.48, 1.48);
-    }
-
-    fn dolly(&mut self, amount: f32) {
-        let forward = self.forward();
-        add_scaled(
-            &mut self.velocity,
-            forward,
-            amount * self.move_speed * 0.2 * CAMERA_VELOCITY_RESPONSE,
-        );
     }
 
     #[allow(clippy::cast_precision_loss)]
@@ -4938,6 +5025,8 @@ mod tests {
         quantize_cascade_extent, ray_distance_for_view_depth, scene_shadow, shadow_uniform_bytes,
         source_road_mips, terrain_color_targets, terrain_viewer_title,
     };
+    use cic_camera::{CameraIntent, RtsCamera, RtsCameraProfile};
+
     use crate::TerrainLighting;
 
     /// The caster passes bind one cascade and the receivers bind the whole array, so the two
@@ -5052,19 +5141,19 @@ mod tests {
         assert_eq!(ROAD_DEPTH_BIAS.clamp.to_bits(), 0.0_f32.to_bits());
         assert_eq!(
             terrain_viewer_title("map", false, false),
-            "map | WASD fly, Space/Ctrl vertical, Shift boost, RMB look, wheel move, R reset, Esc close"
+            "map | WASD/arrows scroll, RMB hold to scroll, wheel zoom, MMB rotate or click to face north, R reset, Esc close"
         );
         assert_eq!(
             terrain_viewer_title("map", false, true),
-            "map | WASD fly, Space/Ctrl vertical, Shift boost, RMB look, wheel move, R reset, M wireframe, Esc close"
+            "map | WASD/arrows scroll, RMB hold to scroll, wheel zoom, MMB rotate or click to face north, R reset, M wireframe, Esc close"
         );
         assert_eq!(
             terrain_viewer_title("map", true, false),
-            "map [wireframe] | WASD fly, Space/Ctrl vertical, Shift boost, RMB look, wheel move, R reset, Esc close"
+            "map [wireframe] | WASD/arrows scroll, RMB hold to scroll, wheel zoom, MMB rotate or click to face north, R reset, Esc close"
         );
         assert_eq!(
             terrain_viewer_title("map", true, true),
-            "map [wireframe] | WASD fly, Space/Ctrl vertical, Shift boost, RMB look, wheel move, R reset, M wireframe, Esc close"
+            "map [wireframe] | WASD/arrows scroll, RMB hold to scroll, wheel zoom, MMB rotate or click to face north, R reset, M wireframe, Esc close"
         );
     }
 
@@ -5163,10 +5252,8 @@ mod tests {
         // texel extent rather than a shared constant.
         let camera = TerrainCamera {
             position: [0.0, 0.0, 200.0],
-            velocity: [0.0; 3],
             yaw: 0.6,
             pitch: -0.7,
-            move_speed: 100.0,
             far_plane: 10_000.0,
         };
         let shadow = scene_shadow(camera, 16.0 / 9.0, TerrainLighting::preview());
@@ -5251,11 +5338,10 @@ mod tests {
             (KeyCode::KeyS, TerrainInput::BACKWARD),
             (KeyCode::KeyA, TerrainInput::LEFT),
             (KeyCode::KeyD, TerrainInput::RIGHT),
-            (KeyCode::Space, TerrainInput::UP),
-            (KeyCode::ControlLeft, TerrainInput::DOWN),
-            (KeyCode::ControlRight, TerrainInput::DOWN),
-            (KeyCode::ShiftLeft, TerrainInput::BOOST),
-            (KeyCode::ShiftRight, TerrainInput::BOOST),
+            (KeyCode::ArrowUp, TerrainInput::FORWARD),
+            (KeyCode::ArrowDown, TerrainInput::BACKWARD),
+            (KeyCode::ArrowLeft, TerrainInput::LEFT),
+            (KeyCode::ArrowRight, TerrainInput::RIGHT),
         ];
         for (key, mask) in mappings {
             input = TerrainInput::default();
@@ -5300,13 +5386,11 @@ mod tests {
     }
 
     #[test]
-    fn perspective_view_matrix_is_finite_and_movement_uses_explicit_delta() {
-        let mut camera = TerrainCamera {
+    fn perspective_view_matrix_is_finite_and_pose_round_trips_through_yaw_and_pitch() {
+        let camera = TerrainCamera {
             position: [10.0, 20.0, 30.0],
-            velocity: [0.0; 3],
             yaw: 0.25,
             pitch: -0.5,
-            move_speed: 100.0,
             far_plane: 10_000.0,
         };
         let matrix = multiply_matrix(
@@ -5314,23 +5398,42 @@ mod tests {
             look_to(camera.position, camera.forward(), [0.0, 0.0, 1.0]),
         );
         assert!(matrix.into_iter().flatten().all(f32::is_finite));
-        let mut stepped_camera = camera;
-        let mut input = TerrainInput::default();
-        input.set(winit::keyboard::KeyCode::KeyW, true);
-        camera.update(input, 0.5);
-        for _ in 0..50 {
-            stepped_camera.update(input, 0.01);
+
+        // The camera model owns movement now, and this type only carries the pose it produces.
+        // Yaw and pitch are recovered from the forward vector, so the round trip has to be exact:
+        // the shadow cascades and the terrain detail selection both reason about those angles.
+        let ground = cic_camera::FlatGround(12.0);
+        let mut rts = RtsCamera::new(RtsCameraProfile::GENERALS_DEFAULT, [40.0, -25.0], &ground);
+        rts.update(
+            CameraIntent {
+                pan: [1.0, 0.5],
+                rotate: 40.0,
+                zoom: -1.0,
+                ..CameraIntent::default()
+            },
+            1.0 / 30.0,
+            &ground,
+        );
+        let pose = rts.pose();
+        let derived = TerrainCamera::from_pose(pose, 10_000.0);
+        for (value, expected) in derived.position.into_iter().zip(pose.eye) {
+            assert!((value - expected).abs() < 1.0e-4, "eye survived: {derived:?}");
         }
-        for (single, stepped) in camera.position.into_iter().zip(stepped_camera.position) {
-            assert!((single - stepped).abs() < 0.001);
+        for (value, expected) in derived.forward().into_iter().zip(pose.forward) {
+            assert!(
+                (value - expected).abs() < 1.0e-4,
+                "forward round-tripped through yaw and pitch: {:?} vs {:?}",
+                derived.forward(),
+                pose.forward
+            );
         }
+        // A source-tilt camera must look downward, or the cascade fit would be aimed at the sky.
+        assert!(derived.pitch < 0.0, "pitch was {}", derived.pitch);
 
         let focus_camera = TerrainCamera {
             position: [10.0, 20.0, 30.0],
-            velocity: [0.0; 3],
             yaw: 0.0,
             pitch: -std::f32::consts::FRAC_PI_4,
-            move_speed: 100.0,
             far_plane: 10_000.0,
         };
         for pitch in [-0.000_001, 0.0, 0.000_001] {
@@ -5355,10 +5458,8 @@ mod tests {
     fn shallow_view_detail_footprint_is_capped_before_the_horizon() {
         let camera = TerrainCamera {
             position: [0.0, 0.0, 200.0],
-            velocity: [0.0; 3],
             yaw: 0.0,
             pitch: -0.1,
-            move_speed: 100.0,
             far_plane: 10_000.0,
         };
         let terrain = ([-2_000.0, -2_000.0, 0.0], [2_000.0, 2_000.0, 100.0]);
@@ -5388,10 +5489,8 @@ mod tests {
     fn limited_viewport_bounds_are_symmetric_after_half_turn() {
         let camera = TerrainCamera {
             position: [0.0, 0.0, 300.0],
-            velocity: [0.0; 3],
             yaw: 0.37,
             pitch: -0.35,
-            move_speed: 100.0,
             far_plane: 10_000.0,
         };
         let reverse = TerrainCamera {

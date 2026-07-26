@@ -23,10 +23,10 @@ struct ShadowCascade {
     params: vec4<f32>,
 }
 
-const SHADOW_CASCADE_COUNT: i32 = 4;
+const SHADOW_CASCADE_COUNT: i32 = 5;
 
 struct ShadowCamera {
-    cascades: array<ShadowCascade, 4>,
+    cascades: array<ShadowCascade, 5>,
 }
 
 struct FullscreenOutput {

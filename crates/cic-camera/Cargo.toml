@@ -1,0 +1,10 @@
+[package]
+name = "cic-camera"
+description = "Reusable real-time-strategy camera model for Commanders in Chief"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true

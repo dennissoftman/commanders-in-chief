@@ -7,6 +7,17 @@ land under the active milestone heading.
 
 ### Added
 
+- Added `cic-camera`, a dependency-free crate holding the real-time-strategy camera model so the
+  inspection viewers, a future editor, and the game share one implementation. Callers translate their
+  own bindings into semantic intents and supply terrain elevation through a trait, so the crate
+  depends on no window, input, or GPU library. Limits and rates come from the source `GameData`
+  camera fields; `CameraAdjustSpeed` is converted through the source logic rate so smoothing feels
+  identical at any present rate, and an absolute height ceiling plus a ground-sample rate limit are
+  project-authored because source data cannot bound a malformed heightfield.
+- `map-view` now uses that camera instead of free flight: a fixed source tilt holding a height above
+  the terrain beneath the view centre, WASD or arrows to scroll, the wheel to zoom, and the middle
+  button to rotate as the original does. Vertical and boost keys are gone, having nothing to do.
+
 - Added a bounded WND text-format decoder (`crates/cic-formats/src/wnd.rs`) covering `FILE_VERSION`,
   the `STARTLAYOUTBLOCK`/`ENDLAYOUTBLOCK` layout block, and the complete `WINDOW`/`CHILD`/`END`/
   `ENDALLCHILDREN` hierarchy with `WINDOWTYPE`/`SCREENRECT` typed. Every other field is retained
