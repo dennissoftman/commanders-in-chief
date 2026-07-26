@@ -786,6 +786,28 @@ impl AnimatedModel {
         Ok(bytes)
     }
 
+    /// Largest distance from the model origin to any bind-pose vertex.
+    ///
+    /// The origin, not the geometric centre, because that is the point an instance transform rotates
+    /// about and translates to: a sphere of this radius about an instance's position contains the
+    /// instance whatever its rotation.
+    pub(crate) fn bind_pose_radius(&self) -> Result<f32, RenderError> {
+        let worlds = self.pose_transforms(None, 0)?;
+        let mut squared = 0.0_f32;
+        for vertex in &self.vertices {
+            let world = worlds
+                .get(usize::try_from(vertex.pivot).map_err(|_| RenderError::InvalidHierarchy)?)
+                .copied()
+                .ok_or(RenderError::InvalidHierarchy)?;
+            let position = world.point(vertex.position);
+            if position.iter().any(|value| !value.is_finite()) {
+                return Err(RenderError::GeometryOutsideLimits);
+            }
+            squared = squared.max(position.into_iter().map(|value| value * value).sum::<f32>());
+        }
+        Ok(squared.sqrt())
+    }
+
     /// Computes one fixed center and scale when a clip is selected.
     pub(crate) fn framing(&self, animation: Option<usize>) -> Result<ModelFraming, RenderError> {
         let worlds = self.pose_transforms(animation, 0)?;

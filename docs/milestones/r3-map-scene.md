@@ -1,7 +1,7 @@
 # R3: Complete MAP ingestion and terrain-scene presentation
 
 **Status:** Complete (2026-07-23). Bounded MAP ingestion, non-simulating scene presentation, and
-deterministic overview capture are established.
+deterministic capture are established.
 
 **Scope:** Boundedly decode and retain every source-established MAP section needed to inspect a
 map and construct its complete pre-simulation scene. This includes terrain, texture blends,
@@ -117,12 +117,19 @@ scene captures; local user-owned verification retains only aggregate diagnostics
    evaluation, timers, side effects, and compatibility rewrites belong to R5.
 7. **Scene integration and R3 closure (complete).** Present all resolved opaque scenery through the existing
    G-buffer, then ordered alpha/additive scenery and forward water. The viewer adds a shared primary
-   directional shadow map and a multisampled composite; `map-render --time` emits a deterministic
-   full-scene overview. Both profiles retain version-1 height data at its native stored grid.
+   directional shadow map and a multisampled composite, and `--time` makes presentation time an
+   explicit input so a full-scene capture is deterministic. Both profiles retain version-1 height
+   data at its native stored grid.
    Source-editor preview/auxiliary chunks remain opaque because they are not scene inputs; R4
    generates previews from the completed renderer. Dense installed and original synthetic fixtures
    verify closure, reporting, continuity, placement, ambient animation, water, stable output, and
    graceful diagnostics.
+
+   R3 met the capture requirement with a separate `map-render` command, which composited roads,
+   water, zones, and scenery over a GPU terrain capture as flat symbolic colours under a fixed
+   isometric transform. R4 removed it: that approximation shared no lighting with the viewer, so its
+   hashes protected none of it. `map-view --output` renders the viewer's own deferred path offscreen
+   instead, and every capture statement below is written against that. See the R4 changelog entry.
 
 **Progress:** The initial source-backed gate inventories the `CkMp` symbol table and top-level
 chunks with exact closure and opaque payload preservation. A separate semantic decoder accepts
@@ -156,7 +163,7 @@ stable static-model instancing, exact terrain-triangle placement, a renderer-onl
 fence, intact bridges with retained state assets and tower scenery, and source mesh culling are
 integrated. Complete polygon retention/reporting, explicit-time default-breeze tree sway, shared
 terrain/scenery/water shadows, the viewer's multisampled composite, and deterministic full-scene
-overview capture close R3. Unsupported draw modules remain visible diagnostics and gameplay-bearing
+capture close R3. Unsupported draw modules remain visible diagnostics and gameplay-bearing
 modules remain excluded rather than blocking this presentation milestone.
 
 ## Closure summary
@@ -193,9 +200,9 @@ modeled constructor/default, function input/output branch, binary structure fiel
 limit, road topology, and atlas primitive; deliberately unmodeled legacy runtime state is recorded
 as an exclusion rather than assigned speculative values. The
 completed scene also retains all polygon areas, applies explicit-time default-breeze tree sway, and
-supports deterministic fixed-isometric full-scene overview capture. Renderer-only diagnostic
-geometry now shows ordinary waypoints, per-player start candidates, and terrain-following polygon
-perimeters in both the interactive viewer and overview capture. Named waypoint paths receive
+supports deterministic full-scene capture. Renderer-only diagnostic geometry now shows ordinary
+waypoints, per-player start candidates, and terrain-following polygon perimeters in both the
+interactive viewer and its captures. Named waypoint paths receive
 deterministic distinct colors and continuous terrain-following ribbons in stored waypoint-ID order;
 multi-path waypoints remain members of every declared path. Scripts
 are inspectable in R3 but cannot be executed until the deterministic simulation boundary begins in
@@ -227,16 +234,18 @@ R5.
   only aggregate counts were retained.
 - `map-height` now writes an 8-bit grayscale PNG by default, deriving the filename from the MAP
   resource basename; `--report` retains the stable text report and `--png` overrides the path.
-- A bounded Terrain INI decoder preserves ordered declarations. `map-render` applies explicit
+- A bounded Terrain INI decoder preserves ordered declarations. `map-view` applies explicit
   `DefaultTerrain` inheritance/override semantics across every provider in stable base-to-overlay
   VFS history and resolves semantic MAP texture classes through VFS-backed `Art/Terrain` sheets.
 - `cic-render` stages source-scaled height geometry, per-cell base/primary/extra layers, blend- and
   cliff-selected triangle diagonals, packed 64-pixel tile quadrants, source-rounded mip reduction,
   and deterministic procedural alpha masks without owning parser, VFS, filesystem, or clock state.
-- `cic-inspect map-render` bakes the stable terrain layers and produces an sRGB PNG through the
-  headless GPU boundary. The legacy-UV layered and custom-edge synthetic captures match RGBA
-  SHA-256 values `d19dee6e96471515ab0b4902e99aa9bed44650b10f975e35a91c427e95f96cad`
-  and `5f5761f44446d8784b7c0910adee7ede440c9e428a3d4b25be26ce470bfabd27`.
+- The headless GPU boundary bakes the stable terrain layers into an sRGB capture. The legacy-UV
+  layered and custom-edge synthetic captures match RGBA SHA-256 values
+  `d19dee6e96471515ab0b4902e99aa9bed44650b10f975e35a91c427e95f96cad` and
+  `5f5761f44446d8784b7c0910adee7ede440c9e428a3d4b25be26ce470bfabd27`; both remain pinned in
+  `crates/cic-render/tests/gpu_capture.rs`, since they cover terrain staging rather than the
+  removed overview compositing.
 - `map-view` shares the staged base/edge GPU path and provides perspective WASD/vertical flight,
   boost, right-mouse look, wheel dolly, and reset controls. The installed Generals viewer remained
   live through resource staging, GPU upload, surface creation, and camera rendering.
@@ -282,18 +291,19 @@ R5.
 - The viewer renders terrain and alpha-tested static scenery into one 2048-square primary
   directional shadow map and samples it from deferred opaque lighting and forward water with
   bounded 3-by-3 PCF. Its opaque G-buffer is hardware multisampled and its final composite applies
-  a bounded contrast-adaptive sharpen; ADR 0007 owns both. Deterministic headless capture does not
-  use that path and is single-sampled.
+  a bounded contrast-adaptive sharpen; ADR 0007 owns both. R4 replaced that single shadow map with
+  five fitted cascades and added ambient occlusion. Deterministic headless capture went through none
+  of it in R3; since R4 it goes through all of it, being the same path rendered offscreen.
 - `W3DTreeDraw` resources now resolve separately from ordinary model draws and receive
   source-default `BreezeInfo` direction, lean, intensity, five-second period, bounded randomness,
   and one of ten deterministic placement-ID sway families. Presentation samples explicit seconds;
   decoded `SET_TREE_SWAY` remains inert until R5.
-- `map-render --time` now emits a deterministic fixed-isometric full-scene overview rather than a
-  terrain-only image. It layers source-ordered road and water triangles plus scenery markers over
-  the GPU terrain capture and reports all scene counts with the RGBA hash.
-- `map-view` and `map-render` stage bounded octahedral markers for every waypoint and larger,
-  stable-color markers for one-based `Player_n_Start` candidates. All polygon areas render as
-  source-ordered translucent terrain-following perimeter walls; water polygons are visibly
+- Full-scene capture at an explicit time reports every scene count with the RGBA hash of the frame.
+  R3 produced that frame as a fixed-isometric overview layering source-ordered road and water
+  triangles plus scenery markers over a GPU terrain capture; `map-view --output` supersedes it.
+- `map-view` stages bounded octahedral markers for every waypoint and larger, stable-color markers
+  for one-based `Player_n_Start` candidates. All polygon areas render as source-ordered translucent
+  terrain-following perimeter walls; water polygons are visibly
   distinct. Up to three retained path labels per waypoint form case-insensitive, lexically ordered
   color groups whose members connect in stored waypoint-ID order with bounded terrain-following
   ribbons. These diagnostics neither register spatial triggers nor create players.
@@ -398,10 +408,12 @@ R5.
 - The optimized USA06 viewer remained live for 15 seconds after angled LOD selection moved from a
   radial/world-axis approximation to camera-space depth and projected page ranking. Regression
   tests preserve the angled cutoff and coarse-visible-before-fine policy; no capture was retained.
-- The final installed overview smoke retained all six polygon areas and 54 points on one dense map.
+- The final installed capture smoke retained all six polygon areas and 54 points on one dense map.
   A separate water-bearing map staged 448 road draws, 1,995 scenery instances across 119 models,
   862 boundary segments, and three water areas; two 256-square captures at explicit time 2 matched
-  RGBA SHA-256 `ba60f7a4aeb92680366ab15170cfe1521de9acfdbf3f6abf5d5d7fc6dc71660e`.
+  RGBA SHA-256 `ba60f7a4aeb92680366ab15170cfe1521de9acfdbf3f6abf5d5d7fc6dc71660e`. That hash
+  belongs to the removed isometric overview and is not reproducible from `map-view --output`; the
+  scene counts are what carries forward.
   Temporary captures were deleted and no retail bytes, names, coordinates, or images were retained.
 
 
@@ -422,7 +434,7 @@ R5.
 - Source standing-water texture/color/blend/opacity and WaterSet sky/environment textures drive the
   selected appearance, including sibling `Map.ini` overrides. Modern water adds bounded
   screen-space/environment reflection inputs; shared shadows, the viewer's multisampled composite,
-  explicit-time overview hashes, and repeatable user-owned comparisons complete the R3 baseline.
+  explicit-time capture hashes, and repeatable user-owned comparisons complete the R3 baseline.
   Exact legacy fixed-function pixel equivalence remains excluded.
 - `WorldInfo`, complete `ObjectsList`/`Object` records, waypoint/player-start metadata,
   `SidesList`, teams, build lists, and the nested player-script tree now have bounded immutable

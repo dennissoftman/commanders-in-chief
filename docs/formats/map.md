@@ -164,8 +164,8 @@ floating-point UVs use exact hexadecimal bit patterns.
 stable source order. `cic-inspect map-polygons` reports every established record, including
 non-water areas, without registering gameplay callbacks or spatial queries.
 
-`map-view` and `map-render` visualize this immutable inspection data with project-authored,
-renderer-only geometry. Ordinary waypoints use small cyan octahedra; one-based player-start
+`map-view` visualizes this immutable inspection data with project-authored, renderer-only geometry,
+identically whether it opens a window or writes a capture with `--output`. Ordinary waypoints use small cyan octahedra; one-based player-start
 candidates use larger stable per-player colors. Each waypoint may retain three nonempty ASCII
 path-label properties. Labels group case-insensitively in lexical byte order for deterministic
 color assignment; path members sort by stored waypoint ID with placement order as the tie-breaker.
@@ -181,11 +181,11 @@ the seam: staging starts on the two points around that seam, advances along one 
 along the other with wraparound, and emits paired cross-sections. A negative seam or one at/past
 the final point is retained by the format model but safely produces no renderer geometry.
 
-`cic-inspect map-render` additionally decodes ordered `Terrain`/`Texture` declarations from every
+`cic-inspect map-view` additionally decodes ordered `Terrain`/`Texture` declarations from every
 provider version of the mounted default and edition Terrain INIs in stable base-to-overlay order,
-applies `DefaultTerrain` inheritance, resolves sheets beneath `Art/Terrain`, stages source-scaled
-geometry and base/primary/extra layers, then adds source-ordered road/water triangles and scenery
-markers in a deterministic fixed-isometric overview and writes an sRGB PNG. Size, explicit time,
+applies `DefaultTerrain` inheritance, resolves sheets beneath `Art/Terrain`, and stages source-scaled
+geometry and base/primary/extra layers. With `--output` it renders that staged scene once through the
+same deferred path the window uses and writes an sRGB PNG or a PPM. Size, explicit time,
 and power-of-two
 pixels per cell are explicit; diagnostics include stable
 geometry/layer counts and the captured RGBA SHA-256. `--terrain-policy legacy` is the default and
@@ -233,7 +233,7 @@ R3 includes the source-backed bounded decoder for the observed `BlendTileData` v
 cliff stride. Both presentation profiles retain version-1 heights on their native stored grid; no
 hidden parser resampling is applied. Source-editor preview and auxiliary chunks that are not needed
 to build the scene remain available through the opaque inventory. R4 map selection generates
-previews from `map-render` rather than decoding or redistributing cached retail thumbnails. Unknown
+previews from `map-view --output` rather than decoding or redistributing cached retail thumbnails. Unknown
 or unobserved versions remain opaque; compatibility claims are version-specific.
 
 Custom-map fixtures must cover omitted optional sections, reordered known chunks, unknown chunks,

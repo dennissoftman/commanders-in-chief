@@ -368,7 +368,10 @@ impl StagedWater {
     /// # Errors
     ///
     /// Returns [`RenderError::GeometryTooLarge`] if checked staging limits are exceeded.
-    pub fn from_map(water: &MapWaterData) -> Result<Self, RenderError> {
+    pub fn from_map(
+        water: &MapWaterData,
+        presentation: WaterPresentationPolicy,
+    ) -> Result<Self, RenderError> {
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
         for area in water.areas() {
@@ -378,6 +381,14 @@ impl StagedWater {
                 stage_lake(area, &mut vertices, &mut indices)?;
             }
         }
+        // Only the modern presentation displaces the surface, and only displacement needs interior
+        // vertices. Subdividing for legacy too would spend geometry on a sheet that never moves, and
+        // would not even leave it identical: interpolating across smaller triangles rounds
+        // differently, which moves the depth fade by a hair and changes the frame.
+        let (vertices, indices) = match presentation {
+            WaterPresentationPolicy::ZeroHourLegacy => (vertices, indices),
+            WaterPresentationPolicy::Modern => subdivide_surface(&vertices, &indices)?,
+        };
         Ok(Self {
             vertices,
             indices,
@@ -479,6 +490,119 @@ fn stage_river(
     Ok(())
 }
 
+/// Target length, in world units, of a staged water triangle edge.
+///
+/// The surface waves have wavelengths near two hundred world units, so this gives roughly ten
+/// samples across a wave — enough that displacement reads as a smooth swell rather than a fold.
+const WATER_TARGET_EDGE: f32 = 22.0;
+/// Cap on subdivided water triangles, so a pathological source polygon cannot generate unbounded
+/// geometry. Source areas triangulate into a handful of long slivers, and a whole-map lake reaches
+/// the target edge length well inside this.
+const MAX_WATER_SUBDIVIDED_TRIANGLES: usize = 48_000;
+
+/// Subdivides staged water triangles until their edges approach [`WATER_TARGET_EDGE`].
+///
+/// Source water areas triangulate into a few very long triangles, which have no interior vertices at
+/// all: a fan over seven authored points is five slivers whose every vertex sits on the boundary. A
+/// vertex shader can only displace vertices it is given, so a flat sheet is all that geometry can
+/// ever be. This gives the surface something to move.
+///
+/// Uniform barycentric subdivision with one lattice size for every triangle, deliberately, rather
+/// than per-triangle sizing: the lattice along a shared edge then depends only on that edge's two
+/// endpoints, so neighbouring triangles land on identical positions and the surface stays watertight.
+/// Per-triangle sizing would crack wherever two neighbours chose differently.
+///
+/// The result is coplanar with its input, so a presentation that does not displace it rasterizes
+/// exactly the same surface.
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+fn subdivide_surface(
+    vertices: &[[f32; 3]],
+    indices: &[u32],
+) -> Result<(Vec<[f32; 3]>, Vec<u32>), RenderError> {
+    let triangles = indices.len() / 3;
+    if triangles == 0 {
+        return Ok((vertices.to_vec(), indices.to_vec()));
+    }
+    let mut longest = 0.0_f32;
+    for triangle in indices.chunks_exact(3) {
+        let corners = triangle_corners(vertices, triangle)?;
+        for edge in 0..3 {
+            let from = corners[edge];
+            let to = corners[(edge + 1) % 3];
+            let length = ((to[0] - from[0]).powi(2) + (to[1] - from[1]).powi(2)).sqrt();
+            longest = longest.max(length);
+        }
+    }
+    // Each input triangle becomes `lattice * lattice` sub-triangles, so the cap bounds `lattice`.
+    let cap = ((MAX_WATER_SUBDIVIDED_TRIANGLES / triangles) as f32).sqrt();
+    let lattice = (longest / WATER_TARGET_EDGE).ceil().min(cap).max(1.0) as u32;
+    if lattice <= 1 {
+        return Ok((vertices.to_vec(), indices.to_vec()));
+    }
+    let mut output_vertices = Vec::new();
+    let mut output_indices = Vec::new();
+    for triangle in indices.chunks_exact(3) {
+        let corners = triangle_corners(vertices, triangle)?;
+        let row_count = lattice as usize + 1;
+        let base = checked_vertex_base(&output_vertices, row_count * (row_count + 1) / 2)?;
+        // Barycentric lattice, row `i` holding `lattice - i + 1` points.
+        for i in 0..=lattice {
+            for j in 0..=(lattice - i) {
+                let v = f32::from(u16::try_from(i).map_err(|_| RenderError::GeometryTooLarge)?)
+                    / lattice as f32;
+                let w = f32::from(u16::try_from(j).map_err(|_| RenderError::GeometryTooLarge)?)
+                    / lattice as f32;
+                // `a + (b - a) v + (c - a) w` rather than the `au + bv + cw` form: the weights only
+                // sum to one up to rounding, so the weighted form drifts off a constant plane by an
+                // epsilon. This form reproduces a constant exactly, which is what lets an
+                // undisplaced surface rasterize identically to the polygon it came from.
+                let mut point = [0.0_f32; 3];
+                for axis in 0..3 {
+                    point[axis] = corners[0][axis]
+                        + (corners[1][axis] - corners[0][axis]) * v
+                        + (corners[2][axis] - corners[0][axis]) * w;
+                }
+                output_vertices.push(point);
+            }
+        }
+        // Offset of the first vertex of lattice row `i`, which shortens by one each row.
+        let row_start = |i: u32| -> u32 {
+            let i = u64::from(i);
+            let lattice = u64::from(lattice);
+            (i * (2 * lattice + 3 - i) / 2) as u32
+        };
+        for i in 0..lattice {
+            for j in 0..(lattice - i) {
+                let here = base + row_start(i) + j;
+                let above = base + row_start(i + 1) + j;
+                // Wound to match the input triangle. The water pipeline does not cull, so nothing
+                // currently depends on this, which is exactly why it is worth not getting wrong.
+                push_indices(&mut output_indices, [here, above, here + 1])?;
+                if j + 1 < lattice - i {
+                    push_indices(&mut output_indices, [above, above + 1, here + 1])?;
+                }
+            }
+        }
+    }
+    Ok((output_vertices, output_indices))
+}
+
+fn triangle_corners(vertices: &[[f32; 3]], triangle: &[u32]) -> Result<[[f32; 3]; 3], RenderError> {
+    let mut corners = [[0.0_f32; 3]; 3];
+    for (corner, index) in corners.iter_mut().zip(triangle) {
+        *corner = usize::try_from(*index)
+            .ok()
+            .and_then(|index| vertices.get(index))
+            .copied()
+            .ok_or(RenderError::InvalidIndex)?;
+    }
+    Ok(corners)
+}
+
 fn checked_vertex_base(vertices: &[[f32; 3]], additional: usize) -> Result<u32, RenderError> {
     let following = vertices
         .len()
@@ -516,6 +640,98 @@ mod tests {
         StagedWater, WaterAppearance, WaterCausticSequence, WaterPresentationPolicy,
         WaterSurfaceTexture,
     };
+
+    /// Subdivision has to stay watertight, or the surface cracks the moment it is displaced: a seam
+    /// where two neighbours disagree on a vertex position opens into a visible tear once the vertices
+    /// move apart vertically. Every interior edge must therefore be shared by exactly two triangles,
+    /// and the shared vertices must be bit-identical, not merely close.
+    ///
+    /// Checked on positions rather than indices, because each input triangle emits its own lattice and
+    /// a shared edge is only watertight if the two lattices land on the same coordinates.
+    #[test]
+    fn subdivided_water_is_watertight_and_stays_in_its_input_plane() {
+        use std::collections::BTreeMap;
+
+        // One large fan-triangulated quad, well past the target edge length in both axes.
+        let corners = [
+            [0.0_f32, 0.0, 90.0],
+            [900.0, 0.0, 90.0],
+            [900.0, 640.0, 90.0],
+            [0.0, 640.0, 90.0],
+        ];
+        let vertices = corners.to_vec();
+        let indices = vec![0, 1, 2, 0, 2, 3];
+        let (output_vertices, output_indices) =
+            super::subdivide_surface(&vertices, &indices).expect("subdivided water");
+
+        assert!(
+            output_indices.len() > indices.len(),
+            "a polygon this large must actually subdivide"
+        );
+        assert!(output_indices.len() % 3 == 0);
+        assert!(output_indices.len() / 3 <= super::MAX_WATER_SUBDIVIDED_TRIANGLES);
+
+        let mut edges: BTreeMap<[[u32; 3]; 2], usize> = BTreeMap::new();
+        let mut longest = 0.0_f32;
+        let mut area = 0.0_f64;
+        for triangle in output_indices.chunks_exact(3) {
+            let corners = super::triangle_corners(&output_vertices, triangle).expect("corners");
+            for corner in corners {
+                assert!(
+                    (corner[2] - 90.0).abs() < f32::EPSILON,
+                    "subdivision must stay in the input plane, got {corner:?}"
+                );
+            }
+            area += f64::from(
+                ((corners[1][0] - corners[0][0]) * (corners[2][1] - corners[0][1])
+                    - (corners[2][0] - corners[0][0]) * (corners[1][1] - corners[0][1]))
+                    .abs(),
+            ) * 0.5;
+            for edge in 0..3 {
+                let from = corners[edge];
+                let to = corners[(edge + 1) % 3];
+                longest =
+                    longest.max(((to[0] - from[0]).powi(2) + (to[1] - from[1]).powi(2)).sqrt());
+                let bits = |point: [f32; 3]| point.map(f32::to_bits);
+                let mut key = [bits(from), bits(to)];
+                key.sort_unstable();
+                *edges.entry(key).or_default() += 1;
+            }
+        }
+        assert!(
+            edges.values().all(|count| *count <= 2),
+            "an edge shared by more than two triangles means overlapping geometry"
+        );
+        let interior = edges.values().filter(|count| **count == 2).count();
+        let boundary = edges
+            .iter()
+            .filter(|(_, count)| **count == 1)
+            .map(|(key, _)| key)
+            .collect::<Vec<_>>();
+        assert!(interior > boundary.len(), "expected a mostly interior mesh");
+        // Every edge on the outside appears once, so their total length is the input perimeter. A
+        // missed seam vertex would leave an interior edge counted once and inflate this.
+        let perimeter = boundary
+            .iter()
+            .map(|key| {
+                let from = key[0].map(f32::from_bits);
+                let to = key[1].map(f32::from_bits);
+                f64::from(((to[0] - from[0]).powi(2) + (to[1] - from[1]).powi(2)).sqrt())
+            })
+            .sum::<f64>();
+        assert!(
+            (perimeter - 2.0 * (900.0 + 640.0)).abs() < 1.0,
+            "boundary length {perimeter} does not match the input perimeter"
+        );
+        assert!(
+            longest <= super::WATER_TARGET_EDGE * 1.5,
+            "longest edge {longest} exceeds the target"
+        );
+        assert!(
+            (area - 900.0 * 640.0).abs() < 1.0,
+            "subdivision must cover the same footprint, got {area}"
+        );
+    }
 
     #[test]
     fn caustic_sequences_require_bounded_consistent_frames() {
@@ -596,7 +812,8 @@ mod tests {
         );
         let map = parse_map(&map_bytes(&payload), "water.map", MapLimits::default()).expect("map");
         let decoded = decode_map_water(&map, MapLimits::default()).expect("water");
-        let staged = StagedWater::from_map(&decoded).expect("staged water");
+        let staged = StagedWater::from_map(&decoded, WaterPresentationPolicy::ZeroHourLegacy)
+            .expect("staged water");
         assert_eq!(staged.area_count(), 2);
         assert_eq!(staged.vertices().len(), 10);
         assert_eq!(
@@ -625,7 +842,8 @@ mod tests {
         add_area(&mut payload, b"past-end", true, 3, &points);
         let map = parse_map(&map_bytes(&payload), "seams.map", MapLimits::default()).expect("map");
         let decoded = decode_map_water(&map, MapLimits::default()).expect("water");
-        let staged = StagedWater::from_map(&decoded).expect("bounded invalid seams");
+        let staged = StagedWater::from_map(&decoded, WaterPresentationPolicy::ZeroHourLegacy)
+            .expect("bounded invalid seams");
         assert_eq!(staged.area_count(), 2);
         assert!(staged.vertices().is_empty());
         assert!(staged.indices().is_empty());

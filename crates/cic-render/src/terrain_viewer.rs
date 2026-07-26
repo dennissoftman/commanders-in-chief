@@ -34,9 +34,9 @@ use crate::viewer::{
     GpuResourceManager, ViewerError, create_depth, create_material_layout, nonzero_size,
 };
 use crate::{
-    MapPresentationFrame, RenderError, StagedBoundaryFence, StagedMapOverlays, StagedRoads,
-    StagedStaticScenery, StagedTerrain, StagedWater, TerrainLighting, WaterAppearance,
-    WaterPresentationPolicy,
+    Capture, MapPresentationFrame, RenderError, StagedBoundaryFence, StagedMapOverlays,
+    StagedRoads, StagedStaticScenery, StagedTerrain, StagedWater, TerrainLighting, WaterAppearance,
+    WaterPresentationPolicy, capture_layout, read_back_capture,
 };
 
 const WINDOW_WIDTH: u32 = 1_280;
@@ -120,228 +120,310 @@ const ROAD_DEPTH_BIAS: wgpu::DepthBiasState = wgpu::DepthBiasState {
     clamp: 0.0,
 };
 
-/// Opens a perspective terrain viewer with keyboard flight and right-drag mouse look.
+/// One immutable staged MAP scene, complete enough to present or capture.
 ///
-/// W/S move forward/back, A/D strafe, Space/Ctrl move vertically, Shift boosts speed, right mouse
-/// drag looks around, the wheel moves along the view direction, R resets, M toggles wireframe when
-/// supported by the adapter, and Escape closes.
+/// Bundled rather than passed as loose arguments because the interactive viewer and the
+/// deterministic capture take exactly the same scene, and a single type is what keeps them unable
+/// to drift apart.
+#[derive(Debug)]
+pub struct MapScene {
+    pub terrain: StagedTerrain,
+    pub roads: StagedRoads,
+    pub boundary: StagedBoundaryFence,
+    pub overlays: StagedMapOverlays,
+    pub scenery: StagedStaticScenery,
+    pub water: StagedWater,
+    pub water_appearance: WaterAppearance,
+    pub lighting: TerrainLighting,
+}
+
+impl MapScene {
+    /// Builds a terrain-and-water-only scene, leaving every MAP overlay empty.
+    #[must_use]
+    pub fn terrain_only(
+        terrain: StagedTerrain,
+        water: StagedWater,
+        water_appearance: WaterAppearance,
+        lighting: TerrainLighting,
+    ) -> Self {
+        Self {
+            terrain,
+            roads: StagedRoads::empty(),
+            boundary: StagedBoundaryFence::empty(),
+            overlays: StagedMapOverlays::empty(),
+            scenery: StagedStaticScenery::empty(),
+            water,
+            water_appearance,
+            lighting,
+        }
+    }
+
+    fn staged<'a>(
+        &'a self,
+        requests: &'a [TerrainDetailRequest],
+        page_view: VirtualPageView,
+    ) -> TerrainViewerScene<'a> {
+        TerrainViewerScene {
+            terrain: &self.terrain,
+            roads: &self.roads,
+            boundary: &self.boundary,
+            overlays: &self.overlays,
+            scenery: &self.scenery,
+            requests,
+            page_view,
+            water: &self.water,
+            water_appearance: &self.water_appearance,
+            lighting: self.lighting,
+        }
+    }
+}
+
+/// Explicit placement for the MAP scene camera.
+///
+/// The interactive viewer treats it as the starting pose and the capture treats it as the only
+/// pose, so a capture frames the scene exactly as the window would before any input arrives. Pitch
+/// is deliberately absent: the source real-time-strategy camera has a fixed tilt and the viewer
+/// offers no way to change it, so a capture that could would no longer be showing what `map-view`
+/// shows.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MapViewCamera {
+    /// Ground point the view is centred on, or `None` for the centre of the terrain bounds.
+    focus_xy: Option<[f32; 2]>,
+    yaw: f32,
+    height: f32,
+}
+
+impl MapViewCamera {
+    /// The pose `map-view` opens on: centred on the terrain, at the source default yaw and height.
+    pub const CENTERED: Self = Self {
+        focus_xy: None,
+        yaw: RtsCameraProfile::GENERALS_DEFAULT.yaw,
+        height: RtsCameraProfile::GENERALS_DEFAULT.height,
+    };
+
+    /// Returns a placement at an explicit yaw in radians and height in world units.
+    ///
+    /// The height is clamped by the camera profile's own limits, exactly as a zoom would be, so a
+    /// capture cannot be framed from somewhere the viewer could not reach.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RenderError::InvalidCameraPlacement`] for a non-finite yaw or height.
+    pub fn new(yaw: f32, height: f32) -> Result<Self, RenderError> {
+        if !yaw.is_finite() || !height.is_finite() {
+            return Err(RenderError::InvalidCameraPlacement);
+        }
+        Ok(Self {
+            focus_xy: None,
+            yaw,
+            height,
+        })
+    }
+
+    /// Centres the view on an explicit ground point instead of the terrain centre.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RenderError::InvalidCameraPlacement`] for a non-finite coordinate.
+    pub fn with_focus(mut self, focus_xy: [f32; 2]) -> Result<Self, RenderError> {
+        if !focus_xy.iter().all(|value| value.is_finite()) {
+            return Err(RenderError::InvalidCameraPlacement);
+        }
+        self.focus_xy = Some(focus_xy);
+        Ok(self)
+    }
+
+    #[must_use]
+    pub const fn yaw(self) -> f32 {
+        self.yaw
+    }
+
+    #[must_use]
+    pub const fn height(self) -> f32 {
+        self.height
+    }
+
+    #[must_use]
+    pub const fn focus_xy(self) -> Option<[f32; 2]> {
+        self.focus_xy
+    }
+
+    /// Resolves the placement into the camera model the viewer drives interactively.
+    fn rts_camera(self, terrain: &StagedTerrain) -> RtsCamera {
+        let focus = self.focus_xy.unwrap_or_else(|| {
+            let (minimum, maximum) = terrain.bounds();
+            [
+                (minimum[0] + maximum[0]) * 0.5,
+                (minimum[1] + maximum[1]) * 0.5,
+            ]
+        });
+        let profile = RtsCameraProfile {
+            yaw: self.yaw,
+            height: self.height,
+            ..RtsCameraProfile::GENERALS_DEFAULT
+        };
+        RtsCamera::new(profile, focus, &StagedGround(terrain))
+    }
+
+    /// Resolves the placement into the renderer's view pose.
+    fn resolve(self, terrain: &StagedTerrain) -> TerrainCamera {
+        TerrainCamera::from_pose(
+            self.rts_camera(terrain).pose(),
+            TerrainCamera::far_plane_for(terrain),
+        )
+    }
+}
+
+impl Default for MapViewCamera {
+    fn default() -> Self {
+        Self::CENTERED
+    }
+}
+
+/// Which optional lighting contributions a frame records.
+///
+/// Skipping one leaves its target at the neutral clear value the pass already writes — a shadow
+/// cascade cleared to the far plane shadows nothing, an occlusion target cleared to white occludes
+/// nothing — so a term can be isolated without a shader variant or a uniform flag. Differencing two
+/// captures that differ in one flag attributes a suspicious region to a specific term, which is the
+/// only way to tell coarse terrain self-shadowing from an occlusion artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MapViewPasses {
+    /// Whether casters are drawn into the shadow cascades.
+    pub shadows: bool,
+    /// Whether the ambient occlusion pass and its blur run.
+    pub occlusion: bool,
+}
+
+impl MapViewPasses {
+    /// Everything on, as the interactive viewer always presents it.
+    pub const ALL: Self = Self {
+        shadows: true,
+        occlusion: true,
+    };
+}
+
+impl Default for MapViewPasses {
+    fn default() -> Self {
+        Self::ALL
+    }
+}
+
+/// Presents a staged MAP scene in an interactive window.
+///
+/// WASD or the arrow keys scroll, the wheel zooms, the middle button rotates and a middle click
+/// faces the camera back to its starting yaw, R resets, M toggles wireframe when the adapter
+/// supports it, and Escape closes. A `frame` freezes water and ambient presentation at an explicit
+/// diagnostic time; camera motion and detail streaming stay live either way.
 ///
 /// # Errors
 ///
-/// Returns a structured window, surface, adapter, device, or terrain-resource failure.
-pub fn run_terrain_viewer(
-    terrain: StagedTerrain,
-    water: StagedWater,
-    water_appearance: WaterAppearance,
-    lighting: TerrainLighting,
+/// Returns a structured window, surface, adapter, device, shader, or terrain-resource failure.
+pub fn run_map_view(
+    scene: MapScene,
+    camera: MapViewCamera,
     title: String,
-) -> Result<(), ViewerError> {
-    run_terrain_viewer_inner(
-        terrain,
-        StagedRoads::empty(),
-        StagedBoundaryFence::empty(),
-        StagedMapOverlays::empty(),
-        StagedStaticScenery::empty(),
-        water,
-        water_appearance,
-        lighting,
-        title,
-        None,
-    )
-}
-
-/// Opens the terrain viewer with immutable staged regular roads.
-///
-/// # Errors
-///
-/// Returns a structured window, surface, adapter, device, shader, or resource failure.
-pub fn run_terrain_viewer_with_roads(
-    terrain: StagedTerrain,
-    roads: StagedRoads,
-    water: StagedWater,
-    water_appearance: WaterAppearance,
-    lighting: TerrainLighting,
-    title: String,
-) -> Result<(), ViewerError> {
-    run_terrain_viewer_inner(
-        terrain,
-        roads,
-        StagedBoundaryFence::empty(),
-        StagedMapOverlays::empty(),
-        StagedStaticScenery::empty(),
-        water,
-        water_appearance,
-        lighting,
-        title,
-        None,
-    )
-}
-
-/// Opens the terrain viewer with immutable roads and a renderer-only playable-boundary fence.
-///
-/// # Errors
-///
-/// Returns a structured window, surface, adapter, device, shader, or resource failure.
-#[allow(clippy::too_many_arguments)]
-pub fn run_terrain_viewer_with_map(
-    terrain: StagedTerrain,
-    roads: StagedRoads,
-    boundary: StagedBoundaryFence,
-    overlays: StagedMapOverlays,
-    scenery: StagedStaticScenery,
-    water: StagedWater,
-    water_appearance: WaterAppearance,
-    lighting: TerrainLighting,
-    title: String,
-) -> Result<(), ViewerError> {
-    run_terrain_viewer_inner(
-        terrain,
-        roads,
-        boundary,
-        overlays,
-        scenery,
-        water,
-        water_appearance,
-        lighting,
-        title,
-        None,
-    )
-}
-
-/// Opens the terrain viewer with water and ambient presentation frozen at an
-/// explicit diagnostic time. Camera controls and detail streaming remain live.
-///
-/// # Errors
-///
-/// Returns a structured window, surface, adapter, device, shader, or terrain
-/// resource failure.
-pub fn run_terrain_viewer_at_time(
-    terrain: StagedTerrain,
-    water: StagedWater,
-    water_appearance: WaterAppearance,
-    lighting: TerrainLighting,
-    title: String,
-    frame: MapPresentationFrame,
-) -> Result<(), ViewerError> {
-    run_terrain_viewer_inner(
-        terrain,
-        StagedRoads::empty(),
-        StagedBoundaryFence::empty(),
-        StagedMapOverlays::empty(),
-        StagedStaticScenery::empty(),
-        water,
-        water_appearance,
-        lighting,
-        title,
-        Some(frame),
-    )
-}
-
-/// Opens the terrain viewer with immutable roads and frozen presentation time.
-///
-/// # Errors
-///
-/// Returns a structured window, surface, adapter, device, shader, or resource failure.
-pub fn run_terrain_viewer_with_roads_at_time(
-    terrain: StagedTerrain,
-    roads: StagedRoads,
-    water: StagedWater,
-    water_appearance: WaterAppearance,
-    lighting: TerrainLighting,
-    title: String,
-    frame: MapPresentationFrame,
-) -> Result<(), ViewerError> {
-    run_terrain_viewer_inner(
-        terrain,
-        roads,
-        StagedBoundaryFence::empty(),
-        StagedMapOverlays::empty(),
-        StagedStaticScenery::empty(),
-        water,
-        water_appearance,
-        lighting,
-        title,
-        Some(frame),
-    )
-}
-
-/// Opens the terrain viewer with roads, the playable-boundary fence, and frozen presentation time.
-///
-/// # Errors
-///
-/// Returns a structured window, surface, adapter, device, shader, or resource failure.
-#[allow(clippy::too_many_arguments)]
-pub fn run_terrain_viewer_with_map_at_time(
-    terrain: StagedTerrain,
-    roads: StagedRoads,
-    boundary: StagedBoundaryFence,
-    overlays: StagedMapOverlays,
-    scenery: StagedStaticScenery,
-    water: StagedWater,
-    water_appearance: WaterAppearance,
-    lighting: TerrainLighting,
-    title: String,
-    frame: MapPresentationFrame,
-) -> Result<(), ViewerError> {
-    run_terrain_viewer_inner(
-        terrain,
-        roads,
-        boundary,
-        overlays,
-        scenery,
-        water,
-        water_appearance,
-        lighting,
-        title,
-        Some(frame),
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn run_terrain_viewer_inner(
-    terrain: StagedTerrain,
-    roads: StagedRoads,
-    boundary: StagedBoundaryFence,
-    overlays: StagedMapOverlays,
-    scenery: StagedStaticScenery,
-    water: StagedWater,
-    water_appearance: WaterAppearance,
-    lighting: TerrainLighting,
-    title: String,
-    fixed_frame: Option<MapPresentationFrame>,
+    frame: Option<MapPresentationFrame>,
 ) -> Result<(), ViewerError> {
     let event_loop = EventLoop::new().map_err(ViewerError::EventLoop)?;
     event_loop.set_control_flow(ControlFlow::Poll);
     let display = event_loop.owned_display_handle();
-    let mut application = TerrainViewerApplication::new(
-        terrain,
-        roads,
-        boundary,
-        overlays,
-        scenery,
-        water,
-        water_appearance,
-        lighting,
-        title,
-        display,
-        fixed_frame,
-    )?;
+    let mut application = TerrainViewerApplication::new(scene, camera, title, display, frame)?;
     event_loop
         .run_app(&mut application)
         .map_err(ViewerError::EventLoop)?;
     application.error.map_or(Ok(()), Err)
 }
 
+/// Renders one frame of a staged MAP scene offscreen, through the same GPU path `run_map_view`
+/// presents: the shadow cascade passes, the multisampled G-buffer, ambient occlusion, deferred
+/// lighting, the composite, and the forward diagnostics and water passes over it.
+///
+/// Every input is explicit — target size, camera placement, and presentation time — and nothing in
+/// the path consults a clock or an RNG, so identical inputs produce an identical image on a given
+/// adapter.
+///
+/// # Errors
+///
+/// Returns a structured capture-dimension, adapter-resource, submission, or readback failure.
+pub(crate) fn capture_map_view(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    [width, height]: [u32; 2],
+    scene: &MapScene,
+    camera: MapViewCamera,
+    frame: MapPresentationFrame,
+    passes: MapViewPasses,
+) -> Result<Capture, ViewerError> {
+    let (unpadded_row, padded_row, buffer_size) = capture_layout(width, height)?;
+    let size = nonzero_size(PhysicalSize::new(width, height));
+    let terrain_camera = camera.resolve(&scene.terrain);
+    let viewport = [size.width, size.height];
+    let requests = terrain_camera.detail_requests(&scene.terrain, viewport)?;
+    let page_view = terrain_camera.virtual_page_view(&scene.terrain, viewport);
+    let target = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("cic-render MAP scene capture target"),
+        size: wgpu::Extent3d {
+            width: size.width,
+            height: size.height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: crate::SCENE_CAPTURE_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("cic-render MAP scene capture readback"),
+        size: buffer_size,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut gpu = TerrainViewerGpu::offscreen(
+        device,
+        queue,
+        target.clone(),
+        &scene.staged(&requests, page_view),
+    )?;
+    let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+    let mut encoder = gpu.encode_frame(terrain_camera, frame.seconds(), false, passes, &view)?;
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: &target,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &readback,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded_row),
+                rows_per_image: Some(size.height),
+            },
+        },
+        target.size(),
+    );
+    let capture = read_back_capture(
+        device,
+        queue,
+        encoder,
+        &readback,
+        size.width,
+        size.height,
+        unpadded_row,
+        padded_row,
+    )?;
+    // `gpu` owns every render attachment the recorded passes write, and drops only here, after the
+    // readback above has submitted and waited.
+    Ok(capture)
+}
+
 #[allow(clippy::struct_excessive_bools)]
 struct TerrainViewerApplication {
-    terrain: Arc<StagedTerrain>,
-    roads: StagedRoads,
-    boundary: StagedBoundaryFence,
-    overlays: StagedMapOverlays,
-    scenery: StagedStaticScenery,
-    water: StagedWater,
-    water_appearance: WaterAppearance,
-    lighting: TerrainLighting,
+    scene: Arc<MapScene>,
     title: String,
     display: OwnedDisplayHandle,
     window: Option<Arc<Window>>,
@@ -380,43 +462,20 @@ struct TerrainViewerApplication {
 }
 
 impl TerrainViewerApplication {
-    #[allow(clippy::too_many_arguments)]
     fn new(
-        terrain: StagedTerrain,
-        roads: StagedRoads,
-        boundary: StagedBoundaryFence,
-        overlays: StagedMapOverlays,
-        scenery: StagedStaticScenery,
-        water: StagedWater,
-        water_appearance: WaterAppearance,
-        lighting: TerrainLighting,
+        scene: MapScene,
+        placement: MapViewCamera,
         title: String,
         display: OwnedDisplayHandle,
         fixed_frame: Option<MapPresentationFrame>,
     ) -> Result<Self, ViewerError> {
-        let terrain = Arc::new(terrain);
-        let (minimum, maximum) = terrain.bounds();
-        let focus = [
-            (minimum[0] + maximum[0]) * 0.5,
-            (minimum[1] + maximum[1]) * 0.5,
-        ];
-        let far_plane = TerrainCamera::far_plane_for(&terrain);
-        let rts_camera = RtsCamera::new(
-            RtsCameraProfile::GENERALS_DEFAULT,
-            focus,
-            &StagedGround(&terrain),
-        );
-        let camera = TerrainCamera::from_pose(rts_camera.pose(), far_plane);
-        let detail_requests = camera.detail_requests(&terrain, [WINDOW_WIDTH, WINDOW_HEIGHT])?;
+        let scene = Arc::new(scene);
+        let rts_camera = placement.rts_camera(&scene.terrain);
+        let camera = placement.resolve(&scene.terrain);
+        let detail_requests =
+            camera.detail_requests(&scene.terrain, [WINDOW_WIDTH, WINDOW_HEIGHT])?;
         Ok(Self {
-            terrain,
-            roads,
-            boundary,
-            overlays,
-            scenery,
-            water,
-            water_appearance,
-            lighting,
+            scene,
             title,
             display,
             window: None,
@@ -459,20 +518,11 @@ impl TerrainViewerApplication {
         let gpu = pollster::block_on(TerrainViewerGpu::new(
             window.clone(),
             self.display.clone(),
-            TerrainViewerScene {
-                terrain: &self.terrain,
-                roads: &self.roads,
-                boundary: &self.boundary,
-                overlays: &self.overlays,
-                scenery: &self.scenery,
-                requests: &self.detail_requests,
-                page_view: self
-                    .camera
-                    .virtual_page_view(&self.terrain, [size.width, size.height]),
-                water: &self.water,
-                water_appearance: &self.water_appearance,
-                lighting: self.lighting,
-            },
+            &self.scene.staged(
+                &self.detail_requests,
+                self.camera
+                    .virtual_page_view(&self.scene.terrain, [size.width, size.height]),
+            ),
         ))?;
         window.set_title(&self.window_title(gpu.wireframe_available()));
         self.window = Some(window);
@@ -569,7 +619,7 @@ impl TerrainViewerApplication {
         self.reset_camera = false;
         self.reset_rotation = false;
         self.rts_camera
-            .update(intent, seconds, &StagedGround(&self.terrain));
+            .update(intent, seconds, &StagedGround(&self.scene.terrain));
         self.camera = TerrainCamera::from_pose(self.rts_camera.pose(), self.camera.far_plane);
     }
 
@@ -578,12 +628,12 @@ impl TerrainViewerApplication {
             let size = nonzero_size(window.inner_size());
             let requests = self
                 .camera
-                .detail_requests(&self.terrain, [size.width, size.height])?;
+                .detail_requests(&self.scene.terrain, [size.width, size.height])?;
             if let Some(gpu) = &mut self.gpu {
                 gpu.update_virtual_residency(
                     &requests,
                     self.camera
-                        .virtual_page_view(&self.terrain, [size.width, size.height]),
+                        .virtual_page_view(&self.scene.terrain, [size.width, size.height]),
                 );
             }
             self.detail_requests = requests;
@@ -970,9 +1020,118 @@ impl TerrainCamera {
     }
 }
 
-struct TerrainViewerGpu {
+/// Where a composed frame lands.
+///
+/// The two arms differ only in how the colour target is obtained and released; every pass between
+/// the shadow cascades and the composite is identical, which is the point. Without this split the
+/// whole deferred path was reachable only through a winit window, so no test could reach the
+/// resource construction below and several wgpu validation failures in it shipped as runtime panics.
+enum ViewerOutput {
+    Window(WindowOutput),
+    Capture(CaptureOutput),
+}
+
+struct WindowOutput {
+    /// Held only to outlive the surface it created.
     _instance: wgpu::Instance,
     surface: wgpu::Surface<'static>,
+    config: wgpu::SurfaceConfiguration,
+    window: Arc<Window>,
+}
+
+struct CaptureOutput {
+    texture: wgpu::Texture,
+    size: PhysicalSize<u32>,
+}
+
+/// A colour target acquired for one frame, plus whatever releasing it needs.
+struct AcquiredFrame {
+    view: wgpu::TextureView,
+    surface: Option<wgpu::SurfaceTexture>,
+    suboptimal: bool,
+}
+
+impl ViewerOutput {
+    fn format(&self) -> wgpu::TextureFormat {
+        match self {
+            Self::Window(output) => output.config.format,
+            Self::Capture(output) => output.texture.format(),
+        }
+    }
+
+    fn size(&self) -> PhysicalSize<u32> {
+        match self {
+            Self::Window(output) => PhysicalSize::new(output.config.width, output.config.height),
+            Self::Capture(output) => output.size,
+        }
+    }
+
+    /// Returns the target for this frame, or `None` when the frame should be skipped entirely.
+    fn acquire(&mut self, device: &wgpu::Device) -> Result<Option<AcquiredFrame>, ViewerError> {
+        match self {
+            Self::Window(output) => {
+                let size = output.window.inner_size();
+                if size.width == 0 || size.height == 0 {
+                    return Ok(None);
+                }
+                let (surface_texture, suboptimal) = match output.surface.get_current_texture() {
+                    wgpu::CurrentSurfaceTexture::Success(texture) => (texture, false),
+                    wgpu::CurrentSurfaceTexture::Suboptimal(texture) => (texture, true),
+                    wgpu::CurrentSurfaceTexture::Timeout
+                    | wgpu::CurrentSurfaceTexture::Occluded => return Ok(None),
+                    wgpu::CurrentSurfaceTexture::Outdated => {
+                        output.surface.configure(device, &output.config);
+                        return Ok(None);
+                    }
+                    wgpu::CurrentSurfaceTexture::Lost => return Err(ViewerError::SurfaceLost),
+                    wgpu::CurrentSurfaceTexture::Validation => {
+                        return Err(ViewerError::SurfaceValidation);
+                    }
+                };
+                let view = surface_texture
+                    .texture
+                    .create_view(&wgpu::TextureViewDescriptor::default());
+                Ok(Some(AcquiredFrame {
+                    view,
+                    surface: Some(surface_texture),
+                    suboptimal,
+                }))
+            }
+            Self::Capture(output) => Ok(Some(AcquiredFrame {
+                view: output
+                    .texture
+                    .create_view(&wgpu::TextureViewDescriptor::default()),
+                surface: None,
+                suboptimal: false,
+            })),
+        }
+    }
+
+    /// Releases a frame acquired from `acquire`, after its commands have been submitted.
+    fn present(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, frame: AcquiredFrame) {
+        let Self::Window(output) = self else {
+            return;
+        };
+        if let Some(surface_texture) = frame.surface {
+            output.window.pre_present_notify();
+            queue.present(surface_texture);
+        }
+        if frame.suboptimal {
+            output.surface.configure(device, &output.config);
+        }
+    }
+
+    /// Reconfigures a window surface to a new size. Capture targets are fixed at construction.
+    fn reconfigure(&mut self, device: &wgpu::Device, size: PhysicalSize<u32>) {
+        if let Self::Window(output) = self {
+            output.config.width = size.width;
+            output.config.height = size.height;
+            output.surface.configure(device, &output.config);
+        }
+    }
+}
+
+struct TerrainViewerGpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipeline: wgpu::RenderPipeline,
@@ -1020,8 +1179,7 @@ struct TerrainViewerGpu {
     water_appearance: WaterAppearanceGpu,
     lighting: TerrainLighting,
     deferred: DeferredTargets,
-    config: wgpu::SurfaceConfiguration,
-    window: Arc<Window>,
+    output: ViewerOutput,
 }
 
 struct WireframePipelines {
@@ -1033,6 +1191,7 @@ struct WireframePipelines {
     water: wgpu::RenderPipeline,
 }
 
+#[derive(Clone, Copy)]
 struct TerrainViewerScene<'a> {
     terrain: &'a StagedTerrain,
     roads: &'a StagedRoads,
@@ -1073,6 +1232,28 @@ struct StaticSceneryModelGpu {
     instance_buffer: wgpu::Buffer,
     instance_count: u32,
     draws: Vec<StaticSceneryDrawGpu>,
+    /// Every instance's world-space bounding sphere, in the same order as `instance_buffer`, for
+    /// deciding per cascade which of them are worth drawing.
+    casters: Vec<CasterSphere>,
+    /// The packed instance records, kept on the CPU so a cascade's subset can be gathered without
+    /// reading back from the GPU. At eighty bytes an instance this is tens of kilobytes per scene.
+    packed_instances: Vec<u8>,
+    instance_stride: usize,
+    /// Packed instance data per cascade, rebuilt when that cascade's own pass is about to run.
+    ///
+    /// One buffer per cascade rather than one shared buffer, because a cascade whose fit has not
+    /// moved skips its pass entirely and keeps both its depth and the instances that produced it; a
+    /// shared buffer would be overwritten by whichever cascade rebuilt last.
+    cascade_instance_buffers: Vec<wgpu::Buffer>,
+    /// How many instances each cascade's buffer currently holds.
+    cascade_instance_counts: Vec<u32>,
+}
+
+/// One caster instance's world-space bounding sphere.
+#[derive(Clone, Copy)]
+struct CasterSphere {
+    center: [f32; 3],
+    radius: f32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2115,6 +2296,40 @@ fn create_static_scenery_gpu(
                 index_count: draw.index_count,
             })
             .collect();
+        let instance_bytes = staged.instance_bytes();
+        let instance_count =
+            u32::try_from(staged.instances().len()).map_err(|_| RenderError::GeometryTooLarge)?;
+        let stride = if staged.instances().is_empty() {
+            0
+        } else {
+            instance_bytes.len() / staged.instances().len()
+        };
+        let casters = staged
+            .instances()
+            .iter()
+            .zip(staged.caster_radii()?)
+            .map(|(instance, radius)| CasterSphere {
+                center: instance.position(),
+                radius,
+            })
+            .collect::<Vec<_>>();
+        // Each cascade's buffer is sized for every instance, since the worst case is that all of
+        // them fall inside it. That is the same total as one full buffer per cascade, which for the
+        // largest MAP scenes is well under a megabyte against the 180 MiB the cascades already cost.
+        let caster_buffer_size = u64::try_from(instance_bytes.len().max(1))
+            .map_err(|_| RenderError::GeometryTooLarge)?;
+        let cascade_instance_buffers = (0..SHADOW_CASCADE_COUNT)
+            .map(|cascade| {
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(&format!(
+                        "cic-render static scenery casters for cascade {cascade}"
+                    )),
+                    size: caster_buffer_size,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
+            })
+            .collect::<Vec<_>>();
         models.push(StaticSceneryModelGpu {
             resources,
             vertex_buffer: upload_buffer(
@@ -2135,12 +2350,16 @@ fn create_static_scenery_gpu(
                 device,
                 queue,
                 "cic-render static scenery instances",
-                &staged.instance_bytes(),
+                &instance_bytes,
                 wgpu::BufferUsages::VERTEX,
             )?,
-            instance_count: u32::try_from(staged.instances().len())
-                .map_err(|_| RenderError::GeometryTooLarge)?,
+            instance_count,
             draws,
+            casters,
+            packed_instances: instance_bytes,
+            instance_stride: stride,
+            cascade_instance_buffers,
+            cascade_instance_counts: vec![0; SHADOW_CASCADE_COUNT],
         });
     }
     Ok(Some(StaticSceneryGpu {
@@ -2150,24 +2369,12 @@ fn create_static_scenery_gpu(
 }
 
 impl TerrainViewerGpu {
-    #[allow(clippy::too_many_lines)]
+    /// Builds the presentation path against a winit window's surface.
     async fn new(
         window: Arc<Window>,
         display: OwnedDisplayHandle,
-        scene: TerrainViewerScene<'_>,
+        scene: &TerrainViewerScene<'_>,
     ) -> Result<Self, ViewerError> {
-        let TerrainViewerScene {
-            terrain,
-            roads,
-            boundary,
-            overlays,
-            scenery,
-            requests,
-            page_view,
-            water,
-            water_appearance,
-            lighting,
-        } = scene;
         let descriptor = wgpu::InstanceDescriptor::new_with_display_handle(Box::new(display));
         let instance = wgpu::Instance::new(descriptor);
         let surface = instance
@@ -2202,8 +2409,79 @@ impl TerrainViewerGpu {
             .get_default_config(&adapter, size.width, size.height)
             .ok_or(ViewerError::UnsupportedSurface)?;
         config.present_mode = wgpu::PresentMode::Fifo;
+        // The deferred composite tonemaps and returns the result unencoded, relying on the colour
+        // target to apply the sRGB transfer function in hardware. `get_default_config` just takes
+        // whichever format the backend lists first, which happens to be an sRGB one on the backends
+        // in use but is not promised to be. On a backend that listed a linear format first the whole
+        // scene would present several times too dark, so prefer the sRGB pair of whatever was chosen.
+        if !config.format.is_srgb() {
+            let encoded = config.format.add_srgb_suffix();
+            if surface
+                .get_capabilities(&adapter)
+                .formats
+                .contains(&encoded)
+            {
+                config.format = encoded;
+            }
+        }
         surface.configure(&device, &config);
+        Self::assemble(
+            device,
+            queue,
+            wireframe_available,
+            ViewerOutput::Window(WindowOutput {
+                _instance: instance,
+                surface,
+                config,
+                window,
+            }),
+            scene,
+        )
+    }
 
+    /// Builds the same resources against an offscreen colour target on a caller-supplied device.
+    ///
+    /// Wireframe pipelines are skipped: they need an optional adapter feature and no capture asks
+    /// for them, so requiring them would make the capture path unavailable on adapters the
+    /// presentation path runs on.
+    fn offscreen(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        texture: wgpu::Texture,
+        scene: &TerrainViewerScene<'_>,
+    ) -> Result<Self, ViewerError> {
+        let size = PhysicalSize::new(texture.width(), texture.height());
+        Self::assemble(
+            device.clone(),
+            queue.clone(),
+            false,
+            ViewerOutput::Capture(CaptureOutput { texture, size }),
+            scene,
+        )
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn assemble(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        wireframe_available: bool,
+        output: ViewerOutput,
+        scene: &TerrainViewerScene<'_>,
+    ) -> Result<Self, ViewerError> {
+        let &TerrainViewerScene {
+            terrain,
+            roads,
+            boundary,
+            overlays,
+            scenery,
+            requests,
+            page_view,
+            water,
+            water_appearance,
+            lighting,
+        } = scene;
+        let size = output.size();
+        let output_format = output.format();
         let layout = create_terrain_layout(&device);
         let lighting_layout = create_lighting_layout(&device);
         let composite_layout = create_composite_layout(&device);
@@ -2280,7 +2558,7 @@ impl TerrainViewerGpu {
             &device,
             &boundary_shader,
             &boundary_pipeline_layout,
-            config.format,
+            output_format,
             "cic-render boundary fence pipeline",
             wgpu::PolygonMode::Fill,
         );
@@ -2347,7 +2625,7 @@ impl TerrainViewerGpu {
             &deferred_shader,
             &[&lighting_layout, &composite_layout],
             "composite_fragment",
-            config.format,
+            output_format,
             "cic-render deferred composite pipeline",
         );
         let depth_resolve_pipeline =
@@ -2380,7 +2658,7 @@ impl TerrainViewerGpu {
             &device,
             &water_shader,
             &water_layout,
-            config.format,
+            output_format,
             scene.water_appearance.additive_blending(),
             "cic-render forward water pipeline",
             wgpu::PolygonMode::Fill,
@@ -2435,7 +2713,7 @@ impl TerrainViewerGpu {
                 &device,
                 &boundary_shader,
                 &boundary_pipeline_layout,
-                config.format,
+                output_format,
                 "cic-render boundary wireframe pipeline",
                 wgpu::PolygonMode::Line,
             ),
@@ -2443,7 +2721,7 @@ impl TerrainViewerGpu {
                 &device,
                 &water_shader,
                 &water_layout,
-                config.format,
+                output_format,
                 scene.water_appearance.additive_blending(),
                 "cic-render water wireframe pipeline",
                 wgpu::PolygonMode::Line,
@@ -2672,8 +2950,6 @@ impl TerrainViewerGpu {
             },
         );
         Ok(Self {
-            _instance: instance,
-            surface,
             device,
             queue,
             pipeline,
@@ -2719,8 +2995,7 @@ impl TerrainViewerGpu {
             water_appearance,
             lighting,
             deferred,
-            config,
-            window,
+            output,
         })
     }
 
@@ -2741,9 +3016,7 @@ impl TerrainViewerGpu {
         if size.width == 0 || size.height == 0 {
             return;
         }
-        self.config.width = size.width;
-        self.config.height = size.height;
-        self.surface.configure(&self.device, &self.config);
+        self.output.reconfigure(&self.device, size);
         self.deferred = DeferredTargets::new(
             &self.device,
             size,
@@ -2764,33 +3037,43 @@ impl TerrainViewerGpu {
         self.cascade_cache.fill(None);
     }
 
-    #[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
     fn render(
         &mut self,
         camera: TerrainCamera,
         presentation_seconds: f32,
         wireframe: bool,
     ) -> Result<(), ViewerError> {
-        if self.window.inner_size().width == 0 || self.window.inner_size().height == 0 {
+        let Some(frame) = self.output.acquire(&self.device)? else {
             return Ok(());
-        }
-        let (surface_texture, suboptimal) = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(texture) => (texture, false),
-            wgpu::CurrentSurfaceTexture::Suboptimal(texture) => (texture, true),
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
-                return Ok(());
-            }
-            wgpu::CurrentSurfaceTexture::Outdated => {
-                self.surface.configure(&self.device, &self.config);
-                return Ok(());
-            }
-            wgpu::CurrentSurfaceTexture::Lost => return Err(ViewerError::SurfaceLost),
-            wgpu::CurrentSurfaceTexture::Validation => return Err(ViewerError::SurfaceValidation),
         };
-        #[allow(clippy::cast_precision_loss)]
-        let aspect = self.config.width as f32 / self.config.height as f32;
-        #[allow(clippy::cast_precision_loss)]
-        let viewport = [self.config.width as f32, self.config.height as f32];
+        let encoder = self.encode_frame(
+            camera,
+            presentation_seconds,
+            wireframe,
+            MapViewPasses::ALL,
+            &frame.view,
+        )?;
+        self.queue.submit([encoder.finish()]);
+        self.output.present(&self.device, &self.queue, frame);
+        Ok(())
+    }
+
+    /// Records every pass for one frame into a fresh encoder, without submitting it.
+    ///
+    /// Split from `render` so the capture path can append a readback copy to the same encoder and
+    /// then submit once, rather than duplicating the pass sequence it is meant to be testing.
+    #[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
+    fn encode_frame(
+        &mut self,
+        camera: TerrainCamera,
+        presentation_seconds: f32,
+        wireframe: bool,
+        passes: MapViewPasses,
+        view: &wgpu::TextureView,
+    ) -> Result<wgpu::CommandEncoder, ViewerError> {
+        let size = self.output.size();
+        let aspect = size.width as f32 / size.height as f32;
+        let viewport = [size.width as f32, size.height as f32];
         let matrix = camera.view_projection(aspect);
         let caustic_animation = [
             self.water_appearance.frame_count as f32,
@@ -2842,9 +3125,6 @@ impl TerrainViewerGpu {
                 &cascade_uniform_bytes(cascade, presentation_seconds),
             );
         }
-        let view = surface_texture
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
         let depth_view = self
             .deferred
             .depth
@@ -2864,6 +3144,63 @@ impl TerrainViewerGpu {
         for index in SHADOW_CACHED_CASCADE_START..SHADOW_CASCADE_COUNT {
             if self.cascade_cache.get(index).copied().flatten() == Some(cascade_keys[index]) {
                 redraw_cascade[index] = false;
+            }
+        }
+        // Gather each redrawing cascade's casters before recording any pass, so the pass loop can
+        // borrow the scenery immutably.
+        //
+        // Only cascades about to redraw are rebuilt. A cached cascade keeps the depth it already
+        // holds, and the instance list that produced that depth is a function of the fitted matrix
+        // alone — the cache key — so an unchanged matrix means an unchanged list. Sway is the one
+        // thing that animates and it lives in the shader, not in these bytes.
+        let cull_scenery = if passes.shadows {
+            self.scenery.as_mut()
+        } else {
+            None
+        };
+        if let Some(scenery) = cull_scenery {
+            for model in &mut scenery.models {
+                if model.instance_stride == 0 {
+                    continue;
+                }
+                let mut packed: [Vec<u8>; SHADOW_CASCADE_COUNT] = Default::default();
+                for (index, caster) in model.casters.iter().enumerate() {
+                    // Projected once per caster rather than once per cascade, since every
+                    // cascade's bounds are measured along the same light basis.
+                    let light_space = [
+                        dot(caster.center, shadow.light_basis[0]),
+                        dot(caster.center, shadow.light_basis[1]),
+                        dot(caster.center, shadow.light_basis[2]),
+                    ];
+                    let start = index * model.instance_stride;
+                    let Some(record) = model
+                        .packed_instances
+                        .get(start..start + model.instance_stride)
+                    else {
+                        continue;
+                    };
+                    for (cascade_index, cascade) in shadow.cascades.iter().enumerate() {
+                        if redraw_cascade[cascade_index]
+                            && cascade.bounds.accepts(light_space, caster.radius)
+                        {
+                            packed[cascade_index].extend_from_slice(record);
+                        }
+                    }
+                }
+                for (cascade_index, bytes) in packed.iter().enumerate() {
+                    if !redraw_cascade[cascade_index] {
+                        continue;
+                    }
+                    model.cascade_instance_counts[cascade_index] =
+                        u32::try_from(bytes.len() / model.instance_stride).unwrap_or(0);
+                    if let Some(buffer) = model
+                        .cascade_instance_buffers
+                        .get(cascade_index)
+                        .filter(|_| !bytes.is_empty())
+                    {
+                        self.queue.write_buffer(buffer, 0, bytes);
+                    }
+                }
             }
         }
         for (cascade_index, cascade_bind_group) in self.cascade_bind_groups.iter().enumerate() {
@@ -2888,6 +3225,11 @@ impl TerrainViewerGpu {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            if !passes.shadows {
+                // The clear above already put the far plane in every texel, which reads as fully
+                // lit, so isolating shadows out needs no shader variant.
+                continue;
+            }
             pass.set_pipeline(&self.terrain_shadow_pipeline);
             pass.set_bind_group(0, cascade_bind_group, &[]);
             pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
@@ -2897,8 +3239,21 @@ impl TerrainViewerGpu {
                 pass.set_pipeline(&self.scenery_shadow_pipeline);
                 pass.set_bind_group(1, cascade_bind_group, &[]);
                 for model in &scenery.models {
+                    let instance_count = model
+                        .cascade_instance_counts
+                        .get(cascade_index)
+                        .copied()
+                        .unwrap_or(0);
+                    let Some(instances) = model.cascade_instance_buffers.get(cascade_index) else {
+                        continue;
+                    };
+                    // A model with nothing inside this cascade costs no draws at all, which is the
+                    // point: every instance used to be submitted to all five cascades.
+                    if instance_count == 0 {
+                        continue;
+                    }
                     pass.set_vertex_buffer(0, model.vertex_buffer.slice(..));
-                    pass.set_vertex_buffer(1, model.instance_buffer.slice(..));
+                    pass.set_vertex_buffer(1, instances.slice(..));
                     pass.set_index_buffer(model.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                     for draw in &model.draws {
                         let material = model
@@ -2919,7 +3274,7 @@ impl TerrainViewerGpu {
                             .checked_add(draw.index_count)
                             .ok_or(RenderError::GeometryTooLarge)?;
                         pass.set_bind_group(0, &material.bind_group, &[]);
-                        pass.draw_indexed(draw.first_index..end, 0, 0..model.instance_count);
+                        pass.draw_indexed(draw.first_index..end, 0, 0..instance_count);
                     }
                 }
             }
@@ -3063,9 +3418,11 @@ impl TerrainViewerGpu {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&self.ao_pipeline);
-            pass.set_bind_group(0, &self.deferred.ao_bind_group, &[]);
-            pass.draw(0..3, 0..1);
+            if passes.occlusion {
+                pass.set_pipeline(&self.ao_pipeline);
+                pass.set_bind_group(0, &self.deferred.ao_bind_group, &[]);
+                pass.draw(0..3, 0..1);
+            }
         }
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -3079,10 +3436,12 @@ impl TerrainViewerGpu {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&self.ao_blur_pipeline);
-            pass.set_bind_group(0, &self.deferred.ao_bind_group, &[]);
-            pass.set_bind_group(1, &self.deferred.ao_source_bind_group, &[]);
-            pass.draw(0..3, 0..1);
+            if passes.occlusion {
+                pass.set_pipeline(&self.ao_blur_pipeline);
+                pass.set_bind_group(0, &self.deferred.ao_bind_group, &[]);
+                pass.set_bind_group(1, &self.deferred.ao_source_bind_group, &[]);
+                pass.draw(0..3, 0..1);
+            }
         }
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -3103,7 +3462,7 @@ impl TerrainViewerGpu {
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("cic-render scene composite pass"),
-                color_attachments: &[Some(clear_attachment(&view, wgpu::Color::BLACK))],
+                color_attachments: &[Some(clear_attachment(view, wgpu::Color::BLACK))],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
@@ -3117,7 +3476,7 @@ impl TerrainViewerGpu {
         if self.boundary.is_some() || self.overlays.is_some() {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("cic-render forward MAP diagnostics pass"),
-                color_attachments: &[Some(load_attachment(&view))],
+                color_attachments: &[Some(load_attachment(view))],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &depth_view,
                     depth_ops: Some(wgpu::Operations {
@@ -3144,7 +3503,7 @@ impl TerrainViewerGpu {
         if let Some(water) = &self.water {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("cic-render forward water pass"),
-                color_attachments: &[Some(load_attachment(&view))],
+                color_attachments: &[Some(load_attachment(view))],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &depth_view,
                     depth_ops: Some(wgpu::Operations {
@@ -3165,13 +3524,7 @@ impl TerrainViewerGpu {
             pass.set_index_buffer(water.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..water.index_count, 0, 0..1);
         }
-        self.queue.submit([encoder.finish()]);
-        self.window.pre_present_notify();
-        self.queue.present(surface_texture);
-        if suboptimal {
-            self.surface.configure(&self.device, &self.config);
-        }
-        Ok(())
+        Ok(encoder)
     }
 }
 
@@ -4672,11 +5025,54 @@ struct ShadowCascade {
     depth_range: f32,
     /// World units covered by one shadow-map texel.
     texel_world: f32,
+    /// What this cascade actually covers, for deciding which casters are worth drawing into it.
+    bounds: CascadeBounds,
+}
+
+/// One cascade's coverage, measured along the light basis its `SceneShadow` carries.
+#[derive(Clone, Copy)]
+struct CascadeBounds {
+    center_right: f32,
+    half_right: f32,
+    center_up: f32,
+    half_up: f32,
+    near_forward: f32,
+    far_forward: f32,
+}
+
+impl CascadeBounds {
+    /// A degenerate volume that accepts nothing, for the array initializer every cascade is then
+    /// overwritten in and for tests that only exercise the packing.
+    const EMPTY: Self = Self {
+        center_right: 0.0,
+        half_right: 0.0,
+        center_up: 0.0,
+        half_up: 0.0,
+        near_forward: 0.0,
+        far_forward: 0.0,
+    };
+
+    /// Whether a caster's bounding sphere can put anything into this cascade's shadow map.
+    ///
+    /// Exact rather than merely conservative, which is what makes culling on it invisible. The light
+    /// is directional, so a caster's shadow keeps the caster's own light-space right and up
+    /// coordinates; one that misses the cascade laterally rasterizes to no texels at all. The depth
+    /// test rejects only what the pipeline's own near and far planes would clip. So a rejected
+    /// instance could not have changed a single texel, and the rendered frame is unchanged.
+    fn accepts(self, light_space: [f32; 3], radius: f32) -> bool {
+        (light_space[0] - self.center_right).abs() <= self.half_right + radius
+            && (light_space[1] - self.center_up).abs() <= self.half_up + radius
+            && light_space[2] + radius >= self.near_forward
+            && light_space[2] - radius <= self.far_forward
+    }
 }
 
 #[derive(Clone, Copy)]
 struct SceneShadow {
     cascades: [ShadowCascade; SHADOW_CASCADE_COUNT],
+    /// Shared light basis every cascade's bounds are expressed in, so a caster is projected into
+    /// light space once per frame rather than once per cascade.
+    light_basis: [[f32; 3]; 3],
 }
 
 /// The primary light's travel direction, falling back to the original preview angle when a MAP
@@ -4786,6 +5182,7 @@ fn fit_cascade(
     );
     let near_plane = 0.1;
     let far_plane = depth_half * 2.0 + SHADOW_CASTER_HEADROOM + 1.0;
+    let position_forward = dot(position, light_forward);
     ShadowCascade {
         matrix: multiply_matrix(
             orthographic_extents(half_right, half_up, near_plane, far_plane),
@@ -4794,6 +5191,16 @@ fn fit_cascade(
         depth_range: far_plane - near_plane,
         // Bias follows the coarser axis, so it stays sufficient on both.
         texel_world: texel_right.max(texel_up),
+        bounds: CascadeBounds {
+            // Read back off the snapped centre rather than recomputed, so the cull volume is exactly
+            // the volume the matrix above projects and cannot drift from it.
+            center_right: dot(snapped, light_right),
+            half_right,
+            center_up: dot(snapped, light_up),
+            half_up,
+            near_forward: position_forward + near_plane,
+            far_forward: position_forward + far_plane,
+        },
     }
 }
 
@@ -4806,6 +5213,7 @@ fn scene_shadow(camera: TerrainCamera, aspect: f32, lighting: TerrainLighting) -
         matrix: [[0.0; 4]; 4],
         depth_range: 1.0,
         texel_world: 1.0,
+        bounds: CascadeBounds::EMPTY,
     }; SHADOW_CASCADE_COUNT];
     let mut near = 1.0_f32;
     for (cascade, split) in cascades.iter_mut().zip(SHADOW_CASCADE_SPLITS) {
@@ -4815,7 +5223,11 @@ fn scene_shadow(camera: TerrainCamera, aspect: f32, lighting: TerrainLighting) -
         // its normal offset nudges it across the boundary.
         near = far * 0.98;
     }
-    SceneShadow { cascades }
+    let (right, up, _) = light_basis(light_forward);
+    SceneShadow {
+        cascades,
+        light_basis: [right, up, light_forward],
+    }
 }
 
 fn look_to(position: [f32; 3], forward: [f32; 3], up: [f32; 3]) -> [[f32; 4]; 4] {
@@ -5013,23 +5425,26 @@ fn ray_distance_for_view_depth(
 #[cfg(test)]
 mod tests {
     use super::{
-        ROAD_DEPTH_BIAS, SHADOW_CASCADE_BYTES, SHADOW_CASCADE_COUNT, SHADOW_CASTER_HEADROOM,
-        SHADOW_UNIFORM_BYTES, SOURCE_ROAD_MIP_LEVELS, SceneShadow, ShadowCascade, TerrainCamera,
-        TerrainInput, cascade_uniform_bytes, create_composite_layout, create_depth_resolve_layout,
-        create_depth_resolve_pipeline, create_fullscreen_pipeline, create_lighting_layout,
-        create_shadow_layout, gray_mip, look_to, multiply_matrix, orthographic, perspective,
-        quantize_cascade_extent, ray_distance_for_view_depth, scene_shadow, shadow_uniform_bytes,
-        source_road_mips, terrain_color_targets, terrain_viewer_title,
+        CascadeBounds, ROAD_DEPTH_BIAS, SHADOW_CASCADE_BYTES, SHADOW_CASCADE_COUNT,
+        SHADOW_CASTER_HEADROOM, SHADOW_UNIFORM_BYTES, SOURCE_ROAD_MIP_LEVELS, SceneShadow,
+        ShadowCascade, TerrainCamera, TerrainInput, cascade_uniform_bytes, dot, gray_mip, look_to,
+        multiply_matrix, orthographic, perspective, quantize_cascade_extent,
+        ray_distance_for_view_depth, scene_shadow, shadow_uniform_bytes, source_road_mips,
+        terrain_color_targets, terrain_viewer_title,
     };
     use cic_camera::{CameraIntent, RtsCamera, RtsCameraProfile};
 
     use crate::TerrainLighting;
 
     /// The caster passes bind one cascade and the receivers bind the whole array, so the two
-    /// minimum binding sizes are deliberately different. Nothing else forces them to stay
-    /// consistent with the buffers actually allocated, and the caster bind groups are only built
-    /// inside the windowed constructor, which no headless test reaches — so binding an
-    /// exactly-sized cascade buffer against the caster layout is checked directly here.
+    /// minimum binding sizes are deliberately different, and nothing else forces the receiver
+    /// array to stay a whole number of cascades.
+    ///
+    /// Whether the GPU accepts an exactly-sized cascade buffer against the caster layout used to be
+    /// checked here with a device of its own, because the caster bind groups were only built inside
+    /// the windowed constructor and no headless test could reach it. `capture_map_view` now builds
+    /// every one of those bind groups on a real device, so that half lives in
+    /// `tests/gpu_capture.rs` and this stays the CPU-side arithmetic guard.
     #[test]
     fn caster_cascade_bind_group_accepts_a_single_cascade_buffer() {
         assert_eq!(
@@ -5037,72 +5452,6 @@ mod tests {
             SHADOW_CASCADE_BYTES * SHADOW_CASCADE_COUNT as u64,
             "receiver array size must stay a whole number of cascades"
         );
-        let renderer = match pollster::block_on(crate::HeadlessRenderer::new()) {
-            Ok(renderer) => renderer,
-            Err(crate::RenderError::RequestAdapter(error)) => {
-                eprintln!("skipping shadow cascade bind group check without an adapter: {error}");
-                return;
-            }
-            Err(error) => panic!("initializing headless renderer: {error}"),
-        };
-        let layout = create_shadow_layout(&renderer.device);
-        let uniform = renderer.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("cascade bind group regression"),
-            size: SHADOW_CASCADE_BYTES,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let _bind_group = renderer
-            .device
-            .create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("cascade bind group regression"),
-                layout: &layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: uniform.as_entire_binding(),
-                }],
-            });
-    }
-
-    #[test]
-    fn deferred_pipeline_layouts_match_every_shader_binding() {
-        let renderer = match pollster::block_on(crate::HeadlessRenderer::new()) {
-            Ok(renderer) => renderer,
-            Err(crate::RenderError::RequestAdapter(error)) => {
-                eprintln!(
-                    "skipping deferred pipeline layout check without a headless adapter: {error}"
-                );
-                return;
-            }
-            Err(error) => panic!("initializing headless renderer: {error}"),
-        };
-        let shader = renderer
-            .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("deferred layout regression shader"),
-                source: wgpu::ShaderSource::Wgsl(include_str!("terrain_deferred.wgsl").into()),
-            });
-        let lighting = create_lighting_layout(&renderer.device);
-        let composite = create_composite_layout(&renderer.device);
-        let _lighting_pipeline = create_fullscreen_pipeline(
-            &renderer.device,
-            &shader,
-            &[&lighting],
-            "lighting_fragment",
-            wgpu::TextureFormat::Rgba16Float,
-            "deferred lighting layout regression",
-        );
-        let _composite_pipeline = create_fullscreen_pipeline(
-            &renderer.device,
-            &shader,
-            &[&lighting, &composite],
-            "composite_fragment",
-            wgpu::TextureFormat::Rgba8Unorm,
-            "deferred composite layout regression",
-        );
-        let depth_resolve = create_depth_resolve_layout(&renderer.device);
-        let _depth_resolve_pipeline =
-            create_depth_resolve_pipeline(&renderer.device, &shader, &depth_resolve);
     }
 
     #[test]
@@ -5159,6 +5508,7 @@ mod tests {
             matrix: [[0.0; 4]; 4],
             depth_range: 1.0,
             texel_world: 1.0,
+            bounds: CascadeBounds::EMPTY,
         }; SHADOW_CASCADE_COUNT];
         for (index, cascade) in cascades.iter_mut().enumerate() {
             let radius = 100.0 * 3.0_f32.powi(i32::try_from(index).expect("cascade index"));
@@ -5166,9 +5516,16 @@ mod tests {
                 matrix: orthographic(radius, 0.1, radius * 4.0),
                 depth_range: radius * 4.0 - 0.1,
                 texel_world: radius * 2.0 / 2_048.0,
+                bounds: CascadeBounds::EMPTY,
             };
         }
-        let bytes = shadow_uniform_bytes(&SceneShadow { cascades }, 2.5);
+        let bytes = shadow_uniform_bytes(
+            &SceneShadow {
+                cascades,
+                light_basis: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            },
+            2.5,
+        );
         assert_eq!(bytes.len() as u64, SHADOW_UNIFORM_BYTES);
         for (index, cascade) in cascades.into_iter().enumerate() {
             assert!(cascade.matrix.into_iter().flatten().all(f32::is_finite));
@@ -5292,6 +5649,134 @@ mod tests {
                 "cascade {index} depth range {} must exceed the caster headroom",
                 cascade.depth_range
             );
+        }
+    }
+
+    /// Per-cascade caster culling is only allowed to be invisible if the volume it tests against is
+    /// exactly the volume the cascade's matrix projects. This checks that equivalence directly: with
+    /// a zero-radius caster, `accepts` must agree with clipping the projected point, for every
+    /// cascade of a real fit and over a grid of world points that straddles all of them.
+    ///
+    /// Without this, a cull volume could drift from the projection under some future change to the
+    /// fit and start dropping casters that do write texels — which reads as shadows popping in and
+    /// out as the camera moves, the kind of bug that is easy to ship and hard to attribute.
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn caster_cull_volume_is_exactly_what_each_cascade_projects() {
+        let camera = TerrainCamera {
+            position: [1_400.0, 900.0, 260.0],
+            yaw: 0.7,
+            pitch: -0.65,
+            far_plane: 4_000.0,
+        };
+        let shadow = scene_shadow(camera, 1.6, TerrainLighting::preview());
+        let mut inside_seen = 0;
+        let mut outside_seen = 0;
+        for cascade in shadow.cascades {
+            for x in (-400..2_400).step_by(157) {
+                for y in (-400..2_400).step_by(163) {
+                    for z in (-100..500).step_by(97) {
+                        let point = [x as f32, y as f32, z as f32];
+                        let light_space = [
+                            dot(point, shadow.light_basis[0]),
+                            dot(point, shadow.light_basis[1]),
+                            dot(point, shadow.light_basis[2]),
+                        ];
+                        let clip = (0..3)
+                            .map(|row| {
+                                (0..3)
+                                    .map(|column| cascade.matrix[column][row] * point[column])
+                                    .sum::<f32>()
+                                    + cascade.matrix[3][row]
+                            })
+                            .collect::<Vec<_>>();
+                        let projects_inside = clip[0].abs() <= 1.0
+                            && clip[1].abs() <= 1.0
+                            && (0.0..=1.0).contains(&clip[2]);
+                        // Points landing within a whisker of a plane are skipped: the two routes to
+                        // the same predicate divide by different quantities, so a point exactly on a
+                        // boundary can round either way without either route being wrong.
+                        let margin = (1.0 - clip[0].abs())
+                            .abs()
+                            .min((1.0 - clip[1].abs()).abs())
+                            .min(clip[2].abs())
+                            .min((1.0 - clip[2]).abs());
+                        if margin < 1e-4 {
+                            continue;
+                        }
+                        if projects_inside {
+                            inside_seen += 1;
+                        } else {
+                            outside_seen += 1;
+                        }
+                        assert_eq!(
+                            cascade.bounds.accepts(light_space, 0.0),
+                            projects_inside,
+                            "point {point:?} clip {clip:?}"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(
+            inside_seen > 0 && outside_seen > 0,
+            "the grid must straddle the cascades to prove anything: {inside_seen} in, {outside_seen} out"
+        );
+    }
+
+    /// A caster's radius may only ever widen the volume, never narrow it: a sphere is accepted
+    /// whenever its centre is, and a sphere large enough to reach the cascade is accepted even when
+    /// its centre is well outside. Otherwise a tall or wide model would lose the shadow it casts
+    /// across a cascade boundary.
+    #[test]
+    fn caster_cull_radius_only_ever_widens_the_volume() {
+        let bounds = CascadeBounds {
+            center_right: 10.0,
+            half_right: 40.0,
+            center_up: -5.0,
+            half_up: 25.0,
+            near_forward: 100.0,
+            far_forward: 900.0,
+        };
+        assert!(bounds.accepts([10.0, -5.0, 500.0], 0.0));
+        for radius in [0.0, 1.0, 60.0, 400.0] {
+            assert!(bounds.accepts([10.0, -5.0, 500.0], radius));
+        }
+        // Just outside on each axis with no radius, reached once the radius covers the gap.
+        for outside in [
+            [10.0 + 45.0, -5.0, 500.0],
+            [10.0, -5.0 - 30.0, 500.0],
+            [10.0, -5.0, 90.0],
+            [10.0, -5.0, 910.0],
+        ] {
+            assert!(!bounds.accepts(outside, 0.0), "{outside:?}");
+            assert!(bounds.accepts(outside, 12.0), "{outside:?}");
+        }
+    }
+
+    /// Sway is bounded rather than sampled, so the bound has to actually hold at every time a frame
+    /// could ask for. A bound that was too small would clip a swaying tree out of a cascade it still
+    /// reaches into.
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn tree_sway_offset_bound_holds_at_every_sampled_time() {
+        for placement in 0_u32..10 {
+            let sway = crate::TreeSwayPresentation::zero_hour_legacy_default(placement);
+            let bound = sway.maximum_offset_fraction();
+            assert!(bound > 0.0, "family {placement} must sway at all");
+            for step in 0..2_000 {
+                let seconds = step as f32 * 0.011;
+                let offset = sway.offset_at(seconds, 1.0);
+                let length = offset
+                    .into_iter()
+                    .map(|value| value * value)
+                    .sum::<f32>()
+                    .sqrt();
+                assert!(
+                    length <= bound + 1e-6,
+                    "family {placement} at {seconds}s displaced {length} past its {bound} bound"
+                );
+            }
         }
     }
 

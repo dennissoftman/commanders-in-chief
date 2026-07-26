@@ -49,11 +49,42 @@ struct WaterVertexOutput {
 @group(0) @binding(12) var primary_shadow_sampler: sampler_comparison;
 @group(0) @binding(13) var<uniform> shadow_camera: ShadowCamera;
 
+// Peak vertical displacement of the water surface, in world units.
+//
+// Deliberately small. The surface sits at one authored height above a bed, and the fragment stage
+// fades it out as that gap closes, so a swell taller than the fade width would make the waterline pop
+// instead of lap. At this amplitude the existing fade does the right thing unaided: a crest thickens
+// the water and a trough thins it, so the shoreline moves smoothly and a trough that dips below the
+// bed simply fades to nothing rather than clipping through it.
+const WAVE_DISPLACEMENT: f32 = 0.55;
+
+/// The height field `wave_normal` below is the analytic slope of, so displacement and shading come
+/// from one field and cannot disagree in phase or direction.
+///
+/// `wave_normal` keeps its own tuned amplitude rather than being derived from this one. Its slopes
+/// imply a swell several world units tall, chosen for how the specular highlight reads; carrying that
+/// geometrically would put crests above the shoreline. Exaggerating a shading normal relative to the
+/// geometry beneath it is ordinary practice, and the part a viewer can actually correlate — where the
+/// crests are and which way they travel — does agree.
+fn wave_height(position: vec2<f32>, time: f32) -> f32 {
+    let phase_a = dot(position, vec2<f32>(0.026, 0.017)) + time * 0.75;
+    let phase_b = dot(position, vec2<f32>(-0.013, 0.031)) - time * 0.52;
+    return sin(phase_a) * 0.62 + sin(phase_b) * 0.38;
+}
+
 @vertex
 fn water_vertex(@location(0) position: vec3<f32>) -> WaterVertexOutput {
     var output: WaterVertexOutput;
-    output.position = camera.view_projection * vec4<f32>(position, 1.0);
-    output.world_position = position;
+    var world = position;
+    // Modern presentation only. The source surface is a flat sheet at one authored height and legacy
+    // keeps it that way, so this is the one place the two presentations differ geometrically.
+    if (camera.water_motion.w > 0.5) {
+        world.z += wave_height(position.xy, camera.camera_position_time.w) * WAVE_DISPLACEMENT;
+    }
+    output.position = camera.view_projection * vec4<f32>(world, 1.0);
+    // The displaced position, so the depth the fragment stage measures against the bed is the depth
+    // under the moving surface. That is what makes the waterline lap rather than sit still.
+    output.world_position = world;
     return output;
 }
 

@@ -98,9 +98,9 @@ Use `--game-dir <path>` instead for a one-off run. Generals is the default resou
 
 ```powershell
 cargo run -p cic-tools -- manifest
-cargo run -p cic-tools -- map-render --size 768 "maps/synthetic/synthetic.map"
 cargo run -p cic-tools -- w3d-export art/w3d/model.w3d
 cargo run -p cic-tools -- map-view "maps/synthetic/synthetic.map"
+cargo run -p cic-tools -- map-view --output scene.png "maps/synthetic/synthetic.map"
 ```
 
 The binary installs as `cic-inspect`, so `cargo run -p cic-tools -- <command>` and
@@ -147,12 +147,14 @@ All commands accept the global options `[--zh] [--game-dir <path>] [--profile <p
 | `map-polygons <path>` | `PolygonTriggers` areas, versions 2 through 4 |
 | `map-objects <path>` | `ObjectsList` placements as immutable data |
 | `map-sides <path>` | Sides, teams, build lists, and the complete nested script tree |
-| `map-render <path> [<out.png>]` | Deterministic fixed-isometric overview PNG plus RGBA hash |
-| `map-view <path>` | Interactive perspective flyover |
+| `map-view <path>` | Interactive real-time-strategy view of the staged scene |
+| `map-view --output <out.png\|out.ppm> <path>` | The same scene rendered once offscreen, plus its RGBA hash |
 
-`map-render` and `map-view` also take `[--pixels-per-cell <pixels>]`,
-`[--terrain-policy <legacy\|modern>]`, and `[--time <seconds>]`; `map-render` additionally takes
-`[--size <pixels>]`.
+`map-view` takes `[--modern]`, `[--pixels-per-cell <pixels>]`, `[--terrain-policy <legacy\|modern>]`,
+`[--time <seconds>]` in either mode, plus `[--yaw <degrees>]`, `[--height <units>]`,
+`[--focus <x>,<y>]`, and `[--overlays <on|off>]` to place and frame the view, `[--size <pixels\|WxH>]`
+for the capture target, and `[--shadows <on|off>]` / `[--occlusion <on|off>]` to isolate a single
+lighting contribution.
 
 ### Models
 
@@ -244,8 +246,8 @@ deterministic, non-simulating scene.
 ```powershell
 cargo run -p cic-tools -- map-height "maps/synthetic/synthetic.map"
 cargo run -p cic-tools -- map-height --report "maps/synthetic/synthetic.map"
-cargo run -p cic-tools -- map-render --size 768 "maps/synthetic/synthetic.map"
 cargo run -p cic-tools -- map-view "maps/synthetic/synthetic.map"
+cargo run -p cic-tools -- map-view --output scene.png "maps/synthetic/synthetic.map"
 cargo run -p cic-tools -- map-polygons "maps/synthetic/synthetic.map"
 cargo run -p cic-tools -- map-objects "maps/synthetic/synthetic.map"
 cargo run -p cic-tools -- map-sides "maps/synthetic/synthetic.map"
@@ -256,17 +258,18 @@ cargo run -p cic-tools -- map-sides "maps/synthetic/synthetic.map"
 | Command | Derived output |
 | --- | --- |
 | `map-height` | `synthetic.png` |
-| `map-render` | `synthetic-terrain.png` |
 
-`map-height` writes the heightmap PNG by default and only prints the text report when `--report` is
+`map-view --output` has no derived name; the capture path is always explicit, and its extension
+selects PNG or PPM. `map-height` writes the heightmap PNG by default and only prints the text report when `--report` is
 passed; `--report` and `--png` are mutually exclusive. Explicit output paths always override the
 derived name.
 
 ### What the staged scene contains
 
-Both commands draw the same staged scene, but at deliberately different fidelity.
+`map-view` has one renderer, whether it opens a window or writes a file. There is no separate
+thumbnail path to drift out of agreement with what the window shows.
 
-**`map-view` is the detailed presentation.** Terrain with authored blend layers and cliff mappings,
+**The staged scene.** Terrain with authored blend layers and cliff mappings,
 roads with legacy-radius curves, miters, and junctions, bridges resolved from paired endpoints,
 instanced static scenery, water with caustics and depth absorption, source-default vegetation sway,
 and renderer-only diagnostics for player-start candidates, waypoints, named waypoint paths, polygon
@@ -276,20 +279,27 @@ composite finishes with a bounded contrast-adaptive sharpen. Terrain detail is s
 persistent GPU-composed virtual-texture cache with GPU-generated mip chains, trilinear filtering,
 and up to 16x anisotropy over the deterministic 8-pixel-per-cell baked background.
 
-**`map-render` is a deterministic thumbnail, not a screenshot of the viewer.** Terrain is the GPU
-capture with its composited texture; roads, water, polygon zones, markers, and scenery are then
-composited in authoritative source order as flat symbolic colors. It is single-sampled and applies
-no anti-aliasing, which is exactly why its RGBA SHA-256 is stable enough to diff.
+**`--output` is that same render, once, offscreen.** It draws the shadow cascade passes, the
+multisampled G-buffer, occlusion, deferred lighting, and the composite exactly as the window does,
+into a texture it copies back instead of a surface it presents. So a capture is evidence about what
+`map-view` shows, not an approximation of it, and a lighting or shadow change can be judged from a
+file rather than from a screenshot of a window.
 
-Presentation time is an explicit input in both, so `--time <seconds>` freezes it for repeatable
-comparison and makes `map-render`'s hash a deterministic diagnostic rather than a wall-clock
-snapshot. Ground placements sample the exact rendered terrain triangle and add the MAP-authored
-relative Z offset verbatim, without clamping or an added epsilon.
+Every input to a capture is explicit — target size, camera placement, presentation time, and which
+lighting contributions run — and nothing in the path reads a clock or an RNG, so identical inputs
+reproduce an identical image and the RGBA SHA-256 moves only when a tuning change moves it.
+`--shadows off` and `--occlusion off` leave their target at the neutral clear value the pass already
+writes, so differencing two captures attributes a suspicious region to a specific term. Ground
+placements sample the exact rendered terrain triangle and add the MAP-authored relative Z offset
+verbatim, without clamping or an added epsilon.
 
 Full detail lives in [docs/formats/map.md](docs/formats/map.md) and
 [docs/milestones/r3-map-scene.md](docs/milestones/r3-map-scene.md).
 
 ### Terrain policies
+
+`--modern` takes no value and selects every project-authored presentation policy at once — terrain
+and water follow the same switch — so it is `--terrain-policy modern` under a shorter name.
 
 | `--terrain-policy` | Behavior |
 | --- | --- |

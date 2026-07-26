@@ -44,11 +44,7 @@ pub use terrain::{
     StagedTerrain, TERRAIN_HEIGHT_SCALE, TERRAIN_XY_SCALE, TerrainCell, TerrainCompatibilityPolicy,
     TerrainError, TerrainLayer, TerrainStagingOptions, TerrainVertex,
 };
-pub use terrain_viewer::{
-    run_terrain_viewer, run_terrain_viewer_at_time, run_terrain_viewer_with_map,
-    run_terrain_viewer_with_map_at_time, run_terrain_viewer_with_roads,
-    run_terrain_viewer_with_roads_at_time,
-};
+pub use terrain_viewer::{MapScene, MapViewCamera, MapViewPasses, run_map_view};
 use viewer::{GpuResourceManager, MaterialPipelines, create_material_layout};
 pub use viewer::{ViewerError, run_model_viewer};
 pub use water::{
@@ -58,6 +54,18 @@ pub use water::{
 pub use wnd_scene::{StagedWndScene, WndQuadVertex, WndSceneError};
 
 const CAPTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+/// Colour target for the deferred MAP scene capture. Deliberately not [`CAPTURE_FORMAT`].
+///
+/// The deferred composite tonemaps with Reinhard and returns the result unencoded, because it is
+/// written to a window surface whose format applies the sRGB transfer function in hardware. A
+/// capture is the same pass, so its target has to encode the same way — into a plain `Unorm` target
+/// the frame lands as linear values, and a PNG that then declares itself sRGB displays roughly five
+/// times too dark in the midtones.
+///
+/// The simpler captures keep [`CAPTURE_FORMAT`]: they shade in whatever space their own shader
+/// works in rather than relying on the target's encode, and their pinned hashes describe those
+/// pipelines.
+const SCENE_CAPTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 const BYTES_PER_PIXEL: u32 = 4;
 const MAX_CAPTURE_DIMENSION: u32 = 4_096;
 const MAX_CAPTURE_BUFFER_BYTES: u64 = 64 * 1_024 * 1_024;
@@ -1349,6 +1357,36 @@ impl HeadlessRenderer {
         Ok(capture)
     }
 
+    /// Renders one frame of a staged MAP scene through the same GPU path `run_map_view` presents:
+    /// the shadow cascade passes, the multisampled G-buffer, ambient occlusion, deferred lighting,
+    /// the composite, and the forward diagnostics and water passes over it.
+    ///
+    /// Every input is explicit — target size, camera placement, and presentation time — and nothing
+    /// in the path consults a clock or an RNG, so identical inputs produce an identical image on a
+    /// given adapter.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured capture-dimension, adapter-resource, submission, or readback failure.
+    pub fn capture_map_view(
+        &self,
+        size: [u32; 2],
+        scene: &MapScene,
+        camera: MapViewCamera,
+        frame: MapPresentationFrame,
+        passes: MapViewPasses,
+    ) -> Result<Capture, ViewerError> {
+        terrain_viewer::capture_map_view(
+            &self.device,
+            &self.queue,
+            size,
+            scene,
+            camera,
+            frame,
+            passes,
+        )
+    }
+
     fn finish_capture(
         &self,
         encoder: wgpu::CommandEncoder,
@@ -1358,40 +1396,63 @@ impl HeadlessRenderer {
         unpadded_row: u32,
         padded_row: u32,
     ) -> Result<Capture, RenderError> {
-        let submission = self.queue.submit([encoder.finish()]);
-        let slice = readback.slice(..);
-        let (sender, receiver) = mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |result| {
-            let _ = sender.send(result);
-        });
-        self.device
-            .poll(wgpu::PollType::Wait {
-                submission_index: Some(submission),
-                timeout: Some(Duration::from_secs(10)),
-            })
-            .map_err(RenderError::Poll)?;
-        receiver
-            .recv_timeout(Duration::from_secs(1))
-            .map_err(|_| RenderError::MapCallbackTimeout)?
-            .map_err(RenderError::MapBuffer)?;
-        let mapped = slice.get_mapped_range().map_err(RenderError::MapRange)?;
-        let output_len = usize::try_from(u64::from(unpadded_row) * u64::from(height))
-            .map_err(|_| RenderError::CaptureTooLarge)?;
-        let mut rgba = Vec::with_capacity(output_len);
-        let padded_row = usize::try_from(padded_row).map_err(|_| RenderError::CaptureTooLarge)?;
-        let unpadded_row =
-            usize::try_from(unpadded_row).map_err(|_| RenderError::CaptureTooLarge)?;
-        for row in mapped.chunks_exact(padded_row) {
-            rgba.extend_from_slice(&row[..unpadded_row]);
-        }
-        drop(mapped);
-        readback.unmap();
-        Ok(Capture {
+        read_back_capture(
+            &self.device,
+            &self.queue,
+            encoder,
+            readback,
             width,
             height,
-            rgba,
-        })
+            unpadded_row,
+            padded_row,
+        )
     }
+}
+
+/// Submits a recorded capture encoder, waits for it, and unpads the readback into a `Capture`.
+#[allow(clippy::too_many_arguments)]
+fn read_back_capture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    encoder: wgpu::CommandEncoder,
+    readback: &wgpu::Buffer,
+    width: u32,
+    height: u32,
+    unpadded_row: u32,
+    padded_row: u32,
+) -> Result<Capture, RenderError> {
+    let submission = queue.submit([encoder.finish()]);
+    let slice = readback.slice(..);
+    let (sender, receiver) = mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = sender.send(result);
+    });
+    device
+        .poll(wgpu::PollType::Wait {
+            submission_index: Some(submission),
+            timeout: Some(Duration::from_secs(10)),
+        })
+        .map_err(RenderError::Poll)?;
+    receiver
+        .recv_timeout(Duration::from_secs(1))
+        .map_err(|_| RenderError::MapCallbackTimeout)?
+        .map_err(RenderError::MapBuffer)?;
+    let mapped = slice.get_mapped_range().map_err(RenderError::MapRange)?;
+    let output_len = usize::try_from(u64::from(unpadded_row) * u64::from(height))
+        .map_err(|_| RenderError::CaptureTooLarge)?;
+    let mut rgba = Vec::with_capacity(output_len);
+    let padded_row = usize::try_from(padded_row).map_err(|_| RenderError::CaptureTooLarge)?;
+    let unpadded_row = usize::try_from(unpadded_row).map_err(|_| RenderError::CaptureTooLarge)?;
+    for row in mapped.chunks_exact(padded_row) {
+        rgba.extend_from_slice(&row[..unpadded_row]);
+    }
+    drop(mapped);
+    readback.unmap();
+    Ok(Capture {
+        width,
+        height,
+        rgba,
+    })
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1687,6 +1748,7 @@ pub enum RenderError {
     InvalidTexture,
     TextureTooLarge,
     EmptyWndScene,
+    InvalidCameraPlacement,
 }
 
 impl Display for RenderError {
@@ -1724,6 +1786,9 @@ impl Display for RenderError {
                 formatter.write_str("decoded texture resources exceed renderer limits")
             }
             Self::EmptyWndScene => formatter.write_str("staged WND scene contains no window quads"),
+            Self::InvalidCameraPlacement => {
+                formatter.write_str("camera focus, yaw, and height inputs must be finite")
+            }
         }
     }
 }
