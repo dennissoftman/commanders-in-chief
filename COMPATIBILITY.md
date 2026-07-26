@@ -68,12 +68,15 @@ observable behavior.
 | MAP viewer | Waypoint paths, player starts, and polygon-zone diagnostics | verified | Stable path grouping/color/order, bounded terrain-following geometry, and installed waypoint/zone/start smokes |
 | MAP | Nested player-script tree | verified | Bounded nested synthetic tree, truncation/limit tests, stable raw-opcode report; execution intentionally deferred to R5 |
 | MAP viewer | R3 complete terrain scene and deterministic overview | verified | Source-topology roads, bridge towers, instanced models, default tree sway, boundary fence, shared shadows, AA, forward water, and repeatable explicit-time full-scene hashes |
-| WND | File/layout blocks, nested windows, fields, and unknown preservation | unknown | Source-established R4 gate; decoder not started |
-| WND | Complete classic status/style and gadget vocabulary | unknown | Source-established R4 gate; immutable control definitions not started |
-| WND | Versioned post-parse patch overlays with provenance | unknown | Planned project-owned R4 format; no source WND mutation |
-| UI resources | Mapped images, explicit fonts, CSF labels, cursors, and transitions | unknown | Planned bounded R4 resource-resolution gate |
-| UI runtime | Retained controls, focus/input, menu stack, and safe callback routing | unknown | Planned `cic-ui`; arbitrary callback execution forbidden |
-| UI renderer | Custom deterministic `wgpu` WND presentation | unknown | ADR 0010; text backend compatibility review pending |
+| WND | File/layout blocks, nested windows, fields, and unknown preservation | verified | Synthetic positive/truncation/limit tests + all 80 installed layouts in both editions, one non-fatal diagnostic corpus-wide |
+| WND | Complete classic status/style and gadget vocabulary | verified | All 46 source keywords typed and reconciled with a corpus census; every retail occurrence decodes with no malformed-field diagnostics |
+| WND | Versioned post-parse patch overlays with provenance | implemented | Bounded synthetic precondition/field/rect/structural tests; demonstrated end to end against the installed `OptionsMenu.wnd` |
+| UI resources | Mapped images, explicit fonts, and CSF labels | implemented | Source-ordered three-stage mapped-image load, header templates, and language policy resolved against a real installation; unresolved names are retail's own gap |
+| UI resources | Cursors, transitions, and menu schemes | unknown | Remaining bounded R4 resource-resolution subsets |
+| UI runtime | Retained controls, layout, focus, and input | implemented | Source-exact `parseScreenRect`, layered hit testing, focus, and control invariants; 480 instantiations over both corpora with zero diagnostics |
+| UI runtime | Menu stack and safe callback routing | unknown | Planned R4 gate 7; arbitrary callback execution forbidden |
+| UI renderer | Custom deterministic `wgpu` WND presentation | implemented | Batched quads, clips, colour space, and shaped text; installed main-menu/options/skirmish captures byte-identical across runs |
+| UI renderer | Per-family gadget draw-data composition | implemented | Every established family composed from its `Gadget*.h` indices and `W3DGadget*ImageDraw` geometry; synthetic all-families geometry tests and a repeatable capture, retail comparison beyond push buttons still open |
 | UI shell | Working main-menu navigation | unknown | Planned user-owned Main Menu completion artifact |
 | UI shell | Modern resolution and refresh-rate Settings path | unknown | Planned patched Options WND + injected mode-catalog/rollback tests |
 | UI shell | Skirmish/map selection with R3 preview and spawn candidates | unknown | Planned non-simulating R4 compatibility harness |

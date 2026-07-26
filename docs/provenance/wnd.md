@@ -10,6 +10,19 @@
   - `Core/GameEngine/Include/GameClient/GameWindowGlobal.h`
   - `Core/GameEngine/Include/GameClient/WindowLayout.h`
   - `Core/GameEngine/Source/GameClient/GUI/WindowLayout.cpp`
+- Per-family draw-data composition, one header and one device file each:
+  - `Core/GameEngineDevice/Source/W3DDevice/GameClient/GUI/Gadget/W3DRadioButton.cpp`
+  - `Core/GameEngineDevice/Source/W3DDevice/GameClient/GUI/Gadget/W3DCheckBox.cpp`
+  - `Core/GameEngineDevice/Source/W3DDevice/GameClient/GUI/Gadget/W3DTextEntry.cpp`
+  - `Core/GameEngineDevice/Source/W3DDevice/GameClient/GUI/Gadget/W3DVerticalSlider.cpp`
+  - `Core/GameEngineDevice/Source/W3DDevice/GameClient/GUI/Gadget/W3DHorizontalSlider.cpp`
+  - `Core/GameEngineDevice/Source/W3DDevice/GameClient/GUI/Gadget/W3DProgressBar.cpp`
+  - `Core/GameEngineDevice/Source/W3DDevice/GameClient/GUI/Gadget/W3DTabControl.cpp`
+  - `Core/GameEngineDevice/Source/W3DDevice/GameClient/GUI/Gadget/W3DListBox.cpp`
+  - `Core/GameEngineDevice/Source/W3DDevice/GameClient/GUI/Gadget/W3DComboBox.cpp`
+  - `Core/GameEngineDevice/Source/W3DDevice/GameClient/GUI/Gadget/W3DStaticText.cpp`
+  - `Core/GameEngine/Source/GameClient/GUI/Gadget/GadgetTabControl.cpp`
+  - `GeneralsMD/Code/GameEngineDevice/Source/W3DDevice/GameClient/GUI/W3DGameWindow.cpp`
 - Gadget declarations and behavior:
   - `Core/GameEngine/Include/GameClient/Gadget.h`
   - `Core/GameEngine/Include/GameClient/GadgetPushButton.h`
@@ -271,8 +284,57 @@ only intentional divergence. It also derives one rule from what the same file do
 `winDrawImage` takes no colour argument, so an image draw is untinted and a slot's `COLOR` belongs to
 the colour-only draw path.
 
-The remaining families' composition is not implemented. Each needs its own `Gadget*.h` index map and
-`W3DGadget*` geometry read at the pinned revision, and one further fact applies to that work: the draw
-procedure is selected by the control's retained draw-callback name — an `...ImageDraw` variant against
-a plain `...Draw` — not by the `WIN_STATUS_IMAGE` bit, so that name is the correct discriminator. Gate 4's transition, cursor, and menu-scheme subsets and everything else recorded above
-remain design-only.
+The remaining families' composition is now implemented, each from its own `Gadget*.h` index map and
+`W3DGadget*` geometry read at the pinned revision. The index maps are:
+
+| Family | Slot entries the source reads |
+| --- | --- |
+| `RADIOBUTTON` | left 0, unchecked box 1, checked box 2 per slot; a selected button reads hilite 3, 4, 5 |
+| `CHECKBOX` | unchecked box 1, checked box 2; entry 0 is a background the source leaves commented out |
+| `ENTRYFIELD` | left 0, right 1, centre 2, small centre 3 |
+| `VERTSLIDER` | top 0, bottom 1, centre 2, small centre 3 |
+| `HORZSLIDER` | fill and blank from disabled 0 and 1, highlight from hilite 0 |
+| `PROGRESSBAR` | background left 0, right 1, centre 2; bar right 5, centre 6 |
+| `TABCONTROL` | background `GTC_BACKGROUND` 0, tabs `GTC_TAB_0` through `GTC_TAB_7` at 1 through 8 |
+| everything else | entry 0, stretched across the control |
+
+Five geometry facts came out of that reading and are reproduced rather than smoothed over:
+
+- `W3DGadgetRadioButtonImageDraw` tests `WIN_STATE_SELECTED` *before* the enabled bit, so a selected
+  radio button draws from the hilite slot even while enabled and never shows disabled art.
+- `W3DGadgetHorizontalSliderImageDraw` ignores the control's own state when choosing art: fill and
+  blank always come from the disabled slot and the highlight row from the hilite slot. It also scales
+  its tick square by `TheDisplay->getWidth() / DEFAULT_DISPLAY_WIDTH` (800), so the squares track the
+  display rather than the control.
+- `W3DGadgetTextEntryImageDraw` and `W3DGadgetVerticalSliderImageDraw` draw one small-centre piece
+  more than fits (`pieces = gap / width + 1`), deliberately overrunning into where the end piece
+  draws over it.
+- `W3DGadgetProgressBarImageDraw` insets the bar ten pixels horizontally and five vertically inside
+  its background, and fills the unreached remainder of the track with the bar's *right* piece rather
+  than leaving it empty.
+- `drawCheckBoxText` does not centre a check box's label the way `drawButtonText` and
+  `drawRadioButtonText` centre theirs: it centres vertically but starts the label one control-height
+  in from the left, clearing the box image.
+
+`GadgetTabControlComputeTabRegion` supplies the tab strip's origin from `TABEDGE`, `TABORIENTATION`,
+and `PANEBORDER`, with `TP_CENTER = 0`, `TP_TOPLEFT = 1`, `TP_BOTTOMRIGHT = 2`, `TP_TOP_SIDE = 3`,
+`TP_RIGHT_SIDE = 4`, `TP_LEFT_SIDE = 5`, and `TP_BOTTOM_SIDE = 6` from `Gadget.h`. One fidelity note
+belongs with it: `parseTabControlData` reads `TABWIDTH` and `TABHEIGHT` straight from the file and
+nothing scales them, so a tab strip does not follow the creation-resolution scaling its own control
+does. That is reproduced as source behaviour. No retail layout declares a tab control, so none of
+this is cross-checked against real data.
+
+The image path itself is chosen the way the source chooses it, in two steps: creating a gadget
+assigns a default procedure from the `WIN_STATUS_IMAGE` bit (`getPushButtonImageDrawFunc` against
+`getPushButtonDrawFunc` in `GameWindowManager.cpp`), and a `DRAWCALLBACK` the function lexicon
+resolves then replaces it in `winCreateFromScript`. So a name reading as a bound draw procedure
+decides, and anything else — including the overwhelmingly common `"[None]"` — leaves the status bit
+deciding.
+
+Where a family's own indices declare nothing, each source procedure returns early and draws nothing.
+This project reproduces that and records a diagnostic naming the family, rather than staging a
+placeholder: a placeholder there would invent a control retail never shows. Placeholders stay for a
+genuinely unresolved resource, which is a different failure.
+
+Gate 4's transition, cursor, and menu-scheme subsets and everything else recorded above remain
+design-only.
