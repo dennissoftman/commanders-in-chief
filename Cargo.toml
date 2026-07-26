@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/cic-camera",
     "crates/cic-core",
     "crates/cic-formats",
     "crates/cic-render",
