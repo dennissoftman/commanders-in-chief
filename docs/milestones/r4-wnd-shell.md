@@ -141,13 +141,53 @@ takes no colour argument, and a slot's `COLOR` belongs to the colour-only fill p
 image by it painted every textured control in whatever that unused field held — frequently red in
 retail data. And a control declaring `IMAGE` whose slot has no entry-0 image keeps its art at indices
 only its own family reads, so filling with the slot colour there painted that same red; those controls
-now stage a visible placeholder plus an `UncomposedFamily` diagnostic naming the family instead.
+staged a visible placeholder plus a diagnostic naming the family instead, until the family itself
+composed.
 
-The remaining families' composition — sliders, list boxes, combo boxes, check boxes, text entry,
-progress bars, tab controls — is the next presentation step. Each needs its `Gadget*.h` index map and
-`W3DGadget*` geometry read at the pinned revision, and the draw procedure is selected by the control's
-retained draw-callback name (an `...ImageDraw` variant against a plain `...Draw`) rather than by the
-`IMAGE` status bit, so that name is the discriminator to dispatch on.
+The remaining families' composition followed and completes Gate 6's per-family work: radio buttons,
+check boxes, text entry, both slider orientations, progress bars, tab controls, and the stretched
+single-image path list boxes, combo boxes, and static text share. Each family's index map comes from
+its `Gadget*.h` accessors and its geometry from the matching `W3DGadget*ImageDraw`, both at the
+pinned revision, and the full table is in [docs/provenance/wnd.md](../provenance/wnd.md). The frame
+now carries all three draw-data slots and the live state a composition branches on, because a draw
+procedure does not always read the slot the control's own state selected.
+
+Reading those files corrected or established five behaviours worth recording:
+
+- A selected radio button reads the hilite slot's second image triple even while enabled, because
+  the source tests `WIN_STATE_SELECTED` before the enabled bit. It therefore never shows disabled
+  art while selected.
+- A horizontal slider ignores the control's state entirely when choosing art — fill and blank always
+  come from the disabled slot, the highlight row from the hilite slot — and scales its tick squares
+  against a fixed 800-pixel display reference rather than against the control.
+- A check box draws no background at all: the source leaves that draw commented out and renders only
+  the box, three pixels down and six shorter than the control. Its label is not centred the way a
+  button's is either; `drawCheckBoxText` centres vertically but indents by the control's own height.
+  That fixes a placement this project had previously centred.
+- A text entry and a vertical slider each draw one small-centre piece more than fits, deliberately
+  overrunning under the end piece that covers it.
+- A progress bar fills the *unreached* part of its track with the bar's right piece rather than
+  leaving it empty, with the whole bar inset ten pixels horizontally and five vertically.
+
+The image path is now chosen the way the source chooses it: the `IMAGE` status bit picks a default
+procedure at creation and a resolvable `DRAWCALLBACK` name replaces it, so a name reading as a draw
+procedure decides and `"[None]"` leaves the bit deciding. With every established family composed,
+the `UncomposedFamily` placeholder is retired. A control whose family finds nothing at its own
+indices now draws nothing, which is the source's early return, and records an `UncomposedArt`
+diagnostic naming the family; a visible placeholder there would have invented a control retail never
+shows. Placeholders remain for a genuinely unresolved mapped image.
+
+Two things about tab controls are reproduced as source behaviour and cannot be cross-checked, since
+no retail layout declares one: `TABWIDTH` and `TABHEIGHT` are read raw and never scaled, so a tab
+strip does not follow the creation-resolution scaling its own control does, and the strip's origin
+comes from `GadgetTabControlComputeTabRegion`'s edge and orientation arithmetic.
+
+Verification is synthetic: an original layout declaring every composed family
+(`crates/cic-render/tests/fixtures/synthetic-gadgets.wnd`) drives per-family geometry assertions and
+a surface-free capture that is byte-identical across runs, and the capture was rendered and looked
+at rather than only asserted. Retail verification of these families is still open — this pass had no
+installation available — so the earlier corpus-wide numbers still describe push buttons and
+backgrounds only.
 
 One compatibility fact belongs to Gates 7 and 8 rather than to presentation: rendering
 `Menus/MainMenu.wnd` shows every subpanel at once, with labels overlapping. Retail hides those
@@ -275,7 +315,7 @@ source WND bytes are edited and no renderer path searches for special window nam
    show/hide/enable, parent-relative layout, classic/modern resolution policies, clipping, z-order,
    hit testing, capture, focus, tab order, hover, press, selection, text editing, scrolling, and
    control-specific invariants. UI state is presentation state, not simulation state.
-6. **Custom `wgpu` presentation (implemented; per-family gadget draw-data composition pending).**
+6. **Custom `wgpu` presentation (implemented).**
    Render ordered colored/image quads, borders, state overlays,
    scissor rectangles, cursors, and shaped Unicode text over either a 2D background or an R3 scene.
    Support source alpha and explicit color-space handling, bounded atlases, batched stable draws,

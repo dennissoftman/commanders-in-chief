@@ -2141,8 +2141,8 @@ where
             UiStagingDiagnosticKind::UnshapeableText { text } => {
                 ("unshapeable_text", text.to_string())
             }
-            UiStagingDiagnosticKind::UncomposedFamily { window_type } => {
-                ("uncomposed_family", window_type.to_string())
+            UiStagingDiagnosticKind::UncomposedArt { family } => {
+                ("uncomposed_art", (*family).to_owned())
             }
         };
         writeln!(
@@ -2156,15 +2156,16 @@ where
 
 /// Returns every distinct mapped-image name a frame can draw, in first-use order.
 ///
-/// Every entry of a quad's slot is collected, not just the background: a family that composes
-/// pieces reads later indices, so binding only entry 0 would silently disable composition.
+/// Every entry of every slot is collected, not just the current state's background: a family that
+/// composes pieces reads later indices, and a selected radio button or a horizontal slider reads a
+/// slot its current state did not select, so binding less would silently disable composition.
 fn collect_frame_images(frame: &UiFrame) -> Vec<String> {
     let mut names = Vec::new();
     for item in frame.items() {
-        if let UiFrameItem::Quad { entries, .. } = item {
-            for image in entries.iter().flatten() {
+        if let UiFrameItem::Quad { images, .. } = item {
+            for image in images.names() {
                 if !names.iter().any(|name| name == image) {
-                    names.push(image.clone());
+                    names.push(image.to_owned());
                 }
             }
         }

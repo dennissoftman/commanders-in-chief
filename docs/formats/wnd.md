@@ -567,19 +567,59 @@ Button text is centred on both axes, as `drawButtonText` does, through the shape
 horizontally and a measured offset vertically. Static text centres only when its own `CENTERED` flag
 is set.
 
-Two colour rules came out of rendering real data. **An image draw is untinted**: `winDrawImage` takes
+One colour rule came out of rendering real data: **an image draw is untinted**. `winDrawImage` takes
 no colour, and a slot's `COLOR` belongs to the colour-only fill path, so multiplying an image by it
 paints every textured control in whatever that unused field happens to hold — which in retail data is
-frequently red. And **a control declaring `IMAGE` whose slot has no entry-0 image keeps its art at
-indices only its own family reads**; filling with the slot colour there would paint that same unused
-red, so a visible placeholder plus an `UncomposedFamily` diagnostic names the control instead.
+frequently red.
 
-Per-family composition beyond push buttons — sliders, list boxes, combo boxes, check boxes, text
-entry, progress bars, tab controls — is the remaining presentation work, and each needs its
-`Gadget*.h` index map and `W3DGadget*` geometry read at the pinned revision. A further finding for
-that work: the draw procedure is selected by the control's retained draw-callback name (for example
-an `...ImageDraw` variant against a plain `...Draw`), not by the `IMAGE` status bit, so that name is
-the correct discriminator.
+Every other established family composes too, each from its own `Gadget*.h` index map:
+
+| Family | Entries the source reads |
+| --- | --- |
+| `PUSHBUTTON` | left 0, middle 5, right 6; pushed 1, 3, 4 |
+| `RADIOBUTTON` | left 0, unchecked 1, checked 2 per slot; selected reads hilite 3, 4, 5 |
+| `CHECKBOX` | unchecked box 1, checked box 2 |
+| `ENTRYFIELD` | left 0, right 1, centre 2, small centre 3 |
+| `VERTSLIDER` | top 0, bottom 1, centre 2, small centre 3 |
+| `HORZSLIDER` | fill and blank from disabled 0 and 1, highlight from hilite 0 |
+| `PROGRESSBAR` | background left 0, right 1, centre 2; bar right 5, centre 6 |
+| `TABCONTROL` | background 0, tabs 1 through 8 |
+| everything else | entry 0, stretched across the control |
+
+Two of those read a slot the control's own state did not select, which is why a frame carries all
+three: a selected radio button reads the hilite slot even while enabled, because the source tests
+`WIN_STATE_SELECTED` before the enabled bit, and a horizontal slider always takes its fill and blank
+squares from the disabled slot and its highlight from the hilite slot. That slider also sizes its
+squares against a fixed 800-pixel display reference rather than against the control, so they track
+the display.
+
+Three more source behaviours are reproduced rather than tidied. A check box draws no background at
+all — the source leaves that draw commented out — and only its box, three pixels down and six shorter
+than the control. A text entry and a vertical slider each draw one small-centre piece more than fits,
+deliberately overrunning under the end piece that covers it. A progress bar fills the unreached part
+of its track with the bar's *right* piece rather than leaving it empty, with the whole bar inset ten
+pixels horizontally and five vertically.
+
+Text placement follows the same files. Push-button and radio-button labels are centred on both axes,
+as `drawButtonText` and `drawRadioButtonText` do, through the shaper's own alignment horizontally and
+a measured offset vertically. A check box's label is *not*: `drawCheckBoxText` centres it vertically
+but starts it one control-height in from the left, clearing the box. Static text centres only when
+its own `CENTERED` flag is set.
+
+The image path itself is chosen the way the source chooses it, in two steps: creating a gadget
+assigns a default procedure from the `IMAGE` status bit, and a `DRAWCALLBACK` the function lexicon
+resolves then replaces it. So a name that reads as a bound draw procedure decides — an `...ImageDraw`
+variant against a plain `...Draw` — and anything else, including the overwhelmingly common
+`"[None]"`, leaves the status bit deciding.
+
+Where a family's own indices declare nothing, each source procedure returns early and draws nothing.
+That is reproduced, with an `UncomposedArt` diagnostic naming the family: a placeholder there would
+invent a control retail never shows. A placeholder still stands in for a mapped image the layout
+names but the catalog cannot resolve, which is a different failure.
+
+A tab control carries one fidelity note, untestable against retail because no retail layout declares
+one: `parseTabControlData` reads `TABWIDTH` and `TABHEIGHT` straight from the file and nothing scales
+them, so a tab strip does not follow the creation-resolution scaling its own control does.
 
 ## Retained UI behavior
 

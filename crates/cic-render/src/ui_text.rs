@@ -158,9 +158,11 @@ impl UiFontSet {
             // `drawButtonText` centres a button's text on both axes. Horizontal centring is the
             // shaper's own alignment; the vertical half is a placement offset computed below from
             // the shaped height, since the source centres the measured text block in the control.
+            // `drawCheckBoxText` centres only vertically, so its horizontal alignment stays the
+            // shaper's default and the indent is a placement offset.
             let align = match run.align {
                 UiTextAlign::Centered => Some(Align::Center),
-                UiTextAlign::TopLeft => None,
+                UiTextAlign::TopLeft | UiTextAlign::CenteredBesideBox => None,
             };
             buffer.set_text(&run.text, &attrs, Shaping::Advanced, align);
             buffer.shape_until_scroll(&mut self.fonts, false);
@@ -170,7 +172,7 @@ impl UiFontSet {
         let areas = runs.iter().zip(&buffers).map(|(run, buffer)| {
             let bounds = run.scissor.unwrap_or(run.rect);
             let top_offset = match run.align {
-                UiTextAlign::Centered => {
+                UiTextAlign::Centered | UiTextAlign::CenteredBesideBox => {
                     let lines = buffer.layout_runs().count().max(1);
                     #[expect(clippy::cast_precision_loss, reason = "a shaped run has few lines")]
                     let shaped_height = buffer.metrics().line_height * lines as f32;
@@ -183,13 +185,24 @@ impl UiFontSet {
                 }
                 UiTextAlign::TopLeft => 0.0,
             };
+            // `drawCheckBoxText` starts the label one control-height in from the left, clearing the
+            // box image the check box draws there.
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "layout rectangles are small pixel counts"
+            )]
+            let left_offset = if run.align == UiTextAlign::CenteredBesideBox {
+                run.rect.height as f32
+            } else {
+                0.0
+            };
             TextArea {
                 buffer,
                 #[expect(
                     clippy::cast_precision_loss,
                     reason = "layout rectangles are small pixel counts"
                 )]
-                left: run.rect.x as f32,
+                left: run.rect.x as f32 + left_offset,
                 #[expect(
                     clippy::cast_precision_loss,
                     reason = "layout rectangles are small pixel counts"

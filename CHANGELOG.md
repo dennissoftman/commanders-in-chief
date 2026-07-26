@@ -170,13 +170,36 @@ land under the active milestone heading.
   the remainder, and the ends draw last over it, including the source's branch for ends that do not
   fit. Button text is centred on both axes, as `drawButtonText` does.
 
+- Added draw-data composition for every remaining gadget family, completing Gate 6: radio buttons,
+  check boxes, text entry, both slider orientations, progress bars, tab controls, and the stretched
+  single-image path list boxes, combo boxes, and static text share. Each family's entry indices come
+  from its `Gadget*.h` accessors and its geometry from the matching `W3DGadget*ImageDraw`, so a
+  layout's art now reaches the screen the way the family that authored it intended rather than as one
+  stretched background. Several source behaviours are reproduced rather than smoothed over: a
+  selected radio button reads the hilite slot even while enabled, a horizontal slider takes its tick
+  art from fixed slots whatever its own state and sizes those ticks against an 800-pixel display
+  reference, a text entry and a vertical slider each draw one seam piece more than fits so the end
+  piece covers it, and a progress bar fills the unreached part of its track with the bar's right
+  piece. A check box draws only its box — the source leaves its background draw commented out — and
+  its label is now indented past that box rather than centred, which is what `drawCheckBoxText` does.
+  A new `crates/cic-render/tests/ui_capture.rs` renders an original all-families synthetic layout
+  through the surface-free capture boundary, byte-identically across runs.
+
+- Added the retained draw-callback name to the UI runtime, and with it the source's own two-step
+  choice of draw procedure: the `IMAGE` status bit picks a default when a gadget is created, and a
+  `DRAWCALLBACK` the function lexicon would resolve then replaces it. A layout naming
+  `GadgetStaticTextDraw` now draws colour-only even while declaring `IMAGE`, and the ubiquitous
+  `"[None]"` correctly leaves the status bit deciding.
+
 ### Fixed
 
 - Fixed images being tinted by their slot's `COLOR`. `winDrawImage` takes no colour - that field
   belongs to the colour-only fill path - and retail frequently leaves an unused red there beside a
   valid image, so every textured control rendered red. A control declaring `IMAGE` whose slot has no
-  entry-0 image now stages a visible placeholder and an `UncomposedFamily` diagnostic naming it,
-  instead of painting that same unused colour.
+  entry-0 image first staged a visible placeholder instead of painting that same unused colour;
+  now that every family composes, such a control draws nothing — the source's own early return —
+  and records an `UncomposedArt` diagnostic naming the family, since a placeholder there would
+  invent a control retail never shows. Placeholders remain for a genuinely unresolved mapped image.
 - Corrected the recorded mapped-image load policy. This project had documented
   `Data/INI/MappedImages/**` as a plain recursive merge, on the measured basis that the
   `HandCreated/` and `TextureSize_512/` name sets were disjoint, and noted that the source loader had

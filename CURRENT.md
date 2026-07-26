@@ -54,7 +54,7 @@ Gate 5's retained runtime is implemented as the new `cic-ui` crate: layout repro
 `parseScreenRect` exactly plus a project-designed uniform-scale `Modern` policy, the original's
 three-pass layered hit testing with source-order child descent, focus with its `NOFOCUS` refusal and
 parent walk, a wraparound tab cycle over declared `TABSTOP` controls, every control-family invariant,
-and renderer-neutral frames. Twenty-one tests over one original synthetic layout pass, and
+and renderer-neutral frames. Tests over one original synthetic layout pass, and
 `cic-inspect ui-layout` verifies it against real data: all 80 Zero Hour and 78 Generals layouts
 instantiate at 800x600, 1920x1080, and 21:9 2560x1080 under both policies with no failures and zero
 diagnostics.
@@ -63,31 +63,41 @@ One measurement from that pass changes a later gate: the whole Zero Hour corpus 
 `TABSTOP` controls, so keyboard traversal of a retail menu cannot come from the layouts and the shell
 gate will need project-owned tab order.
 
-Gate 6's custom `wgpu` presentation is implemented and verified against real data. The text stack is
+Gate 6's custom `wgpu` presentation is complete. The text stack is
 settled: `cosmic-text` 0.19 and `glyphon` 0.12, which declares `wgpu ^30.0.0` and unifies with the
 workspace `wgpu` 30 rather than pulling a second copy; both licences are permissive and compatible
 with GPL-3.0-only. `cic-inspect ui-render` writes a deterministic PNG plus hash from explicit inputs
 only, and renders the retail main menu, options menu, and skirmish options with correct geometry,
 batching, clipping, colour, and localized text, byte-identical across runs.
 
-Push-button draw-data composition is implemented from `GadgetPushButton.h` and
-`W3DGadgetPushButtonImageDraw`, along with the centred button text `drawButtonText` produces. The
-retail main menu now renders as a real menu: background art, logo, gold-framed buttons, centred
-localized labels.
+Per-family draw-data composition finished that gate. Push buttons came first, from
+`GadgetPushButton.h` and `W3DGadgetPushButtonImageDraw`, along with the centred button text
+`drawButtonText` produces; the rest followed — radio buttons, check boxes, text entry, both slider
+orientations,
+progress bars, tab controls, and the stretched single-image path list boxes, combo boxes, and static
+text share. Every established family now composes from its own `Gadget*.h` index map and
+`W3DGadget*ImageDraw` geometry, so no control stages a stand-in for an unimplemented family. Five
+source behaviours that reading produced are recorded in
+[docs/milestones/r4-wnd-shell.md](docs/milestones/r4-wnd-shell.md); the one that changed existing
+output is that a check box centres its label only vertically and indents it by the control's own
+height, which this project had been centring.
 
-The next verified step is **the remaining families' draw-data composition** — sliders, list boxes,
-combo boxes, check boxes, text entry, progress bars, and tab controls — each needing its `Gadget*.h`
-index map and `W3DGadget*` geometry read at the pinned revision. Until then those controls stage a
-visible placeholder plus an `UncomposedFamily` diagnostic rather than a misleading fill. One finding
-shapes that work: the draw procedure is selected by the control's retained draw-callback name (an
-`...ImageDraw` variant against a plain `...Draw`), not by the `IMAGE` status bit, so that name is the
-correct discriminator.
+The image path is now selected the way the source selects it — the `IMAGE` bit picks a default
+procedure at creation and a resolvable `DRAWCALLBACK` replaces it — and a family that finds nothing
+at its own indices draws nothing and reports it, matching the source's early return, instead of
+painting a placeholder over a control retail never shows.
 
-Two smaller pieces remain queued: the rest of Gate 4 — bounded `WindowTransition`, `MouseCursor`, and
-`ShellMenuScheme` subsets, which live in the same INI family and reuse the shared lexer — and Gate 7's
-shell stack, which is what hides the subpanels a retail menu overlays today: rendering `MainMenu.wnd`
-currently shows every subpanel at once, because retail hides them from menu code rather than through
-`STATUS`.
+Verification for these families is synthetic only: an original all-families layout drives per-family
+geometry assertions and a byte-identical surface-free capture. **Retail verification of the newly
+composed families is the next verified step** — the earlier corpus-wide numbers cover push buttons
+and backgrounds only, and this pass had no installation available to render `OptionsMenu.wnd` or
+`SkirmishGameOptionsMenu.wnd` against.
+
+Two smaller pieces remain queued behind it: the rest of Gate 4 — bounded `WindowTransition`,
+`MouseCursor`, and `ShellMenuScheme` subsets, which live in the same INI family and reuse the shared
+lexer — and Gate 7's shell stack, which is what hides the subpanels a retail menu overlays today:
+rendering `MainMenu.wnd` currently shows every subpanel at once, because retail hides them from menu
+code rather than through `STATUS`.
 
 Separately, [docs/formats/csf.md](docs/formats/csf.md) records the language-selection mechanism
 against the pinned source, for the planned goal of shipping languages the original game never had.

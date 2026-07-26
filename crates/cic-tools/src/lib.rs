@@ -1175,15 +1175,17 @@ pub fn render_ui_layout(layout: &UiLayout) -> String {
             UiFrameItem::Quad {
                 control,
                 slot,
-                image,
+                images,
+                family,
                 ..
             } => (
                 "quad",
                 control.index().to_string(),
                 format!(
-                    "{}\t{}",
+                    "{}\t{}\t{}",
                     wnd_draw_slot_name(*slot),
-                    image.as_deref().unwrap_or("-")
+                    images.image(*slot, 0).unwrap_or("-"),
+                    family.name()
                 ),
             ),
             UiFrameItem::Text(run) => ("text", run.control.index().to_string(), run.label.clone()),

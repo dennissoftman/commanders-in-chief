@@ -20,11 +20,13 @@ use std::fmt::{self, Display, Formatter};
 
 use cic_formats::{
     WND_DRAW_DATA_ENTRIES, WndColor, WndComboBoxData, WndDocument, WndDrawData, WndDrawDataSlot,
-    WndDrawEntry, WndGadgetData, WndListBoxData, WndSliderData, WndTextColors, WndTextEntryData,
-    WndWindow,
+    WndDrawEntry, WndGadgetData, WndListBoxData, WndSliderData, WndTabControlData, WndTextColors,
+    WndTextEntryData, WndWindow,
 };
 
-use crate::frame::{UiControlFamily, UiTextAlign};
+use crate::frame::{
+    UI_MAX_TABS, UiControlFamily, UiDrawState, UiSlotImages, UiTabGeometry, UiTextAlign,
+};
 
 /// Explicit bounds for instantiating a retained layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -383,6 +385,8 @@ pub enum UiControlKind {
         active_pane: usize,
         /// How many panes the definition declares.
         panes: usize,
+        /// The declared tab strip, which the presentation layer composes from.
+        geometry: UiTabGeometry,
     },
     /// Any other established window type, retained without family-specific state.
     Generic,
@@ -418,6 +422,7 @@ pub struct UiControl {
     header_template: Option<String>,
     system_callback: Option<String>,
     input_callback: Option<String>,
+    draw_callback: Option<String>,
     draw_data: Vec<(WndDrawDataSlot, WndDrawData)>,
     text_colors: Option<WndTextColors>,
     kind: UiControlKind,
@@ -580,27 +585,114 @@ impl UiControl {
         self.image_offset
     }
 
-    /// Returns which family's draw-data composition rules apply.
+    /// Returns the retained draw callback name. It is data: nothing here dispatches it.
     #[must_use]
-    pub const fn family(&self) -> UiControlFamily {
+    pub fn draw_callback(&self) -> Option<&str> {
+        self.draw_callback.as_deref()
+    }
+
+    /// Returns whether this control draws through an image path rather than a colour-only one.
+    ///
+    /// The source resolves this in two steps. Creating a gadget assigns a default procedure from the
+    /// `IMAGE` status bit — `getPushButtonImageDrawFunc` against `getPushButtonDrawFunc` — and a
+    /// `DRAWCALLBACK` the function lexicon resolves then replaces it. So a name that reads as a
+    /// bound draw procedure decides, and anything else, including the overwhelmingly common
+    /// `"[None]"` and any name the lexicon would not resolve, leaves the status bit deciding.
+    #[must_use]
+    pub fn is_image_draw(&self) -> bool {
+        match self.draw_callback.as_deref() {
+            Some(callback) if callback.ends_with("ImageDraw") => true,
+            Some(callback) if callback.ends_with("Draw") => false,
+            _ => self.status.contains(UiStatus::IMAGE),
+        }
+    }
+
+    /// Returns which family's draw-data composition rules apply.
+    ///
+    /// A slider's orientation is not in its retained state — both orientations decode one
+    /// `SLIDERDATA` — so the declared window type distinguishes them, as it does in the source's
+    /// own `winCreateFromScript` dispatch.
+    #[must_use]
+    pub fn family(&self) -> UiControlFamily {
         match self.kind {
             UiControlKind::PushButton => UiControlFamily::PushButton,
+            UiControlKind::RadioButton { .. } => UiControlFamily::RadioButton,
+            UiControlKind::CheckBox { .. } => UiControlFamily::CheckBox,
+            UiControlKind::TextEntry { .. } => UiControlFamily::TextEntry,
+            UiControlKind::ProgressBar { .. } => UiControlFamily::ProgressBar,
+            UiControlKind::TabControl { geometry, .. } => UiControlFamily::TabControl(geometry),
+            UiControlKind::Slider { .. } if self.window_type.eq_ignore_ascii_case("HORZSLIDER") => {
+                UiControlFamily::HorizontalSlider
+            }
+            UiControlKind::Slider { .. } => UiControlFamily::VerticalSlider,
             _ => UiControlFamily::Simple,
         }
+    }
+
+    /// Returns the source's `WIN_STATE_SELECTED` for this control.
+    ///
+    /// The bit means something different per family — a push button is selected while held down, a
+    /// check box while checked, a radio button while it is its group's choice — and each family's
+    /// draw procedure reads it to pick its selected art.
+    #[must_use]
+    pub const fn is_selected(&self) -> bool {
+        match self.kind {
+            UiControlKind::RadioButton { selected, .. } => selected,
+            UiControlKind::CheckBox { checked } => checked,
+            _ => self.pressed,
+        }
+    }
+
+    /// Returns the scalar draw inputs a family's composition reads: a slider's bounds and position,
+    /// or a progress bar's percentage.
+    #[must_use]
+    pub const fn draw_bounds(&self) -> UiDrawState {
+        let (value, minimum, maximum) = match self.kind {
+            UiControlKind::Slider {
+                minimum,
+                maximum,
+                value,
+            } => (value, minimum, maximum),
+            UiControlKind::ProgressBar { progress } => (progress, 0, 100),
+            _ => (0, 0, 0),
+        };
+        UiDrawState {
+            enabled: false,
+            hilited: false,
+            selected: false,
+            value,
+            minimum,
+            maximum,
+        }
+    }
+
+    /// Returns every image name this control declares, by slot and entry index.
+    ///
+    /// A slot the control does not declare yields [`WND_DRAW_DATA_ENTRIES`] absent names, so an
+    /// index a family composes from is always in range.
+    #[must_use]
+    pub fn slot_images(&self) -> UiSlotImages {
+        UiSlotImages::new(
+            self.draw_entry_images(WndDrawDataSlot::Enabled),
+            self.draw_entry_images(WndDrawDataSlot::Disabled),
+            self.draw_entry_images(WndDrawDataSlot::Hilite),
+        )
     }
 
     /// Returns where this control's text sits inside its rectangle.
     ///
     /// `drawButtonText` centres a push button's text on both axes unless the control declares
-    /// `SHORTCUT_BUTTON`, which the source itself calls a hack for drawing at the top left. Static
-    /// text centres only when its own `CENTERED` flag is set.
+    /// `SHORTCUT_BUTTON`, which the source itself calls a hack for drawing at the top left.
+    /// `drawRadioButtonText` centres the same way. `drawCheckBoxText` does not: it centres
+    /// vertically but indents the label by the control's own height, clearing the box image.
+    /// Static text centres only when its own `CENTERED` flag is set.
     #[must_use]
     pub const fn text_align(&self) -> UiTextAlign {
         match self.kind {
             UiControlKind::PushButton
             | UiControlKind::RadioButton { .. }
-            | UiControlKind::CheckBox { .. }
             | UiControlKind::StaticText { centered: true } => UiTextAlign::Centered,
+            UiControlKind::CheckBox { .. } => UiTextAlign::CenteredBesideBox,
             _ => UiTextAlign::TopLeft,
         }
     }
@@ -881,6 +973,10 @@ impl UiLayout {
                 .callbacks()
                 .get(cic_formats::WndCallbackKind::Input)
                 .map(str::to_owned),
+            draw_callback: window
+                .callbacks()
+                .get(cic_formats::WndCallbackKind::Draw)
+                .map(str::to_owned),
             draw_data: window.draw_data().to_vec(),
             text_colors: window.text_colors().copied(),
             kind,
@@ -960,10 +1056,7 @@ impl UiLayout {
             Some(WndGadgetData::TextEntry(data)) => {
                 Self::text_entry_kind(*data, id, self.limits, &mut diagnostics)
             }
-            Some(WndGadgetData::TabControl(data)) => UiControlKind::TabControl {
-                active_pane: 0,
-                panes: usize::try_from(data.tab_count().max(0)).unwrap_or(0),
-            },
+            Some(WndGadgetData::TabControl(data)) => Self::tab_control_kind(data),
             Some(WndGadgetData::StaticTextCentered(centered)) => UiControlKind::StaticText {
                 centered: *centered,
             },
@@ -1060,6 +1153,32 @@ impl UiLayout {
             caret: 0,
             max_length,
             secret: data.secret_text(),
+        }
+    }
+
+    /// Builds a tab control's retained state, clamping the declared tab count to the source's
+    /// fixed pane array rather than trusting the file's own count.
+    fn tab_control_kind(data: &WndTabControlData) -> UiControlKind {
+        let panes = usize::try_from(data.tab_count().max(0))
+            .unwrap_or(0)
+            .min(UI_MAX_TABS);
+        let mut disabled = [false; UI_MAX_TABS];
+        for (slot, declared) in disabled.iter_mut().zip(data.pane_disabled()) {
+            *slot = *declared;
+        }
+        UiControlKind::TabControl {
+            active_pane: 0,
+            panes,
+            geometry: UiTabGeometry {
+                orientation: data.tab_orientation(),
+                edge: data.tab_edge(),
+                width: data.tab_width(),
+                height: data.tab_height(),
+                count: panes,
+                pane_border: data.pane_border(),
+                active: 0,
+                disabled,
+            },
         }
     }
 
@@ -1420,11 +1539,18 @@ impl UiLayout {
     /// Selects a tab control's active pane, refusing an index outside the declared panes.
     pub fn select_tab_pane(&mut self, id: UiControlId, pane: usize) -> bool {
         match &mut self.controls[id.0].kind {
-            UiControlKind::TabControl { active_pane, panes } => {
+            UiControlKind::TabControl {
+                active_pane,
+                panes,
+                geometry,
+            } => {
                 if pane >= *panes {
                     return false;
                 }
                 *active_pane = pane;
+                // The strip's own active index is what the presentation layer reads to pick the
+                // hilited tab image, so it moves with the retained pane.
+                geometry.active = pane;
                 true
             }
             _ => false,
