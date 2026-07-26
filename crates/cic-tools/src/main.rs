@@ -19,15 +19,15 @@ use cic_formats::{
     parse_water_ini, parse_wnd, parse_wnd_patch, w3d_model_hierarchy_name,
 };
 use cic_render::{
-    AnimatedModel, BridgeTowerPlacement, HeadlessRenderer, MapPresentationFrame, ModelFrame,
-    StagedBoundaryFence, StagedMapOverlays, StagedMapScene, StagedRoads, StagedStaticScenery,
-    StagedStaticSceneryModel, StagedTerrain, StagedUiFrame, StagedWater, StagedWndScene,
-    StaticSceneryDiagnostic, StaticSceneryDiagnosticKind, StaticSceneryInstance,
-    TerrainCompatibilityPolicy, TerrainLighting, TerrainStagingOptions, TextureId,
-    TextureResourceManager, TreeSwayPresentation, UiImageBinding, UiStagingDiagnosticKind,
-    UiStagingLimits, UiTextPolicy, UiTexturePage, WaterAppearance, WaterCausticSequence,
-    WaterPresentationPolicy, WaterSurfaceTexture, bridge_tower_placements, run_model_viewer,
-    run_terrain_viewer_with_map, run_terrain_viewer_with_map_at_time,
+    AnimatedModel, BridgeTowerPlacement, Capture, HeadlessRenderer, MapPresentationFrame, MapScene,
+    MapViewCamera, MapViewPasses, ModelFrame, StagedBoundaryFence, StagedMapOverlays,
+    StagedMapScene, StagedRoads, StagedStaticScenery, StagedStaticSceneryModel, StagedTerrain,
+    StagedUiFrame, StagedWater, StagedWndScene, StaticSceneryDiagnostic,
+    StaticSceneryDiagnosticKind, StaticSceneryInstance, TerrainCompatibilityPolicy,
+    TerrainLighting, TerrainStagingOptions, TextureId, TextureResourceManager,
+    TreeSwayPresentation, UiImageBinding, UiStagingDiagnosticKind, UiStagingLimits, UiTextPolicy,
+    UiTexturePage, WaterAppearance, WaterCausticSequence, WaterPresentationPolicy,
+    WaterSurfaceTexture, bridge_tower_placements, run_map_view, run_model_viewer,
 };
 use cic_tools::resource::{
     DEFAULT_LANGUAGE, GameEdition, MountProfile, MountProfileLimits, ResourceKind, StoredLocations,
@@ -68,8 +68,7 @@ const USAGE: &str = "Usage:\n\
   cic-inspect map-objects <virtual-path> <mount> [<mount> ...]\n\
   cic-inspect map-object-draws <virtual-path> <mount> [<mount> ...]\n\
   cic-inspect map-sides <virtual-path> <mount> [<mount> ...]\n\
-  cic-inspect map-render [--size <pixels>] [--pixels-per-cell <pixels>] [--terrain-policy <legacy|modern>] [--time <seconds>] <virtual-path> [<output.png>] [<mount> ...]\n\
-  cic-inspect map-view [--pixels-per-cell <pixels>] [--terrain-policy <legacy|modern>] [--time <seconds>] <virtual-path> [<mount> ...]\n\
+  cic-inspect map-view [--modern] [--output <file.png>] [--size <pixels|WxH>] [--yaw <degrees>] [--height <units>] [--focus <x>,<y>] [--overlays <on|off>] [--shadows <on|off>] [--occlusion <on|off>] [--pixels-per-cell <pixels>] [--terrain-policy <legacy|modern>] [--time <seconds>] <virtual-path> [<mount> ...]\n\
   cic-inspect w3d <virtual-path> <mount> [<mount> ...]\n\
   cic-inspect w3d-mesh <virtual-path> <top-level-index> <mount> [<mount> ...]\n\
   cic-inspect w3d-view <virtual-path> [<mount> ...]\n\
@@ -83,20 +82,13 @@ const USAGE: &str = "Usage:\n\
 Each mount is a directory or BIG archive. Mounts are applied from left to right; later mounts override earlier mounts.";
 
 const MAX_ENCODED_IMAGE_BYTES: usize = 256 * 1_024 * 1_024;
+/// Default `map-view --output` capture size, matching the interactive window's client area so a
+/// capture frames the scene the way the window does.
+const DEFAULT_CAPTURE_WIDTH: u32 = 1_280;
+const DEFAULT_CAPTURE_HEIGHT: u32 = 800;
 const MAX_OBJECT_CATALOG_DEFINITIONS: usize = 200_000;
 const MAX_OBJECT_RESKIN_DEPTH: usize = 32;
 const DEFAULT_STANDING_WATER_TEXTURE: &[u8] = b"TWWater01.tga";
-type StagedTerrainScene = (
-    StagedTerrain,
-    StagedRoads,
-    StagedBoundaryFence,
-    StagedMapOverlays,
-    StagedStaticScenery,
-    StagedWater,
-    WaterAppearance,
-    TerrainLighting,
-);
-
 #[derive(Debug)]
 struct CliOptions {
     edition: GameEdition,
@@ -181,8 +173,7 @@ fn run(arguments: impl IntoIterator<Item = String>) -> Result<String, Box<dyn Er
         "map-objects" => report_map_objects(arguments, &options),
         "map-object-draws" => report_map_object_draws(arguments, &options),
         "map-sides" => report_map_sides(arguments, &options),
-        "map-render" => render_terrain_capture(&mut arguments, &options),
-        "map-view" => view_terrain(&mut arguments, &options),
+        "map-view" => view_map(&mut arguments, &options),
         "w3d" => {
             let resource_name = arguments.next().ok_or("w3d requires a virtual path")?;
             let mounts = arguments.collect::<Vec<_>>();
@@ -586,56 +577,117 @@ where
     Ok(parse_map(&bytes, resource_path.as_str(), limits)?)
 }
 
-fn render_terrain_capture<I>(
+/// Presents a staged MAP scene, either in a window or as one deterministic offscreen capture.
+///
+/// Both go through the same renderer path, so a capture is what the window would have shown at that
+/// pose and time rather than a separate approximation of it.
+fn view_map<I>(
     arguments: &mut std::iter::Peekable<I>,
     options: &CliOptions,
 ) -> Result<String, Box<dyn Error>>
 where
     I: Iterator<Item = String>,
 {
-    let mut size = 768_u32;
     let mut pixels_per_cell = TerrainStagingOptions::SOURCE_BACKGROUND.pixels_per_cell();
     let mut compatibility = TerrainCompatibilityPolicy::ZeroHourLegacy;
-    let mut frame = MapPresentationFrame::ZERO;
+    let mut fixed_frame = None;
+    let mut output = None;
+    let mut size = [DEFAULT_CAPTURE_WIDTH, DEFAULT_CAPTURE_HEIGHT];
+    let mut yaw_degrees = 0.0_f32;
+    let mut height = None;
+    let mut focus = None;
+    let mut overlays = true;
+    let mut passes = MapViewPasses::ALL;
     while arguments
         .peek()
         .is_some_and(|argument| argument.starts_with("--"))
     {
-        let option = arguments.next().expect("peeked map-render option");
+        let option = arguments.next().expect("peeked map-view option");
+        // `--modern` takes no value: it selects every project-authored presentation policy at once,
+        // which is otherwise a per-subsystem option to remember. There is exactly one policy today
+        // and water follows it, so this is the same switch under a name worth typing.
+        if option == "--modern" {
+            compatibility = TerrainCompatibilityPolicy::Modern;
+            continue;
+        }
         let value = arguments
             .next()
             .ok_or_else(|| format!("{option} requires a value"))?;
         match option.as_str() {
-            "--size" => size = value.parse::<u32>()?,
             "--pixels-per-cell" => pixels_per_cell = value.parse::<u32>()?,
             "--terrain-policy" => compatibility = parse_terrain_policy(&value)?,
-            "--time" => frame = MapPresentationFrame::new(value.parse::<f32>()?)?,
-            _ => return Err(format!("unknown map-render option {option:?}").into()),
+            "--time" => fixed_frame = Some(MapPresentationFrame::new(value.parse::<f32>()?)?),
+            "--output" => output = Some(PathBuf::from(value)),
+            "--size" => size = parse_capture_size(&value)?,
+            "--yaw" => yaw_degrees = value.parse::<f32>()?,
+            "--height" => height = Some(value.parse::<f32>()?),
+            "--focus" => focus = Some(parse_focus(&value)?),
+            "--overlays" => overlays = parse_toggle(&value)?,
+            "--shadows" => passes.shadows = parse_toggle(&value)?,
+            "--occlusion" => passes.occlusion = parse_toggle(&value)?,
+            _ => return Err(format!("unknown map-view option {option:?}").into()),
         }
     }
-    let resource_name = arguments
-        .next()
-        .ok_or("map-render requires a virtual path")?;
+    let resource_name = arguments.next().ok_or("map-view requires a virtual path")?;
     let resource_path = VirtualPath::new(&resource_name)?;
-    let remaining = arguments.collect::<Vec<_>>();
-    let (output_path, mounts) = if remaining.first().is_some_and(|candidate| {
-        Path::new(candidate)
-            .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
-    }) {
-        (PathBuf::from(&remaining[0]), remaining[1..].to_vec())
-    } else {
-        (default_terrain_render_path(&resource_path)?, remaining)
-    };
-    let vfs = mount_all("map-render", &mounts, options, ResourceKind::Terrain)?;
-    let (terrain, roads, boundary, overlays, scenery, water, _water_appearance, _lighting) =
-        load_staged_terrain_and_water(&vfs, &resource_path, pixels_per_cell, compatibility)?;
-    let renderer = pollster::block_on(HeadlessRenderer::new())?;
-    let capture = renderer.capture_map_scene_overview(
-        size, size, &terrain, &roads, &overlays, &scenery, &water, frame,
+    let mounts = arguments.collect::<Vec<_>>();
+    let vfs = mount_all("map-view", &mounts, options, ResourceKind::Terrain)?;
+    let mut scene = load_staged_map_scene(&vfs, &resource_path, pixels_per_cell, compatibility)?;
+    if !overlays {
+        // The waypoint, zone, and boundary ribbons are opaque diagnostics drawn over the composite,
+        // so they hide exactly the terrain a lighting or shadow question is about.
+        scene.overlays = StagedMapOverlays::empty();
+        scene.boundary = StagedBoundaryFence::empty();
+    }
+    let mut camera = MapViewCamera::new(
+        yaw_degrees.to_radians(),
+        height.unwrap_or_else(|| MapViewCamera::CENTERED.height()),
     )?;
-    let png = encode_capture_png(&capture)?;
-    fs::write(&output_path, png)?;
+    if let Some(focus) = focus {
+        camera = camera.with_focus(focus)?;
+    }
+    let report = map_scene_report(&resource_path, &scene, compatibility, fixed_frame);
+    let Some(output_path) = output else {
+        eprintln!("{}", scenery_summary(&scene));
+        let title = map_view_title(&resource_path, &scene);
+        run_map_view(scene, camera, title, fixed_frame)?;
+        return Ok(report);
+    };
+    let renderer = pollster::block_on(HeadlessRenderer::new())?;
+    let capture = renderer.capture_map_view(
+        size,
+        &scene,
+        camera,
+        fixed_frame.unwrap_or(MapPresentationFrame::ZERO),
+        passes,
+    )?;
+    fs::write(&output_path, encode_capture(&capture, &output_path)?)?;
+    Ok(format!(
+        "adapter\t{}\nshadows\t{}\nocclusion\t{}\ncamera_yaw_degrees\t{}\ncamera_height\t{}\ncamera_focus\t{}\ncapture\t{}\t{}\n{report}rgba_sha256\t{}\nwrote\t{}\n",
+        renderer.adapter_info().name,
+        toggle_name(passes.shadows),
+        toggle_name(passes.occlusion),
+        yaw_degrees,
+        camera.height(),
+        camera
+            .focus_xy()
+            .map_or_else(|| "centered".to_owned(), |[x, y]| format!("{x},{y}")),
+        capture.width(),
+        capture.height(),
+        capture.sha256(),
+        output_path.display()
+    ))
+}
+
+/// The scene inventory both presentation modes report, so a capture and a window session describe
+/// the same staged scene.
+fn map_scene_report(
+    resource_path: &VirtualPath,
+    scene: &MapScene,
+    compatibility: TerrainCompatibilityPolicy,
+    fixed_frame: Option<MapPresentationFrame>,
+) -> String {
+    let terrain = &scene.terrain;
     let primary_layers = terrain
         .cells()
         .iter()
@@ -646,143 +698,119 @@ where
         .iter()
         .filter(|cell| cell.extra().is_some())
         .count();
-    Ok(format!(
-        "adapter\t{}\nterrain_policy\t{}\npresentation_time\t{}\ngrid\t{}\t{}\ncells\t{}\nvertices\t{}\nindices\t{}\nedge_indices\t{}\nroad_draws\t{}\nwaypoints\t{}\nspawn_markers\t{}\nwaypoint_paths\t{}\nwaypoint_path_segments\t{}\npolygon_areas\t{}\npolygon_segments\t{}\nscenery_instances\t{}\nscenery_models\t{}\nboundary_segments\t{}\nwater_areas\t{}\nwater_indices\t{}\nprimary_layers\t{}\nextra_layers\t{}\ncustom_edge_cells\t{}\nbaked_texture\t{}\t{}\nrgba_sha256\t{}\nwrote\t{}\n",
-        renderer.adapter_info().name,
+    format!(
+        "resource\t{resource_path}\nterrain_policy\t{}\npresentation_time\t{}\ngrid\t{}\t{}\ncells\t{}\nvertices\t{}\nindices\t{}\nedge_indices\t{}\nroad_draws\t{}\nroad_diagnostics\t{}\nwaypoints\t{}\nspawn_markers\t{}\nwaypoint_paths\t{}\nwaypoint_path_segments\t{}\npolygon_areas\t{}\npolygon_segments\t{}\nscenery_instances\t{}\nscenery_models\t{}\nscenery_diagnostics\t{}\nboundary_segments\t{}\nwater_areas\t{}\nwater_indices\t{}\nprimary_layers\t{}\nextra_layers\t{}\ncustom_edge_cells\t{}\nbaked_texture\t{}\t{}\n",
         terrain_policy_name(compatibility),
-        frame.seconds(),
+        fixed_frame.map_or_else(|| "live".to_owned(), |frame| frame.seconds().to_string()),
         terrain.width(),
         terrain.height(),
         terrain.cells().len(),
         terrain.vertices().len(),
         terrain.indices().len(),
         terrain.edge_indices().len(),
-        roads.draws().len(),
-        overlays.waypoint_count(),
-        overlays.spawn_count(),
-        overlays.waypoint_path_count(),
-        overlays.waypoint_path_segment_count(),
-        overlays.polygon_count(),
-        overlays.polygon_segment_count(),
-        scenery.instance_count(),
-        scenery.models().len(),
-        boundary.indices().len() / 6,
-        water.area_count(),
-        water.indices().len(),
+        scene.roads.draws().len(),
+        scene.roads.diagnostics().len(),
+        scene.overlays.waypoint_count(),
+        scene.overlays.spawn_count(),
+        scene.overlays.waypoint_path_count(),
+        scene.overlays.waypoint_path_segment_count(),
+        scene.overlays.polygon_count(),
+        scene.overlays.polygon_segment_count(),
+        scene.scenery.instance_count(),
+        scene.scenery.models().len(),
+        scene.scenery.diagnostics().len(),
+        scene.boundary.indices().len() / 6,
+        scene.water.area_count(),
+        scene.water.indices().len(),
         primary_layers,
         extra_layers,
         terrain.custom_edge_cell_count(),
         terrain.texture_width(),
         terrain.texture_height(),
-        capture.sha256(),
-        output_path.display()
-    ))
+    )
 }
 
-fn view_terrain<I>(
-    arguments: &mut std::iter::Peekable<I>,
-    options: &CliOptions,
-) -> Result<String, Box<dyn Error>>
-where
-    I: Iterator<Item = String>,
-{
-    let mut pixels_per_cell = TerrainStagingOptions::SOURCE_BACKGROUND.pixels_per_cell();
-    let mut compatibility = TerrainCompatibilityPolicy::ZeroHourLegacy;
-    let mut fixed_frame = None;
-    while arguments
-        .peek()
-        .is_some_and(|argument| argument.starts_with("--"))
+fn map_view_title(resource_path: &VirtualPath, scene: &MapScene) -> String {
+    format!(
+        "Commanders in Chief - terrain - {resource_path} | {} roads, {} scenery, {} waypoints/{} starts/{} paths, {} zones, {} diagnostics",
+        scene.roads.draws().len(),
+        scene.scenery.instance_count(),
+        scene.overlays.waypoint_count(),
+        scene.overlays.spawn_count(),
+        scene.overlays.waypoint_path_count(),
+        scene.overlays.polygon_count(),
+        scene.roads.diagnostics().len() + scene.scenery.diagnostics().len()
+    )
+}
+
+fn scenery_summary(scene: &MapScene) -> String {
+    let diagnostics = scene.scenery.diagnostics();
+    let count = |kind| {
+        diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.kind() == kind)
+            .count()
+    };
+    let missing_definitions = count(StaticSceneryDiagnosticKind::MissingDefinition);
+    let missing_defaults = count(StaticSceneryDiagnosticKind::MissingDefaultModel);
+    let missing_models = count(StaticSceneryDiagnosticKind::MissingModelResource);
+    let invalid_models = diagnostics
+        .len()
+        .saturating_sub(missing_definitions + missing_defaults + missing_models);
+    format!(
+        "static scenery: {} instances/{} models; skipped {missing_definitions} missing definitions, {missing_defaults} without default models, {missing_models} missing model resources, {invalid_models} invalid models",
+        scene.scenery.instance_count(),
+        scene.scenery.models().len()
+    )
+}
+
+/// Parses `--size` as either one dimension for a square capture or `<width>x<height>`.
+fn parse_capture_size(value: &str) -> Result<[u32; 2], Box<dyn Error>> {
+    let Some((width, height)) = value.split_once(['x', 'X']) else {
+        let extent = value.parse::<u32>()?;
+        return Ok([extent, extent]);
+    };
+    Ok([width.parse::<u32>()?, height.parse::<u32>()?])
+}
+
+const fn toggle_name(enabled: bool) -> &'static str {
+    if enabled { "on" } else { "off" }
+}
+
+fn parse_toggle(value: &str) -> Result<bool, Box<dyn Error>> {
+    match value {
+        "on" | "yes" | "true" => Ok(true),
+        "off" | "no" | "false" => Ok(false),
+        _ => Err(format!("expected on or off, got {value:?}").into()),
+    }
+}
+
+fn parse_focus(value: &str) -> Result<[f32; 2], Box<dyn Error>> {
+    let (x, y) = value
+        .split_once(',')
+        .ok_or("--focus expects <x>,<y> in world units")?;
+    Ok([x.trim().parse::<f32>()?, y.trim().parse::<f32>()?])
+}
+
+/// Encodes a capture as PNG. Every capture in the tool is PNG, so the extension is checked rather
+/// than dispatched on, to catch a path that meant something else.
+fn encode_capture(capture: &Capture, path: &Path) -> Result<Vec<u8>, Box<dyn Error>> {
+    if path
+        .extension()
+        .map(std::ffi::OsStr::to_ascii_lowercase)
+        .is_none_or(|extension| extension != "png")
     {
-        let option = arguments.next().expect("peeked map-view option");
-        let value = arguments
-            .next()
-            .ok_or_else(|| format!("{option} requires a value"))?;
-        match option.as_str() {
-            "--pixels-per-cell" => pixels_per_cell = value.parse::<u32>()?,
-            "--terrain-policy" => compatibility = parse_terrain_policy(&value)?,
-            "--time" => fixed_frame = Some(MapPresentationFrame::new(value.parse::<f32>()?)?),
-            _ => return Err(format!("unknown map-view option {option:?}").into()),
-        }
+        return Err(format!("capture output {} must end in .png", path.display()).into());
     }
-    let resource_name = arguments.next().ok_or("map-view requires a virtual path")?;
-    let resource_path = VirtualPath::new(&resource_name)?;
-    let mounts = arguments.collect::<Vec<_>>();
-    let vfs = mount_all("map-view", &mounts, options, ResourceKind::Terrain)?;
-    let (terrain, roads, boundary, overlays, scenery, water, water_appearance, lighting) =
-        load_staged_terrain_and_water(&vfs, &resource_path, pixels_per_cell, compatibility)?;
-    let cells = terrain.cells().len();
-    let vertices = terrain.vertices().len();
-    let road_draws = roads.draws().len();
-    let road_diagnostics = roads.diagnostics().len();
-    let boundary_segments = boundary.indices().len() / 6;
-    let waypoint_count = overlays.waypoint_count();
-    let spawn_count = overlays.spawn_count();
-    let waypoint_path_count = overlays.waypoint_path_count();
-    let polygon_count = overlays.polygon_count();
-    let scenery_instances = scenery.instance_count();
-    let scenery_models = scenery.models().len();
-    let scenery_diagnostics = scenery.diagnostics().len();
-    let missing_definitions = scenery
-        .diagnostics()
-        .iter()
-        .filter(|diagnostic| diagnostic.kind() == StaticSceneryDiagnosticKind::MissingDefinition)
-        .count();
-    let missing_defaults = scenery
-        .diagnostics()
-        .iter()
-        .filter(|diagnostic| diagnostic.kind() == StaticSceneryDiagnosticKind::MissingDefaultModel)
-        .count();
-    let missing_models = scenery
-        .diagnostics()
-        .iter()
-        .filter(|diagnostic| diagnostic.kind() == StaticSceneryDiagnosticKind::MissingModelResource)
-        .count();
-    let invalid_models =
-        scenery_diagnostics.saturating_sub(missing_definitions + missing_defaults + missing_models);
-    eprintln!(
-        "static scenery: {scenery_instances} instances/{scenery_models} models; skipped {missing_definitions} missing definitions, {missing_defaults} without default models, {missing_models} missing model resources, {invalid_models} invalid models"
-    );
-    let title = format!(
-        "Commanders in Chief - terrain - {resource_path} | {road_draws} roads, {scenery_instances} scenery, {waypoint_count} waypoints/{spawn_count} starts/{waypoint_path_count} paths, {polygon_count} zones, {} diagnostics",
-        road_diagnostics + scenery_diagnostics
-    );
-    if let Some(frame) = fixed_frame {
-        run_terrain_viewer_with_map_at_time(
-            terrain,
-            roads,
-            boundary,
-            overlays,
-            scenery,
-            water,
-            water_appearance,
-            lighting,
-            title,
-            frame,
-        )?;
-    } else {
-        run_terrain_viewer_with_map(
-            terrain,
-            roads,
-            boundary,
-            overlays,
-            scenery,
-            water,
-            water_appearance,
-            lighting,
-            title,
-        )?;
-    }
-    Ok(format!(
-        "closed terrain viewer for {resource_path} ({cells} cells, {vertices} terrain vertices, {road_draws} road draws, {scenery_instances} scenery instances/{scenery_models} models, {waypoint_count} waypoints/{spawn_count} starts/{waypoint_path_count} paths, {polygon_count} polygon areas, {boundary_segments} boundary segments, {road_diagnostics} road diagnostics, {scenery_diagnostics} scenery diagnostics)\n"
-    ))
+    Ok(encode_capture_png(capture)?)
 }
 
-fn load_staged_terrain_and_water(
+fn load_staged_map_scene(
     vfs: &Vfs,
     resource_path: &VirtualPath,
     pixels_per_cell: u32,
     compatibility: TerrainCompatibilityPolicy,
-) -> Result<StagedTerrainScene, Box<dyn Error>> {
+) -> Result<MapScene, Box<dyn Error>> {
     let entry = vfs
         .resolve(resource_path)
         .ok_or_else(|| format!("resource not found: {resource_path}"))?;
@@ -827,21 +855,18 @@ fn load_staged_terrain_and_water(
     };
     let overlays = StagedMapOverlays::from_map(world.as_ref(), polygons.as_ref(), &terrain)?;
     let water = match decode_map_water(&map, limits) {
-        Ok(water) => StagedWater::from_map(&water)?,
+        Ok(water) => StagedWater::from_map(&water, water_presentation(compatibility))?,
         Err(MapWaterError::MissingPolygonTriggers | MapWaterError::UnsupportedVersion(1)) => {
             StagedWater::empty()
         }
         Err(error) => return Err(error.into()),
     };
     let water_appearance = if water.indices().is_empty() {
-        WaterAppearance::without_caustics().with_presentation(match compatibility {
-            TerrainCompatibilityPolicy::ZeroHourLegacy => WaterPresentationPolicy::ZeroHourLegacy,
-            TerrainCompatibilityPolicy::Modern => WaterPresentationPolicy::Modern,
-        })
+        WaterAppearance::without_caustics().with_presentation(water_presentation(compatibility))
     } else {
         load_water_appearance(vfs, resource_path, time_of_day, compatibility)?
     };
-    Ok((
+    Ok(MapScene {
         terrain,
         roads,
         boundary,
@@ -850,7 +875,7 @@ fn load_staged_terrain_and_water(
         water,
         water_appearance,
         lighting,
-    ))
+    })
 }
 
 #[derive(Debug, Default)]
@@ -1593,10 +1618,7 @@ fn load_water_appearance(
         .as_deref()
         .map(|name| load_water_surface_texture(vfs, name))
         .transpose()?;
-    let presentation = match compatibility {
-        TerrainCompatibilityPolicy::ZeroHourLegacy => WaterPresentationPolicy::ZeroHourLegacy,
-        TerrainCompatibilityPolicy::Modern => WaterPresentationPolicy::Modern,
-    };
+    let presentation = water_presentation(compatibility);
     Ok(appearance
         .with_transparency(minimum_opacity, opaque_depth)?
         .with_source_surface(source_surface_rgba, source_scroll_per_ms)?
@@ -1634,18 +1656,19 @@ fn parse_terrain_policy(value: &str) -> Result<TerrainCompatibilityPolicy, Box<d
     }
 }
 
+/// Water presentation follows the terrain compatibility policy, so one `--modern` selects both.
+const fn water_presentation(policy: TerrainCompatibilityPolicy) -> WaterPresentationPolicy {
+    match policy {
+        TerrainCompatibilityPolicy::ZeroHourLegacy => WaterPresentationPolicy::ZeroHourLegacy,
+        TerrainCompatibilityPolicy::Modern => WaterPresentationPolicy::Modern,
+    }
+}
+
 const fn terrain_policy_name(policy: TerrainCompatibilityPolicy) -> &'static str {
     match policy {
         TerrainCompatibilityPolicy::ZeroHourLegacy => "legacy",
         TerrainCompatibilityPolicy::Modern => "modern",
     }
-}
-
-fn default_terrain_render_path(resource_path: &VirtualPath) -> Result<PathBuf, Box<dyn Error>> {
-    let stem = Path::new(resource_path.as_str())
-        .file_stem()
-        .ok_or("MAP resource path has no file name")?;
-    Ok(PathBuf::from(format!("{}-terrain", stem.to_string_lossy())).with_extension("png"))
 }
 
 fn load_terrain_textures(

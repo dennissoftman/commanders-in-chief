@@ -6,7 +6,7 @@
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
-use crate::AnimatedModel;
+use crate::{AnimatedModel, RenderError};
 
 const MAX_STATIC_MODELS: usize = 16_384;
 const MAX_STATIC_INSTANCES: usize = 1_000_000;
@@ -48,6 +48,20 @@ impl TreeSwayPresentation {
             speed_factor: 1.0 + (speed_unit * 2.0 - 1.0) * RANDOMNESS_DELTA,
             amount_factor: 1.0 + (amount_unit * 2.0 - 1.0) * RANDOMNESS_DELTA,
         }
+    }
+
+    /// Upper bound, over every presentation time, on how far sway can displace a vertex as a
+    /// fraction of that vertex's local height.
+    ///
+    /// The shader adds `(dir.x * sin a, dir.y * sin a, cos a - 1) * amount_factor * max(z, 0)` with
+    /// `a = lean + intensity * cos(phase)` and `dir` a unit vector, so the displacement length is
+    /// `2 * |sin(a / 2)| * |amount_factor| * max(z, 0)`. That grows with `|a|`, whose extreme over
+    /// all phases is `|lean| + |intensity|`. Bounding it rather than sampling it is what lets a
+    /// caster's culling volume be time-independent, and so lets a cascade whose fit has not moved
+    /// keep both its depth and its instance list.
+    pub(crate) fn maximum_offset_fraction(self) -> f32 {
+        let extreme_angle = self.lean.abs() + self.intensity.abs();
+        2.0 * (extreme_angle * 0.5).sin().abs() * self.amount_factor.abs()
     }
 
     fn gpu_rows(self) -> [[f32; 4]; 2] {
@@ -227,6 +241,32 @@ impl StagedStaticSceneryModel {
     #[must_use]
     pub fn instances(&self) -> &[StaticSceneryInstance] {
         &self.instances
+    }
+
+    /// World-space bounding-sphere radius of each instance, about that instance's own position, in
+    /// source order so it indexes alongside [`Self::instances`].
+    ///
+    /// A sphere about the instance origin rather than a fitted box: the instance transform is a
+    /// rotation about Z with a uniform scale, so a sphere about that origin is invariant to the
+    /// rotation and the cull needs no per-frame transform of a model's corners.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured error when the bind pose cannot be resolved.
+    pub(crate) fn caster_radii(&self) -> Result<Vec<f32>, RenderError> {
+        let bind_pose = self.model.bind_pose_radius()?;
+        Ok(self
+            .instances
+            .iter()
+            .map(|instance| {
+                let sway = instance
+                    .tree_sway
+                    .map_or(0.0, TreeSwayPresentation::maximum_offset_fraction);
+                // Sway scales with a vertex's own height, which is itself bounded by the bind-pose
+                // radius, so inflating that radius by the sway fraction bounds the swayed model too.
+                bind_pose * (1.0 + sway) * instance.scale
+            })
+            .collect())
     }
 
     pub(crate) fn instance_bytes(&self) -> Vec<u8> {
