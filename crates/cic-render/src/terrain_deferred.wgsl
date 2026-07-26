@@ -13,6 +13,8 @@ struct Camera {
     water_surface: vec4<f32>,
     water_motion: vec4<f32>,
     terrain_lights: array<DirectionalLight, 3>,
+    // Inverse of `view_projection`, for reconstructing a pixel's world position from scene depth.
+    inverse_view_projection: mat4x4<f32>,
 }
 
 // `params` packs the presentation time in `x`, the world units spanned by the full normalized
@@ -44,12 +46,43 @@ fn fullscreen_vertex(@builtin(vertex_index) vertex_index: u32) -> FullscreenOutp
 
 @group(0) @binding(0) var g_albedo: texture_2d<f32>;
 @group(0) @binding(1) var g_normal: texture_2d<f32>;
-@group(0) @binding(2) var g_world: texture_2d<f32>;
+// Geometry coverage in `r`: below 0.5 no geometry was drawn, 1.0 is opaque geometry, and anything
+// above 1.0 carries that much emissive strength (see `gbuffer_coverage_emissive`).
+@group(0) @binding(2) var g_coverage: texture_2d<f32>;
 @group(0) @binding(3) var<uniform> light_camera: Camera;
 @group(0) @binding(4) var primary_shadow: texture_depth_2d_array;
 @group(0) @binding(5) var primary_shadow_sampler: sampler_comparison;
 @group(0) @binding(6) var<uniform> shadow_camera: ShadowCamera;
 @group(0) @binding(8) var ambient_occlusion: texture_2d<f32>;
+// Resolved scene depth as a colour target, written by `depth_resolve_fragment`. Binding 9 rather
+// than 7 because this module also declares the multisampled depth that pass reads at 7.
+@group(0) @binding(9) var scene_depth: texture_2d<f32>;
+
+// Reconstructs a G-buffer pixel's world position from its depth.
+//
+// The G-buffer used to carry world position in an `Rgba16Float` target, and a half float has ten
+// mantissa bits: past 1024 world units the representable step is a whole unit, and past 2048 it is
+// two. On a map a few thousand units across that snapped every receiver onto a lattice, and because
+// the shadow map holds smooth depth, roughly half of each lattice cell projected behind its own
+// stored depth -- striped self-shadowing across the whole terrain that no bias or filter setting
+// could reach, since the error was an order of magnitude larger than a shadow texel.
+//
+// Depth carries the same information without that loss. At this projection's 1.0 near plane the
+// reconstruction error is about `distance^2 * 6e-8` world units: five thousandths of a unit at 300
+// units out and a seventh of a unit at the far edge of the shadowed range, against the one-to-two
+// units the old target lost everywhere. It also costs less bandwidth than it saves, because the
+// depth already had to be resolved for the forward passes.
+fn world_from_depth(pixel: vec2<i32>, depth: f32) -> vec3<f32> {
+    // `viewport.zw` holds the reciprocal viewport, and clip space is y-up while pixels are y-down.
+    let uv = (vec2<f32>(pixel) + vec2<f32>(0.5)) * light_camera.viewport.zw;
+    let ndc = vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+    let homogeneous = light_camera.inverse_view_projection * vec4<f32>(ndc, depth, 1.0);
+    return homogeneous.xyz / homogeneous.w;
+}
+
+fn world_at(pixel: vec2<i32>) -> vec3<f32> {
+    return world_from_depth(pixel, textureLoad(scene_depth, pixel, 0).r);
+}
 
 // Both bias terms are expressed in world units and converted with the light frustum's own
 // depth range, so widening the fitted frustum for a larger map no longer inflates the bias in
@@ -180,16 +213,17 @@ fn shadow_visibility(world_position: vec3<f32>, normal: vec3<f32>) -> f32 {
 @fragment
 fn lighting_fragment(input: FullscreenOutput) -> @location(0) vec4<f32> {
     let pixel = vec2<i32>(input.position.xy);
-    let world = textureLoad(g_world, pixel, 0);
-    if (world.a < 0.5) {
+    let coverage = textureLoad(g_coverage, pixel, 0).r;
+    if (coverage < 0.5) {
         let horizon = clamp(input.position.y / light_camera.viewport.y, 0.0, 1.0);
         return vec4<f32>(mix(vec3<f32>(0.025, 0.04, 0.065), vec3<f32>(0.12, 0.20, 0.30), horizon), 1.0);
     }
+    let world = world_at(pixel);
     let albedo = textureLoad(g_albedo, pixel, 0).rgb;
     let normal_roughness = textureLoad(g_normal, pixel, 0);
     let normal = normalize(normal_roughness.xyz);
-    let view_direction = normalize(light_camera.camera_position_time.xyz - world.xyz);
-    let primary_visibility = shadow_visibility(world.xyz, normal);
+    let view_direction = normalize(light_camera.camera_position_time.xyz - world);
+    let primary_visibility = shadow_visibility(world, normal);
     let occlusion = mix(
         AO_AMBIENT_FLOOR,
         1.0,
@@ -235,7 +269,7 @@ fn lighting_fragment(input: FullscreenOutput) -> @location(0) vec4<f32> {
     // `gbuffer_coverage_emissive` in `static_scenery.wgsl`). It is added after the light loop so
     // it survives full shade, which is the whole point of a lamp: the emitted term takes its hue
     // from the material's own albedo, and the intensity is the material's emissive strength.
-    color += albedo * max(world.a - 1.0, 0.0);
+    color += albedo * max(coverage - 1.0, 0.0);
     return vec4<f32>(color, 1.0);
 }
 
@@ -293,8 +327,21 @@ fn composite_fragment(input: FullscreenOutput) -> @location(0) vec4<f32> {
 
 @group(0) @binding(7) var gbuffer_depth_ms: texture_depth_multisampled_2d;
 
+struct ResolvedDepth {
+    // The depth attachment the boundary, overlay, and water passes depth-test against.
+    @builtin(frag_depth) attachment: f32,
+    // The same value as a sampleable colour target. A depth texture cannot be attached for depth
+    // testing and sampled in the same pass, and the water pass needs both, so the resolve writes
+    // its result twice rather than forcing a second resolve or a copy.
+    @location(0) sampleable: f32,
+}
+
 @fragment
-fn depth_resolve_fragment(input: FullscreenOutput) -> @builtin(frag_depth) f32 {
+fn depth_resolve_fragment(input: FullscreenOutput) -> ResolvedDepth {
     let pixel = vec2<i32>(input.position.xy);
-    return textureLoad(gbuffer_depth_ms, pixel, 0);
+    let depth = textureLoad(gbuffer_depth_ms, pixel, 0);
+    var output: ResolvedDepth;
+    output.attachment = depth;
+    output.sampleable = depth;
+    return output;
 }

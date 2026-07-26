@@ -61,6 +61,61 @@ land under the active milestone heading.
   to within 0.014. The primary light now takes the deeper of the two rather than their product,
   which lifts the worst case to 0.181 and the first percentile from 0.200 to 0.326 while leaving
   both floors, and so the worst case either term alone can produce, exactly as they were.
+- `map-view` scrolling is faster and answers a right-button drag sooner, and a middle click no longer
+  faces the camera north unless it really was a click. The camera's base scroll rate goes from 210 to
+  320 world units per second, so at the default height a screen width now takes about two-thirds of a
+  second to cross rather than over one. The anchored right-button scroll reaches full rate 90 pixels
+  from its anchor instead of 180 and follows the square root of that offset rather than the offset
+  itself, so a short nudge past the dead zone asks for about 40 percent of full rate where it used to
+  ask for 8, which is what made the view feel late to start and floaty once moving. The far end of the
+  travel still resolves finely, and the dead zone is unchanged.
+
+  The middle-button reset was decided by whether any single pointer-motion event had moved more than
+  three pixels, so a deliberate rotation — which arrives as a long series of small steps — released as
+  a click and threw away the rotation the player had just made. Travel is now summed across the whole
+  hold against a six-pixel slop, and the release must also come within 180 milliseconds of the press:
+  a hold long enough to aim a rotation is not a tap, however still the cursor stayed.
+- Striped self-shadowing across the terrain is gone. The G-buffer stored world position in an
+  `Rgba16Float` target, and a half float carries ten mantissa bits: past 1024 world units the
+  representable step is a whole unit, and past 2048 it is two. On maps a few thousand units across
+  that snapped every receiver onto a lattice, and since the shadow map holds smooth depth, roughly
+  half of each lattice cell projected behind its own stored depth. The deferred passes now reconstruct
+  world position from the resolved scene depth through an inverse view-projection carried in the
+  camera uniform, and the third G-buffer target shrinks to an `R16Float` coverage and emissive
+  channel.
+
+  Neither bias nor filtering could have reached this. Measured on `tournament lake` at its 44-degree
+  morning sun, eight times the depth slack cut the striping by 13 percent and five times the normal
+  offset by 14, because the position error was one to two world units where both terms are sized in
+  fractions of a shadow texel; quartering every cascade's texel extent left the pattern's pitch and
+  phase untouched, which is what ruled out the shadow map itself. Forcing a four-unit quantization
+  reproduced the same pattern proportionally coarser, and the same view near the world origin, where
+  the half-float step is a sixteenth of a unit, was already clean: 0.11 of spurious shade against
+  7.69 further out. After the change the acne-band energy of the isolated shadow term falls from 177
+  to 110 -- the remainder being genuine alpha-cutout foliage detail -- while the low-frequency energy
+  that carries the real shadows holds at 1266 to 1316, and `gla07` keeps its shadow strength to within
+  three percent.
+
+  Occlusion and water were reading the same quantized positions. GTAO measures distances between
+  neighbouring positions and its bilateral blur separates creases with a six-unit tolerance, both
+  meaningless against two-unit steps; the water surface derives its thickness, and so its whole shore
+  band, from the gap to the bed beneath it, and projected its caustics from the bed's `xy`. All three
+  now work from reconstructed positions. Reconstruction error is depth quantization alone: about
+  `distance^2 * 6e-8` world units at this projection's 1.0 near plane, so thousandths of a unit in the
+  near field against the one to two units lost everywhere before.
+
+  The resolve pass writes depth to a sampleable `R32Float` target as well as to its depth attachment,
+  because the water pass depth-tests against that attachment and cannot also sample it. Net G-buffer
+  traffic drops: six bytes per sample saved against four bytes once.
+- The dev profile now compiles dependencies with `opt-level = 3`, so a debug `map-view` presents
+  smoothly instead of at a hard 30 Hz. The frame cost was never one hot spot: the workspace's own
+  per-frame CPU work measures 0.42 ms unoptimized against 0.07 ms at `--release`, a real penalty but a
+  small share of a frame either way, and the GPU work is identical in both profiles. What is left is
+  `wgpu`'s validation and command-encoding path, which is where the compile time is worth spending
+  since it builds once and is never stepped through. The workspace's own crates stay unoptimized, so a
+  one-file change still rebuilds in about four seconds where `opt-level = 1` on `cic-render` cost
+  forty-six; the one-time dependency rebuild is about eighty seconds. Debug assertions and overflow
+  checks are unchanged.
 
 ### Added
 

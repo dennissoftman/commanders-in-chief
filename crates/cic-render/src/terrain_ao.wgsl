@@ -26,6 +26,8 @@ struct Camera {
     water_surface: vec4<f32>,
     water_motion: vec4<f32>,
     terrain_lights: array<DirectionalLight, 3>,
+    // Inverse of `view_projection`, for reconstructing world position from scene depth.
+    inverse_view_projection: mat4x4<f32>,
 }
 
 struct FullscreenOutput {
@@ -42,8 +44,31 @@ fn fullscreen_vertex(@builtin(vertex_index) vertex_index: u32) -> FullscreenOutp
 }
 
 @group(0) @binding(0) var g_normal: texture_2d<f32>;
-@group(0) @binding(1) var g_world: texture_2d<f32>;
+// Geometry coverage in `r`; below 0.5 no geometry was drawn. See `g_coverage` in
+// `terrain_deferred.wgsl`.
+@group(0) @binding(1) var g_coverage: texture_2d<f32>;
 @group(0) @binding(2) var<uniform> camera: Camera;
+@group(0) @binding(3) var scene_depth: texture_2d<f32>;
+
+// World position of a G-buffer pixel, reconstructed from its depth.
+//
+// Occlusion and its bilateral blur both measure distances between neighbouring positions, so they
+// inherited the old world target's whole-unit quantization directly: a tolerance of six world units
+// cannot separate a crease from a flat surface when the positions themselves snap to two-unit steps.
+// See `world_from_depth` in `terrain_deferred.wgsl` for why that target is gone.
+fn world_from_depth(pixel: vec2<i32>, depth: f32) -> vec3<f32> {
+    let uv = (vec2<f32>(pixel) + vec2<f32>(0.5)) * camera.viewport.zw;
+    let ndc = vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+    let homogeneous = camera.inverse_view_projection * vec4<f32>(ndc, depth, 1.0);
+    return homogeneous.xyz / homogeneous.w;
+}
+
+// Position in `xyz` and geometry coverage in `w`, so a tap that landed on sky can be skipped.
+fn load_geometry(pixel: vec2<i32>) -> vec4<f32> {
+    let depth = textureLoad(scene_depth, pixel, 0).r;
+    let coverage = textureLoad(g_coverage, pixel, 0).r;
+    return vec4<f32>(world_from_depth(pixel, depth), coverage);
+}
 
 const PI: f32 = 3.14159265358979;
 const HALF_PI: f32 = 1.57079632679490;
@@ -78,7 +103,7 @@ fn project_to_pixel(world: vec3<f32>) -> vec2<f32> {
 fn load_world(pixel: vec2<f32>) -> vec4<f32> {
     let limit = vec2<i32>(camera.viewport.xy) - vec2<i32>(1);
     let clamped = clamp(vec2<i32>(pixel), vec2<i32>(0), limit);
-    return textureLoad(g_world, clamped, 0);
+    return load_geometry(clamped);
 }
 
 // Interleaved gradient noise; stable per pixel and free of any frame-varying term. Drives the
@@ -128,7 +153,7 @@ fn horizon_cosine(
 @fragment
 fn ao_fragment(input: FullscreenOutput) -> @location(0) vec4<f32> {
     let center_pixel = floor(input.position.xy) + vec2<f32>(0.5);
-    let world = textureLoad(g_world, vec2<i32>(input.position.xy), 0);
+    let world = load_geometry(vec2<i32>(input.position.xy));
     if world.w < 0.5 {
         return vec4<f32>(1.0);
     }
@@ -216,7 +241,7 @@ const AO_BLUR_WORLD_TOLERANCE: f32 = 6.0;
 @fragment
 fn ao_blur_fragment(input: FullscreenOutput) -> @location(0) vec4<f32> {
     let pixel = vec2<i32>(input.position.xy);
-    let center = textureLoad(g_world, pixel, 0);
+    let center = load_geometry(pixel);
     if center.w < 0.5 {
         return vec4<f32>(1.0);
     }
@@ -226,7 +251,7 @@ fn ao_blur_fragment(input: FullscreenOutput) -> @location(0) vec4<f32> {
     for (var y = -AO_BLUR_RADIUS; y <= AO_BLUR_RADIUS; y += 1) {
         for (var x = -AO_BLUR_RADIUS; x <= AO_BLUR_RADIUS; x += 1) {
             let tap = clamp(pixel + vec2<i32>(x, y), vec2<i32>(0), limit);
-            let neighbor = textureLoad(g_world, tap, 0);
+            let neighbor = load_geometry(tap);
             if neighbor.w < 0.5 {
                 continue;
             }

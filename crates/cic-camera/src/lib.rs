@@ -125,7 +125,9 @@ impl RtsCameraProfile {
         scroll_amount_cutoff: 50.0,
         absolute_maximum_height: 550.0,
         ground_units_per_second: 45.0,
-        scroll_units_per_second: 210.0,
+        // Project-authored and tuned by feel: at 210 a screen width took over a second to cross,
+        // which read as sluggish next to the original.
+        scroll_units_per_second: 320.0,
         // KeyboardScrollSpeedFactor = 2.0
         keyboard_scroll_factor: 2.0,
         // HorizontalScrollSpeedFactor = 1.6

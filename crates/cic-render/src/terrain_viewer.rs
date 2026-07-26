@@ -13,7 +13,7 @@
 //! policy; see `docs/provenance/map.md`.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
@@ -41,11 +41,18 @@ use crate::{
 
 const WINDOW_WIDTH: u32 = 1_280;
 const WINDOW_HEIGHT: u32 = 800;
-const CAMERA_UNIFORM_BYTES: u64 = 304;
-/// Pixels of pointer travel a rotate hold may accumulate and still count as a click.
-const ROTATE_CLICK_SLOP_PIXELS: f32 = 3.0;
+const CAMERA_UNIFORM_BYTES: u64 = 368;
+/// Pixels of pointer travel, summed over the whole hold, a rotate hold may stay within and still
+/// count as a click.
+const ROTATE_CLICK_SLOP_PIXELS: f32 = 6.0;
+/// Longest a middle-button hold may last and still count as a click rather than a rotation.
+///
+/// Travel alone cannot separate the two, because lining up a rotation begins with the cursor held
+/// still: a hold that has not moved far yet is far more likely to be a rotation in progress than a
+/// request to face north. Only a brisk tap gets the reset.
+const ROTATE_CLICK_MAX_HOLD: Duration = Duration::from_millis(180);
 /// Cursor offset from the scroll anchor, in pixels, at which the scroll request reaches full rate.
-const SCROLL_ANCHOR_FULL_PIXELS: f32 = 180.0;
+const SCROLL_ANCHOR_FULL_PIXELS: f32 = 90.0;
 /// Offset below which an anchored scroll stays still, so a press that barely moves does not creep.
 const SCROLL_ANCHOR_DEAD_ZONE_PIXELS: f32 = 6.0;
 
@@ -108,6 +115,12 @@ const AO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
 const SHADOW_MAP_EXTENT: u32 = 3_072;
 /// Hardware MSAA sample count for the opaque G-buffer geometry pass.
 const GBUFFER_SAMPLE_COUNT: u32 = 4;
+/// Third G-buffer target: geometry coverage, carrying emissive strength above 1.0. One channel is
+/// all it needs, and a half float resolves emissive strengths far finer than a material declares.
+const GBUFFER_COVERAGE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R16Float;
+/// Resolved scene depth, kept as a colour target as well as a depth attachment so the deferred and
+/// forward passes can sample it. Full float because it is what world position is reconstructed from.
+const SCENE_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
 const MAX_FRAME_SECONDS: f32 = 0.1;
 const CAMERA_VERTICAL_FOV: f32 = std::f32::consts::PI / 3.0;
 const TERRAIN_CELL_WORLD_SIZE: f32 = 10.0;
@@ -434,11 +447,12 @@ struct TerrainViewerApplication {
     camera: TerrainCamera,
     detail_requests: Vec<TerrainDetailRequest>,
     input: TerrainInput,
-    /// Middle-button rotate, as the original game does it.
-    rotate_drag: bool,
-    /// Whether the current middle-button hold has actually moved. A press and release without
-    /// movement resets rotation instead, which is what the original does.
-    rotate_drag_moved: bool,
+    /// When the current middle-button hold began, if one is active. Middle-button rotate, as the
+    /// original game does it; the press time is kept because a release only faces the camera back
+    /// to its starting yaw when the hold was a brief tap.
+    rotate_press: Option<Instant>,
+    /// Pointer travel summed over the current middle-button hold, in pixels.
+    rotate_travel: f32,
     /// Cursor position where a right-button scroll was anchored, if one is active.
     ///
     /// The original scrolls from an anchor rather than dragging the map: pressing plants an anchor,
@@ -484,8 +498,8 @@ impl TerrainViewerApplication {
             camera,
             detail_requests,
             input: TerrainInput::default(),
-            rotate_drag: false,
-            rotate_drag_moved: false,
+            rotate_press: None,
+            rotate_travel: 0.0,
             scroll_anchor: None,
             scroll_pressed: false,
             pending_rotate: 0.0,
@@ -531,20 +545,19 @@ impl TerrainViewerApplication {
         Ok(())
     }
 
-    /// Middle button rotates and, on a click that never dragged, faces the camera back to its
+    /// Middle button rotates and, on a brief click that stayed put, faces the camera back to its
     /// starting yaw. Right button drags the view, which is the original's other way to scroll.
     fn mouse_button(&mut self, state: ElementState, button: MouseButton) {
         let pressed = state == ElementState::Pressed;
         match button {
             MouseButton::Middle => {
                 if pressed {
-                    self.rotate_drag = true;
-                    self.rotate_drag_moved = false;
-                } else {
-                    if self.rotate_drag && !self.rotate_drag_moved {
-                        self.reset_rotation = true;
-                    }
-                    self.rotate_drag = false;
+                    self.rotate_press = Some(Instant::now());
+                    self.rotate_travel = 0.0;
+                } else if let Some(press) = self.rotate_press.take()
+                    && rotate_release_is_click(press.elapsed(), self.rotate_travel)
+                {
+                    self.reset_rotation = true;
                 }
             }
             MouseButton::Right => {
@@ -561,23 +574,15 @@ impl TerrainViewerApplication {
     /// Scroll request from the anchor offset, as a unit-capped direction and magnitude.
     ///
     /// Velocity rather than displacement: the offset from the anchor is sustained every frame while
-    /// the button is held, so holding the cursor still away from the anchor keeps scrolling. A dead
-    /// zone keeps a press that barely moves from creeping.
+    /// the button is held, so holding the cursor still away from the anchor keeps scrolling.
+    /// [`anchor_scroll_request`] shapes the offset into a rate.
     fn scroll_request(&self) -> [f32; 2] {
         let (Some(anchor), Some(cursor)) = (self.scroll_anchor, self.cursor) else {
             return [0.0; 2];
         };
         #[allow(clippy::cast_possible_truncation)]
         let offset = [(cursor.x - anchor.x) as f32, (cursor.y - anchor.y) as f32];
-        let distance = offset[0].hypot(offset[1]);
-        if distance <= SCROLL_ANCHOR_DEAD_ZONE_PIXELS {
-            return [0.0; 2];
-        }
-        let span = (SCROLL_ANCHOR_FULL_PIXELS - SCROLL_ANCHOR_DEAD_ZONE_PIXELS).max(1.0);
-        let magnitude = ((distance - SCROLL_ANCHOR_DEAD_ZONE_PIXELS) / span).clamp(0.0, 1.0);
-        let scale = magnitude / distance;
-        // Screen up is negative while the camera's forward pan axis is positive.
-        [offset[0] * scale, -offset[1] * scale]
+        anchor_scroll_request(offset)
     }
 
     fn cursor_moved(&mut self, position: PhysicalPosition<f64>) {
@@ -587,10 +592,10 @@ impl TerrainViewerApplication {
                 (position.x - previous.x) as f32,
                 (position.y - previous.y) as f32,
             ];
-            if self.rotate_drag {
-                if motion[0].abs() + motion[1].abs() > ROTATE_CLICK_SLOP_PIXELS {
-                    self.rotate_drag_moved = true;
-                }
+            if self.rotate_press.is_some() {
+                // Summed over the hold, not tested per event: a deliberate rotation arrives as many
+                // small steps and no single one of them clears the click slop.
+                self.rotate_travel += motion[0].abs() + motion[1].abs();
                 self.pending_rotate -= motion[0];
             }
         }
@@ -678,8 +683,8 @@ impl ApplicationHandler for TerrainViewerApplication {
             }
             WindowEvent::Focused(false) => {
                 self.input = TerrainInput::default();
-                self.rotate_drag = false;
-                self.rotate_drag_moved = false;
+                self.rotate_press = None;
+                self.rotate_travel = 0.0;
                 self.scroll_anchor = None;
                 self.pending_rotate = 0.0;
                 self.pending_zoom = 0.0;
@@ -752,6 +757,37 @@ impl ApplicationHandler for TerrainViewerApplication {
             window.request_redraw();
         }
     }
+}
+
+/// Shapes a cursor offset from the scroll anchor into a pan request: the offset's direction, with a
+/// magnitude in `0..=1` of the camera's scroll rate.
+///
+/// The magnitude follows the square root of the offset rather than the offset itself. A linear ramp
+/// spends most of its travel below a usefully brisk rate, which reads as the view responding late
+/// and then drifting; the square root puts a usable share of full rate within a short nudge of the
+/// dead zone and still leaves the outer travel for fine control. A dead zone keeps a press that
+/// barely moves from creeping.
+fn anchor_scroll_request(offset: [f32; 2]) -> [f32; 2] {
+    let distance = offset[0].hypot(offset[1]);
+    if !distance.is_finite() || distance <= SCROLL_ANCHOR_DEAD_ZONE_PIXELS {
+        return [0.0; 2];
+    }
+    let span = (SCROLL_ANCHOR_FULL_PIXELS - SCROLL_ANCHOR_DEAD_ZONE_PIXELS).max(1.0);
+    let ramp = ((distance - SCROLL_ANCHOR_DEAD_ZONE_PIXELS) / span).clamp(0.0, 1.0);
+    let scale = ramp.sqrt() / distance;
+    // Screen up is negative while the camera's forward pan axis is positive.
+    [offset[0] * scale, -offset[1] * scale]
+}
+
+/// Whether a middle-button release counts as a click, which faces the camera back to its starting
+/// yaw, rather than the end of a rotation.
+///
+/// Both gates bind. Travel alone used to decide it and reset far too readily: pointer motion arrives
+/// in small per-event steps, so a rotation that never jumped far within one event released as a
+/// click. Summing the travel fixes that half, and the hold limit covers the rest, because a hold long
+/// enough to aim a rotation is not a tap however still the cursor stayed.
+fn rotate_release_is_click(held: Duration, travel_pixels: f32) -> bool {
+    held <= ROTATE_CLICK_MAX_HOLD && travel_pixels <= ROTATE_CLICK_SLOP_PIXELS
 }
 
 fn terrain_viewer_title(title: &str, wireframe: bool, wireframe_available: bool) -> String {
@@ -1526,26 +1562,28 @@ fn gray_mip(width: u32, height: u32, source: &[u8]) -> Result<(u32, u32, Vec<u8>
 struct DeferredTargets {
     _albedo: wgpu::Texture,
     _normal: wgpu::Texture,
-    _world: wgpu::Texture,
+    _coverage: wgpu::Texture,
+    _scene_depth: wgpu::Texture,
     _scene: wgpu::Texture,
     _shadow: wgpu::Texture,
     _ao: wgpu::Texture,
     _ao_blurred: wgpu::Texture,
     _albedo_ms: wgpu::Texture,
     _normal_ms: wgpu::Texture,
-    _world_ms: wgpu::Texture,
+    _coverage_ms: wgpu::Texture,
     _depth_ms: wgpu::Texture,
     depth: wgpu::Texture,
     shadow_layer_views: Vec<wgpu::TextureView>,
     albedo_view: wgpu::TextureView,
     normal_view: wgpu::TextureView,
-    world_view: wgpu::TextureView,
+    coverage_view: wgpu::TextureView,
+    scene_depth_view: wgpu::TextureView,
     scene_view: wgpu::TextureView,
     ao_view: wgpu::TextureView,
     ao_blurred_view: wgpu::TextureView,
     albedo_ms_view: wgpu::TextureView,
     normal_ms_view: wgpu::TextureView,
-    world_ms_view: wgpu::TextureView,
+    coverage_ms_view: wgpu::TextureView,
     depth_ms_view: wgpu::TextureView,
     lighting_bind_group: wgpu::BindGroup,
     composite_bind_group: wgpu::BindGroup,
@@ -3100,6 +3138,7 @@ impl TerrainViewerGpu {
             0,
             &camera_bytes(&CameraUniformInput {
                 matrix,
+                inverse_matrix: invert_matrix(matrix),
                 position: camera.position,
                 time: presentation_seconds,
                 viewport,
@@ -3300,8 +3339,8 @@ impl TerrainViewerGpu {
                         wgpu::Color::TRANSPARENT,
                     )),
                     Some(clear_attachment_resolved(
-                        &self.deferred.world_ms_view,
-                        &self.deferred.world_view,
+                        &self.deferred.coverage_ms_view,
+                        &self.deferred.coverage_view,
                         wgpu::Color::TRANSPARENT,
                     )),
                 ],
@@ -3387,7 +3426,10 @@ impl TerrainViewerGpu {
             // overlay, and water passes below reuse for depth testing against the terrain.
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("cic-render G-buffer depth resolve pass"),
-                color_attachments: &[],
+                color_attachments: &[Some(clear_attachment(
+                    &self.deferred.scene_depth_view,
+                    wgpu::Color::WHITE,
+                ))],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &depth_view,
                     depth_ops: Some(wgpu::Operations {
@@ -4109,10 +4151,13 @@ fn terrain_color_targets(
             blend: None,
             write_mask: geometry_write_mask,
         }),
+        // Coverage and emissive strength only. World position used to live here as a second
+        // `Rgba16Float`; it is reconstructed from scene depth instead, which is both exact and
+        // six bytes per sample cheaper. See `world_from_depth` in `terrain_deferred.wgsl`.
         Some(wgpu::ColorTargetState {
-            format: wgpu::TextureFormat::Rgba16Float,
+            format: GBUFFER_COVERAGE_FORMAT,
             blend: None,
-            write_mask: geometry_write_mask,
+            write_mask: geometry_write_mask.intersection(wgpu::ColorWrites::RED),
         }),
     ]
 }
@@ -4138,6 +4183,9 @@ fn create_lighting_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
             comparison_sampler_layout_entry(5),
             shadow_matrix_layout_entry(6),
             texture_layout_entry(8, false),
+            // Binding 7 is the multisampled depth the resolve pass reads, declared in the same
+            // shader module, so the resolved copy this pass samples takes the next free slot.
+            texture_layout_entry(9, false),
         ],
     })
 }
@@ -4159,6 +4207,7 @@ fn create_ao_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
                 },
                 count: None,
             },
+            texture_layout_entry(3, false),
         ],
     })
 }
@@ -4242,6 +4291,7 @@ fn create_water_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
             depth_texture_layout_entry(11),
             comparison_sampler_layout_entry(12),
             shadow_matrix_layout_entry(13),
+            texture_layout_entry(14, false),
         ],
     })
 }
@@ -4502,7 +4552,11 @@ fn create_depth_resolve_pipeline(
             module: shader,
             entry_point: Some("depth_resolve_fragment"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
-            targets: &[],
+            targets: &[Some(wgpu::ColorTargetState {
+                format: SCENE_DEPTH_FORMAT,
+                blend: None,
+                write_mask: wgpu::ColorWrites::RED,
+            })],
         }),
         primitive: wgpu::PrimitiveState::default(),
         depth_stencil: Some(wgpu::DepthStencilState {
@@ -4609,12 +4663,8 @@ impl DeferredTargets {
             wgpu::TextureFormat::Rgba16Float,
             "G-buffer normal",
         );
-        let world = render_texture(
-            device,
-            size,
-            wgpu::TextureFormat::Rgba16Float,
-            "G-buffer world",
-        );
+        let coverage = render_texture(device, size, GBUFFER_COVERAGE_FORMAT, "G-buffer coverage");
+        let scene_depth = render_texture(device, size, SCENE_DEPTH_FORMAT, "resolved scene depth");
         let scene = render_texture(
             device,
             size,
@@ -4635,11 +4685,11 @@ impl DeferredTargets {
             wgpu::TextureFormat::Rgba16Float,
             "G-buffer normal MSAA",
         );
-        let world_ms = render_texture_multisampled(
+        let coverage_ms = render_texture_multisampled(
             device,
             size,
-            wgpu::TextureFormat::Rgba16Float,
-            "G-buffer world MSAA",
+            GBUFFER_COVERAGE_FORMAT,
+            "G-buffer coverage MSAA",
         );
         let depth_ms = create_depth_multisampled(device, size);
         let shadow = device.create_texture(&wgpu::TextureDescriptor {
@@ -4659,13 +4709,14 @@ impl DeferredTargets {
         let depth = create_depth(device, size);
         let albedo_view = albedo.create_view(&wgpu::TextureViewDescriptor::default());
         let normal_view = normal.create_view(&wgpu::TextureViewDescriptor::default());
-        let world_view = world.create_view(&wgpu::TextureViewDescriptor::default());
+        let coverage_view = coverage.create_view(&wgpu::TextureViewDescriptor::default());
+        let scene_depth_view = scene_depth.create_view(&wgpu::TextureViewDescriptor::default());
         let scene_view = scene.create_view(&wgpu::TextureViewDescriptor::default());
         let ao_view = ao.create_view(&wgpu::TextureViewDescriptor::default());
         let ao_blurred_view = ao_blurred.create_view(&wgpu::TextureViewDescriptor::default());
         let albedo_ms_view = albedo_ms.create_view(&wgpu::TextureViewDescriptor::default());
         let normal_ms_view = normal_ms.create_view(&wgpu::TextureViewDescriptor::default());
-        let world_ms_view = world_ms.create_view(&wgpu::TextureViewDescriptor::default());
+        let coverage_ms_view = coverage_ms.create_view(&wgpu::TextureViewDescriptor::default());
         let depth_ms_view = depth_ms.create_view(&wgpu::TextureViewDescriptor::default());
         // One single-layer view per cascade to render into, plus one array view to sample.
         let shadow_layer_views = (0..SHADOW_CASCADE_LAYERS)
@@ -4699,7 +4750,7 @@ impl DeferredTargets {
             entries: &[
                 texture_binding(0, &albedo_view),
                 texture_binding(1, &normal_view),
-                texture_binding(2, &world_view),
+                texture_binding(2, &coverage_view),
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: resources.camera_uniform.as_entire_binding(),
@@ -4714,6 +4765,7 @@ impl DeferredTargets {
                     resource: resources.shadow_uniform.as_entire_binding(),
                 },
                 texture_binding(8, &ao_blurred_view),
+                texture_binding(9, &scene_depth_view),
             ],
         });
         let ao_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -4721,11 +4773,12 @@ impl DeferredTargets {
             layout: resources.ao_layout,
             entries: &[
                 texture_binding(0, &normal_view),
-                texture_binding(1, &world_view),
+                texture_binding(1, &coverage_view),
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: resources.camera_uniform.as_entire_binding(),
                 },
+                texture_binding(3, &scene_depth_view),
             ],
         });
         let ao_source_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -4758,7 +4811,7 @@ impl DeferredTargets {
             layout: resources.water_layout,
             entries: &[
                 texture_binding(0, &scene_view),
-                texture_binding(1, &world_view),
+                texture_binding(1, &coverage_view),
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: resources.camera_uniform.as_entire_binding(),
@@ -4805,6 +4858,7 @@ impl DeferredTargets {
                     binding: 13,
                     resource: resources.shadow_uniform.as_entire_binding(),
                 },
+                texture_binding(14, &scene_depth_view),
             ],
         });
         let depth_resolve_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -4818,26 +4872,28 @@ impl DeferredTargets {
         Self {
             _albedo: albedo,
             _normal: normal,
-            _world: world,
+            _coverage: coverage,
+            _scene_depth: scene_depth,
             _scene: scene,
             _shadow: shadow,
             _ao: ao,
             _ao_blurred: ao_blurred,
             _albedo_ms: albedo_ms,
             _normal_ms: normal_ms,
-            _world_ms: world_ms,
+            _coverage_ms: coverage_ms,
             _depth_ms: depth_ms,
             depth,
             shadow_layer_views,
             albedo_view,
             normal_view,
-            world_view,
+            coverage_view,
+            scene_depth_view,
             scene_view,
             ao_view,
             ao_blurred_view,
             albedo_ms_view,
             normal_ms_view,
-            world_ms_view,
+            coverage_ms_view,
             depth_ms_view,
             lighting_bind_group,
             composite_bind_group,
@@ -5247,6 +5303,80 @@ fn look_to(position: [f32; 3], forward: [f32; 3], up: [f32; 3]) -> [[f32; 4]; 4]
     ]
 }
 
+/// Inverse of a 4x4 column-major matrix, or the identity if it is singular.
+///
+/// Gauss-Jordan elimination with partial pivoting, rather than an expanded cofactor formula. The
+/// expansion is the faster route and this runs once per frame, so the deciding factor is that every
+/// published cofactor expansion is written for one indexing convention and silently produces the
+/// inverse of the transpose under the other. Elimination reads the same in either convention because
+/// it only ever refers to whole rows.
+///
+/// Returning the identity on a singular input is deliberate: the caller is filling a uniform read at
+/// every pixel, and a matrix of infinities there would take the whole frame with it, whereas the
+/// identity merely misplaces reconstruction for a frame that is already degenerate.
+fn invert_matrix(matrix: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
+    // Row-major working copy augmented with the identity: `rows[r][c]` is row `r`, column `c`, and
+    // the input is column-major, so the transpose happens here and again on the way out.
+    let mut rows = [[0.0_f64; 8]; 4];
+    for (row_index, row) in rows.iter_mut().enumerate() {
+        for column in 0..4 {
+            row[column] = f64::from(matrix[column][row_index]);
+        }
+        row[4 + row_index] = 1.0;
+    }
+    for pivot in 0..4 {
+        // Partial pivoting: a projection matrix has zeroes on the diagonal of its last two rows, so
+        // eliminating without a row swap divides by zero on entirely ordinary input.
+        let mut best = pivot;
+        for candidate in pivot + 1..4 {
+            if rows[candidate][pivot].abs() > rows[best][pivot].abs() {
+                best = candidate;
+            }
+        }
+        if rows[best][pivot] == 0.0 {
+            return IDENTITY_MATRIX;
+        }
+        rows.swap(pivot, best);
+        let scale = 1.0 / rows[pivot][pivot];
+        for value in &mut rows[pivot] {
+            *value *= scale;
+        }
+        for row_index in 0..4 {
+            if row_index == pivot {
+                continue;
+            }
+            let factor = rows[row_index][pivot];
+            if factor == 0.0 {
+                continue;
+            }
+            let pivot_row = rows[pivot];
+            for (value, scaled) in rows[row_index].iter_mut().zip(pivot_row) {
+                *value -= factor * scaled;
+            }
+        }
+    }
+    let mut result = [[0.0_f32; 4]; 4];
+    for (row_index, row) in rows.iter().enumerate() {
+        for column in 0..4 {
+            #[allow(clippy::cast_possible_truncation)]
+            let value = row[4 + column] as f32;
+            if !value.is_finite() {
+                return IDENTITY_MATRIX;
+            }
+            // Back to column-major.
+            result[column][row_index] = value;
+        }
+    }
+    result
+}
+
+const IDENTITY_MATRIX: [[f32; 4]; 4] = [
+    [1.0, 0.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0, 0.0],
+    [0.0, 0.0, 1.0, 0.0],
+    [0.0, 0.0, 0.0, 1.0],
+];
+
 fn multiply_matrix(left: [[f32; 4]; 4], right: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
     let mut result = [[0.0; 4]; 4];
     for column in 0..4 {
@@ -5289,6 +5419,9 @@ fn shadow_uniform_bytes(shadow: &SceneShadow, time: f32) -> [u8; SHADOW_UNIFORM_
 #[derive(Clone, Copy)]
 struct CameraUniformInput {
     matrix: [[f32; 4]; 4],
+    /// Inverse of `matrix`. The deferred passes reconstruct each pixel's world position from scene
+    /// depth through this, so nothing has to store position in a G-buffer target.
+    inverse_matrix: [[f32; 4]; 4],
     position: [f32; 3],
     time: f32,
     viewport: [f32; 2],
@@ -5300,9 +5433,10 @@ struct CameraUniformInput {
     lighting: TerrainLighting,
 }
 
-fn camera_bytes(input: &CameraUniformInput) -> [u8; 304] {
+fn camera_bytes(input: &CameraUniformInput) -> [u8; 368] {
     let CameraUniformInput {
         matrix,
+        inverse_matrix,
         position,
         time,
         viewport,
@@ -5313,7 +5447,7 @@ fn camera_bytes(input: &CameraUniformInput) -> [u8; 304] {
         water_motion,
         lighting,
     } = *input;
-    let mut bytes = [0; 304];
+    let mut bytes = [0; 368];
     let values = matrix
         .into_iter()
         .flatten()
@@ -5351,7 +5485,8 @@ fn camera_bytes(input: &CameraUniformInput) -> [u8; 304] {
                 direction[2],
                 0.0,
             ]
-        }));
+        }))
+        .chain(inverse_matrix.into_iter().flatten());
     for (index, value) in values.enumerate() {
         bytes[index * 4..index * 4 + 4].copy_from_slice(&value.to_le_bytes());
     }
@@ -5424,12 +5559,16 @@ fn ray_distance_for_view_depth(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::{
-        CascadeBounds, ROAD_DEPTH_BIAS, SHADOW_CASCADE_BYTES, SHADOW_CASCADE_COUNT,
-        SHADOW_CASTER_HEADROOM, SHADOW_UNIFORM_BYTES, SOURCE_ROAD_MIP_LEVELS, SceneShadow,
-        ShadowCascade, TerrainCamera, TerrainInput, cascade_uniform_bytes, dot, gray_mip, look_to,
-        multiply_matrix, orthographic, perspective, quantize_cascade_extent,
-        ray_distance_for_view_depth, scene_shadow, shadow_uniform_bytes, source_road_mips,
+        CascadeBounds, ROAD_DEPTH_BIAS, ROTATE_CLICK_MAX_HOLD, ROTATE_CLICK_SLOP_PIXELS,
+        SCROLL_ANCHOR_DEAD_ZONE_PIXELS, SCROLL_ANCHOR_FULL_PIXELS, SHADOW_CASCADE_BYTES,
+        SHADOW_CASCADE_COUNT, SHADOW_CASTER_HEADROOM, SHADOW_UNIFORM_BYTES, SOURCE_ROAD_MIP_LEVELS,
+        SceneShadow, ShadowCascade, TerrainCamera, TerrainInput, anchor_scroll_request,
+        cascade_uniform_bytes, dot, gray_mip, invert_matrix, look_to, multiply_matrix,
+        orthographic, perspective, quantize_cascade_extent, ray_distance_for_view_depth,
+        rotate_release_is_click, scene_shadow, shadow_uniform_bytes, source_road_mips,
         terrain_color_targets, terrain_viewer_title,
     };
     use cic_camera::{CameraIntent, RtsCamera, RtsCameraProfile};
@@ -5500,6 +5639,170 @@ mod tests {
             terrain_viewer_title("map", true, true),
             "map [wireframe] | WASD/arrows scroll, RMB hold to scroll, wheel zoom, MMB rotate or click to face north, R reset, M wireframe, Esc close"
         );
+    }
+
+    /// The deferred passes reconstruct every pixel's world position through this inverse, so an
+    /// error here does not look like an error: shadows and occlusion simply stop finding their
+    /// cascades and the frame reads as unshadowed rather than as broken. A cofactor expansion under
+    /// the wrong indexing convention did exactly that, which is why the round trip is pinned.
+    #[test]
+    fn the_camera_inverse_round_trips_a_world_position_through_clip_space() {
+        let camera = TerrainCamera {
+            position: [1_400.0, 2_150.0, 260.0],
+            yaw: 0.6,
+            pitch: -0.65,
+            far_plane: 84_000.0,
+        };
+        let matrix = camera.view_projection(1.6);
+        let inverse = invert_matrix(matrix);
+
+        // The inverse view-projection maps the clip-space origin to the eye, so its translation
+        // column is the camera position. Well conditioned, unlike the product against the forward
+        // matrix: that cancels terms of order `position * far_plane`, which at these magnitudes
+        // leaves a quarter of a unit of f32 rounding in the translation column and says nothing
+        // about whether the inverse is right.
+        for (axis, expected) in camera.position.into_iter().enumerate() {
+            let value = inverse[3][axis] / inverse[3][3];
+            assert!(
+                (value - expected).abs() < 1.0,
+                "inverse translation column axis {axis} was {value}, expected the eye at {expected}"
+            );
+        }
+
+        // The property the shaders rely on: a world point projected to normalized device coordinates
+        // and reconstructed through the inverse comes back where it started.
+        let transform = |m: [[f32; 4]; 4], point: [f32; 3]| {
+            [0, 1, 2, 3]
+                .map(|row| (0..3).map(|axis| m[axis][row] * point[axis]).sum::<f32>() + m[3][row])
+        };
+        for world in [
+            [1_400.0_f32, 2_150.0, 20.0],
+            [1_500.0, 2_000.0, 45.0],
+            [1_100.0, 2_400.0, 0.0],
+            [1_800.0, 2_600.0, 120.0],
+        ] {
+            let clip = transform(matrix, world);
+            assert!(clip[3] > 0.0, "{world:?} must be in front of the camera");
+            let ndc = [clip[0] / clip[3], clip[1] / clip[3], clip[2] / clip[3]];
+            let restored = transform(inverse, ndc);
+            for (axis, expected) in world.into_iter().enumerate() {
+                let value = restored[axis] / restored[3];
+                // A third of a unit bounds this round trip, which transforms twice in f32 against a
+                // far plane 84,000 units out. The shader transforms once, from a depth buffer the
+                // rasterizer filled, where the error is depth quantization alone: about
+                // `distance^2 * 6e-8` world units at this projection's 1.0 near plane, so a few
+                // thousandths of a unit in the near field. Either way it is well inside the
+                // one-to-two units the half-float position target lost everywhere.
+                assert!(
+                    (value - expected).abs() < 0.34,
+                    "axis {axis} came back as {value}, expected {expected}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_singular_camera_inverse_falls_back_to_the_identity() {
+        // Nothing renders from a degenerate matrix, but a uniform full of infinities would take the
+        // rest of the frame with it, so the fallback is pinned rather than assumed.
+        let identity = invert_matrix([[0.0; 4]; 4]);
+        for (column, values) in identity.into_iter().enumerate() {
+            for (row, value) in values.into_iter().enumerate() {
+                let expected = if column == row { 1.0 } else { 0.0 };
+                assert!((value - expected).abs() < 1.0e-6);
+            }
+        }
+    }
+
+    #[test]
+    fn anchored_scrolling_holds_still_inside_the_dead_zone_and_answers_a_short_nudge() {
+        let magnitude = |offset: [f32; 2]| {
+            let request = anchor_scroll_request(offset);
+            request[0].hypot(request[1])
+        };
+        // Exactly still, not merely small: a creeping anchor is the failure being ruled out here.
+        let still = |offset: [f32; 2]| {
+            let request = anchor_scroll_request(offset);
+            request[0].to_bits() == 0 && request[1].to_bits() == 0
+        };
+
+        // Inside the dead zone, and exactly on its edge, an anchored press must not creep.
+        assert!(still([0.0, 0.0]));
+        assert!(still([SCROLL_ANCHOR_DEAD_ZONE_PIXELS, 0.0]));
+        assert!(still([0.0, -SCROLL_ANCHOR_DEAD_ZONE_PIXELS + 1.0]));
+
+        // A short nudge past the dead zone already asks for a usable share of the full rate; a
+        // linear ramp gave under a tenth here, which is what made scrolling feel late and floaty.
+        let nudge = magnitude([20.0, 0.0]);
+        assert!(nudge > 0.4, "a 20px nudge only asked for {nudge}");
+
+        // Full rate is reached at the documented offset and never exceeds it, in any direction.
+        assert!((magnitude([SCROLL_ANCHOR_FULL_PIXELS, 0.0]) - 1.0).abs() < 1.0e-4);
+        for offset in [
+            [SCROLL_ANCHOR_FULL_PIXELS * 4.0, 0.0],
+            [0.0, -SCROLL_ANCHOR_FULL_PIXELS * 4.0],
+            [900.0, 900.0],
+        ] {
+            assert!(
+                (magnitude(offset) - 1.0).abs() < 1.0e-4,
+                "{offset:?} should cap at full rate"
+            );
+        }
+
+        // Rightward on screen pans right; downward on screen pans backward, because screen up is
+        // negative while the camera's forward axis is positive.
+        let right = anchor_scroll_request([40.0, 0.0]);
+        assert!(right[0] > 0.0 && right[1].abs() < 1.0e-6, "{right:?}");
+        let down = anchor_scroll_request([0.0, 40.0]);
+        assert!(down[1] < 0.0 && down[0].abs() < 1.0e-6, "{down:?}");
+
+        // The ramp still rises with distance, so the far travel keeps its fine control.
+        let mut previous = 0.0;
+        for distance in [10.0, 25.0, 45.0, 70.0, 89.0] {
+            let current = magnitude([distance, 0.0]);
+            assert!(
+                current > previous,
+                "{distance}px gave {current} <= {previous}"
+            );
+            previous = current;
+        }
+
+        // A malformed cursor position must not become a NaN pan request.
+        assert!(still([f32::NAN, 0.0]));
+        assert!(still([f32::INFINITY, 0.0]));
+    }
+
+    #[test]
+    fn only_a_brief_and_still_middle_click_faces_the_camera_north() {
+        let brief = ROTATE_CLICK_MAX_HOLD / 2;
+        let held = ROTATE_CLICK_MAX_HOLD + Duration::from_millis(120);
+        let still = ROTATE_CLICK_SLOP_PIXELS / 2.0;
+        let moved = ROTATE_CLICK_SLOP_PIXELS + 4.0;
+
+        assert!(
+            rotate_release_is_click(brief, still),
+            "a tap resets rotation"
+        );
+        assert!(
+            !rotate_release_is_click(brief, moved),
+            "a quick flick that travelled is a rotation"
+        );
+        // The reported fault: holding the button while barely moving reset the view far too often.
+        assert!(
+            !rotate_release_is_click(held, still),
+            "a long hold is aiming a rotation, however still it stayed"
+        );
+        assert!(!rotate_release_is_click(held, moved));
+
+        // Both limits are inclusive, so a release exactly on either one is still a click.
+        assert!(rotate_release_is_click(
+            ROTATE_CLICK_MAX_HOLD,
+            ROTATE_CLICK_SLOP_PIXELS
+        ));
+        assert!(!rotate_release_is_click(
+            ROTATE_CLICK_MAX_HOLD + Duration::from_millis(1),
+            0.0
+        ));
     }
 
     #[test]

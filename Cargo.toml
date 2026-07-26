@@ -22,3 +22,24 @@ unsafe_code = "forbid"
 [workspace.lints.clippy]
 all = "warn"
 pedantic = "warn"
+
+# Dependencies are optimized even in the dev profile, because an unoptimized `map-view` is not slow
+# from any one hot spot: the per-frame cost is spread across `wgpu`'s validation and command-encoding
+# path, where every small function is a real call. That lands the frame over the vsync budget, and a
+# missed vblank does not degrade smoothly -- the presented rate snaps to the next divisor of the
+# refresh rate, which is why the debug build reads as a hard 30 Hz rather than as gradual
+# sluggishness. Dependencies are the right place to spend the compile time: they build once and are
+# never stepped through.
+#
+# The workspace's own crates stay unoptimized, so a one-file change still rebuilds in about four
+# seconds rather than the forty-six `opt-level = 1` costs on `cic-render`. That is affordable because
+# our own per-frame CPU work was measured at 0.42 ms unoptimized against 0.07 ms at `--release`
+# -- real, but a small fraction of a frame either way, and not what the debug build is losing.
+#
+# Debug assertions and overflow checks are untouched in both, so this changes how fast the debug build
+# runs and not what it verifies.
+[profile.dev]
+opt-level = 0
+
+[profile.dev.package."*"]
+opt-level = 3

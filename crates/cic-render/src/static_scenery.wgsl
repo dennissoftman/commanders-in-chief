@@ -58,7 +58,8 @@ struct VertexOutput {
 struct GBufferOutput {
     @location(0) albedo: vec4<f32>,
     @location(1) normal_roughness: vec4<f32>,
-    @location(2) world_position: vec4<f32>,
+    // Geometry coverage, carrying emissive strength above 1.0. See `gbuffer_coverage_emissive`.
+    @location(2) coverage: f32,
 }
 
 @vertex
@@ -110,9 +111,6 @@ fn fragment_main(input: VertexOutput) -> GBufferOutput {
     var output: GBufferOutput;
     output.albedo = color;
     output.normal_roughness = vec4<f32>(normalize(input.normal), material.values.z);
-    output.world_position = vec4<f32>(
-        input.world_position,
-        gbuffer_coverage_emissive(material.values.y)
-    );
+    output.coverage = gbuffer_coverage_emissive(material.values.y);
     return output;
 }
