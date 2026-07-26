@@ -20,7 +20,8 @@ use cic_formats::{
     MapScriptParameterValue, MapSidesData, MapWaterData, MapWorldObjects, OptionsIni,
     PatchedWndDocument, TransitionStyle, UiIniDiagnosticKind, W3dChunk, W3dFile, W3dStaticMesh,
     W3dVector3, WindowTransitionsIni, WndCallbackKind, WndDiagnosticKind, WndDocument,
-    WndDrawDataSlot, WndGadgetData, WndPatch, WndPatchOperation, WndWindow, w3d_chunk_name,
+    WndDrawDataSlot, WndGadgetData, WndPatch, WndPatchOperation, WndPatchProvenance, WndWindow,
+    w3d_chunk_name,
 };
 use cic_render::Capture;
 use cic_ui::{
@@ -1662,6 +1663,31 @@ pub fn render_ui_shell(steps: &[(String, Vec<UiShellEvent>)], shell: &UiShell) -
     output
 }
 
+/// Returns the patches in a profile's ordered set that target one document, in that order.
+///
+/// This is the selection half of the patch mechanism. [`apply_wnd_patches`] refuses a patch whose
+/// target is a different document — deliberately, because applying one by accident would be worse
+/// than failing — so a profile carrying patches for several layouts has to choose before it applies.
+/// Selection is by the same normalized, case-insensitive comparison the apply engine uses, so a
+/// patch matches regardless of how the VFS spells the path.
+///
+/// Order is the caller's: patches layer in VFS mount and file order, and a later one observes an
+/// earlier one's result.
+#[must_use]
+pub fn select_wnd_patches(patches: &[WndPatch], document_path: &str) -> Vec<WndPatch> {
+    let wanted = normalize_patch_target(document_path);
+    patches
+        .iter()
+        .filter(|patch| normalize_patch_target(patch.target()) == wanted)
+        .cloned()
+        .collect()
+}
+
+/// Lower-cases a virtual path and normalizes separators, matching the apply engine's comparison.
+fn normalize_patch_target(path: &str) -> String {
+    path.replace('\\', "/").to_ascii_lowercase()
+}
+
 /// Formats a scripted menu session: what each step did, then the allowlist and the resulting stack.
 ///
 /// `steps` pairs each step's spec with the range of records it produced, so a reader can attribute
@@ -1671,6 +1697,7 @@ pub fn render_ui_menu(
     steps: &[(String, std::ops::Range<usize>)],
     records: &[ShellMenuRecord],
     allowlist: &UiActionAllowlist,
+    provenance: &[(String, WndPatchProvenance)],
     shell: &UiShell,
 ) -> String {
     let mut output = String::from("ui_menu_step\tindex\tcommand\trecords\n");
@@ -1729,6 +1756,21 @@ pub fn render_ui_menu(
             )
             .expect("writing to a String cannot fail");
         }
+    }
+
+    // Every field a patch wrote, keyed by the layout it was written into. A project-owned control
+    // that appears in a capture without a row here would be one nothing can be traced back.
+    output.push_str("ui_menu_patch\tlayout\tcontrol\tfield\tpatch\tline\n");
+    for (layout, record) in provenance {
+        writeln!(
+            output,
+            "ui_menu_patch\t{layout}\t{}\t{}\t{}\t{}",
+            record.control(),
+            record.field(),
+            record.patch(),
+            record.line()
+        )
+        .expect("writing to a String cannot fail");
     }
 
     let routed = records
@@ -3050,7 +3092,13 @@ mod tests {
         ];
         // The first two records precede every step, which is the screen opening.
         let steps = vec![("move:1,1".to_owned(), 2..4)];
-        let report = render_ui_menu(&steps, &records, &UiActionAllowlist::new(), &UiShell::new());
+        let report = render_ui_menu(
+            &steps,
+            &records,
+            &UiActionAllowlist::new(),
+            &[],
+            &UiShell::new(),
+        );
 
         assert!(report.contains(
             "ui_menu_record\topen\tinitial_hide\tMainMenu.wnd:MapBorder2\thidden\n\

@@ -10,6 +10,11 @@ use cic_formats::{
 };
 
 use crate::{
+    UI_DISPLAY_CONFIRM_TIMEOUT_MS, UiDisplayCapability, UiDisplayCatalog, UiDisplayOutcome,
+    UiDisplaySelection, UiDisplayTransaction, UiMonitor, UiRollbackReason, UiScaleChoice,
+    UiSelectionError, UiVideoMode, UiWindowMode,
+};
+use crate::{
     UI_MAX_SHELL_STACK, UiActionAllowlist, UiCallbackBinding, UiCallbackSlot, UiCallbackTable,
     UiClipPolicy, UiControlFamily, UiControlId, UiControlKind, UiDemoAction, UiEvent, UiFrameItem,
     UiGadgetRole, UiKey, UiLayout, UiLayoutError, UiLimits, UiMouseButton, UiPoint, UiPresentation,
@@ -2217,4 +2222,317 @@ fn the_same_steps_produce_the_same_frames_and_draws() {
         (frames, draws)
     };
     assert_eq!(run(), run());
+}
+
+/// Two monitors, advertised out of order and with a duplicate, as a backend really might.
+fn display_catalog() -> UiDisplayCatalog {
+    let monitors = vec![
+        UiMonitor::new("DISPLAY2", "Side", 1),
+        UiMonitor::new("DISPLAY1", "Main", 0),
+    ];
+    let modes = vec![
+        UiVideoMode::new("DISPLAY1", 1920, 1080, 59_940, Some(32), 3),
+        UiVideoMode::new("DISPLAY1", 1920, 1080, 60_000, Some(32), 0),
+        // The same mode advertised twice, which some backends do.
+        UiVideoMode::new("DISPLAY1", 1920, 1080, 60_000, Some(32), 4),
+        UiVideoMode::new("DISPLAY1", 1280, 720, 60_000, Some(32), 1),
+        UiVideoMode::new("DISPLAY1", 2560, 1080, 144_000, Some(32), 2),
+        // Below the presentable minimum, so no control ever offers it.
+        UiVideoMode::new("DISPLAY1", 320, 240, 60_000, Some(16), 5),
+        UiVideoMode::new("DISPLAY2", 1280, 1024, 75_000, None, 6),
+    ];
+    UiDisplayCatalog::new(monitors, modes).expect("a well-formed catalog")
+}
+
+#[test]
+fn a_display_catalog_sorts_deduplicates_and_hides_what_cannot_be_presented() {
+    let catalog = display_catalog();
+
+    // Monitors sort by key, not by the order the adapter happened to enumerate them.
+    assert_eq!(
+        catalog
+            .monitors()
+            .iter()
+            .map(UiMonitor::key)
+            .collect::<Vec<_>>(),
+        ["DISPLAY1", "DISPLAY2"]
+    );
+    // The duplicated 1920x1080 at 60 Hz appears once: seven advertised, six kept.
+    assert_eq!(catalog.modes().len(), 6);
+
+    // Resolutions are unique and ascending, and the 320x240 mode is not offered at all.
+    assert_eq!(
+        catalog.resolutions("DISPLAY1"),
+        [(1280, 720), (1920, 1080), (2560, 1080)]
+    );
+    // 59.94 Hz and 60 Hz are distinct advertised rates and are not collapsed, because exclusive
+    // fullscreen has to name one of them exactly.
+    assert_eq!(
+        catalog.refresh_rates("DISPLAY1", (1920, 1080)),
+        [59_940, 60_000]
+    );
+    assert_eq!(catalog.refresh_rates("DISPLAY1", (1280, 720)), [60_000]);
+    // A resolution the monitor does not advertise has no rates rather than borrowing another's.
+    assert!(catalog.refresh_rates("DISPLAY1", (3840, 2160)).is_empty());
+
+    // The desktop mode is the largest at the highest refresh, which is what borderless takes.
+    let desktop = catalog.desktop_mode("DISPLAY1").expect("a desktop mode");
+    assert_eq!(desktop.resolution(), (2560, 1080));
+    assert_eq!(desktop.refresh_millihertz(), 144_000);
+
+    // A monitor whose modes carry no refresh is reported rather than given a fabricated rate.
+    let no_refresh = UiDisplayCatalog::new(
+        vec![UiMonitor::new("DISPLAY1", "Main", 0)],
+        vec![UiVideoMode::new("DISPLAY1", 1920, 1080, 0, None, 0)],
+    )
+    .expect("a catalog with no advertised refresh");
+    assert_eq!(
+        no_refresh.capabilities(),
+        [UiDisplayCapability::NoRefreshRates {
+            monitor: "DISPLAY1".to_owned()
+        }]
+    );
+    assert!(
+        no_refresh
+            .refresh_rates("DISPLAY1", (1920, 1080))
+            .is_empty()
+    );
+    // The well-formed catalog reports no gap for either monitor.
+    assert!(catalog.capabilities().is_empty());
+}
+
+#[test]
+fn each_window_mode_decides_what_the_player_may_actually_choose() {
+    let catalog = display_catalog();
+    let base = UiDisplaySelection {
+        monitor: "DISPLAY1".to_owned(),
+        window_mode: UiWindowMode::Windowed,
+        resolution: (1600, 900),
+        refresh_millihertz: 0,
+        scale: UiScaleChoice::Automatic,
+    };
+
+    // Windowed keeps a client size the monitor never advertised — a window may be any size — and
+    // reports the desktop's refresh rather than pretending to have selected one.
+    let windowed = base.resolve(&catalog).expect("a windowed selection");
+    assert_eq!(windowed.resolution, (1600, 900));
+    assert_eq!(windowed.refresh_millihertz, 144_000);
+    assert!(!UiWindowMode::Windowed.selects_refresh());
+
+    // Borderless overrides both with the desktop mode whatever was asked for.
+    let borderless = UiDisplaySelection {
+        window_mode: UiWindowMode::BorderlessDesktop,
+        resolution: (1280, 720),
+        refresh_millihertz: 60_000,
+        ..base.clone()
+    }
+    .resolve(&catalog)
+    .expect("a borderless selection");
+    assert_eq!(borderless.resolution, (2560, 1080));
+    assert_eq!(borderless.refresh_millihertz, 144_000);
+    assert!(!UiWindowMode::BorderlessDesktop.selects_resolution());
+
+    // Exclusive fullscreen must name an advertised pair, and is the only mode that can fail on
+    // refresh: the resolution exists, that rate on it does not.
+    let exclusive = UiDisplaySelection {
+        window_mode: UiWindowMode::ExclusiveFullscreen,
+        resolution: (1920, 1080),
+        refresh_millihertz: 59_940,
+        ..base.clone()
+    };
+    assert_eq!(
+        exclusive.resolve(&catalog).expect("an advertised pair"),
+        exclusive
+    );
+    assert_eq!(
+        UiDisplaySelection {
+            refresh_millihertz: 120_000,
+            ..exclusive.clone()
+        }
+        .resolve(&catalog),
+        Err(UiSelectionError::UnknownRefreshRate {
+            refresh_millihertz: 120_000
+        })
+    );
+    assert_eq!(
+        UiDisplaySelection {
+            resolution: (3840, 2160),
+            ..exclusive.clone()
+        }
+        .resolve(&catalog),
+        Err(UiSelectionError::UnknownResolution {
+            width: 3840,
+            height: 2160
+        })
+    );
+    // The 320x240 mode is advertised but below the minimum, so it is refused as unpresentable
+    // rather than as unknown.
+    assert_eq!(
+        UiDisplaySelection {
+            resolution: (320, 240),
+            ..exclusive
+        }
+        .resolve(&catalog),
+        Err(UiSelectionError::NotPresentable {
+            width: 320,
+            height: 240
+        })
+    );
+    // A monitor that is gone — unplugged since the preference was written — is named, not guessed.
+    assert_eq!(
+        UiDisplaySelection {
+            monitor: "DISPLAY9".to_owned(),
+            ..base
+        }
+        .resolve(&catalog),
+        Err(UiSelectionError::UnknownMonitor {
+            key: "DISPLAY9".into()
+        })
+    );
+}
+
+/// A selection the fixture catalog accepts, for the transaction tests.
+fn selection(width: u32, height: u32, refresh: u32) -> UiDisplaySelection {
+    UiDisplaySelection {
+        monitor: "DISPLAY1".to_owned(),
+        window_mode: UiWindowMode::ExclusiveFullscreen,
+        resolution: (width, height),
+        refresh_millihertz: refresh,
+        scale: UiScaleChoice::Automatic,
+    }
+}
+
+#[test]
+fn an_unconfirmed_mode_change_rolls_back_on_the_callers_own_clock() {
+    let catalog = display_catalog();
+    let accepted = selection(1280, 720, 60_000);
+    let mut transaction = UiDisplayTransaction::new(accepted.clone());
+    assert!(!transaction.is_awaiting_confirmation());
+
+    let requested = selection(1920, 1080, 59_940);
+    assert_eq!(
+        transaction
+            .request(&catalog, &requested, 1_000)
+            .expect("an advertised pair"),
+        UiDisplayOutcome::AwaitingConfirmation {
+            deadline_ms: 1_000 + UI_DISPLAY_CONFIRM_TIMEOUT_MS
+        }
+    );
+    assert!(transaction.is_awaiting_confirmation());
+    // The new mode is not accepted yet, so nothing may be persisted from it.
+    assert_eq!(transaction.accepted(), &accepted);
+
+    // Polling inside the window does nothing at all, so a frame loop may call it every frame.
+    assert_eq!(transaction.poll(2_000), UiDisplayOutcome::Idle);
+    assert_eq!(transaction.poll(16_000), UiDisplayOutcome::Idle);
+
+    // One millisecond past the deadline it reverts, and says how long it waited.
+    assert_eq!(
+        transaction.poll(16_001),
+        UiDisplayOutcome::RolledBack {
+            reason: UiRollbackReason::TimedOut { elapsed_ms: 15_001 },
+            restored: Box::new(accepted.clone())
+        }
+    );
+    assert_eq!(transaction.accepted(), &accepted);
+    assert!(!transaction.is_awaiting_confirmation());
+    // Nothing is pending any more, so a further poll is idle rather than rolling back twice.
+    assert_eq!(transaction.poll(99_000), UiDisplayOutcome::Idle);
+}
+
+#[test]
+fn only_a_confirmed_mode_becomes_the_accepted_one() {
+    let catalog = display_catalog();
+    let accepted = selection(1280, 720, 60_000);
+    let mut transaction = UiDisplayTransaction::new(accepted).with_timeout_ms(5_000);
+
+    // Confirming inside the window commits, and that is the only outcome a preference may follow.
+    let requested = selection(1920, 1080, 60_000);
+    transaction
+        .request(&catalog, &requested, 0)
+        .expect("an advertised pair");
+    assert_eq!(
+        transaction.confirm(4_999),
+        UiDisplayOutcome::Confirmed {
+            accepted: Box::new(requested.clone())
+        }
+    );
+    assert_eq!(transaction.accepted(), &requested);
+
+    // A confirmation that arrives after the deadline is refused: the dialog it answers is gone.
+    let later = selection(2560, 1080, 144_000);
+    transaction
+        .request(&catalog, &later, 10_000)
+        .expect("an advertised pair");
+    assert_eq!(
+        transaction.confirm(15_001),
+        UiDisplayOutcome::RolledBack {
+            reason: UiRollbackReason::TimedOut { elapsed_ms: 5_001 },
+            restored: Box::new(requested.clone())
+        }
+    );
+    assert_eq!(transaction.accepted(), &requested);
+
+    // Declining and platform failure both revert to the same accepted selection.
+    transaction
+        .request(&catalog, &later, 20_000)
+        .expect("an advertised pair");
+    assert_eq!(
+        transaction.decline(),
+        UiDisplayOutcome::RolledBack {
+            reason: UiRollbackReason::Declined,
+            restored: Box::new(requested.clone())
+        }
+    );
+    transaction
+        .request(&catalog, &later, 30_000)
+        .expect("an advertised pair");
+    assert_eq!(
+        transaction.fail("surface reconfiguration failed"),
+        UiDisplayOutcome::RolledBack {
+            reason: UiRollbackReason::Failed {
+                detail: "surface reconfiguration failed".to_owned()
+            },
+            restored: Box::new(requested.clone())
+        }
+    );
+    assert_eq!(transaction.accepted(), &requested);
+
+    // A refused request applies nothing and leaves the accepted selection alone, so a player who
+    // picks an impossible pair is not left with a broken display.
+    assert!(
+        transaction
+            .request(&catalog, &selection(1920, 1080, 1), 40_000)
+            .is_err()
+    );
+    assert!(!transaction.is_awaiting_confirmation());
+    assert_eq!(transaction.accepted(), &requested);
+    // Confirming with nothing pending is idle, not a commit of whatever was last requested.
+    assert_eq!(transaction.confirm(41_000), UiDisplayOutcome::Idle);
+}
+
+#[test]
+fn a_scale_choice_round_trips_only_through_the_steps_a_menu_offers() {
+    for choice in [
+        UiScaleChoice::Automatic,
+        UiScaleChoice::Fixed(75),
+        UiScaleChoice::Fixed(200),
+    ] {
+        assert_eq!(
+            UiScaleChoice::from_row_name(&choice.row_name()),
+            Some(choice)
+        );
+    }
+    // A percentage no step offers is refused rather than silently kept, so a hand-edited preference
+    // cannot introduce a scale the menu could never show back to the player.
+    assert_eq!(UiScaleChoice::from_row_name("133"), None);
+    assert_eq!(UiScaleChoice::from_row_name(""), None);
+    for mode in [
+        UiWindowMode::Windowed,
+        UiWindowMode::BorderlessDesktop,
+        UiWindowMode::ExclusiveFullscreen,
+    ] {
+        assert_eq!(UiWindowMode::from_row_name(mode.row_name()), Some(mode));
+    }
+    assert_eq!(UiWindowMode::from_row_name("fullscreen"), None);
 }

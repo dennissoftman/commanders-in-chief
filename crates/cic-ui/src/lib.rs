@@ -19,6 +19,7 @@
 //!   submission; no iteration depends on a host hash or a clock.
 
 mod callbacks;
+mod display;
 mod frame;
 mod input;
 mod retained;
@@ -31,6 +32,12 @@ pub use callbacks::{
     UI_CALLBACK_SLOTS, UI_CALLBACK_TABLES, UiActionAllowlist, UiCallbackBinding, UiCallbackEdition,
     UiCallbackSlot, UiCallbackTable, UiDemoAction, ZERO_HOUR_ONLY_NAMES, classify_callback,
     classify_callback_in, is_none_callback,
+};
+pub use display::{
+    UI_DISPLAY_CONFIRM_TIMEOUT_MS, UI_MAX_DISPLAY_MODES, UI_MAX_MONITORS, UI_MIN_CLIENT_HEIGHT,
+    UI_MIN_CLIENT_WIDTH, UiDisplayCapability, UiDisplayCatalog, UiDisplayError, UiDisplayOutcome,
+    UiDisplaySelection, UiDisplayTransaction, UiMonitor, UiRollbackReason, UiScaleChoice,
+    UiSelectionError, UiVideoMode, UiWindowMode,
 };
 pub use frame::{
     UI_MAX_TABS, UiClipPolicy, UiControlFamily, UiDrawState, UiFrame, UiFrameItem, UiSlotImages,

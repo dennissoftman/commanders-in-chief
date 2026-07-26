@@ -12,9 +12,9 @@ use cic_formats::{
     MapScenarioLimits, MapWaterError, ObjectDefinition, ObjectDrawKind, ObjectIniLimits,
     OptionsIniLimits, RoadDefinition, RoadIniLimits, TerrainIniLimits, UiIniLimits, W3dFile,
     W3dLimits, W3dMeshLimits, W3dModelDecodePolicy, W3dSceneLimits, WaterIniLimits, WndLimits,
-    WndPatchLimits, apply_wnd_patches, compose_static_w3d_model, decode_map_blend,
-    decode_map_height, decode_map_lighting, decode_map_polygons, decode_map_sides,
-    decode_map_water, decode_map_world_objects, decode_static_mesh,
+    WndPatch, WndPatchLimits, WndPatchProvenance, apply_wnd_patches, compose_static_w3d_model,
+    decode_map_blend, decode_map_height, decode_map_lighting, decode_map_polygons,
+    decode_map_sides, decode_map_water, decode_map_world_objects, decode_static_mesh,
     decode_w3d_model_set_with_policy, parse_csf, parse_map, parse_object_ini, parse_options_ini,
     parse_road_ini, parse_terrain_ini, parse_w3d, parse_water_ini, parse_window_transitions_ini,
     parse_wnd, parse_wnd_patch, w3d_model_hierarchy_name,
@@ -50,7 +50,7 @@ use cic_tools::{
     render_map_world_objects, render_options_ini, render_transition_run, render_ui_callbacks,
     render_ui_layout, render_ui_menu, render_ui_resources, render_ui_shell, render_w3d,
     render_w3d_gltf, render_w3d_mesh, render_window_transitions, render_wnd, render_wnd_patch,
-    summarize_transition_diagnostics,
+    select_wnd_patches, summarize_transition_diagnostics,
 };
 use cic_ui::{
     UiCallbackEdition, UiClipPolicy, UiDemoAction, UiEvent, UiFrame, UiFrameItem, UiKey, UiLayout,
@@ -83,7 +83,7 @@ const USAGE: &str = "Usage:\n\
   cic-inspect w3d-export [--gltf] <virtual-path> [<output.glb|output.gltf>] [<mount> ...]\n\
   cic-inspect wnd <virtual-path> <mount> [<mount> ...]\n\
   cic-inspect wnd-render <virtual-path> [<output.png>] [<mount> ...]\n\
-  cic-inspect wnd-patch <virtual-path> <patch> [<patch> ...] -- [<mount> ...]\n\
+  cic-inspect wnd-patch <virtual-path> --patch <file> [--patch <file> ...] [<mount> ...]\n\
   cic-inspect ui-resources [--texture-size <pixels>] <virtual-path> [<mount> ...]\n\
   cic-inspect ui-layout [--viewport <width>x<height>] [--scale <classic|modern>] <virtual-path> [<mount> ...]\n\
   cic-inspect ui-transitions [--run] [--menu-dir <prefix>] [<virtual-path>] [<mount> ...]\n\
@@ -2772,11 +2772,15 @@ where
     let mut menu_dir = DEFAULT_MENU_DIRECTORY.to_owned();
     let mut capture_dir = PathBuf::from(".");
     let mut font_paths: Vec<PathBuf> = Vec::new();
+    let mut patch_paths: Vec<PathBuf> = Vec::new();
     let mut specs: Vec<String> = Vec::new();
     let mut mounts = Vec::new();
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--step" => specs.push(arguments.next().ok_or("--step requires a spec")?),
+            "--patch" => patch_paths.push(PathBuf::from(
+                arguments.next().ok_or("--patch requires a file path")?,
+            )),
             "--font" => font_paths.push(PathBuf::from(
                 arguments.next().ok_or("--font requires a file path")?,
             )),
@@ -2845,6 +2849,18 @@ where
     let transitions_bytes = transitions_entry.read(ini_limits.max_file_bytes)?;
     let transitions_ini = parse_window_transitions_ini(&transitions_bytes, ini_limits)?;
 
+    // The profile's patch set, in the order it was named. Each layout takes whichever target it.
+    let patch_limits = WndPatchLimits::default();
+    let mut patches = Vec::with_capacity(patch_paths.len());
+    for path in &patch_paths {
+        let bytes = fs::read(path)?;
+        patches.push(parse_wnd_patch(
+            &path.display().to_string(),
+            &bytes,
+            patch_limits,
+        )?);
+    }
+
     let fonts = font_paths
         .iter()
         .map(fs::read)
@@ -2867,6 +2883,8 @@ where
         clip,
         menu_dir,
         bindings: main_menu_bindings(),
+        patches,
+        provenance: Vec::new(),
         shell: UiShell::new(),
         transitions: UiTransitionHandler::new(&transitions_ini),
         localization,
@@ -2928,6 +2946,7 @@ where
         &steps,
         &session.records,
         &session.bindings.allowlist,
+        &session.provenance,
         &session.shell,
     ))
 }
@@ -2988,6 +3007,9 @@ struct MenuSession<'a> {
     clip: UiClipPolicy,
     menu_dir: String,
     bindings: ShellMenuBindings,
+    /// The active profile's ordered patch set. Each layout takes whichever of these target it.
+    patches: Vec<WndPatch>,
+    provenance: Vec<(String, WndPatchProvenance)>,
     shell: UiShell,
     transitions: UiTransitionHandler,
     localization: LocalizationResources,
@@ -3007,7 +3029,7 @@ impl MenuSession<'_> {
         let resolved = self
             .resolve_menu_layout(path)
             .ok_or_else(|| format!("resource not found for shell layout {path}"))?;
-        let layout = instantiate_ui_layout(self.vfs, &resolved, self.presentation)?;
+        let layout = self.load_layout(&resolved)?;
         let events = self
             .shell
             .push(UiScreen::new(resolved.as_str(), layout), false)?;
@@ -3065,6 +3087,18 @@ impl MenuSession<'_> {
     /// `Shell::doPop` runs the new top's init, so returning to the main menu really does re-enter
     /// `MainMenuInit`. Applying only the shell event would leave the screen exactly as the outgoing
     /// transitions left it, which is blank.
+    /// Loads one layout under the profile's patches, keeping every write's provenance.
+    fn load_layout(&mut self, resolved: &VirtualPath) -> Result<UiLayout, Box<dyn Error>> {
+        let (layout, provenance) =
+            instantiate_patched_ui_layout(self.vfs, resolved, self.presentation, &self.patches)?;
+        self.provenance.extend(
+            provenance
+                .into_iter()
+                .map(|record| (resolved.as_str().to_owned(), record)),
+        );
+        Ok(layout)
+    }
+
     fn record_shell(&mut self, events: Vec<UiShellEvent>) {
         let mut re_entered = false;
         for event in events {
@@ -3238,7 +3272,7 @@ impl MenuSession<'_> {
         let Some(resolved) = self.resolve_menu_layout(source_path) else {
             return ShellMenuActionOutcome::UnresolvedLayout;
         };
-        let layout = match instantiate_ui_layout(self.vfs, &resolved, self.presentation) {
+        let layout = match self.load_layout(&resolved) {
             Ok(layout) => layout,
             Err(error) => return ShellMenuActionOutcome::Refused(error.to_string()),
         };
@@ -3549,17 +3583,35 @@ fn instantiate_ui_layout(
     resource_path: &VirtualPath,
     presentation: UiPresentation,
 ) -> Result<UiLayout, Box<dyn Error>> {
+    Ok(instantiate_patched_ui_layout(vfs, resource_path, presentation, &[])?.0)
+}
+
+/// Decodes one layout, applies whichever of a profile's patches target it, and instantiates that.
+///
+/// The patched document is a new value; the parsed source is never mutated, so the same layout can
+/// be patched differently per profile from one parse. The provenance of every write comes back with
+/// the layout, because a report that shows a project-owned control without saying which patch put it
+/// there is not auditable.
+fn instantiate_patched_ui_layout(
+    vfs: &Vfs,
+    resource_path: &VirtualPath,
+    presentation: UiPresentation,
+    patches: &[WndPatch],
+) -> Result<(UiLayout, Vec<WndPatchProvenance>), Box<dyn Error>> {
     let entry = vfs
         .resolve(resource_path)
         .ok_or_else(|| format!("resource not found: {resource_path}"))?;
     let limits = WndLimits::default();
     let bytes = entry.read(limits.maximum_file_bytes)?;
     let document = parse_wnd(&bytes, limits)?;
-    Ok(UiLayout::instantiate(
-        &document,
-        presentation,
-        UiLimits::default(),
-    )?)
+    let selected = select_wnd_patches(patches, resource_path.as_str());
+    if selected.is_empty() {
+        let layout = UiLayout::instantiate(&document, presentation, UiLimits::default())?;
+        return Ok((layout, Vec::new()));
+    }
+    let overlaid = apply_wnd_patches(&document, resource_path.as_str(), &selected, limits)?;
+    let layout = UiLayout::instantiate(overlaid.document(), presentation, UiLimits::default())?;
+    Ok((layout, overlaid.provenance().to_vec()))
 }
 
 fn default_render_path(
