@@ -105,7 +105,10 @@ pub enum UiTransitionDiagnosticKind {
     /// A `WinName` no loaded screen carries a control for.
     ///
     /// The source asserts and then carries on with a null window, and every style tests for it, so a
-    /// transition over a missing window runs its frames and draws nothing.
+    /// transition over a missing window runs its frames and draws nothing — and, for most styles,
+    /// never reports itself finished either, because the arm that would set the flag tests the window
+    /// first. A block that declares no `WinName` at all is not reported: that is how retail writes the
+    /// two styles which animate no window, `SCREENFADE` and `CONTROLBARARROW`.
     WindowNotFound {
         /// The decorated name as authored.
         name: Box<str>,
@@ -129,6 +132,22 @@ pub enum UiTransitionDiagnosticKind {
         style: TransitionStyle,
         /// What it wanted.
         reason: Box<str>,
+    },
+    /// A style that cannot report itself finished, so its group runs forever.
+    ///
+    /// `TYPETEXT` sets its finished flag only on the state numbered by its *declared* length, but
+    /// arming shortens its length to the character count of the text it animates, and
+    /// `TransitionWindow::update` refuses any frame past the shortened length. A label under thirty
+    /// characters therefore never delivers the state that would finish it. `COUNTUP` shortens the same
+    /// way and finishes correctly, because it carries an extra assignment at its armed length that
+    /// `TYPETEXT` does not, which is what makes this look like an oversight rather than a design.
+    NeverFinishes {
+        /// Which style.
+        style: TransitionStyle,
+        /// The state number that would have finished it.
+        declared_length: i32,
+        /// The length it was armed with.
+        armed_length: i32,
     },
     /// An audio cue the source fires on this frame.
     ///
@@ -661,7 +680,7 @@ impl UiTransition {
         self.viewport = viewport_rect(shell);
 
         self.target = resolve(shell, &self.name);
-        if self.target.is_none() {
+        if self.target.is_none() && !self.name.is_empty() {
             step.diagnostics.push(UiTransitionDiagnostic {
                 window: self.name.clone(),
                 frame: 0,
@@ -693,10 +712,42 @@ impl UiTransition {
             }
         }
 
+        if !self.arm(shell, step) {
+            return;
+        }
+
+        self.forward = false;
+        self.apply(shell, 0, step);
+        self.finished = false;
+        self.forward = true;
+        if self.style == TransitionStyle::CountUp {
+            self.count_value = 0;
+            self.set_text(shell, "0");
+        }
+    }
+
+    /// Applies the per-style arming a style's own `init` does before seeding its start frame.
+    ///
+    /// Returns whether the caller should go on to seed that frame. Four styles arm themselves as
+    /// already finished and return early: a count-up or a text-on-frame whose window starts hidden has
+    /// nothing to animate, and a reverse sound exists only to fire one cue.
+    fn arm(&mut self, shell: &UiShell, step: &mut UiTransitionStep) -> bool {
         match self.style {
             TransitionStyle::TypeText => {
                 let characters = i32::try_from(self.full_text.chars().count()).unwrap_or(i32::MAX);
-                self.frame_length = characters.min(self.style.declared_frame_length());
+                let declared = self.style.declared_frame_length();
+                self.frame_length = characters.min(declared);
+                if self.frame_length < declared {
+                    step.diagnostics.push(UiTransitionDiagnostic {
+                        window: self.name.clone(),
+                        frame: 0,
+                        kind: UiTransitionDiagnosticKind::NeverFinishes {
+                            style: self.style,
+                            declared_length: declared,
+                            armed_length: self.frame_length,
+                        },
+                    });
+                }
             }
             TransitionStyle::CountUp => {
                 // A count-up over an already-hidden window is finished before it starts.
@@ -704,18 +755,20 @@ impl UiTransition {
                     self.forward = true;
                     self.finished = true;
                     self.frame_length = 0;
-                    return;
+                    return false;
                 }
                 self.count_target = leading_integer(&self.full_text);
                 let declared = self.style.declared_frame_length();
-                let (state, length) = if self.count_target < declared {
+                // The step is chosen so the count never needs more than the declared frames: ones
+                // below thirty, hundreds below three thousand, thousands above that.
+                let (count_step, length) = if self.count_target < declared {
                     (1, self.count_target)
                 } else if self.count_target / 100 < declared {
                     (100, self.count_target / 100)
                 } else {
                     (1_000, self.count_target / 1_000)
                 };
-                self.count_step = state;
+                self.count_step = count_step;
                 self.frame_length = length.min(declared);
             }
             TransitionStyle::TextOnFrame => {
@@ -724,14 +777,13 @@ impl UiTransition {
                     self.forward = true;
                     self.finished = true;
                     self.frame_length = 0;
-                    return;
+                    return false;
                 }
             }
             TransitionStyle::ReverseSound => {
-                // Its `init` marks it finished outright: it exists to fire one cue.
                 self.forward = true;
                 self.finished = true;
-                return;
+                return false;
             }
             TransitionStyle::ControlBarArrow => {
                 step.diagnostics.push(UiTransitionDiagnostic {
@@ -748,15 +800,7 @@ impl UiTransition {
             }
             _ => {}
         }
-
-        self.forward = false;
-        self.apply(shell, 0, step);
-        self.finished = false;
-        self.forward = true;
-        if self.style == TransitionStyle::CountUp {
-            self.count_value = 0;
-            self.set_text(shell, "0");
-        }
+        true
     }
 
     /// Applies one group frame, if it falls inside this window's own window of frames.

@@ -24,7 +24,8 @@ use cic_render::Capture;
 use cic_ui::{
     UI_CALLBACK_SLOTS, UiCallbackBinding, UiCallbackEdition, UiCallbackSlot, UiClipPolicy,
     UiControlKind, UiDiagnosticKind, UiFrameItem, UiLayout, UiScalePolicy, UiScreenId, UiShell,
-    UiShellEvent, classify_callback_in,
+    UiShellEvent, UiTransitionDiagnostic, UiTransitionDiagnosticKind, UiTransitionDraw,
+    classify_callback_in,
 };
 use cic_vfs::Vfs;
 
@@ -1713,6 +1714,225 @@ fn ui_callback_detail(callback: Option<&str>, binding: Option<UiCallbackBinding>
         (Some(name), Some(binding)) => format!("{name}\t{}", binding.row_name()),
         _ => "-\t-".to_owned(),
     }
+}
+
+/// One group's outcome from a transition sweep.
+#[derive(Debug, Clone)]
+pub struct TransitionRunOutcome {
+    /// The group's name.
+    pub group: String,
+    /// How many windows it declares.
+    pub windows: usize,
+    /// How many of those name a window at all; the two window-less styles name none.
+    pub named: usize,
+    /// How many resolved to a control in a loaded layout, counting the window-less blocks.
+    pub resolved: usize,
+    /// The layouts its windows name, in the order first seen.
+    pub layouts: Vec<String>,
+    /// The frame the group declared it would finish on, after arming.
+    pub declared_frames: i32,
+    /// How many frames were actually stepped before it reported finished.
+    pub stepped_frames: i32,
+    /// Whether it reported finished within the frame budget.
+    pub finished: bool,
+    /// How many draw records it produced across the run.
+    pub draws: usize,
+    /// Every observation, deduplicated by kind and window.
+    pub diagnostics: Vec<TransitionRunNote>,
+}
+
+/// One deduplicated observation from a transition sweep.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransitionRunNote {
+    /// The decorated window name it belongs to.
+    pub window: String,
+    /// A stable kind name.
+    pub kind: &'static str,
+    /// The detail, or a dash.
+    pub detail: String,
+    /// How many times it occurred.
+    pub count: usize,
+}
+
+/// Formats the outcome of running every transition group, one row per group.
+///
+/// This is the compatibility view of the transition runtime: whether each retail group's windows
+/// resolve in the layouts they name, whether it runs to completion, and what it draws on the way.
+#[must_use]
+pub fn render_transition_run(path: &str, outcomes: &[TransitionRunOutcome]) -> String {
+    let mut output =
+        String::from("ui_transition_run\tpath\tgroups\tunfinished\twindows\tnamed\tunresolved\n");
+    let windows: usize = outcomes.iter().map(|outcome| outcome.windows).sum();
+    let named: usize = outcomes.iter().map(|outcome| outcome.named).sum();
+    let resolved: usize = outcomes.iter().map(|outcome| outcome.resolved).sum();
+    let unfinished = outcomes.iter().filter(|outcome| !outcome.finished).count();
+    writeln!(
+        output,
+        "ui_transition_run\t{path}\t{}\t{unfinished}\t{windows}\t{named}\t{}",
+        outcomes.len(),
+        windows - resolved
+    )
+    .expect("writing to a String cannot fail");
+
+    output.push_str(
+        "ui_transition_group_run\tgroup\twindows\tnamed\tresolved\tdeclared_frames\t\
+         stepped_frames\tfinished\tdraws\tlayouts\n",
+    );
+    for outcome in outcomes {
+        writeln!(
+            output,
+            "ui_transition_group_run\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            outcome.group,
+            outcome.windows,
+            outcome.named,
+            outcome.resolved,
+            outcome.declared_frames,
+            outcome.stepped_frames,
+            outcome.finished,
+            outcome.draws,
+            if outcome.layouts.is_empty() {
+                "-".to_owned()
+            } else {
+                outcome.layouts.join(",")
+            }
+        )
+        .expect("writing to a String cannot fail");
+    }
+
+    output.push_str("ui_transition_note\tgroup\twindow\tkind\tcount\tdetail\n");
+    for outcome in outcomes {
+        for note in &outcome.diagnostics {
+            writeln!(
+                output,
+                "ui_transition_note\t{}\t{}\t{}\t{}\t{}",
+                outcome.group, note.window, note.kind, note.count, note.detail
+            )
+            .expect("writing to a String cannot fail");
+        }
+    }
+    output
+}
+
+/// Collapses a run's observations into stable, counted rows.
+#[must_use]
+pub fn summarize_transition_diagnostics(
+    diagnostics: &[UiTransitionDiagnostic],
+) -> Vec<TransitionRunNote> {
+    let mut rows: Vec<TransitionRunNote> = Vec::new();
+    for diagnostic in diagnostics {
+        let (kind, detail) = match diagnostic.kind() {
+            UiTransitionDiagnosticKind::WindowNotFound { name } => {
+                ("window_not_found", name.to_string())
+            }
+            UiTransitionDiagnosticKind::CompanionNotFound { name } => {
+                ("companion_not_found", name.to_string())
+            }
+            UiTransitionDiagnosticKind::UnsupportedDraw { style, reason } => {
+                ("unsupported_draw", format!("{}: {reason}", style.name()))
+            }
+            UiTransitionDiagnosticKind::NeverFinishes {
+                style,
+                declared_length,
+                armed_length,
+            } => (
+                "never_finishes",
+                format!(
+                    "{}: armed for {armed_length} frames but finishes only on state {declared_length}",
+                    style.name()
+                ),
+            ),
+            UiTransitionDiagnosticKind::AudioCue { event } => ("audio_cue", event.to_string()),
+        };
+        let window = diagnostic.window().to_owned();
+        match rows
+            .iter_mut()
+            .find(|row| row.window == window && row.kind == kind && row.detail == detail)
+        {
+            Some(row) => row.count += 1,
+            None => rows.push(TransitionRunNote {
+                window,
+                kind,
+                detail,
+                count: 1,
+            }),
+        }
+    }
+    rows
+}
+
+/// Formats one transition draw as a stable row detail.
+#[must_use]
+pub fn transition_draw_row(draw: &UiTransitionDraw) -> (&'static str, String) {
+    match draw {
+        UiTransitionDraw::Rect {
+            rect,
+            fill,
+            outline,
+            outline_width,
+        } => (
+            "rect",
+            format!(
+                "{},{} {}x{}\tfill={}\toutline={}\twidth={outline_width}",
+                rect.x,
+                rect.y,
+                rect.width,
+                rect.height,
+                fill.map_or_else(|| "-".to_owned(), render_color),
+                outline.map_or_else(|| "-".to_owned(), render_color)
+            ),
+        ),
+        UiTransitionDraw::ControlImage {
+            target,
+            slot,
+            entry,
+            rect,
+            color,
+        } => (
+            "control_image",
+            format!(
+                "screen={} control={} slot={slot:?} entry={entry} {},{} {}x{}\tcolor={}",
+                target.screen.index(),
+                target.control.index(),
+                rect.x,
+                rect.y,
+                rect.width,
+                rect.height,
+                render_color(*color)
+            ),
+        ),
+        UiTransitionDraw::NamedImage { image, rect, color } => (
+            "named_image",
+            format!(
+                "{image} {},{} {}x{}\tcolor={}",
+                rect.x,
+                rect.y,
+                rect.width,
+                rect.height,
+                render_color(*color)
+            ),
+        ),
+        UiTransitionDraw::PushButtonPieces { target, alpha } => (
+            "push_button_pieces",
+            format!(
+                "screen={} control={} alpha={alpha}",
+                target.screen.index(),
+                target.control.index()
+            ),
+        ),
+        UiTransitionDraw::TypedText { target, text } => (
+            "typed_text",
+            format!(
+                "screen={} control={} {text:?}",
+                target.screen.index(),
+                target.control.index()
+            ),
+        ),
+    }
+}
+
+fn render_color(color: cic_formats::WndColor) -> String {
+    let [red, green, blue, alpha] = color.channels();
+    format!("{red} {green} {blue} {alpha}")
 }
 
 /// Formats decoded transition groups as a deterministic tab-separated inventory.

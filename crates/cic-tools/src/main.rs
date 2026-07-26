@@ -41,16 +41,17 @@ use cic_tools::ui_resources::{
     resolve_ui_resources,
 };
 use cic_tools::{
-    GltfTextureRequest, encode_capture_png, encode_map_height_png, pack_w3d_glb, render_csf,
-    render_manifest, render_map, render_map_blend, render_map_height, render_map_lighting,
-    render_map_polygons, render_map_sides, render_map_water, render_map_world_objects,
-    render_options_ini, render_ui_callbacks, render_ui_layout, render_ui_resources,
-    render_ui_shell, render_w3d, render_w3d_gltf, render_w3d_mesh, render_window_transitions,
-    render_wnd, render_wnd_patch,
+    GltfTextureRequest, TransitionRunOutcome, encode_capture_png, encode_map_height_png,
+    pack_w3d_glb, render_csf, render_manifest, render_map, render_map_blend, render_map_height,
+    render_map_lighting, render_map_polygons, render_map_sides, render_map_water,
+    render_map_world_objects, render_options_ini, render_transition_run, render_ui_callbacks,
+    render_ui_layout, render_ui_resources, render_ui_shell, render_w3d, render_w3d_gltf,
+    render_w3d_mesh, render_window_transitions, render_wnd, render_wnd_patch,
+    summarize_transition_diagnostics,
 };
 use cic_ui::{
     UiCallbackEdition, UiClipPolicy, UiFrame, UiFrameItem, UiLayout, UiLimits, UiPresentation,
-    UiScalePolicy, UiScreen, UiShell, UiViewport,
+    UiScalePolicy, UiScreen, UiShell, UiTransitionHandler, UiViewport,
 };
 use cic_vfs::{BigLimits, Vfs, VirtualPath};
 
@@ -81,7 +82,8 @@ const USAGE: &str = "Usage:\n\
   cic-inspect wnd-patch <virtual-path> <patch> [<patch> ...] -- [<mount> ...]\n\
   cic-inspect ui-resources [--texture-size <pixels>] <virtual-path> [<mount> ...]\n\
   cic-inspect ui-layout [--viewport <width>x<height>] [--scale <classic|modern>] <virtual-path> [<mount> ...]\n\
-  cic-inspect ui-transitions [<virtual-path>] [<mount> ...]\n\
+  cic-inspect ui-transitions [--run] [--menu-dir <prefix>] [<virtual-path>] [<mount> ...]\n\
+    --run steps every group over the layouts its window names belong to and reports the outcome.\n\
   cic-inspect ui-callbacks [--viewport <width>x<height>] [--scale <classic|modern>] <virtual-path> [<mount> ...]\n\
   cic-inspect ui-shell [--viewport <width>x<height>] [--scale <classic|modern>] --step <spec> [--step <spec> ...] [<mount> ...]\n\
     A shell step is push:<virtual-path>, pop, pop-immediate, complete, complete-for-push, update,\n\
@@ -98,6 +100,8 @@ const MAX_OBJECT_RESKIN_DEPTH: usize = 32;
 const DEFAULT_STANDING_WATER_TEXTURE: &[u8] = b"TWWater01.tga";
 /// Where `GameWindowTransitionsHandler::load` reads transition groups from.
 const DEFAULT_WINDOW_TRANSITIONS_PATH: &str = "Data/INI/WindowTransitions.ini";
+/// Where retail keeps the shell's WND layouts, which a transition's window names belong to.
+const DEFAULT_MENU_DIRECTORY: &str = "Window/Menus";
 #[derive(Debug)]
 struct CliOptions {
     edition: GameEdition,
@@ -240,21 +244,7 @@ fn run(arguments: impl IntoIterator<Item = String>) -> Result<String, Box<dyn Er
         "wnd-patch" => report_wnd_patch(&mut arguments, &options),
         "ui-callbacks" => report_ui_callbacks(&mut arguments, &options),
         "ui-shell" => report_ui_shell(&mut arguments, &options),
-        "ui-transitions" => {
-            let resource_name = arguments
-                .next()
-                .unwrap_or_else(|| DEFAULT_WINDOW_TRANSITIONS_PATH.to_owned());
-            let mounts = arguments.collect::<Vec<_>>();
-            let vfs = mount_all("ui-transitions", &mounts, &options, ResourceKind::Ui)?;
-            let resource_path = VirtualPath::new(&resource_name)?;
-            let entry = vfs
-                .resolve(&resource_path)
-                .ok_or_else(|| format!("resource not found: {resource_path}"))?;
-            let limits = UiIniLimits::default();
-            let bytes = entry.read(limits.max_file_bytes)?;
-            let ini = parse_window_transitions_ini(&bytes, limits)?;
-            Ok(render_window_transitions(resource_path.as_str(), &ini))
-        }
+        "ui-transitions" => report_ui_transitions(&mut arguments, &options),
         "ui-resources" => report_ui_resources(&mut arguments, &options),
         "ui-layout" => report_ui_layout(&mut arguments, &options),
         "ui-render" => render_ui_capture(&mut arguments, &options),
@@ -2464,6 +2454,155 @@ where
         resolve_texture_path(&vfs, texture.as_bytes())
     });
     Ok(render_ui_resources(&catalog, &localization, &resolution))
+}
+
+/// Reports a transition file's inventory, or with `--run` the outcome of stepping every group.
+fn report_ui_transitions<I>(
+    arguments: &mut std::iter::Peekable<I>,
+    options: &CliOptions,
+) -> Result<String, Box<dyn Error>>
+where
+    I: Iterator<Item = String>,
+{
+    let mut run = false;
+    let mut menu_dir = DEFAULT_MENU_DIRECTORY.to_owned();
+    while arguments
+        .peek()
+        .is_some_and(|argument| argument.starts_with("--"))
+    {
+        match arguments
+            .next()
+            .expect("peeked ui-transitions option")
+            .as_str()
+        {
+            "--run" => run = true,
+            "--menu-dir" => {
+                menu_dir = arguments
+                    .next()
+                    .ok_or("--menu-dir requires a virtual directory prefix")?;
+            }
+            option => return Err(format!("unknown ui-transitions option {option:?}").into()),
+        }
+    }
+    let resource_name = arguments
+        .next()
+        .unwrap_or_else(|| DEFAULT_WINDOW_TRANSITIONS_PATH.to_owned());
+    let mounts = arguments.collect::<Vec<_>>();
+    let vfs = mount_all("ui-transitions", &mounts, options, ResourceKind::Ui)?;
+    let resource_path = VirtualPath::new(&resource_name)?;
+    let entry = vfs
+        .resolve(&resource_path)
+        .ok_or_else(|| format!("resource not found: {resource_path}"))?;
+    let limits = UiIniLimits::default();
+    let bytes = entry.read(limits.max_file_bytes)?;
+    let ini = parse_window_transitions_ini(&bytes, limits)?;
+    if !run {
+        return Ok(render_window_transitions(resource_path.as_str(), &ini));
+    }
+
+    let presentation = UiPresentation::new(UiViewport::new(800, 600)?, UiScalePolicy::Classic);
+    let mut outcomes = Vec::with_capacity(ini.groups().len());
+    for group in ini.groups() {
+        outcomes.push(run_transition_group(
+            &vfs,
+            &ini,
+            group,
+            presentation,
+            &menu_dir,
+        )?);
+    }
+    Ok(render_transition_run(resource_path.as_str(), &outcomes))
+}
+
+/// Steps one group to completion over the layouts its window names belong to.
+///
+/// A `WinName` is a decorated `<layout>:<control>` name, so its prefix names the WND file the control
+/// lives in. Deriving a virtual path from that prefix is a convenience of this sweep, not engine
+/// behaviour: nothing in `cic-ui` or `cic-render` searches for a layout by a window's name.
+fn run_transition_group(
+    vfs: &Vfs,
+    ini: &cic_formats::WindowTransitionsIni,
+    group: &cic_formats::TransitionGroupDef,
+    presentation: UiPresentation,
+    menu_dir: &str,
+) -> Result<TransitionRunOutcome, Box<dyn Error>> {
+    let mut shell = UiShell::new();
+    let mut layouts: Vec<String> = Vec::new();
+    for window in group.windows() {
+        let name = String::from_utf8_lossy(window.window_name_bytes()).into_owned();
+        let Some((prefix, _)) = name.split_once(':') else {
+            continue;
+        };
+        // Retail keeps most shell layouts under `Window/Menus` but a few, such as
+        // `GeneralsExpPoints.wnd`, directly under `Window`, so both are tried.
+        let menus = menu_dir.trim_end_matches('/');
+        let root = menus.rsplit_once('/').map_or("Window", |(head, _)| head);
+        let Some((path, resource_path)) = [format!("{menus}/{prefix}"), format!("{root}/{prefix}")]
+            .into_iter()
+            .find_map(|candidate| {
+                let resolved = VirtualPath::new(&candidate).ok()?;
+                vfs.resolve(&resolved)
+                    .is_some()
+                    .then_some((candidate, resolved))
+            })
+        else {
+            continue;
+        };
+        if layouts.contains(&path) {
+            continue;
+        }
+        let layout = instantiate_ui_layout(vfs, &resource_path, presentation)?;
+        if shell.screen_count() > 0 {
+            // Every push after the first waits on the previous top's shutdown.
+            shell.push(UiScreen::new(resource_path.as_str(), layout), false)?;
+            shell.shutdown_complete();
+        } else {
+            shell.push(UiScreen::new(resource_path.as_str(), layout), false)?;
+        }
+        layouts.push(path);
+    }
+
+    let name = String::from_utf8_lossy(group.name_bytes()).into_owned();
+    let mut handler = UiTransitionHandler::new(ini);
+    let mut diagnostics = Vec::new();
+    let step = handler.set_group(&mut shell, &name, false);
+    diagnostics.extend_from_slice(step.diagnostics());
+    let declared_frames = handler.group_total_frames(&name);
+    // A block with no `WinName` animates no window by design, so it is not counted as expecting one.
+    let targets = handler.group_targets(&name);
+    let named = targets
+        .iter()
+        .filter(|(window, _, _)| !window.is_empty())
+        .count();
+    let resolved = targets
+        .iter()
+        .filter(|(window, _, target)| window.is_empty() || target.is_some())
+        .count();
+
+    // A group is given twice its declared length plus a margin, which is far more than any state
+    // machine needs and still bounded.
+    let budget = declared_frames.saturating_mul(2).saturating_add(8);
+    let mut stepped = 0;
+    let mut draws = 0;
+    while stepped < budget && !handler.is_finished() {
+        let step = handler.update(&mut shell, 1.0);
+        diagnostics.extend_from_slice(step.diagnostics());
+        draws += handler.draws().len();
+        stepped += 1;
+    }
+
+    Ok(TransitionRunOutcome {
+        group: name,
+        windows: group.windows().len(),
+        named,
+        resolved,
+        layouts,
+        declared_frames,
+        stepped_frames: stepped,
+        finished: handler.is_finished(),
+        draws,
+        diagnostics: summarize_transition_diagnostics(&diagnostics),
+    })
 }
 
 /// Reports every retained callback name in one layout with its function-lexicon classification.
