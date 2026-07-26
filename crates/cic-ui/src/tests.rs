@@ -7,9 +7,11 @@
 use cic_formats::{WndColor, WndDrawDataSlot, WndLimits, parse_wnd};
 
 use crate::{
-    UiClipPolicy, UiControlFamily, UiControlId, UiControlKind, UiEvent, UiFrameItem, UiGadgetRole,
-    UiKey, UiLayout, UiLayoutError, UiLimits, UiMouseButton, UiPoint, UiPresentation, UiRect,
-    UiScalePolicy, UiStatus, UiTextAlign, UiViewport,
+    UI_MAX_SHELL_STACK, UiActionAllowlist, UiCallbackBinding, UiCallbackSlot, UiCallbackTable,
+    UiClipPolicy, UiControlFamily, UiControlId, UiControlKind, UiDemoAction, UiEvent, UiFrameItem,
+    UiGadgetRole, UiKey, UiLayout, UiLayoutError, UiLimits, UiMouseButton, UiPoint, UiPresentation,
+    UiRect, UiScalePolicy, UiScreen, UiShell, UiShellError, UiShellEvent, UiStatus, UiTextAlign,
+    UiViewport, classify_callback, is_none_callback,
 };
 
 fn viewport(width: i32, height: i32) -> UiViewport {
@@ -1130,4 +1132,522 @@ fn every_slot_travels_with_a_quad_so_a_composition_can_read_the_one_it_needs() {
         images.names().collect::<Vec<_>>(),
         ["SynthButtonEnabled", "SynthButtonHilite"]
     );
+}
+
+/// A synthetic layout with two overlapping top-level windows and two overlapping children, for
+/// pinning the order the original's window manager searches.
+fn overlapping_layout() -> String {
+    r#"FILE_VERSION = 2;
+STARTLAYOUTBLOCK
+  LAYOUTINIT = MainMenuInit;
+  LAYOUTUPDATE = "SynthMenuUpdate";
+  LAYOUTSHUTDOWN = [NONE];
+ENDLAYOUTBLOCK
+WINDOW
+  WINDOWTYPE = USER;
+  SCREENRECT = UPPERLEFT: 0 0,
+               BOTTOMRIGHT: 400 400,
+               CREATIONRESOLUTION: 800 600;
+  NAME = "SynthOverlap.wnd:RootFirst";
+  STATUS = ENABLED;
+CHILD
+WINDOW
+  WINDOWTYPE = PUSHBUTTON;
+  SCREENRECT = UPPERLEFT: 10 10,
+               BOTTOMRIGHT: 200 200,
+               CREATIONRESOLUTION: 800 600;
+  NAME = "SynthOverlap.wnd:ChildFirst";
+  STATUS = ENABLED;
+END
+CHILD
+WINDOW
+  WINDOWTYPE = PUSHBUTTON;
+  SCREENRECT = UPPERLEFT: 10 10,
+               BOTTOMRIGHT: 200 200,
+               CREATIONRESOLUTION: 800 600;
+  NAME = "SynthOverlap.wnd:ChildSecond";
+  STATUS = ENABLED;
+END
+ENDALLCHILDREN
+END
+WINDOW
+  WINDOWTYPE = USER;
+  SCREENRECT = UPPERLEFT: 0 0,
+               BOTTOMRIGHT: 400 400,
+               CREATIONRESOLUTION: 800 600;
+  NAME = "SynthOverlap.wnd:RootSecond";
+  STATUS = ENABLED;
+END
+"#
+    .to_owned()
+}
+
+/// Instantiates one synthetic source at 800x600 under the classic policy.
+fn instantiate_source(source: &str) -> UiLayout {
+    let document = parse_wnd(source.as_bytes(), WndLimits::default()).expect("decode layout");
+    assert!(
+        document.diagnostics().is_empty(),
+        "synthetic fixture should decode cleanly: {:?}",
+        document.diagnostics()
+    );
+    UiLayout::instantiate(&document, classic(800, 600), UiLimits::default())
+        .expect("instantiate layout")
+}
+
+#[test]
+fn the_layered_search_runs_front_to_back_which_is_reverse_file_order() {
+    let layout = instantiate_source(&overlapping_layout());
+    let root_second = layout
+        .find("SynthOverlap.wnd:RootSecond")
+        .expect("second root");
+    let child_second = layout
+        .find("SynthOverlap.wnd:ChildSecond")
+        .expect("second child");
+
+    // Both roots cover the point. `winCreate` links each new window at the head of the manager's
+    // list, and `getWindowUnderCursor` walks from the head, so the last window in the file is tested
+    // first — and it is also the one drawn on top.
+    assert_eq!(layout.hit_test(UiPoint::new(50, 50)), Some(root_second));
+
+    // The same holds for children, whose list `addWindowToParent` also prepends to.
+    let mut layout = layout;
+    layout.set_hidden(root_second, true);
+    assert_eq!(layout.hit_test(UiPoint::new(50, 50)), Some(child_second));
+    layout.set_hidden(child_second, true);
+    let child_first = layout
+        .find("SynthOverlap.wnd:ChildFirst")
+        .expect("first child");
+    assert_eq!(layout.hit_test(UiPoint::new(50, 50)), Some(child_first));
+}
+
+#[test]
+fn a_layout_retains_its_own_init_update_and_shutdown_names() {
+    let layout = instantiate_source(&overlapping_layout());
+    assert_eq!(layout.layout_init_callback(), Some("MainMenuInit"));
+    // `[NONE]` is retained verbatim rather than turned into an absent name; the classifier decides
+    // what it means.
+    assert_eq!(layout.layout_shutdown_callback(), Some("[NONE]"));
+    assert!(is_none_callback("[NONE]"));
+    assert!(is_none_callback("[None]"));
+    assert!(!is_none_callback("None"));
+
+    // A layout callback keeps its quotes when the file writes them, because the source reads it with
+    // `strtok(buffer, " =")` and never strips a quote — unlike a window callback, which
+    // `parseSystemCallback` and its siblings read by scanning to the first quote and taking what is
+    // inside. Retail writes layout callbacks bare, so they resolve; a quoted one is a name no table
+    // carries, in the original as much as here.
+    assert_eq!(layout.layout_update_callback(), Some("\"SynthMenuUpdate\""));
+    assert_eq!(
+        classify_callback(UiCallbackSlot::LayoutUpdate, "\"MainMenuUpdate\""),
+        UiCallbackBinding::Unknown
+    );
+    assert_eq!(
+        classify_callback(UiCallbackSlot::LayoutUpdate, "MainMenuUpdate"),
+        UiCallbackBinding::Established {
+            table: UiCallbackTable::LayoutUpdate
+        }
+    );
+}
+
+#[test]
+fn a_control_retains_every_callback_slot_as_data() {
+    let layout = instantiate(classic(800, 600));
+    let button = layout.find("SynthMenu.wnd:ButtonSynth").expect("button");
+    let control = layout.control(button);
+    assert_eq!(control.system_callback(), Some("SynthButtonSystem"));
+    assert_eq!(control.input_callback(), None);
+    assert_eq!(control.tooltip_callback(), None);
+    assert_eq!(control.draw_callback(), None);
+}
+
+#[test]
+fn a_callback_name_resolves_only_in_the_table_its_record_searches() {
+    // A pinned slot finds its own table's names and nothing else.
+    assert_eq!(
+        classify_callback(UiCallbackSlot::System, "MainMenuSystem"),
+        UiCallbackBinding::Established {
+            table: UiCallbackTable::System
+        }
+    );
+    assert_eq!(
+        classify_callback(UiCallbackSlot::System, "MainMenuInput"),
+        UiCallbackBinding::Unknown
+    );
+    // Case matters: `nameToKey` compares with `strcmp`.
+    assert_eq!(
+        classify_callback(UiCallbackSlot::System, "mainmenusystem"),
+        UiCallbackBinding::Unknown
+    );
+    // The two slots that default to `TABLE_ANY` reach the device tables, which is the only way a
+    // gadget draw procedure or the device main-menu initializer resolves at all.
+    assert_eq!(
+        classify_callback(UiCallbackSlot::Draw, "W3DGadgetPushButtonImageDraw"),
+        UiCallbackBinding::Established {
+            table: UiCallbackTable::DeviceDraw
+        }
+    );
+    assert_eq!(
+        classify_callback(UiCallbackSlot::LayoutInit, "W3DMainMenuInit"),
+        UiCallbackBinding::Established {
+            table: UiCallbackTable::LayoutDeviceInit
+        }
+    );
+    // An every-table search walks tables in `TableIndex` order, so an earlier table wins.
+    assert_eq!(
+        classify_callback(UiCallbackSlot::Draw, "MainMenuSystem"),
+        UiCallbackBinding::Established {
+            table: UiCallbackTable::System
+        }
+    );
+    // The placeholder and an unknown name are both inert, and distinguishable.
+    assert_eq!(
+        classify_callback(UiCallbackSlot::System, "[None]"),
+        UiCallbackBinding::None
+    );
+    let unknown = classify_callback(UiCallbackSlot::System, "ModdedMenuSystem");
+    assert_eq!(unknown, UiCallbackBinding::Unknown);
+    assert!(unknown.is_inert());
+    assert!(UiCallbackBinding::None.is_inert());
+    assert!(
+        !UiCallbackBinding::Established {
+            table: UiCallbackTable::System
+        }
+        .is_inert()
+    );
+}
+
+#[test]
+fn only_allowlisted_controls_route_a_typed_action() {
+    let mut allowlist = UiActionAllowlist::new();
+    assert!(allowlist.is_empty());
+    allowlist.allow(
+        "MainMenu.wnd:ButtonOptions",
+        UiDemoAction::PushScreen {
+            path: "Menus/OptionsMenu.wnd".to_owned(),
+        },
+    );
+    allowlist.allow("ButtonBack", UiDemoAction::PopScreen);
+
+    // A decorated key resolves by its exact spelling.
+    assert_eq!(
+        allowlist.resolve("MainMenu.wnd:ButtonOptions"),
+        Some(&UiDemoAction::PushScreen {
+            path: "Menus/OptionsMenu.wnd".to_owned()
+        })
+    );
+    // An undecorated key resolves for any layout, which is how one verb covers every menu's Back.
+    assert_eq!(
+        allowlist.resolve("OptionsMenu.wnd:ButtonBack"),
+        Some(&UiDemoAction::PopScreen)
+    );
+    // Anything not listed routes nothing, however established its callback name is.
+    assert_eq!(allowlist.resolve("MainMenu.wnd:ButtonExit"), None);
+    assert_eq!(allowlist.resolve("ButtonOptions"), None);
+    assert_eq!(allowlist.len(), 2);
+    assert_eq!(
+        allowlist
+            .entries()
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>(),
+        ["ButtonBack", "MainMenu.wnd:ButtonOptions"]
+    );
+}
+
+/// Builds a shell screen from the overlapping fixture under a chosen path.
+fn screen(path: &str) -> UiScreen {
+    UiScreen::new(path, instantiate_source(&overlapping_layout()))
+}
+
+#[test]
+fn a_push_shuts_the_current_top_down_before_linking_the_new_screen() {
+    let mut shell = UiShell::new();
+
+    // With an empty stack there is nothing to shut down, so the push completes in one call.
+    let events = shell
+        .push(screen("Menus/MainMenu.wnd"), false)
+        .expect("push onto an empty stack");
+    assert_eq!(shell.screen_count(), 1);
+    assert!(!shell.is_operation_pending());
+    let first = UiShellEvent::ScreenPushed {
+        screen: shell.top_id().expect("a top"),
+        path: "Menus/MainMenu.wnd".to_owned(),
+    };
+    assert_eq!(events[0], first);
+    assert!(matches!(
+        events[1],
+        UiShellEvent::LayoutInit {
+            binding: Some(UiCallbackBinding::Established { .. }),
+            ..
+        }
+    ));
+    assert!(matches!(events[2], UiShellEvent::BroughtForward { .. }));
+
+    // With a visible top the push waits: the top's shutdown runs and nothing is linked yet.
+    let events = shell
+        .push(screen("Menus/OptionsMenu.wnd"), false)
+        .expect("push over a visible top");
+    assert_eq!(events.len(), 1);
+    assert!(matches!(
+        events[0],
+        UiShellEvent::LayoutShutdown {
+            immediate: false,
+            ..
+        }
+    ));
+    assert_eq!(shell.screen_count(), 1);
+    assert!(shell.is_operation_pending());
+
+    // The layout reports its shutdown finished, and only then is the screen linked.
+    let events = shell.shutdown_complete();
+    assert_eq!(shell.screen_count(), 2);
+    assert!(!shell.is_operation_pending());
+    assert_eq!(shell.top().expect("a top").path(), "Menus/OptionsMenu.wnd");
+    assert!(matches!(events[0], UiShellEvent::ScreenPushed { .. }));
+
+    // The pushed screen was brought to the front of the draw order.
+    assert_eq!(
+        shell.draw_order().last().copied(),
+        Some(shell.top_id().expect("a top"))
+    );
+}
+
+#[test]
+fn a_hidden_top_short_circuits_the_shutdown_the_way_the_source_does() {
+    let mut shell = UiShell::new();
+    shell
+        .push(screen("Menus/MainMenu.wnd"), false)
+        .expect("first push");
+    shell.top_mut().expect("a top").layout_mut().hide(true);
+
+    // `Shell::push` only runs a shutdown when the top is visible, so this pushes immediately.
+    let events = shell
+        .push(screen("Menus/OptionsMenu.wnd"), false)
+        .expect("push over a hidden top");
+    assert_eq!(shell.screen_count(), 2);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, UiShellEvent::LayoutShutdown { .. }))
+    );
+}
+
+#[test]
+fn a_pop_waits_for_shutdown_and_an_immediate_pop_does_not() {
+    let mut shell = UiShell::new();
+    shell
+        .push(screen("Menus/MainMenu.wnd"), false)
+        .expect("first push");
+    shell
+        .push(screen("Menus/OptionsMenu.wnd"), false)
+        .expect("second push");
+    shell.shutdown_complete();
+    assert_eq!(shell.screen_count(), 2);
+
+    let events = shell.pop().expect("pop the top");
+    assert_eq!(events.len(), 1);
+    assert!(matches!(
+        events[0],
+        UiShellEvent::LayoutShutdown {
+            immediate: false,
+            ..
+        }
+    ));
+    assert_eq!(shell.screen_count(), 2);
+
+    let events = shell.shutdown_complete();
+    assert_eq!(shell.screen_count(), 1);
+    assert_eq!(
+        events[0],
+        UiShellEvent::ScreenPopped {
+            path: "Menus/OptionsMenu.wnd".to_owned()
+        }
+    );
+    // The screen underneath is initialized again, as though it had just been pushed.
+    assert!(matches!(events[1], UiShellEvent::LayoutInit { .. }));
+
+    // An immediate pop tells the shutdown it is about to go and unlinks in the same call.
+    shell
+        .push(screen("Menus/SkirmishGameOptionsMenu.wnd"), false)
+        .expect("third push");
+    shell.shutdown_complete();
+    let events = shell.pop_immediate().expect("immediate pop");
+    assert_eq!(shell.screen_count(), 1);
+    assert!(matches!(
+        events[0],
+        UiShellEvent::LayoutShutdown {
+            immediate: true,
+            ..
+        }
+    ));
+    assert!(!shell.is_operation_pending());
+}
+
+#[test]
+fn a_pop_that_only_makes_room_for_a_push_skips_the_new_tops_init() {
+    let mut shell = UiShell::new();
+    shell
+        .push(screen("Menus/MainMenu.wnd"), false)
+        .expect("first push");
+    shell
+        .push(screen("Menus/OptionsMenu.wnd"), false)
+        .expect("second push");
+    shell.shutdown_complete();
+
+    shell.pop().expect("pop the top");
+    let events = shell.shutdown_complete_with(true);
+    assert_eq!(shell.screen_count(), 1);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, UiShellEvent::LayoutInit { .. }))
+    );
+}
+
+#[test]
+fn the_shell_refuses_an_empty_path_a_full_stack_and_an_overlapping_operation() {
+    let mut shell = UiShell::new();
+    assert_eq!(
+        shell.push(screen(""), false).err(),
+        Some(UiShellError::EmptyPath)
+    );
+
+    for index in 0..UI_MAX_SHELL_STACK {
+        shell
+            .push(screen(&format!("Menus/Synth{index}.wnd")), false)
+            .expect("push within the bound");
+        // Every push but the first waits on the previous top's shutdown.
+        shell.shutdown_complete();
+    }
+    assert_eq!(shell.screen_count(), UI_MAX_SHELL_STACK);
+    assert_eq!(
+        shell.push(screen("Menus/SynthOver.wnd"), false).err(),
+        Some(UiShellError::StackFull {
+            path: "Menus/SynthOver.wnd".to_owned().into_boxed_str(),
+            limit: UI_MAX_SHELL_STACK,
+        })
+    );
+
+    // A second operation while one is pending is refused rather than losing the first.
+    shell.pop().expect("pop the top");
+    assert_eq!(shell.pop().err(), Some(UiShellError::OperationPending));
+    assert_eq!(
+        shell.push(screen("Menus/Synth0.wnd"), false).err(),
+        Some(UiShellError::OperationPending)
+    );
+}
+
+#[test]
+fn hiding_the_shell_hides_every_screen_and_updates_run_from_the_top_down() {
+    let mut shell = UiShell::new();
+    shell
+        .push(screen("Menus/MainMenu.wnd"), false)
+        .expect("first push");
+    shell
+        .push(screen("Menus/OptionsMenu.wnd"), false)
+        .expect("second push");
+    shell.shutdown_complete();
+
+    let events = shell.hide(true);
+    assert_eq!(
+        events,
+        vec![UiShellEvent::VisibilityChanged { hidden: true }]
+    );
+    assert!(shell.is_hidden());
+    for entry in shell.screens() {
+        assert!(entry.layout().is_hidden());
+        for root in entry.layout().roots() {
+            assert!(entry.layout().control(*root).is_hidden());
+        }
+    }
+    shell.hide(false);
+    assert!(!shell.is_hidden());
+    assert!(!shell.top().expect("a top").layout().is_hidden());
+
+    // `Shell::update` runs every screen's update starting at the top index and counting down.
+    let updates = shell.update();
+    let order: Vec<usize> = updates
+        .iter()
+        .map(|event| match event {
+            UiShellEvent::LayoutUpdate { screen, .. } => screen.index(),
+            other => panic!("expected an update event, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(order, vec![1, 0]);
+}
+
+#[test]
+fn the_shell_searches_every_screen_front_to_back_in_one_layered_pass() {
+    let mut shell = UiShell::new();
+    shell
+        .push(screen("Menus/MainMenu.wnd"), false)
+        .expect("first push");
+    shell
+        .push(screen("Menus/OptionsMenu.wnd"), false)
+        .expect("second push");
+    shell.shutdown_complete();
+    let bottom = shell
+        .find_screen_by_path("Menus/MainMenu.wnd")
+        .expect("bottom screen");
+    let top = shell.top_id().expect("a top");
+
+    // Both screens cover the point; the front of the draw order answers.
+    let (screen_id, _) = shell.hit_test(UiPoint::new(50, 50)).expect("a hit");
+    assert_eq!(screen_id, top);
+
+    // Bringing the bottom screen forward changes only the draw order, not the stack.
+    shell.bring_forward(bottom);
+    assert_eq!(shell.top_id(), Some(top));
+    let (screen_id, _) = shell.hit_test(UiPoint::new(50, 50)).expect("a hit");
+    assert_eq!(screen_id, bottom);
+
+    // A hidden screen takes no input, so the search falls through to the one behind it.
+    shell
+        .screen_mut(bottom)
+        .expect("bottom screen")
+        .layout_mut()
+        .hide(true);
+    let (screen_id, _) = shell.hit_test(UiPoint::new(50, 50)).expect("a hit");
+    assert_eq!(screen_id, top);
+
+    // Outside every screen nothing is hit.
+    assert!(shell.hit_test(UiPoint::new(700, 500)).is_none());
+}
+
+#[test]
+fn showing_and_hiding_the_shell_run_the_tops_callbacks_without_moving_the_stack() {
+    let mut shell = UiShell::new();
+    assert!(shell.show_shell(true).is_empty());
+    assert!(shell.hide_shell().is_empty());
+    shell
+        .push(screen("Menus/MainMenu.wnd"), false)
+        .expect("first push");
+
+    let events = shell.show_shell(true);
+    assert!(matches!(events[0], UiShellEvent::LayoutInit { .. }));
+    assert_eq!(shell.screen_count(), 1);
+    assert!(shell.show_shell(false).is_empty());
+
+    // `Shell::hideShell` passes an immediate pop even though it pops nothing.
+    let events = shell.hide_shell();
+    assert!(matches!(
+        events[0],
+        UiShellEvent::LayoutShutdown {
+            immediate: true,
+            ..
+        }
+    ));
+    assert_eq!(shell.screen_count(), 1);
+}
+
+#[test]
+fn a_screen_is_found_by_its_path_case_insensitively() {
+    let mut shell = UiShell::new();
+    shell
+        .push(screen("Menus/MainMenu.wnd"), false)
+        .expect("first push");
+    let top = shell.top_id().expect("a top");
+    assert_eq!(shell.find_screen_by_path("Menus/MainMenu.wnd"), Some(top));
+    assert_eq!(shell.find_screen_by_path("menus/mainmenu.wnd"), Some(top));
+    assert_eq!(shell.find_screen_by_path("Menus/OptionsMenu.wnd"), None);
+    assert_eq!(shell.find_screen_by_path(""), None);
 }

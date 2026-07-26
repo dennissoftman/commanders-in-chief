@@ -7,6 +7,31 @@ land under the active milestone heading.
 
 ### Added
 
+- Added a retained shell stack (`UiShell`) reproducing the original's sixteen-screen pseudo-stack:
+  push, pop, immediate pop, show-shell, hide-shell, hiding every screen, updates from the stack top
+  downwards, and a draw order separate from the stack so bringing a screen forward does not change
+  navigation history. The two-phase push and pop are exposed rather than hidden — a push returns the
+  current top's shutdown as a typed event and the caller reports when that shutdown finished — so a
+  navigation sequence can be stepped deterministically with no clock involved.
+- Added safe callback classification. The original's own allowlist is `FunctionLexicon`'s nine fixed
+  name tables, where a name absent from the searched table yields a pointer nothing ever calls; those
+  tables are now carried as data, and every retained WND callback name resolves to established, the
+  explicit `[None]` placeholder, or unknown. The last two are inert, and reportable. Classification is
+  edition-aware, because Zero Hour registers six names base Generals does not. A separate
+  project-owned action allowlist decides which controls may run a typed demo action, so a control with
+  a perfectly valid retail callback name still does nothing unless it was listed.
+- Added a bounded `Data/INI/WindowTransitions.ini` decoder over the existing shared UI INI lexer,
+  covering named groups, `FireOnce`, and the nested `Window` sub-blocks, with all fifteen established
+  transition styles and each one's frame length. Both installed editions decode with no diagnostics:
+  56 groups over 381 windows in Zero Hour, 55 over 379 in base Generals.
+- Added `cic-inspect ui-callbacks`, which reports every retained callback name in a layout with its
+  slot, binding, and resolving table; `cic-inspect ui-shell`, which drives an explicit push/pop script
+  over real layouts and reports each step's events plus the resulting stack, draw order, and
+  visibility; and `cic-inspect ui-transitions`, which reports a transition file's groups, per-style
+  census, and diagnostics.
+- Controls now retain their `TOOLTIPCALLBACK` name alongside the system, input, and draw names, and a
+  layout retains its own `LAYOUTINIT`, `LAYOUTUPDATE`, and `LAYOUTSHUTDOWN` names.
+
 - Added `cic-camera`, a dependency-free crate holding the real-time-strategy camera model so the
   inspection viewers, a future editor, and the game share one implementation. Callers translate their
   own bindings into semantic intents and supply terrain elevation through a trait, so the crate
@@ -255,6 +280,12 @@ land under the active milestone heading.
   report could not be traced back to the control it came from.
 
 ### Fixed
+
+- Hit testing searched top-level windows and children in file order, but the original's window manager
+  links every new window at the head of its list, so it tests the last window in the file first — which
+  is also the front-most one, since drawing runs from the tail backwards. Overlapping siblings
+  therefore resolved backwards. Only overlapping siblings could tell the difference, which is why the
+  earlier per-layout render sweeps did not surface it.
 
 - Fixed the whole-control border being drawn from the wrong rule, which was both adding outlines the
   original never draws and omitting ones it does. This project had gated the border on the

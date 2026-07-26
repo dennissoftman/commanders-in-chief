@@ -105,17 +105,41 @@ Hour corpus, and `OptionsMenu.wnd`'s combos now render as retail draws them. The
 a part's art is not on its parent — a scroll bar's thumb reads `SLIDERTHUMB*` from the list box two
 levels above it — because the original bridges that distance through file statics.
 
-**Gate 7's shell stack is the next verified step**: allowlisted typed callbacks, push/pop/
-bring-forward/hide semantics, and transition groups. It is what hides the subpanels a retail menu
-overlays today — rendering `MainMenu.wnd` shows every subpanel at once, because retail hides them
-from menu code rather than through `STATUS` — and it is the direct prerequisite for Gate 8's
-main-menu artifact.
+Gate 7's safe callbacks and shell stack are implemented. The allowlist did not need inventing: the
+original already has one, in `FunctionLexicon`'s nine fixed name tables, where a name absent from the
+searched table yields a null pointer nothing ever calls. `cic-ui` carries those tables as data and
+classifies every retained name as established, the explicit `[None]` placeholder, or unknown — the
+last two inert here exactly as they were inert there — while a separate project-owned
+`UiActionAllowlist` decides which controls may run a typed demo action at all. `UiShell` reproduces
+`Shell`'s sixteen-screen pseudo-stack, including the two-phase push and pop whose purpose is
+animation, with the shutdown protocol exposed rather than hidden so a capture steps it without a
+clock. Bounded `WindowTransitions.ini` decoding landed alongside, which is the transition part of
+Gate 4's remainder.
 
-Two smaller pieces remain queued alongside it. The rest of Gate 4 is bounded `WindowTransition`,
-`MouseCursor`, and `ShellMenuScheme` subsets, which live in the same INI family and reuse the shared
-lexer. And the ornamental border is unimplemented: `WIN_STATUS_BORDER` makes the window manager tile
-a frame from hardcoded `BorderTop`/`BorderCorner__`-style mapped images, which is a different border
-from the colour-path outline and is drawn by no draw procedure.
+That pass is verified against both installations: 6,908 retained callback names across Zero Hour's
+80 layouts and 6,350 across Generals' 78 classify with six and five unknowns, every one of them a
+layout-level name the shipped client's own lexicon never registers. The transition INI decodes with
+zero diagnostics in both — 56 groups over 381 windows in Zero Hour, 55 over 379 in Generals — and
+`cic-inspect ui-shell` walks Main Menu -> Options -> back -> Skirmish Options -> back over the real
+layouts with every layout callback resolving, byte-identically across runs.
+
+Reading the window manager to build that also found a Gate 5 bug and fixed it: hit testing walked
+top-level windows and children in file order, but `winCreate` links every new window at the *head* of
+its list, so the original tests the last window in the file first — which is also the front-most one,
+since `winRepaint` draws from the tail backwards. Only overlapping siblings could tell the difference,
+which is why the Gate 6 sweeps never surfaced it.
+
+**Gate 7's transition runtime is the next verified step**: driving the decoded groups' current,
+pending, and draw-group scheduling, per-window frame delays, reverse, skip, and fire-once semantics,
+and each style's hide/show state machine. After it, Gate 8's main-menu artifact — which the shell
+stack has now unblocked, since rendering `MainMenu.wnd` still shows every subpanel at once because
+retail hides them from menu code rather than through `STATUS`.
+
+Two smaller pieces remain queued alongside it. The rest of Gate 4 is bounded `MouseCursor` and
+`ShellMenuScheme` subsets, which live in the same INI family and reuse the shared lexer. And the
+ornamental border is unimplemented: `WIN_STATUS_BORDER` makes the window manager tile a frame from
+hardcoded `BorderTop`/`BorderCorner__`-style mapped images, which is a different border from the
+colour-path outline and is drawn by no draw procedure.
 
 Separately, [docs/formats/csf.md](docs/formats/csf.md) records the language-selection mechanism
 against the pinned source, for the planned goal of shipping languages the original game never had.

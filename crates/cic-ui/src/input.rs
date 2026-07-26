@@ -128,10 +128,19 @@ impl UiLayout {
     /// Returns the control the pointer is over, reproducing the original's layered search.
     ///
     /// The original searches top-level windows in three passes — `ABOVE` first, then windows with
-    /// none of `ABOVE`/`BELOW`/`HIDDEN`, then `BELOW` — and descends into the first matching child
-    /// in source order, skipping a hidden or disabled child and continuing with its later siblings.
-    /// A control declaring `NO_INPUT` discards the result entirely. While a control holds the mouse,
-    /// the search is confined to it. Every edge test is inclusive.
+    /// none of `ABOVE`/`BELOW`/`HIDDEN`, then `BELOW` — and descends into the first matching child,
+    /// skipping a hidden or disabled child and continuing with the next in list order. A control
+    /// declaring `NO_INPUT` discards the result entirely. While a control holds the mouse, the search
+    /// is confined to it. Every edge test is inclusive.
+    ///
+    /// Both searches run in reverse source order, because that is the order the original's window
+    /// manager holds. `winCreate` links every new window at the head of its list — the top-level list
+    /// through `linkWindow`, a child list through `addWindowToParent`, whose append-at-end variant is
+    /// commented out — so a layout's list is the reverse of its file order, and `winBringToTop` pulls
+    /// from the layout tail specifically to preserve that. `getWindowUnderCursor` and
+    /// `winPointInChild` then walk from the head, so the last window in the file is tested first.
+    /// This is also the front-most window: `winRepaint` draws from the tail backwards, which puts the
+    /// last window in the file on top.
     #[must_use]
     pub fn hit_test(&self, point: UiPoint) -> Option<UiControlId> {
         if let Some(capture) = self.capture() {
@@ -143,23 +152,38 @@ impl UiLayout {
             |status| status.contains(UiStatus::BELOW),
         ];
         for accepts in passes {
-            for root in self.roots() {
-                let control = self.control(*root);
-                if control.is_hidden() || !accepts(control.status()) {
-                    continue;
-                }
-                if !self.screen_rect(*root).contains(point) || !control.is_enabled() {
-                    continue;
-                }
-                return self.filter_input(self.descend(*root, point));
+            if let Some(control) = self.hit_test_pass(point, accepts) {
+                return Some(control);
             }
+        }
+        None
+    }
+
+    /// Runs one pass of the layered search over this layout's top-level controls.
+    ///
+    /// The shell owns the three-pass loop when more than one layout is up, because the original's
+    /// passes run over one global window list spanning every layout rather than per layout.
+    pub(crate) fn hit_test_pass(
+        &self,
+        point: UiPoint,
+        accepts: fn(UiStatus) -> bool,
+    ) -> Option<UiControlId> {
+        for root in self.roots().iter().rev() {
+            let control = self.control(*root);
+            if control.is_hidden() || !accepts(control.status()) {
+                continue;
+            }
+            if !self.screen_rect(*root).contains(point) || !control.is_enabled() {
+                continue;
+            }
+            return self.filter_input(self.descend(*root, point));
         }
         None
     }
 
     /// Descends into the first visible, enabled child containing the point, or returns `parent`.
     fn descend(&self, parent: UiControlId, point: UiPoint) -> UiControlId {
-        for child in self.control(parent).children() {
+        for child in self.control(parent).children().iter().rev() {
             let control = self.control(*child);
             if control.is_hidden() || !self.screen_rect(*child).contains(point) {
                 continue;
@@ -167,8 +191,8 @@ impl UiLayout {
             if control.is_enabled() {
                 return self.descend(*child, point);
             }
-            // A disabled child that contains the point is skipped, and iteration continues with
-            // its later siblings, exactly as the source does.
+            // A disabled child that contains the point is skipped, and iteration continues with the
+            // next child in list order, exactly as the source does.
         }
         parent
     }

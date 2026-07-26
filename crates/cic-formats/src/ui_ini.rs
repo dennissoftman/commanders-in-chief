@@ -37,6 +37,8 @@ pub enum UiIniFormat {
     HeaderTemplate,
     /// `Data/<Language>/Language.ini` font families and text presentation policy.
     Language,
+    /// `Data/INI/WindowTransitions.ini` named shell transition groups.
+    WindowTransition,
 }
 
 impl UiIniFormat {
@@ -47,6 +49,7 @@ impl UiIniFormat {
             Self::MappedImage => "MappedImage",
             Self::HeaderTemplate => "HeaderTemplate",
             Self::Language => "Language",
+            Self::WindowTransition => "WindowTransition",
         }
     }
 }
@@ -57,6 +60,7 @@ impl Display for UiIniFormat {
             Self::MappedImage => "MappedImage INI",
             Self::HeaderTemplate => "HeaderTemplate INI",
             Self::Language => "Language INI",
+            Self::WindowTransition => "WindowTransition INI",
         };
         formatter.write_str(name)
     }

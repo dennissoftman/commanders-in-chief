@@ -520,6 +520,7 @@ pub struct UiControl {
     header_template: Option<String>,
     system_callback: Option<String>,
     input_callback: Option<String>,
+    tooltip_callback: Option<String>,
     draw_callback: Option<String>,
     draw_data: Vec<(WndDrawDataSlot, WndDrawData)>,
     text_colors: Option<WndTextColors>,
@@ -662,6 +663,12 @@ impl UiControl {
     #[must_use]
     pub fn input_callback(&self) -> Option<&str> {
         self.input_callback.as_deref()
+    }
+
+    /// Returns the retained tooltip callback name. It is data: nothing here dispatches it.
+    #[must_use]
+    pub fn tooltip_callback(&self) -> Option<&str> {
+        self.tooltip_callback.as_deref()
     }
 
     /// Returns the family-specific retained state.
@@ -982,6 +989,10 @@ pub struct UiLayout {
     focus: Option<UiControlId>,
     capture: Option<UiControlId>,
     diagnostics: Vec<UiDiagnostic>,
+    layout_init: Option<String>,
+    layout_update: Option<String>,
+    layout_shutdown: Option<String>,
+    hidden: bool,
 }
 
 impl UiLayout {
@@ -1002,6 +1013,7 @@ impl UiLayout {
         presentation: UiPresentation,
         limits: UiLimits,
     ) -> Result<Self, UiLayoutError> {
+        let block = document.layout();
         let mut layout = Self {
             controls: Vec::new(),
             roots: Vec::new(),
@@ -1011,6 +1023,12 @@ impl UiLayout {
             focus: None,
             capture: None,
             diagnostics: Vec::new(),
+            layout_init: block.and_then(|block| block.init()).map(str::to_owned),
+            layout_update: block.and_then(|block| block.update()).map(str::to_owned),
+            layout_shutdown: block.and_then(|block| block.shutdown()).map(str::to_owned),
+            // `WindowLayout`'s constructor leaves a layout visible; its windows carry their own
+            // declared `HIDDEN` bits independently.
+            hidden: false,
         };
         for window in document.windows() {
             let id = layout.add(window, None, 0)?;
@@ -1088,6 +1106,10 @@ impl UiLayout {
             input_callback: window
                 .callbacks()
                 .get(cic_formats::WndCallbackKind::Input)
+                .map(str::to_owned),
+            tooltip_callback: window
+                .callbacks()
+                .get(cic_formats::WndCallbackKind::Tooltip)
                 .map(str::to_owned),
             draw_callback: window
                 .callbacks()
@@ -1544,6 +1566,7 @@ impl UiLayout {
             header_template: None,
             system_callback: None,
             input_callback: None,
+            tooltip_callback: None,
             draw_callback: None,
             draw_data,
             text_colors,
@@ -1793,6 +1816,46 @@ impl UiLayout {
     #[must_use]
     pub fn diagnostics(&self) -> &[UiDiagnostic] {
         &self.diagnostics
+    }
+
+    /// Returns the retained `LAYOUTINIT` callback name. It is data: nothing here dispatches it.
+    #[must_use]
+    pub fn layout_init_callback(&self) -> Option<&str> {
+        self.layout_init.as_deref()
+    }
+
+    /// Returns the retained `LAYOUTUPDATE` callback name. It is data: nothing here dispatches it.
+    #[must_use]
+    pub fn layout_update_callback(&self) -> Option<&str> {
+        self.layout_update.as_deref()
+    }
+
+    /// Returns the retained `LAYOUTSHUTDOWN` callback name. It is data: nothing here dispatches it.
+    #[must_use]
+    pub fn layout_shutdown_callback(&self) -> Option<&str> {
+        self.layout_shutdown.as_deref()
+    }
+
+    /// Returns whether the whole layout was hidden by [`UiLayout::hide`].
+    ///
+    /// This is `WindowLayout::isHidden`, the layout's own recorded state rather than a scan of its
+    /// windows, and the shell reads it to decide whether a screen still needs shutting down.
+    #[must_use]
+    pub const fn is_hidden(&self) -> bool {
+        self.hidden
+    }
+
+    /// Hides or shows every top-level control, and records the layout's own hidden state.
+    ///
+    /// `WindowLayout::hide` walks the layout's window list — which `winCreateFromScript` fills with
+    /// exactly the file's top-level `WINDOW` blocks, in file order — and calls `winHide` on each.
+    /// Children follow because a hidden parent hides its subtree.
+    pub fn hide(&mut self, hidden: bool) {
+        let roots = self.roots.clone();
+        for root in roots {
+            self.set_hidden(root, hidden);
+        }
+        self.hidden = hidden;
     }
 
     /// Returns one control.
