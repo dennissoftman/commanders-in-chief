@@ -148,6 +148,18 @@ land under the active milestone heading.
   mechanism's remaining integration step. `select_wnd_patches` picks the patches in an ordered set
   that target one document, and `ui-menu --patch` applies them at instantiation and reports the
   provenance of every field they wrote.
+- Added `cic-inspect ui-view`, which runs the retained shell in a real window with real mouse and
+  keyboard input. It shares the whole session with `ui-menu` and differs only in where input comes
+  from and where frames go, so the same binding table, allowlist, shell stack, transition handler,
+  and patched layouts drive both. The surface takes a *non*-sRGB format deliberately: the UI pipeline
+  writes bytes that are already display-encoded, so an sRGB target would encode them twice and wash
+  the menu out, and this way the window matches what `ui-render` writes to a PNG.
+
+  Observed live: the window opens showing the logo and nothing else, the first pointer move reveals
+  the default panel, hover tracks from control to control as the pointer crosses them, and clicking
+  runs both a subpanel transition and a screen push. Changing a display setting there is implemented
+  but has not yet been seen to reconfigure the surface — the viewer reports the surface format, input
+  counts, and accepted selection so that can be diagnosed in one run.
 - Added `cic-inspect ui-display`, which drives the display transaction against a catalog built from
   `--monitor` and `--mode` and stepped by explicit millisecond stamps, so the whole run is
   reproducible. `--enumerate` reads the host display instead and says so in its own row, being the

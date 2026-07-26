@@ -175,12 +175,13 @@ lighting contribution.
 | --- | --- |
 | `wnd <path>` | Source-order inventory of the decoded WND hierarchy, fields, and diagnostics |
 | `wnd-render <path> [<out.png>]` | Surface-free capture of every window rectangle plus RGBA hash |
-| `wnd-patch <path> <patch>... -- [<mount>...]` | Report a patch overlay's operations, provenance, and resulting hierarchy |
+| `wnd-patch <path> --patch <file>... [<mount>...]` | Report a patch overlay's operations, provenance, and resulting hierarchy |
 | `ui-resources <path>` | Resolve the mapped images, fonts, header templates, and CSF labels a layout names |
 | `ui-layout <path>` | Instantiate a layout for a viewport and report the retained tree, tab order, and frame order |
 | `ui-render <path> [<out.png>]` | Deterministic UI capture plus RGBA hash, with staged quad/batch/text counts |
 | `ui-menu --step <spec>...` | Drive the user-owned main menu through a scripted navigation session, capturing as it goes |
 | `ui-display --step <spec>...` | Drive display settings against an injected mode catalog, or `--enumerate` the host's |
+| `ui-view` | Run the shell in a real window with real mouse and keyboard input |
 
 `ui-resources` takes `[--texture-size <pixels>]`. `ui-layout` takes
 `[--viewport <width>x<height>] [--scale <classic\|modern>]`, and `ui-render` adds
@@ -220,6 +221,19 @@ here that is not reproducible:
 ```bash
 cargo run -p cic-tools --release -- ui-display --enumerate --step poll:0
 ```
+
+`ui-view` is the interactive counterpart. It shares the whole session with `ui-menu` — same bindings,
+allowlist, shell stack, transitions, and patches — and differs only in where input comes from. Escape
+closes it, and it prints the same session report on exit plus the surface format and input counts:
+
+```bash
+cargo run -p cic-tools --release -- --zh ui-view --viewport 1280x720 --font C:/Windows/Fonts/arial.ttf --patch crates/cic-tools/patches/options-modern-display.wndpatch
+```
+
+The window opens showing only the logo, for the same reason the first capture above does. Changing a
+display setting on the Options page is wired through to real surface reconfiguration with a timed
+confirmation — Enter keeps a change, Escape reverts it — but that path has not yet been observed
+working end to end; `ui-display` is where the same transaction is actually tested.
 
 `wnd-render` is a Gate 1 proof-of-pipeline only: flat coloured rectangles, no images, text, or
 gadget visuals. `ui-render` is the real presentation path.

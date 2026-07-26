@@ -2170,6 +2170,37 @@ impl UiLayout {
         }
     }
 
+    /// Replaces a combo box's entries and clears its selection.
+    ///
+    /// A WND declares no entries for a combo box: retail's own menu code fills one at runtime with
+    /// `GadgetComboBoxAddEntry` — `OptionsMenuInit` populates the resolution combo exactly this way —
+    /// so an application supplying a list is reproducing the original's arrangement, not working
+    /// around a gap in the format. The selection is cleared because the old index means nothing
+    /// against a new list.
+    ///
+    /// Returns whether the control is a combo box.
+    pub fn set_combo_entries(&mut self, id: UiControlId, values: Vec<String>) -> bool {
+        match &mut self.controls[id.0].kind {
+            UiControlKind::ComboBox {
+                entries, selected, ..
+            } => {
+                *entries = values;
+                *selected = None;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Returns a combo box's entries, empty when the control is not one.
+    #[must_use]
+    pub fn combo_entries(&self, id: UiControlId) -> &[String] {
+        match &self.controls[id.0].kind {
+            UiControlKind::ComboBox { entries, .. } => entries,
+            _ => &[],
+        }
+    }
+
     /// Selects one combo entry, refusing an index outside the entry list.
     pub fn select_combo_entry(&mut self, id: UiControlId, entry: usize) -> bool {
         match &mut self.controls[id.0].kind {

@@ -112,6 +112,22 @@ pub fn enumerate_display_catalog() -> Result<UiDisplayCatalog, Box<dyn std::erro
         .ok_or("the event loop exited before reporting any monitor")??)
 }
 
+/// Returns the monitor whose derived key matches, enumerating in the same order the catalog did.
+///
+/// The key embeds the enumeration index, so a match is only meaningful against the same enumeration
+/// the catalog was built from — which is the whole reason [`UiMonitor`] promises per-session
+/// stability and no more.
+#[must_use]
+pub fn find_monitor(
+    monitors: impl Iterator<Item = MonitorHandle>,
+    key: &str,
+) -> Option<MonitorHandle> {
+    monitors
+        .enumerate()
+        .find(|(index, monitor)| monitor_key(monitor, *index) == key)
+        .map(|(_, monitor)| monitor)
+}
+
 /// Composes a per-session key for one monitor.
 ///
 /// Two monitors of the same model report the same name and size, so the virtual-desktop position is

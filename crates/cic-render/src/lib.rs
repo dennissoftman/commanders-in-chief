@@ -14,6 +14,7 @@ mod terrain_viewer;
 mod terrain_virtual;
 mod ui;
 mod ui_text;
+mod ui_view;
 mod viewer;
 mod water;
 mod wnd_scene;
@@ -27,7 +28,7 @@ use cic_formats::W3dStaticMesh;
 use sha2::{Digest, Sha256};
 
 pub use boundary::{BoundaryStagingError, BoundaryVertex, StagedBoundaryFence};
-pub use display::{display_catalog_from_monitors, enumerate_display_catalog};
+pub use display::{display_catalog_from_monitors, enumerate_display_catalog, find_monitor};
 pub use lighting::{TerrainDirectionalLight, TerrainLighting};
 pub use map_overlay::{MapOverlayError, MapOverlayVertex, StagedMapOverlays};
 pub use map_scene::{
@@ -55,6 +56,9 @@ pub use ui::{
     UiTexturePage, UiVertex,
 };
 pub use ui_text::{UiFontSet, UiTextError};
+pub use ui_view::{
+    UiViewContext, UiViewEvent, UiViewHost, UiViewRequest, UiViewSummary, run_ui_view,
+};
 use viewer::{GpuResourceManager, MaterialPipelines, create_material_layout};
 pub use viewer::{ViewerError, run_model_viewer};
 pub use water::{

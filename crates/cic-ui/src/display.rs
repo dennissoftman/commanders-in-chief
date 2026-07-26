@@ -854,6 +854,15 @@ impl UiDisplayTransaction {
         self.pending.as_ref()
     }
 
+    /// Returns when the confirmation window closes, on the caller's own clock.
+    ///
+    /// A dialog counting down needs this to say how long is left; nothing about the transaction
+    /// depends on anyone reading it.
+    #[must_use]
+    pub const fn deadline_ms(&self) -> Option<u64> {
+        self.deadline_ms
+    }
+
     /// Returns whether a confirmation is outstanding.
     #[must_use]
     pub const fn is_awaiting_confirmation(&self) -> bool {

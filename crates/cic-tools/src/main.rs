@@ -27,9 +27,9 @@ use cic_render::{
     StaticSceneryDiagnosticKind, StaticSceneryInstance, TerrainCompatibilityPolicy,
     TerrainLighting, TerrainStagingOptions, TextureId, TextureResourceManager,
     TreeSwayPresentation, UiImageBinding, UiStagingDiagnosticKind, UiStagingLimits, UiTextPolicy,
-    UiTexturePage, WaterAppearance, WaterCausticSequence, WaterPresentationPolicy,
-    WaterSurfaceTexture, bridge_tower_placements, enumerate_display_catalog, run_map_view,
-    run_model_viewer,
+    UiTexturePage, UiViewContext, UiViewEvent, UiViewHost, UiViewRequest, WaterAppearance,
+    WaterCausticSequence, WaterPresentationPolicy, WaterSurfaceTexture, bridge_tower_placements,
+    enumerate_display_catalog, run_map_view, run_model_viewer, run_ui_view,
 };
 use cic_tools::preferences::persist_confirmed_display;
 use cic_tools::resource::{
@@ -261,6 +261,7 @@ fn run(arguments: impl IntoIterator<Item = String>) -> Result<String, Box<dyn Er
         "ui-shell" => report_ui_shell(&mut arguments, &options),
         "ui-menu" => report_ui_menu(&mut arguments, &options),
         "ui-display" => report_ui_display(&mut arguments, &options),
+        "ui-view" => run_ui_view_command(&mut arguments, &options),
         "ui-transitions" => report_ui_transitions(&mut arguments, &options),
         "ui-resources" => report_ui_resources(&mut arguments, &options),
         "ui-layout" => report_ui_layout(&mut arguments, &options),
@@ -2954,6 +2955,637 @@ where
         &session.provenance,
         &session.shell,
     ))
+}
+
+/// Runs the retained shell in a real window, where a display change reconfigures a real surface.
+///
+/// This is the interactive counterpart to `ui-menu`. It shares the whole session — the same binding
+/// table, allowlist, shell stack, transition handler, and patched layouts — and differs only in
+/// where input comes from and where frames go. Nothing here is deterministic and nothing pretends to
+/// be: `--enumerate` reads the host's monitors and the confirmation timeout runs on a real clock,
+/// which is exactly what `ui-display` exists to avoid.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one command: parse its options, mount, build the session, then run the window"
+)]
+fn run_ui_view_command<I>(
+    arguments: &mut std::iter::Peekable<I>,
+    options: &CliOptions,
+) -> Result<String, Box<dyn Error>>
+where
+    I: Iterator<Item = String>,
+{
+    let mut presentation = parse_ui_presentation("ui-view", arguments)?;
+    let mut clip = UiClipPolicy::None;
+    let mut texture_size = DEFAULT_MAPPED_IMAGE_TEXTURE_SIZE;
+    let mut transitions_path = DEFAULT_WINDOW_TRANSITIONS_PATH.to_owned();
+    let mut menu_dir = DEFAULT_MENU_DIRECTORY.to_owned();
+    let mut font_paths: Vec<PathBuf> = Vec::new();
+    let mut patch_paths: Vec<PathBuf> = Vec::new();
+    let mut preferences: Option<PathBuf> = None;
+    let mut timeout_ms = UI_DISPLAY_CONFIRM_TIMEOUT_MS;
+    let mut mounts = Vec::new();
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--font" => font_paths.push(PathBuf::from(
+                arguments.next().ok_or("--font requires a file path")?,
+            )),
+            "--patch" => patch_paths.push(PathBuf::from(
+                arguments.next().ok_or("--patch requires a file path")?,
+            )),
+            "--preferences" => {
+                preferences = Some(PathBuf::from(
+                    arguments
+                        .next()
+                        .ok_or("--preferences requires a file path")?,
+                ));
+            }
+            "--timeout" => {
+                timeout_ms = arguments
+                    .next()
+                    .ok_or("--timeout requires milliseconds")?
+                    .parse::<u64>()?;
+            }
+            "--menu-dir" => {
+                menu_dir = arguments
+                    .next()
+                    .ok_or("--menu-dir requires a virtual directory prefix")?;
+            }
+            "--transitions" => {
+                transitions_path = arguments
+                    .next()
+                    .ok_or("--transitions requires a virtual path")?;
+            }
+            "--texture-size" => {
+                texture_size = arguments
+                    .next()
+                    .ok_or("--texture-size requires a pixel count")?
+                    .parse::<u32>()?;
+            }
+            "--clip" => {
+                clip = match arguments
+                    .next()
+                    .ok_or("--clip requires none or parent")?
+                    .as_str()
+                {
+                    "none" => UiClipPolicy::None,
+                    "parent" => UiClipPolicy::ClipToParent,
+                    other => return Err(format!("unknown clip policy {other:?}").into()),
+                };
+            }
+            "--viewport" | "--scale" => {
+                let value = arguments
+                    .next()
+                    .ok_or_else(|| format!("{argument} requires a value"))?;
+                let mut restated = [argument, value].into_iter().peekable();
+                presentation = parse_ui_presentation("ui-view", &mut restated)?;
+            }
+            option if option.starts_with("--") => {
+                return Err(format!("unknown ui-view option {option:?}").into());
+            }
+            _ => mounts.push(argument),
+        }
+    }
+
+    let vfs = mount_all("ui-view", &mounts, options, ResourceKind::Ui)?;
+    let resource_limits = UiResourceLimits::default();
+    let catalog_images = load_mapped_image_catalog(&vfs, texture_size, resource_limits)?;
+    let localization = load_localization_resources(&vfs, &options.language, resource_limits)?;
+
+    let transitions_resource = VirtualPath::new(&transitions_path)?;
+    let ini_limits = UiIniLimits::default();
+    let transitions_entry = vfs
+        .resolve(&transitions_resource)
+        .ok_or_else(|| format!("resource not found: {transitions_resource}"))?;
+    let transitions_bytes = transitions_entry.read(ini_limits.max_file_bytes)?;
+    let transitions_ini = parse_window_transitions_ini(&transitions_bytes, ini_limits)?;
+
+    let patch_limits = WndPatchLimits::default();
+    let mut patches = Vec::with_capacity(patch_paths.len());
+    for path in &patch_paths {
+        let bytes = fs::read(path)?;
+        patches.push(parse_wnd_patch(
+            &path.display().to_string(),
+            &bytes,
+            patch_limits,
+        )?);
+    }
+
+    let fonts = font_paths
+        .iter()
+        .map(fs::read)
+        .collect::<Result<Vec<Vec<u8>>, _>>()?;
+    let text_policy = if fonts.is_empty() {
+        UiTextPolicy::Placeholder
+    } else {
+        UiTextPolicy::Shape
+    };
+
+    let mut session = MenuSession {
+        vfs: &vfs,
+        presentation,
+        clip,
+        menu_dir,
+        bindings: main_menu_bindings(),
+        patches,
+        provenance: Vec::new(),
+        shell: UiShell::new(),
+        transitions: UiTransitionHandler::new(&transitions_ini),
+        localization,
+        catalog: catalog_images,
+        images: UiImageResources::new(),
+        first_input_seen: false,
+        opened: false,
+        pointer: UiPoint::new(0, 0),
+        records: Vec::new(),
+    };
+    session.open()?;
+
+    let viewport = presentation.viewport;
+    // The catalog and the accepted selection are both filled in once the viewer has enumerated,
+    // because only its event loop can. Until then the transaction holds the window this command was
+    // asked for, which is what the viewer is about to open.
+    let accepted = UiDisplaySelection {
+        monitor: String::new(),
+        window_mode: UiWindowMode::Windowed,
+        resolution: (
+            u32::try_from(viewport.width())?,
+            u32::try_from(viewport.height())?,
+        ),
+        refresh_millihertz: 0,
+        scale: UiScaleChoice::Automatic,
+    };
+    let mut host = ShellViewHost {
+        session,
+        catalog: UiDisplayCatalog::default(),
+        transaction: UiDisplayTransaction::new(accepted).with_timeout_ms(timeout_ms),
+        preferences,
+        pending_request: None,
+        pending_restore: None,
+        pages_revision: 0,
+        uploaded_pages: 0,
+        text_policy,
+        status: "move the mouse to reveal the menu".to_owned(),
+        exit: false,
+        timeout_ms,
+    };
+    let summary = run_ui_view(&mut host, viewport, fonts)?;
+
+    // The session's own records are the same ones `ui-menu` reports, so a run that went wrong can be
+    // read back the same way afterwards.
+    let [moves, presses, releases, keys, text] = summary.input_counts;
+    let mut report = format!(
+        "ui_view_surface\tformat\tsrgb\tframes\nui_view_surface\t{}\t{}\t{}\n\
+         ui_view_input\tmoves\tpresses\treleases\tkeys\ttext\n\
+         ui_view_input\t{moves}\t{presses}\t{releases}\t{keys}\t{text}\n\
+         ui_view_display\taccepted\tstatus\n\
+         ui_view_display\t{}\t{}\n",
+        summary.surface_format,
+        summary.surface_is_srgb,
+        summary.frames,
+        describe_display(host.transaction.accepted()),
+        host.status
+    );
+    report.push_str(&render_ui_menu(
+        &[],
+        &host.session.records,
+        &host.session.bindings.allowlist,
+        &host.session.provenance,
+        &host.session.shell,
+    ));
+    Ok(report)
+}
+
+/// Hosts the retained shell inside the interactive viewer.
+///
+/// This is the one place in R4 where a display change reaches a real window: the shell's own Options
+/// controls request a mode, `cic-ui`'s transaction decides whether it is kept, and `cic-render`
+/// reconfigures the surface. The transaction still owns the decision — the viewer applies and reports
+/// but never commits — so an unconfirmed change reverts here for exactly the reason it reverts in the
+/// scripted session.
+struct ShellViewHost<'a> {
+    session: MenuSession<'a>,
+    catalog: UiDisplayCatalog,
+    transaction: UiDisplayTransaction,
+    preferences: Option<PathBuf>,
+    pending_request: Option<UiDisplaySelection>,
+    pending_restore: Option<UiDisplaySelection>,
+    pages_revision: u64,
+    uploaded_pages: usize,
+    text_policy: UiTextPolicy,
+    status: String,
+    exit: bool,
+    timeout_ms: u64,
+}
+
+impl UiViewHost for ShellViewHost<'_> {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one frame: input, actions, transitions, the display transaction, then staging"
+    )]
+    fn update(
+        &mut self,
+        context: &UiViewContext<'_>,
+    ) -> Result<(StagedUiFrame, UiViewRequest), Box<dyn Error>> {
+        // The platform's answer to a previous request arrives first, because whether the surface
+        // holds the mode decides whether there is anything left to confirm.
+        if let Some(applied) = &context.display_applied {
+            match applied {
+                Ok(selection) => {
+                    self.status = format!(
+                        "{} applied — press Enter to keep it, Esc to revert ({}s)",
+                        describe_display(selection),
+                        self.transaction_seconds_left(context.elapsed_ms)
+                    );
+                }
+                Err(reason) => {
+                    let outcome = self.transaction.fail(reason.clone());
+                    self.finish_display(&outcome)?;
+                }
+            }
+        }
+
+        for event in context.events {
+            match event {
+                UiViewEvent::PointerMoved(point) => self.session.pointer_moved(*point),
+                UiViewEvent::PointerPressed(button) => {
+                    let events = self
+                        .session
+                        .shell
+                        .pointer_pressed(self.session.pointer, *button);
+                    self.session.record_input(events);
+                }
+                UiViewEvent::PointerReleased(button) => {
+                    let events = self
+                        .session
+                        .shell
+                        .pointer_released(self.session.pointer, *button);
+                    self.session.record_input(events);
+                }
+                UiViewEvent::Key(key) => {
+                    // Enter and Escape answer the confirmation dialog while one is up, and reach the
+                    // shell otherwise. That is the dialog being modal, which is what a confirmation
+                    // has to be: the player must not be able to click past the question.
+                    if self.transaction.is_awaiting_confirmation() {
+                        let outcome = match key {
+                            UiKey::Enter => Some(self.transaction.confirm(context.elapsed_ms)),
+                            UiKey::Escape => Some(self.transaction.decline()),
+                            _ => None,
+                        };
+                        if let Some(outcome) = outcome {
+                            self.finish_display(&outcome)?;
+                            continue;
+                        }
+                    } else if *key == UiKey::Escape {
+                        self.exit = true;
+                    }
+                    self.session.press_key(*key);
+                }
+                UiViewEvent::Text(text) => self.session.insert_text(text),
+                UiViewEvent::Resized(viewport) => {
+                    self.status = format!("{} x {}", viewport.width(), viewport.height());
+                }
+            }
+        }
+
+        // The Options screen is pushed long after the catalog arrives, so its combos are filled the
+        // first frame they exist rather than once at startup. Retail fills its own the same way, in
+        // `OptionsMenuInit` — the entries belong to the screen being opened, not to the session.
+        if self.display_controls_are_empty() {
+            self.populate_display_controls();
+        }
+
+        // Anything the player changed on the display combos becomes one request. Reading the
+        // controls rather than watching for events keeps this indifferent to *how* the selection
+        // moved — mouse, keyboard, or a drop-down — which is what the retained model is for.
+        if !self.transaction.is_awaiting_confirmation()
+            && let Some(selection) = self.read_display_controls()
+            && selection != *self.transaction.accepted()
+        {
+            self.pending_request = Some(selection);
+        }
+
+        // Transitions advance in whole frames only, exactly as the scripted session steps them.
+        for _ in 0..context.transition_frames {
+            self.session
+                .transitions
+                .update(&mut self.session.shell, 1.0);
+        }
+
+        // A timeout is checked every frame; nothing else in this loop reads the clock.
+        let outcome = self.transaction.poll(context.elapsed_ms);
+        if !matches!(outcome, UiDisplayOutcome::Idle) {
+            self.finish_display(&outcome)?;
+        } else if self.transaction.is_awaiting_confirmation() {
+            self.status = format!(
+                "confirm the display change — Enter keeps it, Esc reverts ({}s)",
+                self.transaction_seconds_left(context.elapsed_ms)
+            );
+        }
+
+        // Anything the shell's own controls asked for this frame.
+        let request = if self.exit {
+            UiViewRequest::Exit
+        } else if let Some(restored) = self.pending_restore.take() {
+            // A rollback has to put the surface back, not merely forget the request. This goes
+            // through the viewer like any other apply, and its result is reported the same way.
+            UiViewRequest::ApplyDisplay(Box::new(restored))
+        } else if let Some(selection) = self.pending_request.take() {
+            match self
+                .transaction
+                .request(&self.catalog, &selection, context.elapsed_ms)
+            {
+                Ok(_) => UiViewRequest::ApplyDisplay(Box::new(selection)),
+                Err(error) => {
+                    self.status = format!("cannot apply: {error}");
+                    UiViewRequest::Continue
+                }
+            }
+        } else {
+            UiViewRequest::Continue
+        };
+
+        let localization = &self.session.localization;
+        let frame = self
+            .session
+            .shell
+            .frame(self.session.clip)
+            .with_resolved_text(&|label| localized_text(localization, label));
+        self.session
+            .images
+            .bind_frame(self.session.vfs, &self.session.catalog, &frame)?;
+        // Only a genuinely larger page set is worth re-uploading; a frame that bound nothing new
+        // reuses what is already on the device.
+        let uploaded = self.session.images.pages.len();
+        if uploaded != self.uploaded_pages {
+            self.uploaded_pages = uploaded;
+            self.pages_revision += 1;
+        }
+
+        let canvas = [
+            u32::try_from(context.viewport.width())?,
+            u32::try_from(context.viewport.height())?,
+        ];
+        let bindings = &self.session.images.bindings;
+        let staged = StagedUiFrame::from_frame(
+            &frame,
+            canvas,
+            self.text_policy,
+            UiStagingLimits::default(),
+            &|name| bindings.get(name).copied(),
+        )?;
+        Ok((staged, request))
+    }
+
+    fn monitors_enumerated(&mut self, catalog: UiDisplayCatalog) -> Result<(), Box<dyn Error>> {
+        // The accepted selection is the window that is about to open: this monitor, windowed, at the
+        // size asked for, presenting at whatever the desktop is doing. Saying anything else would put
+        // a value on the Options page that does not describe what the player is looking at.
+        let monitor = catalog
+            .default_monitor()
+            .ok_or("the platform reported no monitor")?
+            .key()
+            .to_owned();
+        let refresh = catalog
+            .desktop_mode(&monitor)
+            .map_or(0, cic_ui::UiVideoMode::refresh_millihertz);
+        let accepted = UiDisplaySelection {
+            monitor,
+            refresh_millihertz: refresh,
+            ..self.transaction.accepted().clone()
+        };
+        self.catalog = catalog;
+        self.transaction = UiDisplayTransaction::new(accepted).with_timeout_ms(self.timeout_ms);
+        self.populate_display_controls();
+        Ok(())
+    }
+
+    fn pages(&self) -> &[UiTexturePage] {
+        &self.session.images.pages
+    }
+
+    fn pages_revision(&self) -> u64 {
+        self.pages_revision
+    }
+
+    fn title(&self) -> String {
+        format!(
+            "Commanders in Chief — {} — {}",
+            self.session
+                .shell
+                .top()
+                .map_or("(no screen)", cic_ui::UiScreen::path),
+            self.status
+        )
+    }
+}
+
+impl ShellViewHost<'_> {
+    /// Records the end of a display transaction and persists it if — and only if — it was confirmed.
+    fn finish_display(&mut self, outcome: &UiDisplayOutcome) -> Result<(), Box<dyn Error>> {
+        self.status = match outcome {
+            UiDisplayOutcome::Confirmed { accepted } => {
+                format!("kept {}", describe_display(accepted))
+            }
+            UiDisplayOutcome::RolledBack { reason, restored } => format!(
+                "reverted ({}) to {}",
+                reason.row_name(),
+                describe_display(restored)
+            ),
+            other => other.row_name().to_owned(),
+        };
+        if let Some(path) = self.preferences.as_deref() {
+            persist_confirmed_display(outcome, path)?;
+        }
+        // A rollback has to put the surface back, not merely forget the request.
+        if let UiDisplayOutcome::RolledBack { restored, .. } = outcome {
+            self.pending_restore = Some((**restored).clone());
+        }
+        Ok(())
+    }
+
+    /// Populates the five display combos from the catalog, once the Options screen is loaded.
+    ///
+    /// A WND declares no combo entries — retail's `OptionsMenuInit` fills the resolution combo at
+    /// runtime — so filling these reproduces the original's arrangement for controls it does not
+    /// have. Each list is ordered exactly as the catalog orders it, so an index means the same thing
+    /// on two runs against the same hardware.
+    fn populate_display_controls(&mut self) {
+        let accepted = self.transaction.accepted().clone();
+        let monitors: Vec<String> = self
+            .catalog
+            .monitors()
+            .iter()
+            .map(|entry| entry.name().to_owned())
+            .collect();
+        let resolutions: Vec<String> = self
+            .catalog
+            .resolutions(&accepted.monitor)
+            .into_iter()
+            .map(|(width, height)| format!("{width} x {height}"))
+            .collect();
+        let refreshes: Vec<String> = self
+            .catalog
+            .refresh_rates(&accepted.monitor, accepted.resolution)
+            .into_iter()
+            .map(format_refresh)
+            .collect();
+        let modes = vec![
+            "Windowed".to_owned(),
+            "Borderless".to_owned(),
+            "Fullscreen".to_owned(),
+        ];
+        let scales: Vec<String> = std::iter::once("Automatic".to_owned())
+            .chain(UiScaleChoice::STEPS.iter().map(|step| format!("{step}%")))
+            .collect();
+        for (name, entries) in [
+            ("OptionsMenu.wnd:ComboBoxMonitor", monitors),
+            ("OptionsMenu.wnd:ComboBoxResolution", resolutions),
+            ("OptionsMenu.wnd:ComboBoxRefreshRate", refreshes),
+            ("OptionsMenu.wnd:ComboBoxWindowMode", modes),
+            ("OptionsMenu.wnd:ComboBoxUiScale", scales),
+        ] {
+            let Some((screen, id)) = self.session.shell.find_control_by_decorated_name(name) else {
+                continue;
+            };
+            if let Some(layout) = self.session.shell.layout_mut(screen) {
+                layout.set_combo_entries(id, entries);
+            }
+        }
+        self.select_current_display_entries();
+    }
+
+    /// Returns whether the window-mode combo exists and has not been filled yet.
+    fn display_controls_are_empty(&self) -> bool {
+        let Some((screen, id)) = self
+            .session
+            .shell
+            .find_control_by_decorated_name("OptionsMenu.wnd:ComboBoxWindowMode")
+        else {
+            return false;
+        };
+        self.session
+            .shell
+            .layout(screen)
+            .is_some_and(|layout| layout.combo_entries(id).is_empty())
+    }
+
+    /// Moves each combo to the entry the accepted selection names, so the page opens showing truth.
+    fn select_current_display_entries(&mut self) {
+        let accepted = self.transaction.accepted().clone();
+        let monitor_index = self
+            .catalog
+            .monitors()
+            .iter()
+            .position(|entry| entry.key() == accepted.monitor);
+        let resolution_index = self
+            .catalog
+            .resolutions(&accepted.monitor)
+            .iter()
+            .position(|entry| *entry == accepted.resolution);
+        let refresh_index = self
+            .catalog
+            .refresh_rates(&accepted.monitor, accepted.resolution)
+            .iter()
+            .position(|rate| *rate == accepted.refresh_millihertz);
+        let mode_index = match accepted.window_mode {
+            UiWindowMode::Windowed => 0,
+            UiWindowMode::BorderlessDesktop => 1,
+            UiWindowMode::ExclusiveFullscreen => 2,
+        };
+        let scale_index = match accepted.scale {
+            UiScaleChoice::Automatic => Some(0),
+            UiScaleChoice::Fixed(percent) => UiScaleChoice::STEPS
+                .iter()
+                .position(|step| *step == percent)
+                .map(|index| index + 1),
+        };
+        for (name, index) in [
+            ("OptionsMenu.wnd:ComboBoxMonitor", monitor_index),
+            ("OptionsMenu.wnd:ComboBoxResolution", resolution_index),
+            ("OptionsMenu.wnd:ComboBoxRefreshRate", refresh_index),
+            ("OptionsMenu.wnd:ComboBoxWindowMode", Some(mode_index)),
+            ("OptionsMenu.wnd:ComboBoxUiScale", scale_index),
+        ] {
+            let (Some(index), Some((screen, id))) = (
+                index,
+                self.session.shell.find_control_by_decorated_name(name),
+            ) else {
+                continue;
+            };
+            if let Some(layout) = self.session.shell.layout_mut(screen) {
+                layout.select_combo_entry(id, index);
+            }
+        }
+    }
+
+    /// Reads the five combos back into a selection, or `None` when the Options page is not up.
+    fn read_display_controls(&self) -> Option<UiDisplaySelection> {
+        let accepted = self.transaction.accepted();
+        let selected = |name: &str| -> Option<usize> {
+            let (screen, id) = self.session.shell.find_control_by_decorated_name(name)?;
+            match self.session.shell.layout(screen)?.control(id).kind() {
+                cic_ui::UiControlKind::ComboBox { selected, .. } => *selected,
+                _ => None,
+            }
+        };
+        // The window-mode combo is the one that must be present: with no Options page up there is
+        // nothing to read and no request to make.
+        let mode = match selected("OptionsMenu.wnd:ComboBoxWindowMode")? {
+            0 => UiWindowMode::Windowed,
+            1 => UiWindowMode::BorderlessDesktop,
+            _ => UiWindowMode::ExclusiveFullscreen,
+        };
+        let monitor = selected("OptionsMenu.wnd:ComboBoxMonitor")
+            .and_then(|index| self.catalog.monitors().get(index))
+            .map_or_else(|| accepted.monitor.clone(), |entry| entry.key().to_owned());
+        let resolutions = self.catalog.resolutions(&monitor);
+        let resolution = selected("OptionsMenu.wnd:ComboBoxResolution")
+            .and_then(|index| resolutions.get(index).copied())
+            .unwrap_or(accepted.resolution);
+        let refreshes = self.catalog.refresh_rates(&monitor, resolution);
+        let refresh_millihertz = selected("OptionsMenu.wnd:ComboBoxRefreshRate")
+            .and_then(|index| refreshes.get(index).copied())
+            .unwrap_or(accepted.refresh_millihertz);
+        let scale = selected("OptionsMenu.wnd:ComboBoxUiScale").map_or(accepted.scale, |index| {
+            index
+                .checked_sub(1)
+                .and_then(|step| UiScaleChoice::STEPS.get(step).copied())
+                .map_or(UiScaleChoice::Automatic, UiScaleChoice::Fixed)
+        });
+        Some(UiDisplaySelection {
+            monitor,
+            window_mode: mode,
+            resolution,
+            refresh_millihertz,
+            scale,
+        })
+    }
+
+    fn transaction_seconds_left(&self, now_ms: u64) -> u64 {
+        self.transaction
+            .deadline_ms()
+            .map_or(0, |deadline| deadline.saturating_sub(now_ms) / 1_000)
+    }
+}
+
+/// Formats a selection for the window title.
+fn describe_display(selection: &UiDisplaySelection) -> String {
+    format!(
+        "{} {}x{} @ {} mHz",
+        selection.window_mode.row_name(),
+        selection.resolution.0,
+        selection.resolution.1,
+        selection.refresh_millihertz
+    )
+}
+
+/// Formats a refresh rate for a menu, trimming the millihertz a whole rate does not need.
+fn format_refresh(millihertz: u32) -> String {
+    if millihertz.is_multiple_of(1_000) {
+        return format!("{} Hz", millihertz / 1_000);
+    }
+    format!("{}.{:03} Hz", millihertz / 1_000, millihertz % 1_000)
 }
 
 /// Drives an explicit display-settings script against an injected mode catalog.

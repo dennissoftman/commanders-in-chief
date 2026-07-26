@@ -576,11 +576,29 @@ development machine — and is the one path that is not reproducible, reported a
 The patched Options page renders at 1280x720 with the reused resolution combo beside all four new
 controls and zero staging diagnostics.
 
-What Gate 9 does not have is a window. The charter asks for apply through `winit` surface
-reconfiguration behind a timed confirmation dialog; the transaction, the catalog, the platform
-adapter, and the persistence rule are all in place and tested, but nothing yet drives them from an
-interactive shell, because no interactive UI viewer exists. That belongs with Gate 11's complete
-navigation loop and is listed there.
+`cic-inspect ui-view` is the interactive counterpart, and the first time this project's shell has run
+in a window. It shares the whole session with `ui-menu` — the same binding table, allowlist, shell
+stack, transition handler, and patched layouts — and differs only in where input comes from and where
+frames go. The surface deliberately takes a *non*-sRGB format: the UI pipeline writes bytes that are
+already display-encoded, so an sRGB target would apply the transfer function a second time; on this
+machine it presents through `Bgra8Unorm`, and the window matches the PNG.
+
+Verified live against Zero Hour: the window opens showing the logo and nothing else, the first pointer
+move reveals the default panel through the same `MainMenuInput` behaviour, hover tracks from
+`MainMenuParent` to `MapBorder2` to `ButtonLoadReplay` as the pointer crosses them, and clicking runs
+both a subpanel transition and a screen push onto the shell stack, with the patched Options page
+rendering its five display controls.
+
+**The one thing Gate 9 still cannot show is a real mode change.** The path is implemented end to end —
+the Options combos are populated from the enumerated catalog, a changed selection becomes a request,
+the transaction decides, and `cic-render` reconfigures the window — and every part of it below the
+window is tested, but no run has yet been observed actually resizing or going fullscreen. A scripted
+trigger written to exercise it without a click did not fire, and the cause was not found; it was
+removed rather than shipped as a silent no-op. The diagnostic that a next attempt needs is already in
+place: `ui-view` reports the surface format, the input counts, and the accepted selection with the
+last status, which on the failing run showed the catalog had reached the transaction correctly
+(`windowed 1280x720 @ 144000 mHz`) while the request never issued. Until that is resolved this row
+stays `implemented`, not `verified`.
 
 **Scope:** Boundedly decode the complete source-established WND grammar and the UI definition
 resources required by it, then present those values through a retained, non-gameplay UI runtime.

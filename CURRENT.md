@@ -184,10 +184,12 @@ non-executing Start validation. `SkirmishGameOptionsMenu.wnd` already loads and 
 shell; what it has no data behind it yet is the map list, the preview, and the slots.
 
 Five smaller pieces remain queued. Five smaller pieces remain queued. Transition draws are renderer-neutral records that
-`cic-render` does not execute yet, so transitions run and report but do not reach a surface. There is
-no interactive UI viewer, so Gate 9's display transaction is driven only by a script and never yet by a
-real `winit` surface reconfiguration behind a timed dialog; that moved to Gate 11 with the rest of the
-complete navigation loop. Gate 8's optional shell-MAP background — composing the R3 scene beneath the
+`cic-render` does not execute yet, so transitions run and report but do not reach a surface. The
+interactive shell viewer, `cic-inspect ui-view`, runs the menu in a real window with real input, but
+**no run has yet been observed actually changing display mode**: the path from the Options combos
+through the transaction to `winit` is implemented and everything below the window is tested, and the
+viewer already reports the surface format, input counts, and accepted selection so the next attempt
+can diagnose it in one run. Gate 8's optional shell-MAP background — composing the R3 scene beneath the
 UI — is not wired up. The rest of Gate 4 is bounded `MouseCursor` and `ShellMenuScheme` subsets, which
 live in the same INI family and reuse the shared lexer. And the ornamental border is unimplemented: `WIN_STATUS_BORDER` makes the
 window manager tile a frame from hardcoded `BorderTop`/`BorderCorner__`-style mapped images, which is a
