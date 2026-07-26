@@ -297,6 +297,16 @@ impl UiFrame {
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
+
+    /// Appends another frame's instructions after this frame's own.
+    ///
+    /// Appending is how several screens compose: the original's window manager holds one global
+    /// window list rather than one per layout, and `winRepaint` walks it from the tail, so a layout
+    /// `bringForward` moved to the head draws over everything behind it. Later items draw over
+    /// earlier ones here, so appending in draw order reproduces that.
+    pub fn append(&mut self, other: Self) {
+        self.items.extend(other.items);
+    }
 }
 
 impl UiLayout {
@@ -372,14 +382,21 @@ impl UiLayout {
 
     /// Returns the draw-data slot a control's current state selects.
     ///
-    /// Disabled wins over hover, and a pressed or hovered enabled control draws hilited, which is
-    /// the three-state model every gadget's draw data declares.
+    /// Disabled wins over everything, and an enabled control draws hilited while the pointer is over
+    /// it — but only if it declares `MOUSETRACK`. Nothing in the original sets `WIN_STATE_HILITED`
+    /// from the window manager's own mouse-enter dispatch: each gadget family's input handler sets it,
+    /// and every one of them tests `GWS_MOUSE_TRACK` first. A window with no such handler, which is
+    /// every plain `USER` window, is drawn identically whether the pointer is over it or not.
+    ///
+    /// A press does not select this slot. `GWM_LEFT_DOWN` sets `WIN_STATE_SELECTED`, which a
+    /// composition reads separately as [`UiDrawState::selected`]; the pressed art of a retail button
+    /// comes from that, and from the hover it necessarily already had.
     #[must_use]
     pub fn state_slot(&self, id: UiControlId) -> WndDrawDataSlot {
         let control = self.control(id);
         if !self.is_effectively_enabled(id) {
             WndDrawDataSlot::Disabled
-        } else if control.is_pressed() || control.is_hovered() {
+        } else if control.is_hovered() && control.is_mouse_track() {
             WndDrawDataSlot::Hilite
         } else {
             WndDrawDataSlot::Enabled

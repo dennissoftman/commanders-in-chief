@@ -336,23 +336,85 @@ pub enum UiDemoAction {
         /// The control's name.
         control: String,
     },
-    /// Set the current transition group by name.
+    /// Set the current transition group by name, which is the handler's `setGroup`.
     SetTransitionGroup {
         /// The group's name.
         group: String,
+        /// Whether the running group is skipped to its end rather than reversed behind this one.
+        immediate: bool,
+    },
+    /// Run a transition group backwards, which is the handler's `reverse`.
+    ReverseTransitionGroup {
+        /// The group's name.
+        group: String,
+    },
+    /// Drop a transition group, which is the handler's `remove`.
+    RemoveTransitionGroup {
+        /// The group's name.
+        group: String,
+        /// Whether a pending group of the same name is skipped to its end before being dropped.
+        skip_pending: bool,
+    },
+    /// Move keyboard focus to one control by name, or clear it when the name resolves to nothing.
+    FocusControl {
+        /// The control's name.
+        control: String,
     },
     /// Leave the demo. A caller decides what that means; nothing here exits a process.
     Quit,
 }
 
-/// A project-owned map from a control's authored name to the typed action it may run.
+impl UiDemoAction {
+    /// Returns a stable name for reports, without the action's operands.
+    #[must_use]
+    pub const fn row_name(&self) -> &'static str {
+        match self {
+            Self::PushScreen { .. } => "push_screen",
+            Self::PopScreen => "pop_screen",
+            Self::ShowControl { .. } => "show_control",
+            Self::HideControl { .. } => "hide_control",
+            Self::SetTransitionGroup { .. } => "set_transition_group",
+            Self::ReverseTransitionGroup { .. } => "reverse_transition_group",
+            Self::RemoveTransitionGroup { .. } => "remove_transition_group",
+            Self::FocusControl { .. } => "focus_control",
+            Self::Quit => "quit",
+        }
+    }
+
+    /// Returns the action's operands as one stable field for a report, empty when it has none.
+    #[must_use]
+    pub fn row_detail(&self) -> String {
+        match self {
+            Self::PushScreen { path } => path.clone(),
+            Self::PopScreen | Self::Quit => String::new(),
+            Self::ShowControl { control }
+            | Self::HideControl { control }
+            | Self::FocusControl { control } => control.clone(),
+            Self::ReverseTransitionGroup { group } => group.clone(),
+            Self::SetTransitionGroup { group, immediate } => {
+                format!("{group} immediate={immediate}")
+            }
+            Self::RemoveTransitionGroup {
+                group,
+                skip_pending,
+            } => format!("{group} skip_pending={skip_pending}"),
+        }
+    }
+}
+
+/// A project-owned map from a control's authored name to the typed actions it may run.
 ///
 /// Keys are decorated `<layout>:<control>` names when a binding is layout-specific and undecorated
 /// control names otherwise, matching what [`crate::UiLayout::find`] accepts. Iteration is ordered by
 /// name so a report over an allowlist is stable.
+///
+/// A control maps to an ordered *sequence* rather than a single action because one press in the
+/// original does several things at once: `MainMenuSystem`'s single-player arm reveals a subpanel,
+/// removes one transition group, reverses a second, and sets a third. Running them in the authored
+/// order is what reproduces that; a one-action binding could not express it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UiActionAllowlist {
-    entries: BTreeMap<String, UiDemoAction>,
+    entries: BTreeMap<String, Vec<UiDemoAction>>,
 }
 
 impl UiActionAllowlist {
@@ -364,27 +426,32 @@ impl UiActionAllowlist {
 
     /// Allows one control to run one action, replacing any earlier entry for that name.
     pub fn allow(&mut self, control: impl Into<String>, action: UiDemoAction) {
-        self.entries.insert(control.into(), action);
+        self.allow_all(control, vec![action]);
     }
 
-    /// Returns the action a control's name is allowed to run, if any.
+    /// Allows one control to run an ordered sequence of actions, replacing any earlier entry.
+    pub fn allow_all(&mut self, control: impl Into<String>, actions: Vec<UiDemoAction>) {
+        self.entries.insert(control.into(), actions);
+    }
+
+    /// Returns the actions a control's name is allowed to run, in order, if any.
     ///
     /// Both the decorated and undecorated spellings are tried, so an allowlist written against
     /// either resolves. The match is case-sensitive: an authored name is compared as spelled.
     #[must_use]
-    pub fn resolve(&self, name: &str) -> Option<&UiDemoAction> {
-        if let Some(action) = self.entries.get(name) {
-            return Some(action);
+    pub fn resolve(&self, name: &str) -> Option<&[UiDemoAction]> {
+        if let Some(actions) = self.entries.get(name) {
+            return Some(actions);
         }
         let (_, control) = name.split_once(':')?;
-        self.entries.get(control)
+        self.entries.get(control).map(Vec::as_slice)
     }
 
     /// Returns every entry ordered by control name.
-    pub fn entries(&self) -> impl Iterator<Item = (&str, &UiDemoAction)> {
+    pub fn entries(&self) -> impl Iterator<Item = (&str, &[UiDemoAction])> {
         self.entries
             .iter()
-            .map(|(name, action)| (name.as_str(), action))
+            .map(|(name, actions)| (name.as_str(), actions.as_slice()))
     }
 
     /// Returns how many controls the allowlist covers.

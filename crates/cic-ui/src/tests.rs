@@ -70,6 +70,7 @@ WINDOW
                CREATIONRESOLUTION: 800 600;
   NAME = "SynthMenu.wnd:ButtonSynth";
   STATUS = ENABLED+TABSTOP;
+  STYLE = PUSHBUTTON+MOUSETRACK;
   TEXT = "GUI:SynthButton";
   SYSTEMCALLBACK = "SynthButtonSystem";
   TEXTCOLOR = ENABLED: 255 255 255 255, ENABLEDBORDER: 0 0 0 255,
@@ -870,6 +871,38 @@ fn the_frame_submits_parents_before_children_and_selects_the_state_slot() {
 }
 
 #[test]
+fn only_a_mouse_tracking_control_hilites_under_the_pointer() {
+    let mut layout = instantiate(classic(800, 600));
+    let panel = layout.roots()[0];
+    let button = layout.find("SynthMenu.wnd:ButtonSynth").expect("button");
+    assert!(layout.control(button).is_mouse_track());
+    // The enclosing panel is a plain `USER` window and declares no style at all.
+    assert!(!layout.control(panel).is_mouse_track());
+
+    // Over the button, which tracks: the hilite slot.
+    layout.pointer_moved(UiPoint::new(150, 90));
+    assert!(layout.control(button).is_hovered());
+    assert_eq!(layout.state_slot(button), WndDrawDataSlot::Hilite);
+
+    // Over the panel's own margin, which does not track: hovered, but still drawn enabled. Nothing
+    // in the original sets `WIN_STATE_HILITED` for a window whose input handler does not, so a
+    // pointer resting on a menu's background must not repaint the whole screen.
+    layout.pointer_moved(UiPoint::new(110, 60));
+    assert!(layout.control(panel).is_hovered());
+    assert!(!layout.control(button).is_hovered());
+    assert_eq!(layout.state_slot(panel), WndDrawDataSlot::Enabled);
+    assert_eq!(layout.state_slot(button), WndDrawDataSlot::Enabled);
+
+    // A press reports `selected` rather than moving the slot: the pressed art of a retail button
+    // comes from the selected bit on top of the hover it already had.
+    layout.pointer_moved(UiPoint::new(150, 90));
+    layout.pointer_pressed(UiPoint::new(150, 90), UiMouseButton::Left);
+    assert!(layout.control(button).is_pressed());
+    assert_eq!(layout.state_slot(button), WndDrawDataSlot::Hilite);
+    assert_eq!(layout.state_slot(panel), WndDrawDataSlot::Enabled);
+}
+
+#[test]
 fn the_frame_carries_text_runs_with_state_colour() {
     let layout = instantiate(classic(800, 600));
     let button = layout.find("SynthMenu.wnd:ButtonSynth").expect("button");
@@ -1335,14 +1368,17 @@ fn only_allowlisted_controls_route_a_typed_action() {
     // A decorated key resolves by its exact spelling.
     assert_eq!(
         allowlist.resolve("MainMenu.wnd:ButtonOptions"),
-        Some(&UiDemoAction::PushScreen {
-            path: "Menus/OptionsMenu.wnd".to_owned()
-        })
+        Some(
+            [UiDemoAction::PushScreen {
+                path: "Menus/OptionsMenu.wnd".to_owned()
+            }]
+            .as_slice()
+        )
     );
     // An undecorated key resolves for any layout, which is how one verb covers every menu's Back.
     assert_eq!(
         allowlist.resolve("OptionsMenu.wnd:ButtonBack"),
-        Some(&UiDemoAction::PopScreen)
+        Some([UiDemoAction::PopScreen].as_slice())
     );
     // Anything not listed routes nothing, however established its callback name is.
     assert_eq!(allowlist.resolve("MainMenu.wnd:ButtonExit"), None);
@@ -1357,9 +1393,122 @@ fn only_allowlisted_controls_route_a_typed_action() {
     );
 }
 
+#[test]
+fn one_control_may_run_an_ordered_sequence_of_actions() {
+    // `MainMenuSystem`'s single-player arm reveals a subpanel and then touches three transition
+    // groups, so the binding has to keep four actions in the order the source runs them.
+    let mut allowlist = UiActionAllowlist::new();
+    allowlist.allow_all(
+        "MainMenu.wnd:ButtonSinglePlayer",
+        vec![
+            UiDemoAction::ShowControl {
+                control: "MainMenu.wnd:MapBorder".to_owned(),
+            },
+            UiDemoAction::RemoveTransitionGroup {
+                group: "MainMenuDefaultMenu".to_owned(),
+                skip_pending: false,
+            },
+            UiDemoAction::ReverseTransitionGroup {
+                group: "MainMenuDefaultMenuBack".to_owned(),
+            },
+            UiDemoAction::SetTransitionGroup {
+                group: "MainMenuSinglePlayerMenu".to_owned(),
+                immediate: false,
+            },
+        ],
+    );
+
+    let routed = allowlist
+        .resolve("MainMenu.wnd:ButtonSinglePlayer")
+        .expect("the single-player binding");
+    assert_eq!(routed.len(), 4);
+    assert_eq!(
+        routed
+            .iter()
+            .map(UiDemoAction::row_name)
+            .collect::<Vec<_>>(),
+        [
+            "show_control",
+            "remove_transition_group",
+            "reverse_transition_group",
+            "set_transition_group"
+        ]
+    );
+    // The operands survive into the report field, which is what a capture's log is read from.
+    assert_eq!(routed[0].row_detail(), "MainMenu.wnd:MapBorder");
+    assert_eq!(
+        routed[3].row_detail(),
+        "MainMenuSinglePlayerMenu immediate=false"
+    );
+    // One control still holds one binding: allowing it again replaces the sequence rather than
+    // appending to it.
+    allowlist.allow("MainMenu.wnd:ButtonSinglePlayer", UiDemoAction::PopScreen);
+    assert_eq!(
+        allowlist.resolve("MainMenu.wnd:ButtonSinglePlayer"),
+        Some([UiDemoAction::PopScreen].as_slice())
+    );
+    assert_eq!(allowlist.len(), 1);
+}
+
 /// Builds a shell screen from the overlapping fixture under a chosen path.
 fn screen(path: &str) -> UiScreen {
     UiScreen::new(path, instantiate_source(&overlapping_layout()))
+}
+
+#[test]
+fn a_composed_frame_draws_the_screens_in_draw_order_not_stack_order() {
+    let mut shell = UiShell::new();
+    shell
+        .push(screen("Menus/MainMenu.wnd"), false)
+        .expect("push the first screen");
+    shell
+        .push(screen("Menus/OptionsMenu.wnd"), false)
+        .expect("push over it");
+    shell.shutdown_complete();
+    assert_eq!(shell.screen_count(), 2);
+
+    // Each screen contributes its own frame, and the composed frame is exactly their concatenation.
+    let frames = shell.frames(UiClipPolicy::None);
+    assert_eq!(frames.len(), 2);
+    let composed = shell.frame(UiClipPolicy::None);
+    assert_eq!(
+        composed.len(),
+        frames.iter().map(|(_, frame)| frame.len()).sum::<usize>()
+    );
+
+    // The pushed screen was brought forward, so its items land last and therefore draw on top.
+    let (front, front_frame) = frames.last().expect("a front screen");
+    assert_eq!(front.index(), 1);
+    assert_eq!(
+        composed.items()[composed.len() - front_frame.len()..],
+        *front_frame.items()
+    );
+
+    // Bringing the bottom screen forward reorders the composition without touching the stack.
+    let bottom_id = shell
+        .find_screen_by_path("Menus/MainMenu.wnd")
+        .expect("the bottom screen");
+    shell.bring_forward(bottom_id);
+    assert_eq!(shell.top().expect("a top").path(), "Menus/OptionsMenu.wnd");
+    assert_eq!(
+        shell
+            .frames(UiClipPolicy::None)
+            .iter()
+            .map(|(screen, _)| screen.index())
+            .collect::<Vec<_>>(),
+        [1, 0]
+    );
+
+    // A hidden screen draws nothing, so the composition shrinks to the visible screen alone.
+    shell
+        .layout_mut(bottom_id)
+        .expect("the bottom layout")
+        .hide(true);
+    assert_eq!(
+        shell.frame(UiClipPolicy::None).len(),
+        front_frame.len(),
+        "a hidden screen must contribute no items"
+    );
 }
 
 #[test]

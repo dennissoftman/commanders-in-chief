@@ -2,12 +2,12 @@
 
 ## Objective
 
-R4 is active. Its first vertical slice — a bounded, unknown-preserving WND inventory and
-immutable layout/control decoder, plus a surface-free `wgpu` capture of one original synthetic
-menu — is complete (see [docs/milestones/r4-wnd-shell.md](docs/milestones/r4-wnd-shell.md) Gate 1).
-Gates 2 through 4's definition side follow it: typed per-gadget fields, bounded patch overlays, and
-resolution of the mapped images, fonts, header templates, and CSF labels a layout names. The
-remaining slices add the retained `cic-ui` runtime, the main-menu stack, modern display settings, and
+R4 is active and its main-menu slice now runs end to end: the user-owned main menu loads, renders, and
+navigates to Options and Skirmish Options and back through the shell stack
+(see [docs/milestones/r4-wnd-shell.md](docs/milestones/r4-wnd-shell.md) Gate 8). Gates 1 through 8 are
+complete — bounded WND inventory and typed control decoding, patch overlays, UI resource resolution,
+the retained `cic-ui` runtime, custom `wgpu` presentation, safe callbacks with the shell stack and
+transitions, and the working main-menu artifact. The remaining slices add modern display settings and
 the skirmish/map-selection harness. R4 remains presentation-only: callbacks are allowlisted typed
 events, MAP scripts stay inert until R5, and project-owned post-parse patches augment rather than
 modify user-owned WND bytes.
@@ -146,14 +146,33 @@ the per-window frame filter refuses anything past it. That is the four unfinishe
 edition. `COUNTUP` shortens identically and does finish, thanks to one extra assignment `TYPETEXT`
 lacks.
 
-**Gate 8's main-menu artifact is the next verified step**: loading the user-owned `Menus/MainMenu.wnd`
-with its images, fonts, and labels, and driving hover, focus, click, the subpanels, Back, Options,
-Skirmish, and a safe Exit through the shell stack and the action allowlist. Rendering `MainMenu.wnd`
-still shows every subpanel at once, because retail hides them from menu code rather than through
-`STATUS`; the shell stack is what will hide them.
+Gate 8's main-menu artifact is complete. `cic-inspect ui-menu` loads the user-owned
+`Menus/MainMenu.wnd` with its images, fonts, and labels and drives hover, focus, click, the subpanels,
+Back, Options, Skirmish, and a safe Exit through the shell stack, the transition handler, and the
+action allowlist together, capturing a PNG at each named point. The complete loop runs on both
+installations at 1280x720 with every routed action applied, nothing unrouted, no unresolved image, and
+byte-identical repeat runs; returning to the menu by any of the three routes reproduces the default
+menu's capture hash exactly. What each control does is a project-owned table in `cic-tools`'s
+`shell_menu`, derived from `MainMenu.cpp`, which `cic-ui` never consults.
 
-Three smaller pieces remain queued alongside it. Transition draws are renderer-neutral records that
-`cic-render` does not execute yet, so transitions run and report but do not reach a surface. The rest
+Two facts from that pass are worth carrying forward. The retail main menu draws nothing but the logo
+until the player's first input, because `MainMenuInit` hides every panel and `MainMenuInput` is what
+reveals the default one — so the earlier observation that rendering `MainMenu.wnd` shows every subpanel
+at once was the layout without any of its menu behaviour, and both the hiding and the revealing are now
+reproduced. And hovering used to hilite any control, where the original hilites only a control
+declaring `MOUSETRACK`; that had been repainting the whole main-menu background whenever the pointer
+rested on it, and is fixed.
+
+**Gate 9's modern Options and display settings is the next verified step**: loading
+`Menus/OptionsMenu.wnd`, reusing its established `ComboBoxResolution`, and applying a bounded
+project-owned patch that adds monitor, window-mode, refresh-rate, and UI-scale controls without
+changing user-owned bytes, then applying a mode through a confirmation/rollback transaction against an
+injected catalog. The patch mechanism itself is already demonstrated end to end against this layout
+(Gate 3); profile-driven patch selection is the remaining integration step.
+
+Four smaller pieces remain queued. Transition draws are renderer-neutral records that
+`cic-render` does not execute yet, so transitions run and report but do not reach a surface. Gate 8's
+optional shell-MAP background — composing the R3 scene beneath the UI — is not wired up. The rest
 of Gate 4 is bounded `MouseCursor` and `ShellMenuScheme` subsets, which live in the same INI family and
 reuse the shared lexer. And the ornamental border is unimplemented: `WIN_STATUS_BORDER` makes the
 window manager tile a frame from hardcoded `BorderTop`/`BorderCorner__`-style mapped images, which is a

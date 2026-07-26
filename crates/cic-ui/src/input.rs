@@ -207,7 +207,15 @@ impl UiLayout {
 
     /// Moves the pointer, updating hover state and emitting the resulting transitions.
     pub fn pointer_moved(&mut self, point: UiPoint) -> Vec<UiEvent> {
-        let target = self.hit_test(point);
+        self.pointer_moved_to(self.hit_test(point))
+    }
+
+    /// Applies a hover result this layout did not search for itself.
+    ///
+    /// The original searches one global window list across every loaded layout, so with a shell stack
+    /// up only one layout may hold the hover and the rest must drop theirs. `None` is that "the
+    /// pointer is somewhere else" case; a layout given `None` clears its own hover and nothing more.
+    pub fn pointer_moved_to(&mut self, target: Option<UiControlId>) -> Vec<UiEvent> {
         let mut events = Vec::new();
         let previously: Vec<UiControlId> = self
             .controls()
@@ -235,10 +243,19 @@ impl UiLayout {
     /// A control declaring `ON_MOUSE_DOWN` activates immediately on press, which is how the
     /// original distinguishes those push buttons; every other control activates on release.
     pub fn pointer_pressed(&mut self, point: UiPoint, button: UiMouseButton) -> Vec<UiEvent> {
+        match self.hit_test(point) {
+            Some(target) => self.pointer_pressed_on(target, button),
+            None => Vec::new(),
+        }
+    }
+
+    /// Presses one control this layout did not search for itself, for a shell-level hit test.
+    pub fn pointer_pressed_on(
+        &mut self,
+        target: UiControlId,
+        button: UiMouseButton,
+    ) -> Vec<UiEvent> {
         let mut events = Vec::new();
-        let Some(target) = self.hit_test(point) else {
-            return events;
-        };
         if button == UiMouseButton::Right
             && !self
                 .control(target)

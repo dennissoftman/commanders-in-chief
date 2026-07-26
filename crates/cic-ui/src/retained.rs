@@ -529,6 +529,8 @@ pub struct UiControl {
     /// `LISTBOXDATA`'s `SCROLLBAR`, which decides whether the list box builds a scroll bar. It is
     /// creation-time input rather than retained state, so it stays out of [`UiControlKind`].
     list_box_scroll_bar: bool,
+    /// The `MOUSETRACK` style bit, which is what makes hovering change a control's appearance.
+    mouse_track: bool,
 }
 
 impl UiControl {
@@ -625,6 +627,17 @@ impl UiControl {
     #[must_use]
     pub const fn is_pressed(&self) -> bool {
         self.pressed
+    }
+
+    /// Returns whether the control declares `MOUSETRACK`.
+    ///
+    /// This is `GWS_MOUSE_TRACK`, and it is the gate on hover changing anything an eye can see: every
+    /// gadget's input handler sets `WIN_STATE_HILITED` on `GWM_MOUSE_ENTERING` only when the bit is
+    /// set, and the window manager itself never sets that state. A control without it is drawn the
+    /// same whether the pointer is over it or not.
+    #[must_use]
+    pub const fn is_mouse_track(&self) -> bool {
+        self.mouse_track
     }
 
     /// Returns the `TEXT` record's value, which callers resolve as a label or literal.
@@ -1093,6 +1106,12 @@ impl UiLayout {
             enabled: status.contains(UiStatus::ENABLED),
             hovered: false,
             pressed: false,
+            // `MOUSETRACK` is matched case-insensitively because a WND flag list is authored freely
+            // and the source's own lookup upper-cases before comparing.
+            mouse_track: window
+                .style()
+                .iter()
+                .any(|flag| flag.name().eq_ignore_ascii_case("MOUSETRACK")),
             text_label: window.text().map(str::to_owned),
             tooltip_label: window.tooltip_text().map(str::to_owned),
             font: window
@@ -1560,6 +1579,10 @@ impl UiLayout {
             enabled: child_status.contains(UiStatus::ENABLED),
             hovered: false,
             pressed: false,
+            // A created part tracks the mouse when its owner does: `gogoGadgetSlider` and
+            // `gogoGadgetComboBox` each copy `GWS_MOUSE_TRACK` across only if the owner declares it.
+            // The combo box's drop-down list is the exception, built with the bit unconditionally.
+            mouse_track: owner.mouse_track || role == UiGadgetRole::ComboBoxListBox,
             text_label,
             tooltip_label: None,
             font,

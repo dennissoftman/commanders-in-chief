@@ -451,6 +451,78 @@ precisely the Gate 9 composition ADR 0010 requires be expressible as auditable d
 hardcoded window names, demonstrated before any of the Options UI exists. Profile-driven patch
 selection is the remaining integration step.
 
+Gate 8 (working main-menu artifact) is implemented as `cic-inspect ui-menu`, which is the first thing
+in this project to run the retained runtime, the shell stack, the transition handler, the action
+allowlist, and the `wgpu` UI renderer together. It loads the user-owned `Menus/MainMenu.wnd` with its
+mapped images, fonts, and localized labels, applies the screen's initial hidden set, and then steps an
+explicit script: pointer moves, clicks named by control or by point, keys, text, whole transition
+frames, `settle`, `pop`, and captures. Time is stepped only in whole transition frames and every input
+is on the command line, so nothing reads a clock, a host pointer, or a host display.
+
+What the menu does at each point is project-owned data, not menu code. `cic-tools`'s `shell_menu`
+module carries the initial hidden set, the first-input behaviour, the re-entry behaviour, and the
+per-control action sequences as a table derived from `MainMenu.cpp`, and `cic-ui` consults none of it —
+a caller applies it, so no runtime or renderer path searches for a special window name, which is what
+ADR 0010 requires.
+
+Four source facts came out of reading `MainMenu.cpp` to build that table, and the first two are why
+Gate 6's render of this layout looked wrong:
+
+- **The retail main menu is empty until the player's first input.** `MainMenuInit` hides all five
+  `MapBorder*` panels, and the one call that would reveal the default one is commented out. It is
+  `MainMenuInput` — on the first pointer move over twenty pixels, or the first character — that calls
+  `winHide(FALSE)` on `MapBorder2`, arms `MainMenuFade` immediately, queues `MainMenuDefaultMenu`
+  behind it, and clears its own `notShown` guard so it never fires again. The first capture of a
+  freshly opened main menu therefore shows the logo and nothing else, which is correct.
+- **`initialHide` changes nothing against retail data.** Every window it names — the eleven
+  `WinFaction*` variants and `WinGrowMarker` — already declares `HIDDEN` in the layout, so all sixteen
+  of its calls are no-ops in the original as much as here. It is kept in the table because a modded
+  layout need not declare it. The report counts `hidden` against `already_hidden` so this stays
+  visible rather than being something a reader has to know.
+- **Returning to a screen is not the same as opening it.** `Shell::doPop` runs the new top's init, so
+  `MainMenuInit` hides everything a second time; the menu would be left blank if that were all.
+  `FirstTimeRunningTheGame` is false by then, so it takes its other branch — showing `MainMenuRuler`
+  rather than leaving it hidden — and arms `justEntered`, which two `MainMenuUpdate` calls later sets
+  `MainMenuDefaultMenuLogoFade`. That group's own `FLASH` on `MapBorder2` unhides it at frame four, so
+  no explicit reveal is needed here and none is in the source. The frame delay has no presentation
+  effect once the group is armed and is not reproduced.
+- **Options does not push.** `MainMenuSystem` fetches the shell's cached options layout, runs its
+  init, unhides it, and brings it forward, so the options menu overlays the main menu rather than
+  replacing it on the stack. The retained shell owns no cached-layout slot, so the demo pushes
+  instead; the visible difference is only that retail keeps running the main menu's update underneath.
+
+Building the artifact also found a presentation bug of this project's own, and it is the kind that a
+clean build and passing tests cannot catch. Hovering **any** control selected the hilite draw slot, but
+the original hilites only a control declaring `MOUSETRACK`: the window manager never sets
+`WIN_STATE_HILITED` itself, each gadget family's input handler sets it on `GWM_MOUSE_ENTERING`, and
+every one of them tests `GWS_MOUSE_TRACK` first. `MainMenu.wnd:MainMenuParent` is `STYLE = USER` and
+fills the viewport, so resting the pointer anywhere repainted the whole background in the parent's
+hilite colour. `cic-ui` now carries the bit — inherited by created gadget parts as `gogoGadgetSlider`
+and `gogoGadgetComboBox` copy it, and set unconditionally on the combo box's drop-down list — and a
+press no longer selects the hilite slot either, since `GWM_LEFT_DOWN` sets the selected state that
+compositions already read separately.
+
+Verified against both installations at 1280x720 with a user-owned font, over the loop the completion
+artifact names: open, first input, hover, single-player subpanel, Back, Options, Back, single-player,
+Skirmish Options, Back, Exit.
+
+| Measure | Zero Hour | Generals |
+| --- | --- | --- |
+| Captures written | 10 | 10 |
+| Routed actions | 29 | 29 |
+| Activations routing nothing | 0 | 0 |
+| Initial-hide entries missing from the layout | 0 | 0 |
+| Staging observations that are an unresolved image | 0 | 0 |
+| Repeat run byte-identical | yes | yes |
+
+Every routed action applied; none hit an unknown control, an unknown transition group, or an
+unresolvable layout. Returning to the main menu by any of the three routes — the subpanel's own Back,
+popping Options, popping Skirmish Options — produces a capture hash identical to the default menu,
+which is the strongest available check that the transition groups wind back exactly as far as they
+wound forward. Every staging observation across both runs is `uncomposed_art`, a control whose family
+found nothing at its own indices and so drew nothing, matching the source's early return; not one is a
+missing image or font.
+
 **Scope:** Boundedly decode the complete source-established WND grammar and the UI definition
 resources required by it, then present those values through a retained, non-gameplay UI runtime.
 Cover nested layouts, exact creation rectangles, resolution scaling, status/style flags, draw and
@@ -575,7 +647,8 @@ source WND bytes are edited and no renderer path searches for special window nam
    layout callback names, then route only allowlisted demo actions through typed events. Implement
    push/pop/bring-forward/hide semantics and established transition groups without invoking MAP
    scripts or arbitrary symbols. Unknown callbacks remain reportable and inert.
-8. **Working main-menu artifact.** Load the user-owned `Menus/MainMenu.wnd`, mapped images, fonts,
+8. **Working main-menu artifact (implemented; shell-MAP background pending).** Load the user-owned
+   `Menus/MainMenu.wnd`, mapped images, fonts,
    and CSF labels; render its original controls and text; support hover/focus/click, established
    subpanels, Back, Options, Skirmish navigation, and safe Exit. When configured,
    compose the R3-rendered shell MAP as a non-simulating 3D background beneath the UI. No retail

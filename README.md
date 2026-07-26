@@ -179,11 +179,26 @@ lighting contribution.
 | `ui-resources <path>` | Resolve the mapped images, fonts, header templates, and CSF labels a layout names |
 | `ui-layout <path>` | Instantiate a layout for a viewport and report the retained tree, tab order, and frame order |
 | `ui-render <path> [<out.png>]` | Deterministic UI capture plus RGBA hash, with staged quad/batch/text counts |
+| `ui-menu --step <spec>...` | Drive the user-owned main menu through a scripted navigation session, capturing as it goes |
 
 `ui-resources` takes `[--texture-size <pixels>]`. `ui-layout` takes
 `[--viewport <width>x<height>] [--scale <classic\|modern>]`, and `ui-render` adds
 `[--clip <none\|parent>]` and a repeatable `[--font <file>]` — without a font it stages visible text
 placeholders rather than falling back to a host face, so captures stay reproducible.
+
+`ui-menu` takes all of those plus `[--menu-dir <prefix>]`, `[--transitions <virtual-path>]`, and
+`[--capture-dir <directory>]`. A step is `move:<x>,<y>`, `hover:<control|x,y>`,
+`click:<control|x,y>`, `key:<name>`, `text:<string>`, `frame`, `frames:<count>`, `settle`, `pop`,
+`update`, or `capture:<file.png>`. Time advances only in whole transition frames and every input is
+named on the command line, so the same script over the same installation reproduces the same PNG
+bytes. This walks the complete loop:
+
+```bash
+cargo run -p cic-tools --release -- --zh ui-menu --viewport 1280x720 --font C:/Windows/Fonts/arial.ttf --capture-dir out --step capture:01-opened.png --step move:640,360 --step settle --step capture:02-default.png --step hover:MainMenu.wnd:ButtonSinglePlayer --step capture:03-hover.png --step click:MainMenu.wnd:ButtonSinglePlayer --step settle --step capture:04-single.png --step click:MainMenu.wnd:ButtonSingleBack --step settle --step click:MainMenu.wnd:ButtonOptions --step settle --step capture:05-options.png --step pop --step settle --step click:MainMenu.wnd:ButtonSinglePlayer --step settle --step click:MainMenu.wnd:ButtonSkirmish --step settle --step capture:06-skirmish.png --step pop --step settle --step click:MainMenu.wnd:ButtonExit
+```
+
+The first capture shows the logo and nothing else, which is correct: the retail main menu hides every
+panel when it opens and reveals the default one on the player's first input.
 
 `wnd-render` is a Gate 1 proof-of-pipeline only: flat coloured rectangles, no images, text, or
 gadget visuals. `ui-render` is the real presentation path.
@@ -392,7 +407,7 @@ all explicit arguments.
 R4 is active and adds bounded WND/UI ingestion plus a navigable `wgpu` main-menu and skirmish demo,
 so map compatibility can be inspected through the intended shell before simulation exists.
 
-**Available now** (Gates 1 through 6):
+**Available now** (Gates 1 through 8):
 
 - A bounded, unknown-preserving WND decoder covering the file and layout versions, the layout block,
   the complete `WINDOW` / `CHILD` hierarchy, and every established per-gadget field — all 21
@@ -409,12 +424,17 @@ so map compatibility can be inspected through the intended shell before simulati
 - `cic-render`'s custom `wgpu` UI backend: batched quads, nested clipping, explicit colour space,
   shaped Unicode text through `cosmic-text`/`glyphon`, per-family gadget art composed from each
   family's own source draw procedure, and surface-free deterministic capture.
-- The reports above: `wnd`, `wnd-patch`, `ui-resources`, `ui-layout`, and `ui-render`.
+- The shell stack: the original's sixteen-screen pseudo-stack with its two-phase push and pop, safe
+  callback classification against the source's own nine name tables, the fifteen transition styles,
+  and a project-owned allowlist deciding which controls may run a typed demo action.
+- The working main menu: `ui-menu` loads the user-owned `Menus/MainMenu.wnd` and navigates hover,
+  focus, click, the subpanels, Back, Options, Skirmish Options, and a safe Exit, capturing as it goes.
+- The reports above: `wnd`, `wnd-patch`, `ui-resources`, `ui-layout`, `ui-render`, `ui-callbacks`,
+  `ui-shell`, `ui-transitions`, and `ui-menu`.
 
-**Planned for the rest of R4:** the shell stack — allowlisted typed callbacks, menu push/pop, and
-transition groups; main-menu navigation into skirmish setup and map selection with R3 previews and
-spawn markers; and modern window-mode, resolution, refresh-rate, and UI-scale controls introduced by
-patch, with apply/confirm and timeout rollback.
+**Planned for the rest of R4:** modern window-mode, resolution, refresh-rate, and UI-scale controls
+introduced by patch, with apply/confirm and timeout rollback; and skirmish setup and map selection
+bound to R3's map catalog, previews, and spawn markers.
 
 Patches are applied as a pure transformation from one immutable WND definition to another, after
 parse and before UI instantiation — the user-owned WND bytes are never modified. Callback names

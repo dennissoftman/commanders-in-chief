@@ -119,6 +119,26 @@ land under the active milestone heading.
 
 ### Added
 
+- Added `cic-inspect ui-menu`, a scripted navigation session over the user-owned main menu, and with
+  it the working main-menu artifact. It loads `Menus/MainMenu.wnd` with its mapped images, fonts, and
+  localized labels, applies the screen's initial hidden set, then drives explicit steps —
+  `move`, `hover`, `click` by control name or point, `key`, `text`, whole transition `frames`,
+  `settle`, `pop`, and `capture` — through the retained runtime, the shell stack, the transition
+  handler, and the action allowlist together, writing a PNG plus hash at each capture. Nothing reads
+  a clock, a host pointer, or a host display, so a repeated script reproduces the same bytes.
+
+  Verified against both installations at 1280x720: the complete loop of default menu, single-player
+  subpanel, Back, Options, Back, Skirmish Options, Back, and a safe Exit runs with every routed action
+  applied and nothing unrouted. Returning by any of the three routes restores a capture hash identical
+  to the default menu. Every staging observation across the run is `uncomposed_art` — a control whose
+  family found nothing at its own indices, which is the source's own early return — and no image fails
+  to resolve.
+- Added shell-level composition and input to `cic-ui`. `UiShell::frame` builds one renderer-neutral
+  frame over every screen in draw order, because the original draws one global window list rather than
+  one list per layout, and `UiShell::pointer_moved`/`pointer_pressed`/`pointer_released` run the
+  layered hit test across the whole stack so exactly one control anywhere holds the hover or the mouse
+  capture. An action binding may now be an ordered *sequence*, since one press in the original reveals
+  a panel and then removes, reverses, and sets three different transition groups.
 - Added the transition runtime (`UiTransitionHandler`), which runs the decoded groups over the retained
   shell: one current group, one queued behind it, and the two that still have something to draw, with
   set, reverse, remove, skip, and fire-once semantics. Timing belongs to the caller — the source
@@ -439,6 +459,16 @@ land under the active milestone heading.
 
 ### Fixed
 
+- Hovering any control drew it hilited, but the original hilites a control only when it declares
+  `MOUSETRACK`. Nothing in the window manager sets `WIN_STATE_HILITED`: each gadget family's input
+  handler sets it on mouse-enter, and every one of them tests `GWS_MOUSE_TRACK` first, so a window
+  with no such handler — every plain `USER` window — is drawn identically whether the pointer is over
+  it or not. `MainMenu.wnd:MainMenuParent` is one of those, and it fills the screen, so resting the
+  pointer anywhere on the main menu repainted the whole background in the parent's hilite colour.
+  A press no longer selects the hilite slot either: `GWM_LEFT_DOWN` sets the selected state, which
+  compositions already read separately. Created gadget parts inherit the bit from their owner, as
+  `gogoGadgetSlider` and `gogoGadgetComboBox` copy it, with the combo box's drop-down list the one
+  part built with it unconditionally.
 - Two source conditions that stop a transition group finishing are now reported instead of hanging
   silently. A group naming a window no loaded layout carries never finishes, because the arm that
   would set the flag tests the window first. And `TYPETEXT` cannot finish when its label is under

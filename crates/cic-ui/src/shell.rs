@@ -23,6 +23,8 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
 use crate::callbacks::{UiCallbackBinding, UiCallbackSlot, classify_callback};
+use crate::frame::{UiClipPolicy, UiFrame};
+use crate::input::{UiEvent, UiMouseButton};
 use crate::retained::{UiControlId, UiLayout, UiPoint, UiStatus};
 
 /// The original's `MAX_SHELL_STACK`: how many screens may be on the stack at once.
@@ -526,6 +528,116 @@ impl UiShell {
             }
         }
         None
+    }
+
+    /// Moves the pointer over the whole stack, so exactly one control anywhere holds the hover.
+    ///
+    /// The original's hover follows `getWindowUnderCursor` over one global window list, so a screen
+    /// the pointer is not over must drop whatever hover it held. Each screen is told the result of the
+    /// shell-level search rather than searching for itself, and events carry the screen they belong
+    /// to.
+    pub fn pointer_moved(&mut self, point: UiPoint) -> Vec<(UiScreenId, UiEvent)> {
+        let target = self.hit_test(point);
+        let mut events = Vec::new();
+        for index in 0..self.screens.len() {
+            let id = UiScreenId(index);
+            let control = target.filter(|(screen, _)| *screen == id).map(|(_, c)| c);
+            events.extend(
+                self.screens[index]
+                    .layout
+                    .pointer_moved_to(control)
+                    .into_iter()
+                    .map(|event| (id, event)),
+            );
+        }
+        events
+    }
+
+    /// Presses at a point, on whichever screen the layered search lands in.
+    pub fn pointer_pressed(
+        &mut self,
+        point: UiPoint,
+        button: UiMouseButton,
+    ) -> Vec<(UiScreenId, UiEvent)> {
+        let Some((screen, control)) = self.hit_test(point) else {
+            return Vec::new();
+        };
+        self.screens[screen.0]
+            .layout
+            .pointer_pressed_on(control, button)
+            .into_iter()
+            .map(|event| (screen, event))
+            .collect()
+    }
+
+    /// Releases at a point, on the screen that holds the mouse capture.
+    ///
+    /// The press is what decided the screen: while a control holds the mouse the original's search is
+    /// confined to it, so no fresh search happens here and a release that wandered onto another
+    /// screen still cancels the press it started.
+    pub fn pointer_released(
+        &mut self,
+        point: UiPoint,
+        button: UiMouseButton,
+    ) -> Vec<(UiScreenId, UiEvent)> {
+        let Some(screen) = self.capture_screen() else {
+            return Vec::new();
+        };
+        self.screens[screen.0]
+            .layout
+            .pointer_released(point, button)
+            .into_iter()
+            .map(|event| (screen, event))
+            .collect()
+    }
+
+    /// Returns the screen whose layout holds the mouse capture.
+    #[must_use]
+    pub fn capture_screen(&self) -> Option<UiScreenId> {
+        self.screens
+            .iter()
+            .position(|screen| screen.layout.capture().is_some())
+            .map(UiScreenId)
+    }
+
+    /// Returns the screen whose layout holds keyboard focus, else the front-most screen.
+    ///
+    /// Focus is global in the original — the window manager holds a single focused window — so a key
+    /// has exactly one destination. With nothing focused the front-most screen is the one a key
+    /// reaches, which is where `Shell::push` leaves focus after bringing a screen forward.
+    #[must_use]
+    pub fn focus_screen(&self) -> Option<UiScreenId> {
+        self.screens
+            .iter()
+            .position(|screen| screen.layout.focus().is_some())
+            .map(UiScreenId)
+            .or_else(|| self.draw_order.last().copied().map(UiScreenId))
+    }
+
+    /// Builds one renderer-neutral frame per screen, from the back of the draw order to the front.
+    ///
+    /// A screen whose layout is hidden contributes an empty frame rather than being dropped, because
+    /// its stack position is still meaningful to a caller attributing items back to screens.
+    #[must_use]
+    pub fn frames(&self, clip: UiClipPolicy) -> Vec<(UiScreenId, UiFrame)> {
+        self.draw_order
+            .iter()
+            .map(|index| (UiScreenId(*index), self.screens[*index].layout.frame(clip)))
+            .collect()
+    }
+
+    /// Builds one composed frame over every screen, in draw order.
+    ///
+    /// The original draws the whole window list in one pass, so a composed frame — not one frame per
+    /// screen — is what a renderer receives. Screens appear back to front, which puts the most
+    /// recently brought-forward screen's items last and therefore on top.
+    #[must_use]
+    pub fn frame(&self, clip: UiClipPolicy) -> UiFrame {
+        let mut composed = UiFrame::default();
+        for (_, frame) in self.frames(clip) {
+            composed.append(frame);
+        }
+        composed
     }
 
     fn do_push(&mut self, screen: UiScreen) -> Vec<UiShellEvent> {

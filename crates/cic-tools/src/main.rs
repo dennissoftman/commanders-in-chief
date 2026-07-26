@@ -35,8 +35,11 @@ use cic_tools::resource::{
     config_path, discover_options_ini, discover_steam_locations, resolve_archives_for_language,
     resolve_options_ini_path, validate_installation,
 };
+use cic_tools::shell_menu::{
+    ShellMenuActionOutcome, ShellMenuBindings, ShellMenuHide, ShellMenuRecord, main_menu_bindings,
+};
 use cic_tools::ui_resources::{
-    DEFAULT_MAPPED_IMAGE_TEXTURE_SIZE, LocalizationResources, UiResourceLimits,
+    DEFAULT_MAPPED_IMAGE_TEXTURE_SIZE, LocalizationResources, MappedImageCatalog, UiResourceLimits,
     collect_ui_resource_demand, load_localization_resources, load_mapped_image_catalog,
     resolve_ui_resources,
 };
@@ -45,13 +48,14 @@ use cic_tools::{
     pack_w3d_glb, render_csf, render_manifest, render_map, render_map_blend, render_map_height,
     render_map_lighting, render_map_polygons, render_map_sides, render_map_water,
     render_map_world_objects, render_options_ini, render_transition_run, render_ui_callbacks,
-    render_ui_layout, render_ui_resources, render_ui_shell, render_w3d, render_w3d_gltf,
-    render_w3d_mesh, render_window_transitions, render_wnd, render_wnd_patch,
+    render_ui_layout, render_ui_menu, render_ui_resources, render_ui_shell, render_w3d,
+    render_w3d_gltf, render_w3d_mesh, render_window_transitions, render_wnd, render_wnd_patch,
     summarize_transition_diagnostics,
 };
 use cic_ui::{
-    UiCallbackEdition, UiClipPolicy, UiFrame, UiFrameItem, UiLayout, UiLimits, UiPresentation,
-    UiScalePolicy, UiScreen, UiShell, UiTransitionHandler, UiViewport,
+    UiCallbackEdition, UiClipPolicy, UiDemoAction, UiEvent, UiFrame, UiFrameItem, UiKey, UiLayout,
+    UiLimits, UiMouseButton, UiPoint, UiPresentation, UiScalePolicy, UiScreen, UiScreenId, UiShell,
+    UiShellEvent, UiTransitionHandler, UiViewport,
 };
 use cic_vfs::{BigLimits, Vfs, VirtualPath};
 
@@ -88,6 +92,13 @@ const USAGE: &str = "Usage:\n\
   cic-inspect ui-shell [--viewport <width>x<height>] [--scale <classic|modern>] --step <spec> [--step <spec> ...] [<mount> ...]\n\
     A shell step is push:<virtual-path>, pop, pop-immediate, complete, complete-for-push, update,\n\
     hide, show, show-shell, hide-shell, or forward:<screen-index>.\n\
+  cic-inspect ui-menu [--viewport <width>x<height>] [--scale <classic|modern>] [--clip <none|parent>]\n\
+                      [--font <file>]... [--texture-size <pixels>] [--menu-dir <prefix>]\n\
+                      [--transitions <virtual-path>] [--capture-dir <directory>]\n\
+                      --step <spec> [--step <spec> ...] [<mount> ...]\n\
+    Drives the user-owned main menu. A step is move:<x>,<y>, hover:<control|x,y>,\n\
+    click:<control|x,y>, key:<name>, text:<string>, frame, frames:<count>, settle, pop, update,\n\
+    or capture:<file.png>.\n\
 Each mount is a directory or BIG archive. Mounts are applied from left to right; later mounts override earlier mounts.";
 
 const MAX_ENCODED_IMAGE_BYTES: usize = 256 * 1_024 * 1_024;
@@ -244,6 +255,7 @@ fn run(arguments: impl IntoIterator<Item = String>) -> Result<String, Box<dyn Er
         "wnd-patch" => report_wnd_patch(&mut arguments, &options),
         "ui-callbacks" => report_ui_callbacks(&mut arguments, &options),
         "ui-shell" => report_ui_shell(&mut arguments, &options),
+        "ui-menu" => report_ui_menu(&mut arguments, &options),
         "ui-transitions" => report_ui_transitions(&mut arguments, &options),
         "ui-resources" => report_ui_resources(&mut arguments, &options),
         "ui-layout" => report_ui_layout(&mut arguments, &options),
@@ -2195,45 +2207,10 @@ where
         .frame(clip)
         .with_resolved_text(&|label| localized_text(&localization, label));
 
-    let mut pages: Vec<UiTexturePage> = Vec::new();
-    let mut page_indices: BTreeMap<String, usize> = BTreeMap::new();
-    let mut bindings: BTreeMap<String, UiImageBinding> = BTreeMap::new();
-    for image in collect_frame_images(&frame) {
-        let Some(cataloged) = catalog.find(image.as_bytes()) else {
-            continue;
-        };
-        let texture = String::from_utf8_lossy(cataloged.image().texture_bytes()).into_owned();
-        if texture.is_empty() {
-            continue;
-        }
-        let page = if let Some(page) = page_indices.get(&texture) {
-            *page
-        } else {
-            {
-                let Ok((path, encoded)) = resolve_texture(&vfs, texture.as_bytes()) else {
-                    continue;
-                };
-                // TGA carries no magic bytes, so the format comes from the resolved path rather
-                // than from guessing, exactly as the terrain and model paths do.
-                let decoded = decode_viewer_texture(&encoded, image_format(&path)?)?;
-                let page =
-                    UiTexturePage::new(decoded.width(), decoded.height(), decoded.into_raw())?;
-                pages.push(page);
-                let index = pages.len() - 1;
-                page_indices.insert(texture.clone(), index);
-                index
-            }
-        };
-        let (width, height) = cataloged.image().image_size();
-        bindings.insert(
-            image,
-            UiImageBinding {
-                page,
-                uv: cataloged.image().uv(),
-                size: [width, height],
-            },
-        );
-    }
+    let mut images = UiImageResources::new();
+    images.bind_frame(&vfs, &catalog, &frame)?;
+    let pages = images.pages;
+    let bindings = images.bindings;
 
     let fonts = font_paths
         .iter()
@@ -2310,6 +2287,75 @@ where
         )?;
     }
     Ok(report)
+}
+
+/// Texture pages and per-image bindings for every frame a capture session stages.
+///
+/// A session that captures more than once accumulates rather than rebuilding, so a page uploaded for
+/// an early frame is reused by a later one and page indices stay stable across the whole run. That
+/// makes the accumulated set a function of the script alone, which is what keeps repeat runs
+/// byte-identical.
+struct UiImageResources {
+    pages: Vec<UiTexturePage>,
+    page_indices: BTreeMap<String, usize>,
+    bindings: BTreeMap<String, UiImageBinding>,
+}
+
+impl UiImageResources {
+    fn new() -> Self {
+        Self {
+            pages: Vec::new(),
+            page_indices: BTreeMap::new(),
+            bindings: BTreeMap::new(),
+        }
+    }
+
+    /// Resolves and uploads every image one frame can draw that is not already bound.
+    fn bind_frame(
+        &mut self,
+        vfs: &Vfs,
+        catalog: &MappedImageCatalog,
+        frame: &UiFrame,
+    ) -> Result<(), Box<dyn Error>> {
+        for image in collect_frame_images(frame) {
+            if self.bindings.contains_key(&image) {
+                continue;
+            }
+            let Some(cataloged) = catalog.find(image.as_bytes()) else {
+                continue;
+            };
+            let texture = String::from_utf8_lossy(cataloged.image().texture_bytes()).into_owned();
+            if texture.is_empty() {
+                continue;
+            }
+            let page = if let Some(page) = self.page_indices.get(&texture) {
+                *page
+            } else {
+                let Ok((path, encoded)) = resolve_texture(vfs, texture.as_bytes()) else {
+                    continue;
+                };
+                // TGA carries no magic bytes, so the format comes from the resolved path rather
+                // than from guessing, exactly as the terrain and model paths do.
+                let decoded = decode_viewer_texture(&encoded, image_format(&path)?)?;
+                let page =
+                    UiTexturePage::new(decoded.width(), decoded.height(), decoded.into_raw())?;
+                self.pages.push(page);
+                let index = self.pages.len() - 1;
+                self.page_indices.insert(texture, index);
+                index
+            };
+            let (width, height) = cataloged.image().image_size();
+            self.bindings.insert(
+                image,
+                UiImageBinding {
+                    page,
+                    uv: cataloged.image().uv(),
+                    size: [width, height],
+                },
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Returns every distinct mapped-image name a frame can draw, in first-use order.
@@ -2700,6 +2746,758 @@ where
         steps.push((spec.clone(), events));
     }
     Ok(render_ui_shell(&steps, &shell))
+}
+
+/// Drives an explicit script over the user-owned main menu and reports everything it did.
+///
+/// Gate 8's artifact. The step list is the whole input record: pointer positions, clicks named by
+/// control, keys, how many transition frames were stepped, and where each capture went. Nothing reads
+/// a clock, a host pointer, or a host display, so two runs of the same script over the same
+/// installation produce the same PNG bytes.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one arm per step kind; the option loop and the script loop are one command's contract"
+)]
+fn report_ui_menu<I>(
+    arguments: &mut std::iter::Peekable<I>,
+    options: &CliOptions,
+) -> Result<String, Box<dyn Error>>
+where
+    I: Iterator<Item = String>,
+{
+    let mut presentation = parse_ui_presentation("ui-menu", arguments)?;
+    let mut clip = UiClipPolicy::None;
+    let mut texture_size = DEFAULT_MAPPED_IMAGE_TEXTURE_SIZE;
+    let mut transitions_path = DEFAULT_WINDOW_TRANSITIONS_PATH.to_owned();
+    let mut menu_dir = DEFAULT_MENU_DIRECTORY.to_owned();
+    let mut capture_dir = PathBuf::from(".");
+    let mut font_paths: Vec<PathBuf> = Vec::new();
+    let mut specs: Vec<String> = Vec::new();
+    let mut mounts = Vec::new();
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--step" => specs.push(arguments.next().ok_or("--step requires a spec")?),
+            "--font" => font_paths.push(PathBuf::from(
+                arguments.next().ok_or("--font requires a file path")?,
+            )),
+            "--capture-dir" => {
+                capture_dir = PathBuf::from(
+                    arguments
+                        .next()
+                        .ok_or("--capture-dir requires a directory")?,
+                );
+            }
+            "--menu-dir" => {
+                menu_dir = arguments
+                    .next()
+                    .ok_or("--menu-dir requires a virtual directory prefix")?;
+            }
+            "--transitions" => {
+                transitions_path = arguments
+                    .next()
+                    .ok_or("--transitions requires a virtual path")?;
+            }
+            "--texture-size" => {
+                texture_size = arguments
+                    .next()
+                    .ok_or("--texture-size requires a pixel count")?
+                    .parse::<u32>()?;
+            }
+            "--clip" => {
+                clip = match arguments
+                    .next()
+                    .ok_or("--clip requires none or parent")?
+                    .as_str()
+                {
+                    "none" => UiClipPolicy::None,
+                    "parent" => UiClipPolicy::ClipToParent,
+                    other => return Err(format!("unknown clip policy {other:?}").into()),
+                };
+            }
+            "--viewport" | "--scale" => {
+                // Both may also appear after another option, so the shared parser is reused here.
+                let value = arguments
+                    .next()
+                    .ok_or_else(|| format!("{argument} requires a value"))?;
+                let mut restated = [argument, value].into_iter().peekable();
+                presentation = parse_ui_presentation("ui-menu", &mut restated)?;
+            }
+            option if option.starts_with("--") => {
+                return Err(format!("unknown ui-menu option {option:?}").into());
+            }
+            _ => mounts.push(argument),
+        }
+    }
+    if specs.is_empty() {
+        return Err("ui-menu requires at least one --step <spec>".into());
+    }
+
+    let vfs = mount_all("ui-menu", &mounts, options, ResourceKind::Ui)?;
+    let resource_limits = UiResourceLimits::default();
+    let catalog = load_mapped_image_catalog(&vfs, texture_size, resource_limits)?;
+    let localization = load_localization_resources(&vfs, &options.language, resource_limits)?;
+
+    let transitions_resource = VirtualPath::new(&transitions_path)?;
+    let ini_limits = UiIniLimits::default();
+    let transitions_entry = vfs
+        .resolve(&transitions_resource)
+        .ok_or_else(|| format!("resource not found: {transitions_resource}"))?;
+    let transitions_bytes = transitions_entry.read(ini_limits.max_file_bytes)?;
+    let transitions_ini = parse_window_transitions_ini(&transitions_bytes, ini_limits)?;
+
+    let fonts = font_paths
+        .iter()
+        .map(fs::read)
+        .collect::<Result<Vec<Vec<u8>>, _>>()?;
+    let text_policy = if fonts.is_empty() {
+        UiTextPolicy::Placeholder
+    } else {
+        UiTextPolicy::Shape
+    };
+    let renderer = pollster::block_on(HeadlessRenderer::new())?;
+    let mut font_set = if fonts.is_empty() {
+        None
+    } else {
+        Some(renderer.create_ui_font_set(&fonts)?)
+    };
+
+    let mut session = MenuSession {
+        vfs: &vfs,
+        presentation,
+        clip,
+        menu_dir,
+        bindings: main_menu_bindings(),
+        shell: UiShell::new(),
+        transitions: UiTransitionHandler::new(&transitions_ini),
+        localization,
+        catalog,
+        images: UiImageResources::new(),
+        first_input_seen: false,
+        opened: false,
+        pointer: UiPoint::new(0, 0),
+        records: Vec::new(),
+    };
+    session.open()?;
+
+    let mut steps = Vec::with_capacity(specs.len());
+    for spec in &specs {
+        let before = session.records.len();
+        match spec.split_once(':') {
+            Some(("move", operand)) => session.pointer_moved(parse_ui_point(operand)?),
+            Some(("hover", operand)) => {
+                let point = resolve_step_point(&session, operand)?;
+                session.pointer_moved(point);
+            }
+            Some(("click", operand)) => {
+                let point = resolve_step_point(&session, operand)?;
+                session.click(point);
+            }
+            Some(("key", operand)) => session.press_key(parse_ui_key(operand)?),
+            Some(("text", operand)) => session.insert_text(operand),
+            Some(("frames", operand)) => session.step_transitions(operand.parse::<usize>()?),
+            Some(("capture", operand)) => {
+                let path = capture_dir.join(operand);
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                session.capture(&renderer, font_set.as_mut(), text_policy, &path)?;
+            }
+            Some((unknown, _)) => return Err(format!("unknown ui-menu step {unknown:?}").into()),
+            None => match spec.as_str() {
+                "frame" => session.step_transitions(1),
+                "settle" => session.settle_transitions(),
+                "pop" => {
+                    let outcome = session.pop_screen();
+                    session.records.push(ShellMenuRecord::Action {
+                        control: "-".to_owned(),
+                        action: UiDemoAction::PopScreen,
+                        outcome,
+                    });
+                }
+                "update" => {
+                    let events = session.shell.update();
+                    session.record_shell(events);
+                }
+                unknown => return Err(format!("unknown ui-menu step {unknown:?}").into()),
+            },
+        }
+        steps.push((spec.clone(), before..session.records.len()));
+    }
+
+    Ok(render_ui_menu(
+        &steps,
+        &session.records,
+        &session.bindings.allowlist,
+        &session.shell,
+    ))
+}
+
+/// Reads a step's point operand, either an explicit `x,y` or a control name to aim at.
+fn resolve_step_point(session: &MenuSession<'_>, operand: &str) -> Result<UiPoint, Box<dyn Error>> {
+    if let Ok(point) = parse_ui_point(operand) {
+        return Ok(point);
+    }
+    session
+        .control_center(operand)
+        .ok_or_else(|| format!("no control named {operand:?} on the stack").into())
+}
+
+fn parse_ui_point(operand: &str) -> Result<UiPoint, Box<dyn Error>> {
+    let (x, y) = operand
+        .split_once(',')
+        .ok_or("a point operand is <x>,<y>")?;
+    Ok(UiPoint::new(
+        x.trim().parse::<i32>()?,
+        y.trim().parse::<i32>()?,
+    ))
+}
+
+fn parse_ui_key(operand: &str) -> Result<UiKey, Box<dyn Error>> {
+    Ok(match operand {
+        "tab" => UiKey::Tab,
+        "shift-tab" => UiKey::ShiftTab,
+        "backspace" => UiKey::Backspace,
+        "delete" => UiKey::Delete,
+        "left" => UiKey::Left,
+        "right" => UiKey::Right,
+        "home" => UiKey::Home,
+        "end" => UiKey::End,
+        "up" => UiKey::Up,
+        "down" => UiKey::Down,
+        "enter" => UiKey::Enter,
+        "escape" => UiKey::Escape,
+        other => return Err(format!("unknown key {other:?}").into()),
+    })
+}
+
+/// How many transition frames `settle` will step before giving up.
+///
+/// A group that cannot finish is a real source condition — `TYPETEXT` under thirty characters never
+/// sets its finished flag — so a settle has to be bounded rather than trusting the handler.
+const MAX_SETTLE_FRAMES: usize = 256;
+
+/// A scripted navigation session over real shell layouts, with resources and capture.
+///
+/// This is Gate 8's artifact: the retained runtime, the shell stack, the transition handler, the
+/// action allowlist, and the `wgpu` UI renderer driven together by an explicit step list. Every input
+/// is named on the command line and time is stepped in whole transition frames, so no clock, host
+/// pointer, or host display reaches the output.
+struct MenuSession<'a> {
+    vfs: &'a Vfs,
+    presentation: UiPresentation,
+    clip: UiClipPolicy,
+    menu_dir: String,
+    bindings: ShellMenuBindings,
+    shell: UiShell,
+    transitions: UiTransitionHandler,
+    localization: LocalizationResources,
+    catalog: MappedImageCatalog,
+    images: UiImageResources,
+    first_input_seen: bool,
+    /// Whether the bound screen has been opened, which is what makes a later init a re-entry.
+    opened: bool,
+    pointer: UiPoint,
+    records: Vec<ShellMenuRecord>,
+}
+
+impl MenuSession<'_> {
+    /// Opens the session's first screen and applies its initial hidden set.
+    fn open(&mut self) -> Result<(), Box<dyn Error>> {
+        let path = self.bindings.path;
+        let resolved = self
+            .resolve_menu_layout(path)
+            .ok_or_else(|| format!("resource not found for shell layout {path}"))?;
+        let layout = instantiate_ui_layout(self.vfs, &resolved, self.presentation)?;
+        let events = self
+            .shell
+            .push(UiScreen::new(resolved.as_str(), layout), false)?;
+        self.record_shell(events);
+        self.apply_initial_hide();
+        Ok(())
+    }
+
+    /// Hides every window the screen's binding table names, reporting what each one did.
+    fn apply_initial_hide(&mut self) {
+        let Some(screen) = self.shell.top_id() else {
+            return;
+        };
+        for name in self.bindings.initial_hidden {
+            let layout = self
+                .shell
+                .layout_mut(screen)
+                .expect("the screen just resolved");
+            let outcome = match layout.find(name) {
+                None => ShellMenuHide::Missing,
+                Some(control) if layout.control(control).is_hidden() => {
+                    ShellMenuHide::AlreadyHidden
+                }
+                Some(control) => {
+                    layout.set_hidden(control, true);
+                    ShellMenuHide::Hidden
+                }
+            };
+            self.records.push(ShellMenuRecord::InitialHide {
+                control: (*name).to_owned(),
+                outcome,
+            });
+        }
+    }
+
+    /// Turns a source-spelled layout path into a virtual path the mounted filesystem carries.
+    ///
+    /// `Shell::push` is called with `Menus/<file>.wnd` while the archives hold `Window/Menus/<file>`,
+    /// and a few layouts sit directly under `Window`, so both are tried — the same pair the
+    /// transition sweep resolves window names through.
+    fn resolve_menu_layout(&self, source_path: &str) -> Option<VirtualPath> {
+        let file = source_path.rsplit(['/', '\\']).next()?;
+        let menus = self.menu_dir.trim_end_matches('/');
+        let root = menus.rsplit_once('/').map_or("Window", |(head, _)| head);
+        [format!("{menus}/{file}"), format!("{root}/{file}")]
+            .into_iter()
+            .find_map(|candidate| {
+                let resolved = VirtualPath::new(&candidate).ok()?;
+                self.vfs.resolve(&resolved).is_some().then_some(resolved)
+            })
+    }
+
+    /// Records shell events and re-runs the bound screen's own init behaviour when it comes back.
+    ///
+    /// `Shell::doPop` runs the new top's init, so returning to the main menu really does re-enter
+    /// `MainMenuInit`. Applying only the shell event would leave the screen exactly as the outgoing
+    /// transitions left it, which is blank.
+    fn record_shell(&mut self, events: Vec<UiShellEvent>) {
+        let mut re_entered = false;
+        for event in events {
+            if let UiShellEvent::LayoutInit { screen, .. } = &event
+                && self.is_bound_screen(*screen)
+            {
+                // The first init is the screen opening, which `open` already handled.
+                re_entered = self.opened;
+                self.opened = true;
+            }
+            self.records.push(ShellMenuRecord::Shell(event));
+        }
+        if re_entered {
+            self.apply_initial_hide();
+            let actions = self.bindings.re_entry.clone();
+            for action in &actions {
+                let outcome = self.run_action(action);
+                self.records.push(ShellMenuRecord::Action {
+                    control: self.bindings.path.to_owned(),
+                    action: action.clone(),
+                    outcome,
+                });
+            }
+        }
+    }
+
+    /// Returns whether a screen is the one the binding table describes.
+    fn is_bound_screen(&self, screen: UiScreenId) -> bool {
+        let Some(path) = self.shell.screen(screen).map(UiScreen::path) else {
+            return false;
+        };
+        let file = self.bindings.path.rsplit(['/', '\\']).next().unwrap_or("");
+        !file.is_empty()
+            && path
+                .to_ascii_lowercase()
+                .ends_with(&file.to_ascii_lowercase())
+    }
+
+    /// Records input events and routes every activation through the allowlist.
+    fn record_input(&mut self, events: Vec<(UiScreenId, UiEvent)>) {
+        for (screen, event) in events {
+            let control = match &event {
+                UiEvent::HoverEntered { control }
+                | UiEvent::HoverLeft { control }
+                | UiEvent::Pressed { control, .. }
+                | UiEvent::Activated { control, .. }
+                | UiEvent::PressCancelled { control }
+                | UiEvent::ToggleChanged { control, .. }
+                | UiEvent::ValueChanged { control, .. }
+                | UiEvent::SelectionChanged { control, .. }
+                | UiEvent::TextChanged { control } => Some(*control),
+                UiEvent::FocusChanged { to, .. } => *to,
+            };
+            let name = control.and_then(|control| {
+                self.shell
+                    .layout(screen)
+                    .and_then(|layout| layout.control(control).name().map(str::to_owned))
+            });
+            let (kind, detail) = ui_event_row(&event);
+            self.records.push(ShellMenuRecord::Input {
+                screen: screen.index(),
+                control: name.clone(),
+                kind,
+                detail,
+            });
+            if let UiEvent::Activated { callback, .. } = &event {
+                self.route_activation(name, callback.clone());
+            }
+        }
+    }
+
+    /// Runs whatever the allowlist permits for one activated control, or records that nothing ran.
+    fn route_activation(&mut self, control: Option<String>, callback: Option<String>) {
+        let actions = control
+            .as_deref()
+            .and_then(|name| self.bindings.allowlist.resolve(name))
+            .map(<[UiDemoAction]>::to_vec);
+        match (control, actions) {
+            (Some(name), Some(actions)) => self.run_actions(&name, &actions),
+            (control, _) => self
+                .records
+                .push(ShellMenuRecord::Unrouted { control, callback }),
+        }
+    }
+
+    /// Runs one binding's actions in order, recording each one's outcome.
+    fn run_actions(&mut self, control: &str, actions: &[UiDemoAction]) {
+        for action in actions {
+            let outcome = self.run_action(action);
+            self.records.push(ShellMenuRecord::Action {
+                control: control.to_owned(),
+                action: action.clone(),
+                outcome,
+            });
+        }
+    }
+
+    fn run_action(&mut self, action: &UiDemoAction) -> ShellMenuActionOutcome {
+        match action {
+            UiDemoAction::ShowControl { control } => self.set_control_hidden(control, false),
+            UiDemoAction::HideControl { control } => self.set_control_hidden(control, true),
+            UiDemoAction::FocusControl { control } => {
+                let Some((screen, id)) = self.shell.find_control_by_decorated_name(control) else {
+                    return ShellMenuActionOutcome::UnknownControl;
+                };
+                let events = self
+                    .shell
+                    .layout_mut(screen)
+                    .expect("the screen just resolved")
+                    .set_focus(Some(id))
+                    .into_iter()
+                    .map(|event| (screen, event))
+                    .collect();
+                self.record_input(events);
+                ShellMenuActionOutcome::Applied
+            }
+            UiDemoAction::SetTransitionGroup { group, immediate } => {
+                if !self.has_group(group) {
+                    return ShellMenuActionOutcome::UnknownGroup;
+                }
+                self.transitions
+                    .set_group(&mut self.shell, group, *immediate);
+                ShellMenuActionOutcome::Applied
+            }
+            UiDemoAction::ReverseTransitionGroup { group } => {
+                if !self.has_group(group) {
+                    return ShellMenuActionOutcome::UnknownGroup;
+                }
+                self.transitions.reverse(&mut self.shell, group);
+                ShellMenuActionOutcome::Applied
+            }
+            UiDemoAction::RemoveTransitionGroup {
+                group,
+                skip_pending,
+            } => {
+                if !self.has_group(group) {
+                    return ShellMenuActionOutcome::UnknownGroup;
+                }
+                self.transitions
+                    .remove(&mut self.shell, group, *skip_pending);
+                ShellMenuActionOutcome::Applied
+            }
+            UiDemoAction::PushScreen { path } => self.push_screen(path),
+            UiDemoAction::PopScreen => self.pop_screen(),
+            // Nothing here ends a process. R4 is presentation-only, so leaving the demo is a record.
+            UiDemoAction::Quit => ShellMenuActionOutcome::QuitRecorded,
+        }
+    }
+
+    fn has_group(&self, group: &str) -> bool {
+        self.transitions.group_names().any(|name| name == group)
+    }
+
+    fn set_control_hidden(&mut self, control: &str, hidden: bool) -> ShellMenuActionOutcome {
+        let Some((screen, id)) = self.shell.find_control_by_decorated_name(control) else {
+            return ShellMenuActionOutcome::UnknownControl;
+        };
+        self.shell
+            .layout_mut(screen)
+            .expect("the screen just resolved")
+            .set_hidden(id, hidden);
+        ShellMenuActionOutcome::Applied
+    }
+
+    /// Pushes a screen, completing the two-phase sequence in one step.
+    ///
+    /// The protocol itself — a push waiting on the outgoing screen's shutdown — is what `ui-shell`
+    /// reports; here the shutdown is declared finished immediately, because this demo runs no layout
+    /// shutdown that could animate and then report back.
+    fn push_screen(&mut self, source_path: &str) -> ShellMenuActionOutcome {
+        let Some(resolved) = self.resolve_menu_layout(source_path) else {
+            return ShellMenuActionOutcome::UnresolvedLayout;
+        };
+        let layout = match instantiate_ui_layout(self.vfs, &resolved, self.presentation) {
+            Ok(layout) => layout,
+            Err(error) => return ShellMenuActionOutcome::Refused(error.to_string()),
+        };
+        match self
+            .shell
+            .push(UiScreen::new(resolved.as_str(), layout), false)
+        {
+            Ok(events) => {
+                self.record_shell(events);
+                let events = self.shell.shutdown_complete();
+                self.record_shell(events);
+                ShellMenuActionOutcome::Applied
+            }
+            Err(error) => ShellMenuActionOutcome::Refused(error.to_string()),
+        }
+    }
+
+    fn pop_screen(&mut self) -> ShellMenuActionOutcome {
+        match self.shell.pop() {
+            Ok(events) => {
+                self.record_shell(events);
+                let events = self.shell.shutdown_complete();
+                self.record_shell(events);
+                ShellMenuActionOutcome::Applied
+            }
+            Err(error) => ShellMenuActionOutcome::Refused(error.to_string()),
+        }
+    }
+
+    /// Delivers the screen's first-input actions, once, as `MainMenuInput` does.
+    fn fire_first_input(&mut self) {
+        if self.first_input_seen {
+            return;
+        }
+        self.first_input_seen = true;
+        self.records.push(ShellMenuRecord::FirstInput);
+        let actions = self.bindings.first_input.clone();
+        for action in &actions {
+            let outcome = self.run_action(action);
+            self.records.push(ShellMenuRecord::Action {
+                control: self.bindings.path.to_owned(),
+                action: action.clone(),
+                outcome,
+            });
+        }
+    }
+
+    fn pointer_moved(&mut self, point: UiPoint) {
+        self.pointer = point;
+        let events = self.shell.pointer_moved(point);
+        self.record_input(events);
+        self.fire_first_input();
+    }
+
+    fn click(&mut self, point: UiPoint) {
+        self.pointer_moved(point);
+        let events = self.shell.pointer_pressed(point, UiMouseButton::Left);
+        self.record_input(events);
+        let events = self.shell.pointer_released(point, UiMouseButton::Left);
+        self.record_input(events);
+    }
+
+    /// Returns the centre of a named control on whichever screen carries it.
+    fn control_center(&self, name: &str) -> Option<UiPoint> {
+        let (screen, id) = self
+            .shell
+            .find_control_by_decorated_name(name)
+            .or_else(|| {
+                // A caller naming a control without its layout prefix still resolves, which is how a
+                // script written against one menu survives being pushed under another.
+                self.shell
+                    .draw_order()
+                    .into_iter()
+                    .rev()
+                    .find_map(|screen| {
+                        self.shell
+                            .layout(screen)
+                            .and_then(|layout| layout.find(name))
+                            .map(|id| (screen, id))
+                    })
+            })?;
+        let rect = self.shell.layout(screen)?.screen_rect(id);
+        Some(UiPoint::new(
+            rect.x + rect.width / 2,
+            rect.y + rect.height / 2,
+        ))
+    }
+
+    fn press_key(&mut self, key: UiKey) {
+        let Some(screen) = self.shell.focus_screen() else {
+            return;
+        };
+        let events = self
+            .shell
+            .layout_mut(screen)
+            .expect("the focused screen exists")
+            .press_key(key)
+            .into_iter()
+            .map(|event| (screen, event))
+            .collect();
+        self.record_input(events);
+        self.fire_first_input();
+    }
+
+    fn insert_text(&mut self, text: &str) {
+        let Some(screen) = self.shell.focus_screen() else {
+            return;
+        };
+        let events = self
+            .shell
+            .layout_mut(screen)
+            .expect("the focused screen exists")
+            .insert_text(text)
+            .into_iter()
+            .map(|event| (screen, event))
+            .collect();
+        self.record_input(events);
+        self.fire_first_input();
+    }
+
+    /// Steps whole transition frames, which is the only time this session advances.
+    fn step_transitions(&mut self, frames: usize) {
+        let mut diagnostics = 0;
+        for _ in 0..frames {
+            let step = self.transitions.update(&mut self.shell, 1.0);
+            diagnostics += step.diagnostics().len();
+        }
+        self.records.push(ShellMenuRecord::Transition {
+            frames,
+            group: self.transitions.current_group().map(str::to_owned),
+            finished: self.transitions.is_finished(),
+            diagnostics,
+        });
+    }
+
+    /// Steps until the handler has nothing left to run, under an explicit bound.
+    fn settle_transitions(&mut self) {
+        let mut frames = 0;
+        let mut diagnostics = 0;
+        while frames < MAX_SETTLE_FRAMES && !self.transitions.is_finished() {
+            let step = self.transitions.update(&mut self.shell, 1.0);
+            diagnostics += step.diagnostics().len();
+            frames += 1;
+        }
+        self.records.push(ShellMenuRecord::Transition {
+            frames,
+            group: self.transitions.current_group().map(str::to_owned),
+            finished: self.transitions.is_finished(),
+            diagnostics,
+        });
+    }
+
+    /// Stages and captures the whole stack as one composed frame.
+    fn capture(
+        &mut self,
+        renderer: &HeadlessRenderer,
+        font_set: Option<&mut cic_render::UiFontSet>,
+        text_policy: UiTextPolicy,
+        path: &Path,
+    ) -> Result<(), Box<dyn Error>> {
+        let localization = &self.localization;
+        let frame = self
+            .shell
+            .frame(self.clip)
+            .with_resolved_text(&|label| localized_text(localization, label));
+        self.images.bind_frame(self.vfs, &self.catalog, &frame)?;
+        let viewport = self.presentation.viewport;
+        let canvas = [
+            u32::try_from(viewport.width())?,
+            u32::try_from(viewport.height())?,
+        ];
+        let bindings = &self.images.bindings;
+        let staged = StagedUiFrame::from_frame(
+            &frame,
+            canvas,
+            text_policy,
+            UiStagingLimits::default(),
+            &|name| bindings.get(name).copied(),
+        )?;
+        let capture = renderer.capture_ui_frame(
+            &staged,
+            &self.images.pages,
+            font_set,
+            [0.0, 0.0, 0.0, 1.0],
+        )?;
+        let png = encode_capture_png(&capture)?;
+        fs::write(path, &png)?;
+        self.records.push(ShellMenuRecord::Capture {
+            path: path.display().to_string(),
+            width: capture.width(),
+            height: capture.height(),
+            sha256: capture.sha256(),
+            quads: staged.vertices().len() / 4,
+            batches: staged.batches().len(),
+            text_runs: staged.text().len(),
+            diagnostics: staged.diagnostics().len(),
+        });
+        for diagnostic in staged.diagnostics() {
+            let (kind, detail) = ui_staging_diagnostic_row(diagnostic.kind());
+            self.records.push(ShellMenuRecord::CaptureDiagnostic {
+                item: diagnostic.item(),
+                control: diagnostic.control().map(cic_ui::UiControlId::index),
+                kind,
+                detail,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Returns a stable kind and operand for one staging diagnostic.
+fn ui_staging_diagnostic_row(kind: &UiStagingDiagnosticKind) -> (&'static str, String) {
+    match kind {
+        UiStagingDiagnosticKind::UnboundImage { name } => ("unbound_image", (*name).to_string()),
+        UiStagingDiagnosticKind::UnbalancedPopClip => ("unbalanced_pop_clip", "-".to_owned()),
+        UiStagingDiagnosticKind::UnclosedClips { depth } => ("unclosed_clips", depth.to_string()),
+        UiStagingDiagnosticKind::UnshapeableText { text } => {
+            ("unshapeable_text", (*text).to_string())
+        }
+        UiStagingDiagnosticKind::UncomposedArt { family } => {
+            ("uncomposed_art", (*family).to_owned())
+        }
+    }
+}
+
+/// Returns a stable kind and operand field for one retained input event.
+fn ui_event_row(event: &UiEvent) -> (&'static str, String) {
+    match event {
+        UiEvent::HoverEntered { .. } => ("hover_entered", String::new()),
+        UiEvent::HoverLeft { .. } => ("hover_left", String::new()),
+        UiEvent::Pressed { button, .. } => ("pressed", format!("{button:?}")),
+        UiEvent::Activated {
+            button, callback, ..
+        } => (
+            "activated",
+            format!("{button:?} callback={}", callback.as_deref().unwrap_or("-")),
+        ),
+        UiEvent::PressCancelled { .. } => ("press_cancelled", String::new()),
+        UiEvent::FocusChanged { from, to } => (
+            "focus_changed",
+            format!(
+                "from={} to={}",
+                from.map_or_else(|| "-".to_owned(), |id| id.index().to_string()),
+                to.map_or_else(|| "-".to_owned(), |id| id.index().to_string())
+            ),
+        ),
+        UiEvent::ToggleChanged { selected, .. } => {
+            ("toggle_changed", format!("selected={selected}"))
+        }
+        UiEvent::ValueChanged { value, .. } => ("value_changed", format!("value={value}")),
+        UiEvent::SelectionChanged { index, .. } => (
+            "selection_changed",
+            format!(
+                "index={}",
+                index.map_or_else(|| "-".to_owned(), |index| index.to_string())
+            ),
+        ),
+        UiEvent::TextChanged { .. } => ("text_changed", String::new()),
+    }
 }
 
 /// Reads the `--viewport` and `--scale` options both UI reports accept.

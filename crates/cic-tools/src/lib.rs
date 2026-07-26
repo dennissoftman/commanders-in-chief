@@ -2,12 +2,14 @@
 
 mod gltf;
 pub mod resource;
+pub mod shell_menu;
 pub mod ui_resources;
 
 pub use gltf::{GltfTextureRequest, W3dGlbError, W3dGltfBundle, pack_w3d_glb, render_w3d_gltf};
 
 use std::fmt::Write;
 
+use crate::shell_menu::{ShellMenuActionOutcome, ShellMenuHide, ShellMenuRecord};
 use crate::ui_resources::{
     LocalizationResources, MappedImageCatalog, UiResourceBinding, UiResourceKind,
     UiResourceResolution,
@@ -22,10 +24,10 @@ use cic_formats::{
 };
 use cic_render::Capture;
 use cic_ui::{
-    UI_CALLBACK_SLOTS, UiCallbackBinding, UiCallbackEdition, UiCallbackSlot, UiClipPolicy,
-    UiControlKind, UiDiagnosticKind, UiFrameItem, UiLayout, UiScalePolicy, UiScreenId, UiShell,
-    UiShellEvent, UiTransitionDiagnostic, UiTransitionDiagnosticKind, UiTransitionDraw,
-    classify_callback_in,
+    UI_CALLBACK_SLOTS, UiActionAllowlist, UiCallbackBinding, UiCallbackEdition, UiCallbackSlot,
+    UiClipPolicy, UiControlKind, UiDiagnosticKind, UiFrameItem, UiLayout, UiScalePolicy,
+    UiScreenId, UiShell, UiShellEvent, UiTransitionDiagnostic, UiTransitionDiagnosticKind,
+    UiTransitionDraw, classify_callback_in,
 };
 use cic_vfs::Vfs;
 
@@ -1660,6 +1662,196 @@ pub fn render_ui_shell(steps: &[(String, Vec<UiShellEvent>)], shell: &UiShell) -
     output
 }
 
+/// Formats a scripted menu session: what each step did, then the allowlist and the resulting stack.
+///
+/// `steps` pairs each step's spec with the range of records it produced, so a reader can attribute
+/// every record to the input that caused it without the records carrying a step index.
+#[must_use]
+pub fn render_ui_menu(
+    steps: &[(String, std::ops::Range<usize>)],
+    records: &[ShellMenuRecord],
+    allowlist: &UiActionAllowlist,
+    shell: &UiShell,
+) -> String {
+    let mut output = String::from("ui_menu_step\tindex\tcommand\trecords\n");
+    for (index, (command, range)) in steps.iter().enumerate() {
+        writeln!(output, "ui_menu_step\t{index}\t{command}\t{}", range.len())
+            .expect("writing to a String cannot fail");
+    }
+
+    // Records before the first step belong to opening the screen, which no step asked for.
+    let step_of = |record: usize| {
+        steps
+            .iter()
+            .position(|(_, range)| range.contains(&record))
+            .map_or_else(|| "open".to_owned(), |index| index.to_string())
+    };
+    output.push_str("ui_menu_record\tstep\tkind\tsubject\tdetail\n");
+    for (index, record) in records.iter().enumerate() {
+        let step = step_of(index);
+        let (kind, subject, detail) = ui_menu_record_row(record);
+        writeln!(
+            output,
+            "ui_menu_record\t{step}\t{kind}\t{subject}\t{detail}"
+        )
+        .expect("writing to a String cannot fail");
+    }
+
+    // The initial hidden set is where the `initialHide` redundancy shows, so it is counted rather
+    // than left for a reader to tally.
+    let mut hidden = 0;
+    let mut already = 0;
+    let mut missing = 0;
+    for record in records {
+        if let ShellMenuRecord::InitialHide { outcome, .. } = record {
+            match outcome {
+                ShellMenuHide::Hidden => hidden += 1,
+                ShellMenuHide::AlreadyHidden => already += 1,
+                ShellMenuHide::Missing => missing += 1,
+            }
+        }
+    }
+    output.push_str("ui_menu_initial_hide\thidden\talready_hidden\tmissing\n");
+    writeln!(
+        output,
+        "ui_menu_initial_hide\t{hidden}\t{already}\t{missing}"
+    )
+    .expect("writing to a String cannot fail");
+
+    output.push_str("ui_menu_binding\tcontrol\tindex\taction\tdetail\n");
+    for (control, actions) in allowlist.entries() {
+        for (index, action) in actions.iter().enumerate() {
+            writeln!(
+                output,
+                "ui_menu_binding\t{control}\t{index}\t{}\t{}",
+                action.row_name(),
+                blank_as_dash(&action.row_detail())
+            )
+            .expect("writing to a String cannot fail");
+        }
+    }
+
+    let routed = records
+        .iter()
+        .filter(|record| matches!(record, ShellMenuRecord::Action { .. }))
+        .count();
+    let unrouted = records
+        .iter()
+        .filter(|record| matches!(record, ShellMenuRecord::Unrouted { .. }))
+        .count();
+    let captures = records
+        .iter()
+        .filter(|record| matches!(record, ShellMenuRecord::Capture { .. }))
+        .count();
+    output.push_str("ui_menu_summary\tscreens\ttop\trouted_actions\tunrouted\tcaptures\n");
+    writeln!(
+        output,
+        "ui_menu_summary\t{}\t{}\t{routed}\t{unrouted}\t{captures}",
+        shell.screen_count(),
+        shell.top().map_or("-", cic_ui::UiScreen::path)
+    )
+    .expect("writing to a String cannot fail");
+    output
+}
+
+fn ui_menu_record_row(record: &ShellMenuRecord) -> (&'static str, String, String) {
+    match record {
+        ShellMenuRecord::InitialHide { control, outcome } => (
+            "initial_hide",
+            control.clone(),
+            outcome.row_name().to_owned(),
+        ),
+        ShellMenuRecord::Shell(event) => {
+            let (kind, screen, detail) = ui_shell_event_row(event);
+            ("shell", format!("{kind}@{screen}"), detail)
+        }
+        ShellMenuRecord::Input {
+            screen,
+            control,
+            kind,
+            detail,
+        } => (
+            "input",
+            format!("{}@{screen}", control.as_deref().unwrap_or("-")),
+            format!("{kind} {}", blank_as_dash(detail)),
+        ),
+        ShellMenuRecord::FirstInput => (
+            "first_input",
+            "-".to_owned(),
+            "MainMenuInput reveals the default panel".to_owned(),
+        ),
+        ShellMenuRecord::Action {
+            control,
+            action,
+            outcome,
+        } => (
+            "action",
+            control.clone(),
+            format!(
+                "{} {} {}",
+                action.row_name(),
+                blank_as_dash(&action.row_detail()),
+                match outcome {
+                    ShellMenuActionOutcome::Refused(reason) => format!("refused={reason}"),
+                    other => other.row_name().to_owned(),
+                }
+            ),
+        ),
+        ShellMenuRecord::Unrouted { control, callback } => (
+            "unrouted",
+            control.as_deref().unwrap_or("-").to_owned(),
+            format!("callback={}", callback.as_deref().unwrap_or("-")),
+        ),
+        ShellMenuRecord::Transition {
+            frames,
+            group,
+            finished,
+            diagnostics,
+        } => (
+            "transition",
+            group.as_deref().unwrap_or("-").to_owned(),
+            format!("frames={frames} finished={finished} diagnostics={diagnostics}"),
+        ),
+        ShellMenuRecord::Capture {
+            path,
+            width,
+            height,
+            sha256,
+            quads,
+            batches,
+            text_runs,
+            diagnostics,
+        } => (
+            "capture",
+            path.clone(),
+            format!(
+                "{width}x{height} {sha256} quads={quads} batches={batches} text_runs={text_runs} diagnostics={diagnostics}"
+            ),
+        ),
+        ShellMenuRecord::CaptureDiagnostic {
+            item,
+            control,
+            kind,
+            detail,
+        } => (
+            "capture_diagnostic",
+            format!(
+                "{}@item{item}",
+                control.map_or_else(|| "-".to_owned(), |control| control.to_string())
+            ),
+            format!("{kind} {}", blank_as_dash(detail)),
+        ),
+    }
+}
+
+fn blank_as_dash(value: &str) -> String {
+    if value.is_empty() {
+        "-".to_owned()
+    } else {
+        value.to_owned()
+    }
+}
+
 fn ui_shell_event_row(event: &UiShellEvent) -> (&'static str, String, String) {
     let screen_text = |screen: UiScreenId| screen.index().to_string();
     match event {
@@ -2475,9 +2667,12 @@ mod tests {
     };
     use cic_vfs::{Vfs, VirtualPath};
 
+    use cic_ui::{UiActionAllowlist, UiDemoAction, UiShell};
+
+    use super::shell_menu::{ShellMenuHide, ShellMenuRecord, main_menu_bindings};
     use super::{
         encode_map_height_png, render_csf, render_manifest, render_map, render_map_blend,
-        render_map_height, render_map_polygons, render_w3d, render_w3d_mesh,
+        render_map_height, render_map_polygons, render_ui_menu, render_w3d, render_w3d_mesh,
     };
 
     fn hex_fixture(hex: &str) -> Vec<u8> {
@@ -2737,5 +2932,136 @@ mod tests {
             "triangle\tv0\tv1\tv2\tattributes\tnx\tny\tnz\tdistance\n\
              0\t0\t1\t2\t0x00000000\t0x00000000\t0x00000000\t0x3F800000\t0x00000000\n"
         ));
+    }
+
+    /// The main-menu table is source-derived data, so what it must satisfy is structural: every
+    /// action it names is one a session can run, and the panel arms are complete and in order.
+    #[test]
+    fn the_main_menu_bindings_route_only_complete_panel_changes() {
+        let bindings = main_menu_bindings();
+        assert_eq!(bindings.path, "Menus/MainMenu.wnd");
+
+        // `MainMenuInit` hides all five drop-down panels; the loop that does it starts past the
+        // unassigned `DROPDOWN_NONE` slot, so exactly five, not four.
+        let panels = bindings
+            .initial_hidden
+            .iter()
+            .filter(|name| name.contains(":MapBorder"))
+            .count();
+        assert_eq!(panels, 5);
+        // `showSelectiveButtons(SHOW_NONE)` hides two buttons for each of the three factions.
+        let saves = bindings
+            .initial_hidden
+            .iter()
+            .filter(|name| name.contains("RecentSave") || name.contains("LoadGame"))
+            .count();
+        assert_eq!(saves, 6);
+        assert!(
+            bindings
+                .initial_hidden
+                .contains(&"MainMenu.wnd:MainMenuRuler")
+        );
+
+        // The first input reveals the default panel: that reveal is an explicit `winHide(FALSE)` in
+        // `MainMenuInput`, not something the transition does, so it must be in the list.
+        assert!(bindings.first_input.iter().any(|action| matches!(
+            action,
+            UiDemoAction::ShowControl { control } if control == "MainMenu.wnd:MapBorder2"
+        )));
+        // Re-entry must not repeat that reveal: `MainMenuDefaultMenuLogoFade`'s own `FLASH` unhides
+        // the panel, and the source's call at that point is commented out.
+        assert!(!bindings.re_entry.iter().any(|action| matches!(
+            action,
+            UiDemoAction::ShowControl { control } if control == "MainMenu.wnd:MapBorder2"
+        )));
+
+        // Every panel change reveals its panel first, then removes, reverses, and sets a group.
+        for control in [
+            "MainMenu.wnd:ButtonSinglePlayer",
+            "MainMenu.wnd:ButtonSingleBack",
+            "MainMenu.wnd:ButtonMultiplayer",
+            "MainMenu.wnd:ButtonMultiBack",
+            "MainMenu.wnd:ButtonLoadReplay",
+            "MainMenu.wnd:ButtonLoadReplayBack",
+        ] {
+            let actions = bindings
+                .allowlist
+                .resolve(control)
+                .unwrap_or_else(|| panic!("{control} must be bound"));
+            assert_eq!(
+                actions
+                    .iter()
+                    .map(UiDemoAction::row_name)
+                    .collect::<Vec<_>>(),
+                [
+                    "show_control",
+                    "remove_transition_group",
+                    "reverse_transition_group",
+                    "set_transition_group"
+                ],
+                "{control}"
+            );
+        }
+
+        // Only Skirmish pushes a gameplay-adjacent screen, and Exit only ever reports.
+        assert_eq!(
+            bindings
+                .allowlist
+                .resolve("MainMenu.wnd:ButtonExit")
+                .map(<[UiDemoAction]>::to_vec),
+            Some(vec![UiDemoAction::Quit])
+        );
+        assert!(
+            bindings
+                .allowlist
+                .resolve("MainMenu.wnd:ButtonSkirmish")
+                .expect("the skirmish binding")
+                .iter()
+                .any(|action| matches!(
+                    action,
+                    UiDemoAction::PushScreen { path } if path == "Menus/SkirmishGameOptionsMenu.wnd"
+                ))
+        );
+        // A control the table says nothing about routes nothing, however established its callback.
+        assert!(
+            bindings
+                .allowlist
+                .resolve("MainMenu.wnd:ButtonWorldBuilder")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_menu_report_attributes_every_record_to_the_step_that_caused_it() {
+        let records = vec![
+            ShellMenuRecord::InitialHide {
+                control: "MainMenu.wnd:MapBorder2".to_owned(),
+                outcome: ShellMenuHide::Hidden,
+            },
+            ShellMenuRecord::InitialHide {
+                control: "MainMenu.wnd:WinFactionUS".to_owned(),
+                outcome: ShellMenuHide::AlreadyHidden,
+            },
+            ShellMenuRecord::FirstInput,
+            ShellMenuRecord::Unrouted {
+                control: Some("MainMenu.wnd:ButtonCredits".to_owned()),
+                callback: Some("MainMenuSystem".to_owned()),
+            },
+        ];
+        // The first two records precede every step, which is the screen opening.
+        let steps = vec![("move:1,1".to_owned(), 2..4)];
+        let report = render_ui_menu(&steps, &records, &UiActionAllowlist::new(), &UiShell::new());
+
+        assert!(report.contains(
+            "ui_menu_record\topen\tinitial_hide\tMainMenu.wnd:MapBorder2\thidden\n\
+             ui_menu_record\topen\tinitial_hide\tMainMenu.wnd:WinFactionUS\talready_hidden\n"
+        ));
+        assert!(report.contains("ui_menu_record\t0\tfirst_input\t"));
+        assert!(report.contains(
+            "ui_menu_record\t0\tunrouted\tMainMenu.wnd:ButtonCredits\tcallback=MainMenuSystem\n"
+        ));
+        // The initial-hide tally is what makes `initialHide`'s redundancy visible at a glance.
+        assert!(report.contains("ui_menu_initial_hide\t1\t1\t0\n"));
+        assert!(report.contains("ui_menu_summary\t0\t-\t0\t1\t0\n"));
     }
 }

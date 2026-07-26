@@ -131,6 +131,9 @@
 - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Generals/Code/GameEngine/Source/GameClient/GUI/GUICallbacks/Menus/SkirmishGameOptionsMenu.cpp>
 - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Generals/Code/GameEngine/Source/GameClient/GUI/GUICallbacks/Menus/SkirmishMapSelectMenu.cpp>
 - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Generals/Code/GameEngine/Source/GameClient/GUI/GUICallbacks/Menus/OptionsMenu.cpp>
+- <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/GeneralsMD/Code/GameEngine/Source/GameClient/GUI/GUICallbacks/Menus/MainMenu.cpp>
+- <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/GeneralsMD/Code/GameEngine/Source/GameClient/GUI/GameWindowManager.cpp>
+- <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/GameEngine/Source/GameClient/GUI/Gadget/GadgetPushButton.cpp>
 - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/GameEngine/Include/GameClient/Display.h>
 - <https://github.com/TheSuperHackers/GeneralsGameCode/blob/9f7abb866f5afd446db14149979e744c7216baaf/Core/GameEngine/Source/Common/OptionPreferences.cpp>
 
@@ -459,5 +462,72 @@ Five facts about that construction are reproduced rather than tidied:
   the one part of this that would need font metrics and it is unreachable; a layout that reached it
   would be reported rather than mislaid.
 
-Gate 4's transition, cursor, and menu-scheme subsets and everything else recorded above remain
-design-only.
+Gate 4's cursor and menu-scheme subsets and everything else recorded above remain design-only.
+
+## Main-menu behaviour
+
+`crates/cic-tools/src/shell_menu.rs` carries, as a data table, what
+`GeneralsMD/Code/GameEngine/Source/GameClient/GUI/GUICallbacks/Menus/MainMenu.cpp` does through native
+menu code. R4 dispatches no source callback, so this project either expresses that behaviour as an
+allowlisted typed sequence or does not have it at all. The table is consulted by `cic-tools` alone;
+neither `cic-ui` nor `cic-render` reads it, so no runtime or renderer path searches for a window by
+name.
+
+Four behaviours are reproduced, from `MainMenuInit`, `initialHide`, `showSelectiveButtons`,
+`MainMenuInput`, `MainMenuSystem`'s `GBM_SELECTED` arm, and `quitCallback`:
+
+- **What the menu hides when it opens.** All five `MapBorder*` drop-down panels — the loop over
+  `dropDownWindows` starts past the unassigned `DROPDOWN_NONE` slot, so it covers every real one and
+  never dereferences the null — then `initialHide`'s eleven `WinFaction*` windows and `WinGrowMarker`,
+  then `showSelectiveButtons(SHOW_NONE)`'s six save and load buttons, then `MainMenuRuler`.
+  `initialHide` names three of its windows twice, which is harmless there and here, and every window
+  it names already declares `HIDDEN` in the retail layout, so against retail data the whole call is a
+  no-op. It is kept because a modded layout need not declare it.
+- **The default panel is revealed by input, not by initialization.** `MainMenuInit`'s one call that
+  would reveal it is commented out. `MainMenuInput` handles the first pointer move over twenty pixels
+  or the first character by unhiding `MapBorder2`, setting `MainMenuFade` immediately, queueing
+  `MainMenuDefaultMenu` behind it, and clearing `notShown` so it never runs again.
+- **Each panel change is four operations in order:** reveal the panel being moved to, `remove` the
+  group that was showing, `reverse` its counterpart, and `setGroup` the one that animates in. The panel
+  being left is hidden by that reversed group's own final frame rather than by an explicit hide.
+  `ButtonMultiBack` reverses `MainMenuMultiPlayerMenuReverse` where the other Back arms reverse a
+  `...Back` group; that asymmetry is the source's and both names exist in the transition file.
+- **Re-entry differs from opening.** `Shell::doPop` runs the new top's init, so `MainMenuInit` hides
+  everything a second time. `FirstTimeRunningTheGame` is false by then, so it shows `MainMenuRuler`
+  instead of leaving it hidden and arms `justEntered`, which two `MainMenuUpdate` calls later sets
+  `MainMenuDefaultMenuLogoFade`. That group's `FLASH` on `MapBorder2` unhides it at frame four, so no
+  explicit reveal belongs here — and the source's call at that point is commented out. The frame delay
+  has no presentation effect once the group is armed and is not reproduced.
+
+Two of its arms are deliberately not reproduced faithfully, and the difference is behavioural:
+
+- `optionsID` does not push. It fetches the shell's cached options layout, runs its init, unhides it,
+  and brings it forward, so the options menu overlays the main menu rather than replacing it on the
+  stack. The retained shell owns no cached-layout slot, so the demo pushes; retail keeps running the
+  main menu's update underneath, which nothing here depends on.
+- `exitID` calls `quitCallback` when windowed and raises a yes/no box otherwise. `quitCallback` pops
+  the shell and sets the engine quitting. Only the leaving is represented, as a `Quit` record a caller
+  interprets; nothing in this project ends a process from a WND callback.
+
+The `campaignSelected` and `dontAllowTransitions` guards, the script-engine `signalUIInteract` hooks,
+the GameSpy and download paths, and the campaign and difficulty arms all belong to gameplay or online
+services and have no representation here.
+
+### Mouse tracking gates the hilite state
+
+`GWS_MOUSE_TRACK` is what makes hovering change a control's appearance, and it is easy to miss because
+nothing named "hilite" is involved at the point the decision is made. `GameWindowManager` sends
+`GWM_MOUSE_ENTERING` and `GWM_MOUSE_LEAVING` to the window under the cursor and sets no state itself.
+Each gadget family's input handler is what sets `WIN_STATE_HILITED`, and every one of them tests the
+style bit first — `GadgetPushButtonInput`, `GadgetListBoxInput`, `GadgetComboBoxInput`, and both
+sliders all guard on `BitIsSet( instData->getStyle(), GWS_MOUSE_TRACK )`. A window whose input callback
+does not do this, which is every plain `USER` window, is drawn identically whether the pointer is over
+it or not.
+
+Created gadget parts inherit the bit: `gogoGadgetSlider` copies it to the thumb and
+`gogoGadgetComboBox` to the drop-down button, edit field, and list, each only if the owner declares it.
+The combo box's internal drop-down list is the one part built with `GWS_MOUSE_TRACK` unconditionally.
+
+A press is separate. `GWM_LEFT_DOWN` sets `WIN_STATE_SELECTED`, which each family's draw procedure
+reads as its own index within whichever slot the hilite state already chose; it does not select the
+hilite slot itself.
