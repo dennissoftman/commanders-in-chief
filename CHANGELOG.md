@@ -48,11 +48,13 @@ land under the active milestone heading.
   solid silhouette, and multiply detail stages were re-rasterizing geometry whose base stage had
   already written the same depth.
 - Added cascaded shadow maps to the MAP scene, replacing the single whole-map orthographic slice.
-  Three 2048-square layers of a depth array texture are fitted per frame to slices of the camera
-  frustum, with each cascade's centre snapped to whole texels in light space so shadow edges do not
-  crawl as the camera moves. Receivers select the first cascade that contains them, which is also
-  the densest one that does. Each cascade derives its own bias from its own texel extent, so the
-  near cascade is biased far more tightly than the far one.
+  Five 3072-square layers of a depth array texture are fitted per frame to slices of the camera
+  frustum, each fitted with a light-space box rather than a bounding sphere for roughly twice the
+  effective texel density. Each cascade's centre snaps to whole texels and its extent quantizes onto
+  a fixed ladder, because a box fit is not invariant to camera yaw and an unquantized extent would
+  rescale every texel as the view turned. Receivers take the first cascade containing them, which is
+  also the densest one that does, and each cascade derives its own bias from its own texel extent,
+  so the near cascade is biased far more tightly than the far one.
 - Added ground-truth ambient occlusion (`crates/cic-render/src/terrain_ao.wgsl`) to the MAP scene,
   evaluated in world space over the resolved G-buffer with a bilateral cross blur and consumed as
   the ambient visibility term by deferred lighting. Sampling is purely spatial because the renderer
@@ -68,6 +70,16 @@ land under the active milestone heading.
 
 ### Fixed
 
+- Fixed tree sway never applying in the Generals profile, where every tree stood perfectly still
+  while the same scene swayed under `--zh`. Sway was attached only to draws decoded as
+  `ObjectDrawKind::Tree`, which requires the `W3DTreeDraw` module. Zero Hour introduced that module
+  for its optimized client-side tree renderer and reparented its tree reskins onto `GenericOptTree`;
+  Generals predates it and draws the same trees with plain `W3DModelDraw` off `GenericTree`, so
+  shipped Generals `NatureProp.ini` contains no `W3DTreeDraw` at all. Foliage is now classified by
+  the engine's own `KindOf = SHRUBBERY` flag, which both editions carry, so Generals scenes sway.
+  This is a deliberate divergence from the retail client rather than a decoder correction, and is
+  recorded as such in COMPATIBILITY.md. Verified on an installed Generals map: renders at two
+  explicit times were previously byte-identical and now differ only across the scenery footprint.
 - Specular highlights now come from the source material instead of a fixed constant. Scenery wrote
   a hard-coded roughness and deferred lighting applied a fixed highlight strength once per light, so
   stone, plaster, and wood all carried a sheen no W3D material asked for. Roughness is now derived
@@ -82,14 +94,23 @@ land under the active milestone heading.
 - Replaced the primary shadow map's fixed normalized-depth bias with normal-offset plus depth slack
   derived in world units from the fitted light frustum's own depth range and texel extent. The old
   constant epsilon scaled with the frustum, so it grew to roughly 8-17 world units of slack as maps
-  got larger and detached or erased the shadows of anything shorter than that. Raising the shadow
-  extent to 4096 squared now tightens the bias instead of loosening it.
+  got larger and detached or erased the shadows of anything shorter than that. Because both terms
+  now follow each cascade's own texel extent, raising shadow resolution tightens the bias instead of
+  leaving it untouched.
 - Repaired the `map` libFuzzer target, which no longer compiled after `MapLimits` gained polygon
   and water-trigger fields during R3; fuzzing was not part of the workspace test suite so the
   regression was silent.
 - Corrected the R2 milestone doc's stale W3D chunk-identifier count (73 to 77).
 
 ### Changed
+
+- Extended `object_ini.rs` to decode one `KindOf` flag, `SHRUBBERY` ("tree, bush, etc." in the
+  source `KindOf.h`), exposed as `ObjectDefinition::kind_of_shrubbery()`. It returns `Option<bool>`
+  so an undeclared `KindOf` stays distinguishable from a declared one that omits the flag: shipped
+  tree templates are `ObjectReskin` blocks that restate only their `Draw`, so the flag has to be
+  inherited from the reskin base rather than read as a denial. Resolving that chain stays caller
+  policy, as it already is for draws. The rest of `KindOf` selects gameplay and simulation behavior
+  and remains an intentional, documented architectural exclusion.
 
 - Changed `terrain_ini.rs`, `water_ini.rs`, `road_ini.rs`, and `object_ini.rs` (owned by R3) so an
   unrecognized field name inside a block they otherwise decode is never silently dropped. Each

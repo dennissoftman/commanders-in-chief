@@ -4,6 +4,10 @@ Status values are `unknown`, `observed`, `implemented`, and `verified`. `Verifie
 requires synthetic fixtures plus comparison against legally obtained game data or
 observable behavior.
 
+`Deliberate divergence` marks a presentation policy this project chose that the retail
+client does not implement. It is not a compatibility gap and not a defect: the source
+behavior is known, recorded in the Evidence column, and departed from on purpose.
+
 | Area | Capability | Status | Evidence |
 |---|---|---|---|
 | VFS | ASCII case-insensitive virtual paths | verified | Unit tests + GitHub CI run 29840005186 |
@@ -62,6 +66,7 @@ observable behavior.
 | MAP | `WorldInfo` and `ObjectsList` placements | verified | Bounded synthetic layouts, truncation/limit tests, stable report, and immutable source-order staging |
 | MAP | Roads and bridges | verified | Source-radius curves/miters, atlas joins, stacking, terrain fit, intact instanced bridges, retained body-state assets, and renderer-only tower scenery; runtime state transitions remain R5+ |
 | MAP | R3 object draw-definition resolution and static scenery | verified | Default/initial-NONE W3D states, reskins, scales, standalone meshes, exact placement, Header3 culling, GPU instancing, and explicit-time default tree sway; unsupported/gameplay draw modules are excluded |
+| MAP | Foliage sway classification by `KindOf = SHRUBBERY` | deliberate divergence | Vanilla sways only `W3DTreeDraw` (`addToTreeBuffer` to `W3DTreeBuffer::updateSway`), a Zero Hour-only module, so Generals foliage never sways in the retail client. This project keys sway off the engine's own `SHRUBBERY` ("tree, bush, etc.") flag instead, resolved through `ObjectReskin` bases. Measured on shipped `NatureProp.ini`: 135 Generals foliage templates classified with no false positives; on Zero Hour a strict superset of `W3DTreeDraw` (nothing loses sway, the 8 `W3DModelDraw` palms gain it) |
 | MAP | Waypoints and `Player_n_Start` spawn candidates | verified | Immutable object projection preserves ordered candidates without assigning slots |
 | MAP | `SidesList`, teams, and build lists | verified | Versions 1 through 3 decode under explicit limits without runtime repair or activation |
 | MAP | Complete polygon-area semantics | verified | Versions 2 through 4 retain every source record/point under per-area and total limits; `map-water` remains a stable projection |

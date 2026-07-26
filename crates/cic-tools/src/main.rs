@@ -442,12 +442,14 @@ where
     Ok(render_map_world_objects(&world))
 }
 
-/// Reports, per placed template, which draw module the object catalog resolves to.
+/// Reports, per placed template, which draw module the object catalog resolves to and whether it is
+/// classified as foliage.
 ///
-/// The draw module is what decides presentation policy that the placement itself never states:
-/// tree sway is attached only to a `W3DTreeDraw` module, so a profile whose templates declare a
-/// different module produces still trees with no diagnostic to explain it. Mounting matches the
-/// terrain path so the object INIs are present.
+/// Both columns exist because the placement states neither, yet together they decide presentation
+/// the placement cannot explain. Sway is attached to a `W3DTreeDraw` module or to a `KindOf =
+/// SHRUBBERY` classification, and the two disagree across editions: Generals draws its trees with
+/// plain `W3DModelDraw`, so the draw module alone would suggest a Generals tree cannot sway when it
+/// does. Mounting matches the terrain path so the object INIs are present.
 fn report_map_object_draws<I>(arguments: I, options: &CliOptions) -> Result<String, Box<dyn Error>>
 where
     I: Iterator<Item = String>,
@@ -478,9 +480,10 @@ where
         slot.1 += 1;
     }
 
-    let mut report = String::from("template\tplacements\tdraw\tkind\tmodel\n");
+    let mut report = String::from("template\tplacements\tdraw\tkind\tshrubbery\tsways\tmodel\n");
     for (key, (name, count)) in &placements {
         let display = String::from_utf8_lossy(name);
+        let shrubbery = resolve_object_shrubbery(&catalog, key);
         match resolve_object_draws(&catalog, key) {
             Some(draws) if !draws.is_empty() => {
                 for draw in draws {
@@ -488,10 +491,16 @@ where
                         ObjectDrawKind::Tree => "tree",
                         ObjectDrawKind::Model => "model",
                     };
+                    // Mirrors the sway condition the scene staging applies, so the report answers
+                    // "will this sway" directly rather than leaving it to be inferred.
+                    let sways = draw.kind() == ObjectDrawKind::Tree || shrubbery;
                     let module = String::from_utf8_lossy(draw.module_bytes());
                     let model = String::from_utf8_lossy(draw.model_bytes());
-                    writeln!(report, "{display}\t{count}\t{module}\t{kind}\t{model}")
-                        .expect("writing to a String cannot fail");
+                    writeln!(
+                        report,
+                        "{display}\t{count}\t{module}\t{kind}\t{shrubbery}\t{sways}\t{model}"
+                    )
+                    .expect("writing to a String cannot fail");
                 }
             }
             _ => {
@@ -500,7 +509,7 @@ where
                 } else {
                     "missing-definition"
                 };
-                writeln!(report, "{display}\t{count}\t{state}\t-\t-")
+                writeln!(report, "{display}\t{count}\t{state}\t-\t{shrubbery}\tfalse\t-")
                     .expect("writing to a String cannot fail");
             }
         }
@@ -938,6 +947,12 @@ fn load_staged_static_scenery(
             ));
             continue;
         };
+        // Zero Hour marks foliage with the `W3DTreeDraw` module its optimized tree renderer reads;
+        // Generals predates that module and draws the same trees with plain `W3DModelDraw`, so the
+        // module alone would leave every Generals tree still. `KindOf = SHRUBBERY` is the engine's
+        // own "tree, bush, etc." classification and is present in both editions, so it is what this
+        // project keys sway off. Vanilla sways only `W3DTreeDraw`; see COMPATIBILITY.md.
+        let shrubbery = resolve_object_shrubbery(&catalog, &template_key);
         for draw in draws {
             let mut position = object.position();
             if let Some(ground) = terrain.height_at_world([position[0], position[1]]) {
@@ -949,7 +964,7 @@ fn load_staged_static_scenery(
                 object.angle(),
                 draw.scale(),
             )?;
-            let instance = if draw.kind() == ObjectDrawKind::Tree {
+            let instance = if draw.kind() == ObjectDrawKind::Tree || shrubbery {
                 instance.with_tree_sway(TreeSwayPresentation::zero_hour_legacy_default(
                     object.placement_id(),
                 ))
@@ -1359,6 +1374,34 @@ fn resolve_object_draws<'a>(
         key = ascii_fold(definition.reskin_of_bytes()?);
     }
     None
+}
+
+/// Resolves whether a placed template is foliage, following `ObjectReskin` bases until one
+/// declares a `KindOf`.
+///
+/// Shipped tree templates are reskins that restate only their `Draw`, so the flag almost always
+/// comes from the base (`GenericTree` in Generals, `GenericOptTree` in Zero Hour). A template that
+/// reaches the end of its chain without any `KindOf` is not foliage. Cycle and depth guards match
+/// [`resolve_object_draws`].
+fn resolve_object_shrubbery(catalog: &BTreeMap<Vec<u8>, ObjectDefinition>, initial: &[u8]) -> bool {
+    let mut key = initial.to_vec();
+    let mut visited = BTreeSet::new();
+    for _ in 0..MAX_OBJECT_RESKIN_DEPTH {
+        if !visited.insert(key.clone()) {
+            return false;
+        }
+        let Some(definition) = catalog.get(&key) else {
+            return false;
+        };
+        if let Some(shrubbery) = definition.kind_of_shrubbery() {
+            return shrubbery;
+        }
+        let Some(base) = definition.reskin_of_bytes() else {
+            return false;
+        };
+        key = ascii_fold(base);
+    }
+    false
 }
 
 fn resolve_w3d_model_path(
@@ -2426,17 +2469,58 @@ fn mount_all(
 
 #[cfg(test)]
 mod tests {
-    use cic_formats::MapTimeOfDay;
+    use std::collections::BTreeMap;
+
+    use cic_formats::{MapTimeOfDay, ObjectIniLimits};
     use cic_render::TerrainCompatibilityPolicy;
     use cic_vfs::{Vfs, VirtualPath};
 
     use super::{
-        apply_additive_preview_alpha, load_terrain_texture_catalog, load_water_appearance,
+        apply_additive_preview_alpha, ascii_fold, insert_object_definitions,
+        load_terrain_texture_catalog, load_water_appearance, resolve_object_shrubbery,
         static_world_height,
     };
 
     fn path(value: &str) -> VirtualPath {
         VirtualPath::new(value).expect("valid virtual path")
+    }
+
+    #[test]
+    fn shrubbery_resolves_through_reskin_chains_in_both_edition_shapes() {
+        // Generals draws trees with `W3DModelDraw` off `GenericTree`; Zero Hour reparents the same
+        // reskins onto `GenericOptTree`, which uses `W3DTreeDraw`. Both carry `KindOf = SHRUBBERY`
+        // on the base only, so sway classification has to walk the chain in either edition.
+        let bytes = b"Object GenericTree\n  Draw = W3DModelDraw ModuleTag_01\n    DefaultConditionState\n      Model = PTDogwod01\n    End\n  End\n  KindOf = SHRUBBERY IMMOBILE IGNORED_IN_GUI\nEnd\nObjectReskin TreeDogwood3 GenericTree\n  Draw = W3DModelDraw ModuleTag_01\n    DefaultConditionState\n      Model = PTDogwod03\n    End\n  End\nEnd\nObject GenericOptTree\n  Draw = W3DTreeDraw ModuleTag_01\n    ModelName = PTDogwod01\n  End\n  KindOf = SHRUBBERY IMMOBILE IGNORED_IN_GUI OPTIMIZED_TREE\nEnd\nObjectReskin TreeBirch02 GenericOptTree\nEnd\nObject StreetSign\n  Draw = W3DModelDraw ModuleTag_01\n    DefaultConditionState\n      Model = PMSign01\n    End\n  End\n  KindOf = IMMOBILE PROP\nEnd\nObjectReskin SignVariant StreetSign\nEnd\n";
+        let mut catalog = BTreeMap::new();
+        insert_object_definitions(&mut catalog, bytes, ObjectIniLimits::default())
+            .expect("object catalog");
+        let shrubbery = |name: &[u8]| resolve_object_shrubbery(&catalog, &ascii_fold(name));
+
+        assert!(shrubbery(b"GenericTree"));
+        assert!(
+            shrubbery(b"TreeDogwood3"),
+            "Generals reskin inherits the base flag"
+        );
+        assert!(
+            shrubbery(b"TreeBirch02"),
+            "Zero Hour reskin inherits the base flag"
+        );
+        // Placement names are matched case-insensitively, as map templates are.
+        assert!(shrubbery(b"treedogwood3"));
+        // Non-foliage props must not sway, directly or through their reskins.
+        assert!(!shrubbery(b"StreetSign"));
+        assert!(!shrubbery(b"SignVariant"));
+        // An unknown template is not foliage rather than a panic.
+        assert!(!shrubbery(b"TemplateNotInCatalog"));
+    }
+
+    #[test]
+    fn shrubbery_resolution_terminates_on_a_reskin_cycle() {
+        let bytes = b"ObjectReskin LoopA LoopB\nEnd\nObjectReskin LoopB LoopA\nEnd\n";
+        let mut catalog = BTreeMap::new();
+        insert_object_definitions(&mut catalog, bytes, ObjectIniLimits::default())
+            .expect("object catalog");
+        assert!(!resolve_object_shrubbery(&catalog, &ascii_fold(b"LoopA")));
     }
 
     #[test]
