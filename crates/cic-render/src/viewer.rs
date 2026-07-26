@@ -549,8 +549,26 @@ impl GpuResourceManager {
                 mapped_at_creation: false,
             });
             let cutoff = if material.alpha_test { 0.5_f32 } else { 0.0 };
+            // The G-buffer carries one self-illumination scalar, so the strongest source channel
+            // becomes the strength and the material's own albedo supplies the hue. That matches how
+            // W3D self-illumination is authored in practice — a grey or white scale over an already
+            // coloured lamp texture — without inventing a per-channel term the G-buffer cannot hold.
+            let emissive = f32::from(material.emissive.into_iter().max().unwrap_or(0)) / 255.0;
+            // Roughness drives both the highlight's width and, in deferred lighting, its strength,
+            // so a material whose source specular color is black resolves to fully rough and gets
+            // no highlight at all. That is the common case for the stone, plaster, and wood the
+            // MAP scene is mostly built from, which a fixed roughness constant made uniformly
+            // glossy. Source shininess is treated as glossiness in `0..=1`; the floor keeps a
+            // genuinely specular material from collapsing to a mirror.
+            let roughness = if material.specular == [0; 3] {
+                1.0
+            } else {
+                (1.0 - f32::from_bits(material.shininess_bits).clamp(0.0, 1.0)).clamp(0.15, 1.0)
+            };
             let mut uniform_bytes = [0; 16];
             uniform_bytes[..4].copy_from_slice(&cutoff.to_le_bytes());
+            uniform_bytes[4..8].copy_from_slice(&emissive.to_le_bytes());
+            uniform_bytes[8..12].copy_from_slice(&roughness.to_le_bytes());
             queue.write_buffer(&uniform, 0, &uniform_bytes);
             let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("cic-render managed material"),

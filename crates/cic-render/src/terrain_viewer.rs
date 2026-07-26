@@ -40,7 +40,62 @@ use crate::{
 const WINDOW_WIDTH: u32 = 1_280;
 const WINDOW_HEIGHT: u32 = 800;
 const CAMERA_UNIFORM_BYTES: u64 = 304;
-const SHADOW_UNIFORM_BYTES: u64 = 80;
+const SHADOW_CASCADE_COUNT: usize = 4;
+/// `SHADOW_CASCADE_COUNT` as the array-layer count the texture and its views need. Must match.
+const SHADOW_CASCADE_LAYERS: u32 = 4;
+/// One `mat4x4` plus one `vec4` of parameters per cascade.
+const SHADOW_CASCADE_BYTES: u64 = 80;
+/// `SHADOW_CASCADE_BYTES * SHADOW_CASCADE_COUNT`, spelled as a `usize` so the packing routine can
+/// return a fixed-size array. A unit test pins it against the two constants it derives from.
+const SHADOW_UNIFORM_LEN: usize = 320;
+const SHADOW_UNIFORM_BYTES: u64 = SHADOW_UNIFORM_LEN as u64;
+/// Fractions of the shadowed view distance where each cascade ends: an even blend of a logarithmic
+/// and a uniform split.
+///
+/// The distribution matters more than it looks, for two reasons pulling in opposite directions.
+/// Because a cascade is fitted to the bounding volume of its frustum slice, its texel extent is
+/// proportional to where it *ends*, at approximately `far / 823` for this field of view and cascade
+/// resolution — so leaving most of the range to the outermost cascade makes that cascade coarser
+/// than a single whole-map slice would have been. But a purely logarithmic split fails the other
+/// way here: this camera sits well above the terrain, so the nearest *visible* ground is hundreds
+/// of units out, and front-loaded cascades land on almost nothing while the whole screen falls to
+/// the two coarsest. The blended split keeps density stepping by roughly a factor of two per
+/// cascade across the range that actually contains visible ground.
+const SHADOW_CASCADE_SPLITS: [f32; SHADOW_CASCADE_COUNT] = [0.13, 0.27, 0.47, 1.0];
+/// Cap on how far cascades chase the view, and the dominant control over outermost-cascade
+/// quality: the last cascade lands near `SHADOW_MAX_DISTANCE / 823` world units per texel. Raise it
+/// for more shadowed distance at the cost of blockier far shadows; lower it to sharpen them at the
+/// cost of distant geometry reading as unshadowed, which is a far softer failure than blocky.
+const SHADOW_MAX_DISTANCE: f32 = 800.0;
+/// Extra world units each cascade's light camera is pulled back along the light, so that casters
+/// standing above the cascade's receiver region are still inside its depth range.
+///
+/// Without it a cascade only reaches about its own radius above the ground it covers, and the near
+/// cascade's radius is a few tens of units while a structure is well over a hundred tall — so tall
+/// objects get clipped out of exactly the cascade a nearby receiver selects, and lose their shadow
+/// when the camera approaches. This costs no resolution: an orthographic depth range does not
+/// affect texel density, and the world-space bias is unaffected because it is derived from
+/// `texel_world` and converted through `depth_range` at sample time.
+const SHADOW_CASTER_HEADROOM: f32 = 600.0;
+/// First cascade eligible for reuse across frames. Every caster in the MAP scene is static, so a
+/// cascade whose fitted matrix is unchanged since the previous frame already holds the correct
+/// depth and its pass can be skipped entirely. Texel snapping makes this common: a cascade's matrix
+/// only changes when its snapped centre crosses a texel, and the outer cascades have the largest
+/// texels, so they are both the most expensive to redraw and the least likely to need it.
+///
+/// The inner cascades are deliberately excluded. Tree sway is the one thing that animates, and it
+/// is not part of the matrix, so a reused cascade freezes the sway in its shadows. In the outer
+/// cascades that motion is close to a texel and reads as still; in the inner ones it would be
+/// obvious. Raise this to 3 if frozen sway is visible at mid distance.
+const SHADOW_CACHED_CASCADE_START: usize = 2;
+/// Occlusion is a single visibility scalar, so one 8-bit channel is enough and keeps the extra
+/// full-resolution target plus its blur ping-pong cheap.
+const AO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
+// Per-cascade extent. Three 2048-square layers cost 48 MiB as `Depth32Float`, less than the single
+// 4096-square whole-map slice this replaced, while the near cascade covers a small enough region to
+// land roughly an order of magnitude more texels on the ground the camera is actually looking at.
+// Each cascade derives its own bias from its own `texel_world`, so the near cascade is also biased
+// far more tightly than the far one.
 const SHADOW_MAP_EXTENT: u32 = 2_048;
 /// Hardware MSAA sample count for the opaque G-buffer geometry pass.
 const GBUFFER_SAMPLE_COUNT: u32 = 4;
@@ -851,12 +906,19 @@ struct TerrainViewerGpu {
     composite_layout: wgpu::BindGroupLayout,
     water_layout: wgpu::BindGroupLayout,
     depth_resolve_layout: wgpu::BindGroupLayout,
+    ao_layout: wgpu::BindGroupLayout,
+    ao_blur_layout: wgpu::BindGroupLayout,
+    ao_pipeline: wgpu::RenderPipeline,
+    ao_blur_pipeline: wgpu::RenderPipeline,
     _texture: wgpu::Texture,
     _edge_texture: wgpu::Texture,
     camera_uniform: wgpu::Buffer,
     shadow_uniform: wgpu::Buffer,
-    shadow_bind_group: wgpu::BindGroup,
-    shadow_matrix: [[f32; 4]; 4],
+    cascade_uniforms: Vec<wgpu::Buffer>,
+    cascade_bind_groups: Vec<wgpu::BindGroup>,
+    /// Matrix bits each cascade layer was last rendered with, or `None` when its contents are not
+    /// known to be valid. Reset whenever the shadow texture is recreated.
+    cascade_cache: Vec<Option<[u32; 16]>>,
     bind_group: wgpu::BindGroup,
     edge_bind_group: wgpu::BindGroup,
     vertex_buffer: wgpu::Buffer,
@@ -1201,16 +1263,20 @@ struct DeferredTargets {
     _world: wgpu::Texture,
     _scene: wgpu::Texture,
     _shadow: wgpu::Texture,
+    _ao: wgpu::Texture,
+    _ao_blurred: wgpu::Texture,
     _albedo_ms: wgpu::Texture,
     _normal_ms: wgpu::Texture,
     _world_ms: wgpu::Texture,
     _depth_ms: wgpu::Texture,
     depth: wgpu::Texture,
-    shadow_view: wgpu::TextureView,
+    shadow_layer_views: Vec<wgpu::TextureView>,
     albedo_view: wgpu::TextureView,
     normal_view: wgpu::TextureView,
     world_view: wgpu::TextureView,
     scene_view: wgpu::TextureView,
+    ao_view: wgpu::TextureView,
+    ao_blurred_view: wgpu::TextureView,
     albedo_ms_view: wgpu::TextureView,
     normal_ms_view: wgpu::TextureView,
     world_ms_view: wgpu::TextureView,
@@ -1219,6 +1285,8 @@ struct DeferredTargets {
     composite_bind_group: wgpu::BindGroup,
     water_bind_group: wgpu::BindGroup,
     depth_resolve_bind_group: wgpu::BindGroup,
+    ao_bind_group: wgpu::BindGroup,
+    ao_source_bind_group: wgpu::BindGroup,
 }
 
 #[derive(Clone, Copy)]
@@ -1227,6 +1295,8 @@ struct DeferredTargetResources<'a> {
     composite_layout: &'a wgpu::BindGroupLayout,
     water_layout: &'a wgpu::BindGroupLayout,
     depth_resolve_layout: &'a wgpu::BindGroupLayout,
+    ao_layout: &'a wgpu::BindGroupLayout,
+    ao_blur_layout: &'a wgpu::BindGroupLayout,
     camera_uniform: &'a wgpu::Buffer,
     shadow_uniform: &'a wgpu::Buffer,
     water_appearance: &'a WaterAppearanceGpu,
@@ -2054,6 +2124,8 @@ impl TerrainViewerGpu {
         let composite_layout = create_composite_layout(&device);
         let water_layout = create_water_layout(&device);
         let depth_resolve_layout = create_depth_resolve_layout(&device);
+        let ao_layout = create_ao_layout(&device);
+        let ao_blur_layout = create_ao_blur_layout(&device);
         let boundary_layout = create_boundary_layout(&device);
         let shadow_layout = create_shadow_layout(&device);
         let material_layout = create_material_layout(&device);
@@ -2195,6 +2267,26 @@ impl TerrainViewerGpu {
         );
         let depth_resolve_pipeline =
             create_depth_resolve_pipeline(&device, &deferred_shader, &depth_resolve_layout);
+        let ao_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("cic-render ambient occlusion shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("terrain_ao.wgsl").into()),
+        });
+        let ao_pipeline = create_fullscreen_pipeline(
+            &device,
+            &ao_shader,
+            &[&ao_layout],
+            "ao_fragment",
+            AO_FORMAT,
+            "cic-render ambient occlusion pipeline",
+        );
+        let ao_blur_pipeline = create_fullscreen_pipeline(
+            &device,
+            &ao_shader,
+            &[&ao_layout, &ao_blur_layout],
+            "ao_blur_fragment",
+            AO_FORMAT,
+            "cic-render ambient occlusion blur pipeline",
+        );
         let water_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cic-render modern water shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("water_viewer.wgsl").into()),
@@ -2304,21 +2396,38 @@ impl TerrainViewerGpu {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let shadow_matrix = scene_shadow_matrix(terrain, lighting);
         let shadow_uniform = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("cic-render scene shadow camera"),
+            label: Some("cic-render scene shadow cascades"),
             size: SHADOW_UNIFORM_BYTES,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let shadow_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("cic-render scene shadow bind group"),
-            layout: &shadow_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: shadow_uniform.as_entire_binding(),
-            }],
-        });
+        // The caster passes render one cascade at a time and reuse the single-cascade shader
+        // interface, so each gets its own small buffer rather than a dynamic offset into the
+        // receiver array, whose 80-byte stride is finer than the uniform offset alignment allows.
+        let cascade_uniforms = (0..SHADOW_CASCADE_COUNT)
+            .map(|index| {
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(&format!("cic-render scene shadow cascade {index}")),
+                    size: SHADOW_CASCADE_BYTES,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
+            })
+            .collect::<Vec<_>>();
+        let cascade_bind_groups = cascade_uniforms
+            .iter()
+            .map(|uniform| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("cic-render scene shadow cascade bind group"),
+                    layout: &shadow_layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: uniform.as_entire_binding(),
+                    }],
+                })
+            })
+            .collect::<Vec<_>>();
         let virtual_terrain =
             VirtualTerrainGpu::new(&device, &queue, terrain, requests, page_view)?;
         let roads = create_road_gpu(
@@ -2470,6 +2579,8 @@ impl TerrainViewerGpu {
                 composite_layout: &composite_layout,
                 water_layout: &water_layout,
                 depth_resolve_layout: &depth_resolve_layout,
+                ao_layout: &ao_layout,
+                ao_blur_layout: &ao_blur_layout,
                 camera_uniform: &camera_uniform,
                 shadow_uniform: &shadow_uniform,
                 water_appearance: &water_appearance,
@@ -2496,12 +2607,17 @@ impl TerrainViewerGpu {
             composite_layout,
             water_layout,
             depth_resolve_layout,
+            ao_layout,
+            ao_blur_layout,
+            ao_pipeline,
+            ao_blur_pipeline,
             _texture: texture,
             _edge_texture: edge_texture,
             camera_uniform,
             shadow_uniform,
-            shadow_bind_group,
-            shadow_matrix,
+            cascade_uniforms,
+            cascade_bind_groups,
+            cascade_cache: vec![None; SHADOW_CASCADE_COUNT],
             bind_group,
             edge_bind_group,
             vertex_buffer,
@@ -2551,11 +2667,16 @@ impl TerrainViewerGpu {
                 composite_layout: &self.composite_layout,
                 water_layout: &self.water_layout,
                 depth_resolve_layout: &self.depth_resolve_layout,
+                ao_layout: &self.ao_layout,
+                ao_blur_layout: &self.ao_blur_layout,
                 camera_uniform: &self.camera_uniform,
                 shadow_uniform: &self.shadow_uniform,
                 water_appearance: &self.water_appearance,
             },
         );
+        // Recreating the deferred targets allocates a new shadow texture, so no cascade layer holds
+        // valid depth any more.
+        self.cascade_cache.fill(None);
     }
 
     #[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
@@ -2622,11 +2743,20 @@ impl TerrainViewerGpu {
                 lighting: self.lighting,
             }),
         );
+        // Cascades follow the camera, so the fit is recomputed every frame rather than staged once.
+        let shadow = scene_shadow(camera, aspect, self.lighting);
         self.queue.write_buffer(
             &self.shadow_uniform,
             0,
-            &shadow_uniform_bytes(self.shadow_matrix, presentation_seconds),
+            &shadow_uniform_bytes(&shadow, presentation_seconds),
         );
+        for (uniform, cascade) in self.cascade_uniforms.iter().zip(shadow.cascades) {
+            self.queue.write_buffer(
+                uniform,
+                0,
+                &cascade_uniform_bytes(cascade, presentation_seconds),
+            );
+        }
         let view = surface_texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -2641,12 +2771,28 @@ impl TerrainViewerGpu {
                 label: Some("cic-render terrain viewer encoder"),
             });
         self.virtual_terrain.encode(&mut encoder);
-        {
+        // Cascades whose fitted matrix has not moved since the previous frame already hold correct
+        // depth, because every caster is static. Their passes are skipped, which also leaves the
+        // layer's existing contents untouched since no pass clears it.
+        let cascade_keys = shadow.cascades.map(|cascade| matrix_bits(cascade.matrix));
+        let mut redraw_cascade = [true; SHADOW_CASCADE_COUNT];
+        for index in SHADOW_CACHED_CASCADE_START..SHADOW_CASCADE_COUNT {
+            if self.cascade_cache.get(index).copied().flatten() == Some(cascade_keys[index]) {
+                redraw_cascade[index] = false;
+            }
+        }
+        for (cascade_index, cascade_bind_group) in self.cascade_bind_groups.iter().enumerate() {
+            let Some(layer_view) = self.deferred.shadow_layer_views.get(cascade_index) else {
+                continue;
+            };
+            if !redraw_cascade.get(cascade_index).copied().unwrap_or(true) {
+                continue;
+            }
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("cic-render primary directional shadow pass"),
+                label: Some("cic-render primary directional shadow cascade pass"),
                 color_attachments: &[],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.deferred.shadow_view,
+                    view: layer_view,
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(1.0),
                         store: wgpu::StoreOp::Store,
@@ -2658,13 +2804,13 @@ impl TerrainViewerGpu {
                 multiview_mask: None,
             });
             pass.set_pipeline(&self.terrain_shadow_pipeline);
-            pass.set_bind_group(0, &self.shadow_bind_group, &[]);
+            pass.set_bind_group(0, cascade_bind_group, &[]);
             pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..self.index_count, 0, 0..1);
             if let Some(scenery) = &self.scenery {
                 pass.set_pipeline(&self.scenery_shadow_pipeline);
-                pass.set_bind_group(1, &self.shadow_bind_group, &[]);
+                pass.set_bind_group(1, cascade_bind_group, &[]);
                 for model in &scenery.models {
                     pass.set_vertex_buffer(0, model.vertex_buffer.slice(..));
                     pass.set_vertex_buffer(1, model.instance_buffer.slice(..));
@@ -2675,6 +2821,14 @@ impl TerrainViewerGpu {
                             .materials
                             .get(draw.material)
                             .ok_or(RenderError::InvalidMaterial)?;
+                        // Additive draws are emissive decoration; giving them opaque depth makes
+                        // a glow cast a solid silhouette. Multiply draws are the detail and
+                        // lightmap stages layered over geometry whose base stage already wrote
+                        // this depth, so rasterizing them again only costs draws. Neither belongs
+                        // in a shadow map.
+                        if matches!(material.blend, BlendMode::Additive | BlendMode::Multiply) {
+                            continue;
+                        }
                         let end = draw
                             .first_index
                             .checked_add(draw.index_count)
@@ -2684,6 +2838,9 @@ impl TerrainViewerGpu {
                     }
                 }
             }
+        }
+        for (slot, key) in self.cascade_cache.iter_mut().zip(cascade_keys) {
+            *slot = Some(key);
         }
         let wireframe_pipelines = wireframe
             .then_some(self.wireframe_pipelines.as_ref())
@@ -2808,6 +2965,41 @@ impl TerrainViewerGpu {
             pass.draw(0..3, 0..1);
         }
         {
+            // Occlusion runs on the resolved geometry targets, before lighting consumes it as the
+            // ambient visibility term.
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("cic-render ambient occlusion pass"),
+                color_attachments: &[Some(clear_attachment(
+                    &self.deferred.ao_view,
+                    wgpu::Color::WHITE,
+                ))],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.ao_pipeline);
+            pass.set_bind_group(0, &self.deferred.ao_bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("cic-render ambient occlusion blur pass"),
+                color_attachments: &[Some(clear_attachment(
+                    &self.deferred.ao_blurred_view,
+                    wgpu::Color::WHITE,
+                ))],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.ao_blur_pipeline);
+            pass.set_bind_group(0, &self.deferred.ao_bind_group, &[]);
+            pass.set_bind_group(1, &self.deferred.ao_source_bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("cic-render deferred lighting pass"),
                 color_attachments: &[Some(clear_attachment(
@@ -2914,16 +3106,19 @@ fn create_boundary_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     })
 }
 
+/// Layout for the caster passes, which render one cascade at a time and so bind a single cascade
+/// rather than the whole receiver array. Sized with [`SHADOW_CASCADE_BYTES`], not
+/// [`SHADOW_UNIFORM_BYTES`] — the receiver bindings are the ones that need the full array.
 fn create_shadow_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("cic-render scene shadow layout"),
+        label: Some("cic-render scene shadow cascade layout"),
         entries: &[wgpu::BindGroupLayoutEntry {
             binding: 0,
             visibility: wgpu::ShaderStages::VERTEX,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
                 has_dynamic_offset: false,
-                min_binding_size: wgpu::BufferSize::new(SHADOW_UNIFORM_BYTES),
+                min_binding_size: wgpu::BufferSize::new(SHADOW_CASCADE_BYTES),
             },
             count: None,
         }],
@@ -3504,7 +3699,37 @@ fn create_lighting_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
             depth_texture_layout_entry(4),
             comparison_sampler_layout_entry(5),
             shadow_matrix_layout_entry(6),
+            texture_layout_entry(8, false),
         ],
+    })
+}
+
+/// Group zero for both ambient-occlusion passes: the resolved geometry targets plus the camera.
+fn create_ao_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("cic-render ambient occlusion layout"),
+        entries: &[
+            texture_layout_entry(0, false),
+            texture_layout_entry(1, false),
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(CAMERA_UNIFORM_BYTES),
+                },
+                count: None,
+            },
+        ],
+    })
+}
+
+/// Group one for the blur pass: the unfiltered occlusion it reduces.
+fn create_ao_blur_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("cic-render ambient occlusion blur layout"),
+        entries: &[texture_layout_entry(0, false)],
     })
 }
 
@@ -3717,7 +3942,7 @@ fn depth_texture_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
         visibility: wgpu::ShaderStages::FRAGMENT,
         ty: wgpu::BindingType::Texture {
             sample_type: wgpu::TextureSampleType::Depth,
-            view_dimension: wgpu::TextureViewDimension::D2,
+            view_dimension: wgpu::TextureViewDimension::D2Array,
             multisampled: false,
         },
         count: None,
@@ -3958,6 +4183,8 @@ impl DeferredTargets {
             wgpu::TextureFormat::Rgba16Float,
             "lit scene color",
         );
+        let ao = render_texture(device, size, AO_FORMAT, "ambient occlusion");
+        let ao_blurred = render_texture(device, size, AO_FORMAT, "ambient occlusion blurred");
         let albedo_ms = render_texture_multisampled(
             device,
             size,
@@ -3978,11 +4205,11 @@ impl DeferredTargets {
         );
         let depth_ms = create_depth_multisampled(device, size);
         let shadow = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("cic-render primary directional shadow map"),
+            label: Some("cic-render primary directional shadow cascades"),
             size: wgpu::Extent3d {
                 width: SHADOW_MAP_EXTENT,
                 height: SHADOW_MAP_EXTENT,
-                depth_or_array_layers: 1,
+                depth_or_array_layers: SHADOW_CASCADE_LAYERS,
             },
             mip_level_count: 1,
             sample_count: 1,
@@ -3996,11 +4223,29 @@ impl DeferredTargets {
         let normal_view = normal.create_view(&wgpu::TextureViewDescriptor::default());
         let world_view = world.create_view(&wgpu::TextureViewDescriptor::default());
         let scene_view = scene.create_view(&wgpu::TextureViewDescriptor::default());
+        let ao_view = ao.create_view(&wgpu::TextureViewDescriptor::default());
+        let ao_blurred_view = ao_blurred.create_view(&wgpu::TextureViewDescriptor::default());
         let albedo_ms_view = albedo_ms.create_view(&wgpu::TextureViewDescriptor::default());
         let normal_ms_view = normal_ms.create_view(&wgpu::TextureViewDescriptor::default());
         let world_ms_view = world_ms.create_view(&wgpu::TextureViewDescriptor::default());
         let depth_ms_view = depth_ms.create_view(&wgpu::TextureViewDescriptor::default());
-        let shadow_view = shadow.create_view(&wgpu::TextureViewDescriptor::default());
+        // One single-layer view per cascade to render into, plus one array view to sample.
+        let shadow_layer_views = (0..SHADOW_CASCADE_LAYERS)
+            .map(|index| {
+                shadow.create_view(&wgpu::TextureViewDescriptor {
+                    label: Some("cic-render shadow cascade layer"),
+                    dimension: Some(wgpu::TextureViewDimension::D2),
+                    base_array_layer: index,
+                    array_layer_count: Some(1),
+                    ..Default::default()
+                })
+            })
+            .collect::<Vec<_>>();
+        let shadow_view = shadow.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("cic-render shadow cascade array"),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
         let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("cic-render primary directional shadow sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -4030,7 +4275,25 @@ impl DeferredTargets {
                     binding: 6,
                     resource: resources.shadow_uniform.as_entire_binding(),
                 },
+                texture_binding(8, &ao_blurred_view),
             ],
+        });
+        let ao_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("cic-render ambient occlusion bind group"),
+            layout: resources.ao_layout,
+            entries: &[
+                texture_binding(0, &normal_view),
+                texture_binding(1, &world_view),
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: resources.camera_uniform.as_entire_binding(),
+                },
+            ],
+        });
+        let ao_source_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("cic-render ambient occlusion blur source bind group"),
+            layout: resources.ao_blur_layout,
+            entries: &[texture_binding(0, &ao_view)],
         });
         let composite_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("cic-render deferred composite bind group"),
@@ -4120,16 +4383,20 @@ impl DeferredTargets {
             _world: world,
             _scene: scene,
             _shadow: shadow,
+            _ao: ao,
+            _ao_blurred: ao_blurred,
             _albedo_ms: albedo_ms,
             _normal_ms: normal_ms,
             _world_ms: world_ms,
             _depth_ms: depth_ms,
             depth,
-            shadow_view,
+            shadow_layer_views,
             albedo_view,
             normal_view,
             world_view,
             scene_view,
+            ao_view,
+            ao_blurred_view,
             albedo_ms_view,
             normal_ms_view,
             world_ms_view,
@@ -4138,6 +4405,8 @@ impl DeferredTargets {
             composite_bind_group,
             water_bind_group,
             depth_resolve_bind_group,
+            ao_bind_group,
+            ao_source_bind_group,
         }
     }
 }
@@ -4271,39 +4540,197 @@ fn perspective(field_of_view: f32, aspect: f32, near: f32, far: f32) -> [[f32; 4
     ]
 }
 
+#[cfg(test)]
 fn orthographic(radius: f32, near: f32, far: f32) -> [[f32; 4]; 4] {
+    orthographic_extents(radius, radius, near, far)
+}
+
+/// Orthographic projection with independent half-extents per axis, so a cascade can be fitted to a
+/// box rather than forced to a square.
+fn orthographic_extents(half_x: f32, half_y: f32, near: f32, far: f32) -> [[f32; 4]; 4] {
     [
-        [1.0 / radius, 0.0, 0.0, 0.0],
-        [0.0, 1.0 / radius, 0.0, 0.0],
+        [1.0 / half_x, 0.0, 0.0, 0.0],
+        [0.0, 1.0 / half_y, 0.0, 0.0],
         [0.0, 0.0, 1.0 / (near - far), 0.0],
         [0.0, 0.0, near / (near - far), 1.0],
     ]
 }
 
-fn scene_shadow_matrix(terrain: &StagedTerrain, lighting: TerrainLighting) -> [[f32; 4]; 4] {
-    let (minimum, maximum) = terrain.bounds();
-    let center = [
-        (minimum[0] + maximum[0]) * 0.5,
-        (minimum[1] + maximum[1]) * 0.5,
-        (minimum[2] + maximum[2]) * 0.5,
-    ];
-    let extent = subtract(maximum, minimum);
-    let radius = (dot(extent, extent).sqrt() * 0.5).max(100.0);
-    let mut forward = lighting.lights()[0].source_direction();
-    if dot(forward, forward) <= f32::EPSILON {
-        forward = [0.45, 0.35, -0.82];
+/// Rounds a cascade half-extent up onto a fixed geometric ladder.
+///
+/// A light-space box is not invariant to camera yaw the way a bounding sphere is, so its extents
+/// would otherwise change every frame as the view turns. Texel snapping only removes translation
+/// jitter; a changing extent rescales every texel and makes shadow edges re-quantize, which crawls.
+/// Snapping the extent to a ladder means it holds still across small rotations and steps only
+/// occasionally, at the cost of at most this ladder's ratio in wasted coverage.
+fn quantize_cascade_extent(value: f32) -> f32 {
+    // 2^(1/8): at most about nine percent of an axis given away to keep the fit stable.
+    const LADDER: f32 = 1.090_507_7;
+    if value <= f32::EPSILON || !value.is_finite() {
+        return 1.0;
     }
-    forward = normalize(forward);
-    let position = subtract(center, scale_vector(forward, radius * 2.0));
-    let up = if forward[2].abs() > 0.95 {
+    LADDER.powf((value.ln() / LADDER.ln()).ceil())
+}
+
+/// One fitted cascade of the primary directional light, plus the two world-space scales a shadow
+/// receiver needs to bias itself correctly.
+///
+/// `depth_range` and `texel_world` are per cascade because both bias terms have to be expressed in
+/// world units and converted against the frustum they belong to, rather than hard-coded as a
+/// normalized-depth epsilon: a fixed epsilon silently becomes a larger world-space offset as the
+/// frustum grows, and with cascades the frusta differ from each other by more than an order of
+/// magnitude.
+#[derive(Clone, Copy)]
+struct ShadowCascade {
+    matrix: [[f32; 4]; 4],
+    /// World units spanned by the full `0..=1` normalized depth range.
+    depth_range: f32,
+    /// World units covered by one shadow-map texel.
+    texel_world: f32,
+}
+
+#[derive(Clone, Copy)]
+struct SceneShadow {
+    cascades: [ShadowCascade; SHADOW_CASCADE_COUNT],
+}
+
+/// The primary light's travel direction, falling back to the original preview angle when a MAP
+/// declares a degenerate one.
+fn primary_light_forward(lighting: TerrainLighting) -> [f32; 3] {
+    let forward = lighting.lights()[0].source_direction();
+    if dot(forward, forward) <= f32::EPSILON {
+        return normalize([0.45, 0.35, -0.82]);
+    }
+    normalize(forward)
+}
+
+/// Light-space basis. `look_to` derives its right and up the same way from the same reference, so
+/// texel snapping performed in this basis matches the projection the snapped centre feeds.
+fn light_basis(forward: [f32; 3]) -> ([f32; 3], [f32; 3], [f32; 3]) {
+    let reference = if forward[2].abs() > 0.95 {
         [0.0, 1.0, 0.0]
     } else {
         [0.0, 0.0, 1.0]
     };
-    multiply_matrix(
-        orthographic(radius, 0.1, radius * 4.0),
-        look_to(position, forward, up),
-    )
+    let right = normalize(cross(forward, reference));
+    let up = cross(right, forward);
+    (right, up, reference)
+}
+
+/// Fits one cascade to the slice of the camera frustum between `near` and `far`.
+///
+/// The slice's bounding sphere sets the orthographic extent, which makes the fit independent of
+/// camera yaw and so keeps the cascade a stable size as the view turns. The centre is then snapped
+/// to whole texels in light space: without that, sub-texel centre motion re-quantizes every shadow
+/// edge each frame and the result crawls visibly while the camera moves.
+#[allow(clippy::cast_precision_loss)]
+fn fit_cascade(
+    camera: TerrainCamera,
+    aspect: f32,
+    near: f32,
+    far: f32,
+    light_forward: [f32; 3],
+) -> ShadowCascade {
+    let view_forward = normalize(camera.forward());
+    let (view_right, view_up, _) = light_basis(view_forward);
+    let tangent_vertical = (CAMERA_VERTICAL_FOV * 0.5).tan();
+    let tangent_horizontal = tangent_vertical * aspect;
+
+    let mut corners = [[0.0_f32; 3]; 8];
+    let mut index = 0;
+    for distance in [near, far] {
+        let half_height = tangent_vertical * distance;
+        let half_width = tangent_horizontal * distance;
+        let slice_center = add(camera.position, scale_vector(view_forward, distance));
+        for vertical in [-half_height, half_height] {
+            for horizontal in [-half_width, half_width] {
+                corners[index] = add(
+                    slice_center,
+                    add(
+                        scale_vector(view_right, horizontal),
+                        scale_vector(view_up, vertical),
+                    ),
+                );
+                index += 1;
+            }
+        }
+    }
+
+    // Fit the slice with a box aligned to the light instead of a bounding sphere. A sphere has to
+    // contain the slice's longest diagonal, which is far larger than the slice's actual footprint
+    // when viewed along the light -- most of all on the axis the slice is shallow in.
+    let (light_right, light_up, reference) = light_basis(light_forward);
+    let mut minimum = [f32::MAX; 3];
+    let mut maximum = [f32::MIN; 3];
+    for corner in corners {
+        let light_space = [
+            dot(corner, light_right),
+            dot(corner, light_up),
+            dot(corner, light_forward),
+        ];
+        for axis in 0..3 {
+            minimum[axis] = minimum[axis].min(light_space[axis]);
+            maximum[axis] = maximum[axis].max(light_space[axis]);
+        }
+    }
+
+    let half_right = quantize_cascade_extent((maximum[0] - minimum[0]) * 0.5);
+    let half_up = quantize_cascade_extent((maximum[1] - minimum[1]) * 0.5);
+    let extent = SHADOW_MAP_EXTENT as f32;
+    let texel_right = half_right * 2.0 / extent;
+    let texel_up = half_up * 2.0 / extent;
+    // Each axis snaps by its own texel size, since they now differ.
+    let snapped = add(
+        add(
+            scale_vector(
+                light_right,
+                (((minimum[0] + maximum[0]) * 0.5) / texel_right).floor() * texel_right,
+            ),
+            scale_vector(
+                light_up,
+                (((minimum[1] + maximum[1]) * 0.5) / texel_up).floor() * texel_up,
+            ),
+        ),
+        scale_vector(light_forward, (minimum[2] + maximum[2]) * 0.5),
+    );
+
+    let depth_half = ((maximum[2] - minimum[2]) * 0.5).max(1.0);
+    let position = subtract(
+        snapped,
+        scale_vector(light_forward, depth_half + SHADOW_CASTER_HEADROOM),
+    );
+    let near_plane = 0.1;
+    let far_plane = depth_half * 2.0 + SHADOW_CASTER_HEADROOM + 1.0;
+    ShadowCascade {
+        matrix: multiply_matrix(
+            orthographic_extents(half_right, half_up, near_plane, far_plane),
+            look_to(position, light_forward, reference),
+        ),
+        depth_range: far_plane - near_plane,
+        // Bias follows the coarser axis, so it stays sufficient on both.
+        texel_world: texel_right.max(texel_up),
+    }
+}
+
+/// Fits every cascade to the current view. Recomputed per frame, since each cascade tracks the
+/// camera rather than the map.
+fn scene_shadow(camera: TerrainCamera, aspect: f32, lighting: TerrainLighting) -> SceneShadow {
+    let light_forward = primary_light_forward(lighting);
+    let shadowed_distance = camera.far_plane.min(SHADOW_MAX_DISTANCE);
+    let mut cascades = [ShadowCascade {
+        matrix: [[0.0; 4]; 4],
+        depth_range: 1.0,
+        texel_world: 1.0,
+    }; SHADOW_CASCADE_COUNT];
+    let mut near = 1.0_f32;
+    for (cascade, split) in cascades.iter_mut().zip(SHADOW_CASCADE_SPLITS) {
+        let far = (shadowed_distance * split).max(near + 1.0);
+        *cascade = fit_cascade(camera, aspect, near, far, light_forward);
+        // Overlap the next cascade slightly so a receiver near a split still finds coverage after
+        // its normal offset nudges it across the boundary.
+        near = far * 0.98;
+    }
+    SceneShadow { cascades }
 }
 
 fn look_to(position: [f32; 3], forward: [f32; 3], up: [f32; 3]) -> [[f32; 4]; 4] {
@@ -4335,13 +4762,26 @@ fn multiply_matrix(left: [[f32; 4]; 4], right: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
     result
 }
 
-fn shadow_uniform_bytes(matrix: [[f32; 4]; 4], time: f32) -> [u8; 80] {
+/// Packs one cascade for the caster passes, which each see a single cascade at a time.
+fn cascade_uniform_bytes(cascade: ShadowCascade, time: f32) -> [u8; 80] {
     let mut bytes = [0; 80];
-    for (target, value) in bytes
-        .chunks_exact_mut(4)
-        .zip(matrix.into_iter().flatten().chain([time, 0.0, 0.0, 0.0]))
-    {
+    for (target, value) in bytes.chunks_exact_mut(4).zip(
+        cascade
+            .matrix
+            .into_iter()
+            .flatten()
+            .chain([time, cascade.depth_range, cascade.texel_world, 0.0]),
+    ) {
         target.copy_from_slice(&value.to_le_bytes());
+    }
+    bytes
+}
+
+/// Packs every cascade for the receiver passes, which select among them per pixel.
+fn shadow_uniform_bytes(shadow: &SceneShadow, time: f32) -> [u8; SHADOW_UNIFORM_LEN] {
+    let mut bytes = [0; SHADOW_UNIFORM_LEN];
+    for (target, cascade) in bytes.chunks_exact_mut(80).zip(shadow.cascades) {
+        target.copy_from_slice(&cascade_uniform_bytes(cascade, time));
     }
     bytes
 }
@@ -4418,6 +4858,24 @@ fn camera_bytes(input: &CameraUniformInput) -> [u8; 304] {
     bytes
 }
 
+/// Exact bit pattern of a matrix, for deciding whether a cascade may be reused. Compared as bits
+/// rather than floats so the test is an identity check with no equality edge cases.
+fn matrix_bits(matrix: [[f32; 4]; 4]) -> [u32; 16] {
+    let mut bits = [0; 16];
+    for (target, value) in bits.iter_mut().zip(matrix.into_iter().flatten()) {
+        *target = value.to_bits();
+    }
+    bits
+}
+
+fn add(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {
+    [
+        left[0] + right[0],
+        left[1] + right[1],
+        left[2] + right[2],
+    ]
+}
+
 fn subtract(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {
     [left[0] - right[0], left[1] - right[1], left[2] - right[2]]
 }
@@ -4471,12 +4929,55 @@ fn ray_distance_for_view_depth(
 #[cfg(test)]
 mod tests {
     use super::{
-        ROAD_DEPTH_BIAS, SOURCE_ROAD_MIP_LEVELS, TerrainCamera, TerrainInput,
-        create_composite_layout, create_depth_resolve_layout, create_depth_resolve_pipeline,
-        create_fullscreen_pipeline, create_lighting_layout, gray_mip, look_to, multiply_matrix,
-        orthographic, perspective, ray_distance_for_view_depth, shadow_uniform_bytes,
+        ROAD_DEPTH_BIAS, SHADOW_CASCADE_BYTES, SHADOW_CASCADE_COUNT, SHADOW_CASTER_HEADROOM,
+        SHADOW_UNIFORM_BYTES,
+        SOURCE_ROAD_MIP_LEVELS, SceneShadow, ShadowCascade, TerrainCamera, TerrainInput,
+        cascade_uniform_bytes, create_composite_layout, create_depth_resolve_layout,
+        create_depth_resolve_pipeline, create_fullscreen_pipeline, create_lighting_layout,
+        create_shadow_layout, gray_mip, look_to, multiply_matrix, orthographic, perspective,
+        quantize_cascade_extent, ray_distance_for_view_depth, scene_shadow, shadow_uniform_bytes,
         source_road_mips, terrain_color_targets, terrain_viewer_title,
     };
+    use crate::TerrainLighting;
+
+    /// The caster passes bind one cascade and the receivers bind the whole array, so the two
+    /// minimum binding sizes are deliberately different. Nothing else forces them to stay
+    /// consistent with the buffers actually allocated, and the caster bind groups are only built
+    /// inside the windowed constructor, which no headless test reaches — so binding an
+    /// exactly-sized cascade buffer against the caster layout is checked directly here.
+    #[test]
+    fn caster_cascade_bind_group_accepts_a_single_cascade_buffer() {
+        assert_eq!(
+            SHADOW_UNIFORM_BYTES,
+            SHADOW_CASCADE_BYTES * SHADOW_CASCADE_COUNT as u64,
+            "receiver array size must stay a whole number of cascades"
+        );
+        let renderer = match pollster::block_on(crate::HeadlessRenderer::new()) {
+            Ok(renderer) => renderer,
+            Err(crate::RenderError::RequestAdapter(error)) => {
+                eprintln!("skipping shadow cascade bind group check without an adapter: {error}");
+                return;
+            }
+            Err(error) => panic!("initializing headless renderer: {error}"),
+        };
+        let layout = create_shadow_layout(&renderer.device);
+        let uniform = renderer.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cascade bind group regression"),
+            size: SHADOW_CASCADE_BYTES,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let _bind_group = renderer
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("cascade bind group regression"),
+                layout: &layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform.as_entire_binding(),
+                }],
+            });
+    }
 
     #[test]
     fn deferred_pipeline_layouts_match_every_shader_binding() {
@@ -4568,15 +5069,175 @@ mod tests {
     }
 
     #[test]
-    fn shadow_projection_and_explicit_time_uniform_are_stably_packed() {
-        let projection = orthographic(400.0, 0.1, 1_600.0);
-        assert!(projection.into_iter().flatten().all(f32::is_finite));
-        let bytes = shadow_uniform_bytes(projection, 2.5);
-        assert_eq!(bytes.len(), 80);
-        assert_eq!(
-            u32::from_le_bytes(bytes[64..68].try_into().expect("time bytes")),
-            2.5_f32.to_bits()
+    fn shadow_cascade_uniform_is_stably_packed_in_cascade_order() {
+        let mut cascades = [ShadowCascade {
+            matrix: [[0.0; 4]; 4],
+            depth_range: 1.0,
+            texel_world: 1.0,
+        }; SHADOW_CASCADE_COUNT];
+        for (index, cascade) in cascades.iter_mut().enumerate() {
+            let radius = 100.0 * 3.0_f32.powi(i32::try_from(index).expect("cascade index"));
+            *cascade = ShadowCascade {
+                matrix: orthographic(radius, 0.1, radius * 4.0),
+                depth_range: radius * 4.0 - 0.1,
+                texel_world: radius * 2.0 / 2_048.0,
+            };
+        }
+        let bytes = shadow_uniform_bytes(&SceneShadow { cascades }, 2.5);
+        assert_eq!(bytes.len() as u64, SHADOW_UNIFORM_BYTES);
+        for (index, cascade) in cascades.into_iter().enumerate() {
+            assert!(cascade.matrix.into_iter().flatten().all(f32::is_finite));
+            let base = index * 80;
+            assert_eq!(
+                &bytes[base..base + 80],
+                &cascade_uniform_bytes(cascade, 2.5),
+                "cascade {index} slice must match its standalone packing"
+            );
+            assert_eq!(
+                u32::from_le_bytes(
+                    bytes[base + 64..base + 68]
+                        .try_into()
+                        .expect("time bytes")
+                ),
+                2.5_f32.to_bits()
+            );
+            assert_eq!(
+                u32::from_le_bytes(
+                    bytes[base + 68..base + 72]
+                        .try_into()
+                        .expect("depth range bytes")
+                ),
+                cascade.depth_range.to_bits()
+            );
+            assert_eq!(
+                u32::from_le_bytes(
+                    bytes[base + 72..base + 76]
+                        .try_into()
+                        .expect("texel extent bytes")
+                ),
+                cascade.texel_world.to_bits()
+            );
+        }
+    }
+
+    /// The light-space box fit is only safe because its extents are quantized. A sphere is
+    /// invariant to camera yaw; a box is not, so an unquantized extent would change every frame as
+    /// the view turned, rescaling every texel and making shadow edges re-quantize -- crawl that
+    /// texel snapping cannot remove, because snapping only cancels translation. The ladder has to
+    /// hold still across small changes while never returning less than it was asked to cover.
+    #[test]
+    fn cascade_extent_quantization_covers_its_input_and_holds_still() {
+        for base in [1.0_f32, 7.5, 42.0, 137.0, 900.0, 3_000.0] {
+            let quantized = quantize_cascade_extent(base);
+            assert!(
+                quantized >= base,
+                "quantized {quantized} must still cover {base}"
+            );
+            assert!(
+                quantized < base * 1.10,
+                "quantized {quantized} gives away too much of {base}"
+            );
+            // A one-percent wobble in the fitted extent must not move the ladder rung, which is
+            // what keeps the projection stable while the camera turns slowly.
+            let wobbled = quantize_cascade_extent(base * 0.995);
+            assert!(
+                wobbled <= quantized,
+                "a smaller input must not select a larger rung: {wobbled} vs {quantized}"
+            );
+        }
+        // Degenerate inputs must not produce a zero or non-finite extent, which would make the
+        // projection divide by zero.
+        for degenerate in [0.0_f32, -1.0, f32::NAN, f32::INFINITY] {
+            let quantized = quantize_cascade_extent(degenerate);
+            assert!(
+                quantized.is_finite() && quantized > 0.0,
+                "degenerate input {degenerate} produced {quantized}"
+            );
+        }
+    }
+
+    #[test]
+    fn near_cascade_resolves_far_more_finely_than_the_far_cascade() {
+        // The whole point of cascades here: the near slice must land dramatically more texels on
+        // the ground than a whole-map slice ever could, and each cascade's bias follows its own
+        // texel extent rather than a shared constant.
+        let camera = TerrainCamera {
+            position: [0.0, 0.0, 200.0],
+            velocity: [0.0; 3],
+            yaw: 0.6,
+            pitch: -0.7,
+            move_speed: 100.0,
+            far_plane: 10_000.0,
+        };
+        let shadow = scene_shadow(camera, 16.0 / 9.0, TerrainLighting::preview());
+        let extents = shadow.cascades.map(|cascade| cascade.texel_world);
+        assert!(
+            extents.iter().all(|extent| extent.is_finite() && *extent > 0.0),
+            "every cascade needs a usable texel extent: {extents:?}"
         );
+        assert!(
+            extents.windows(2).all(|pair| pair[0] < pair[1]),
+            "cascades must grow coarser outward: {extents:?}"
+        );
+        assert!(
+            extents[0] < 0.25,
+            "near cascade should resolve well under a quarter world unit per texel: {extents:?}"
+        );
+        // The outermost cascade is what distant blockiness is made of, and it is the one a split
+        // scheme silently ruins: leaving most of the shadowed range to it makes it coarser than a
+        // single whole-map slice would have been. A whole-map 4096-square slice reached roughly
+        // 1.04 world units per texel, so the outermost cascade has to stay near that to be worth
+        // having. Bounding only the near cascade is what let a 3.16 regression ship.
+        let outermost = extents[SHADOW_CASCADE_COUNT - 1];
+        assert!(
+            outermost < 1.4,
+            "outermost cascade must not be coarser than a whole-map slice: {extents:?}"
+        );
+        // Density should step by a roughly constant factor, not pile the range into one cascade.
+        for pair in extents.windows(2) {
+            let ratio = pair[1] / pair[0];
+            assert!(
+                (1.5..=5.0).contains(&ratio),
+                "cascade density should step geometrically, got ratio {ratio} in {extents:?}"
+            );
+        }
+        // Every cascade must reach far enough above its receiver region to contain a tall caster.
+        // The near cascade's own radius is only tens of units, so without the headroom a structure
+        // standing in it is clipped out of precisely the cascade a nearby receiver selects.
+        for (index, cascade) in shadow.cascades.into_iter().enumerate() {
+            assert!(cascade.matrix.into_iter().flatten().all(f32::is_finite));
+            assert!(
+                cascade.depth_range > SHADOW_CASTER_HEADROOM,
+                "cascade {index} depth range {} must exceed the caster headroom",
+                cascade.depth_range
+            );
+        }
+    }
+
+    #[test]
+    fn shadow_depth_slack_stays_in_world_units_across_every_fitted_frustum() {
+        // Mirrors `SHADOW_DEPTH_SLACK_TEXELS` in `terrain_deferred.wgsl` and the epsilon it
+        // replaced. The shader biases by `texel_world * slack / depth_range` in normalized depth,
+        // so the world-space consequence is `texel_world * slack` and is independent of how large
+        // the fitted frustum grew. The legacy fixed normalized-depth epsilon instead scaled with
+        // the frustum, which is what erased short occluders' shadows on larger maps.
+        const LEGACY_NORMALIZED_EPSILON: f32 = 0.0015;
+        const SLACK_TEXELS: f32 = 0.5;
+        // Half-diagonals for a small skirmish map, a mid-size map, and a large four-player map.
+        for radius in [141.0_f32, 1_414.0, 2_828.0] {
+            let depth_range = radius * 4.0 - 0.1;
+            let texel_world = radius * 2.0 / 2_048.0;
+            let world_slack = texel_world * SLACK_TEXELS;
+            let legacy_world_slack = LEGACY_NORMALIZED_EPSILON * depth_range;
+            assert!(
+                world_slack < legacy_world_slack,
+                "radius {radius} regressed: {world_slack} >= {legacy_world_slack}"
+            );
+            assert!(
+                world_slack < crate::terrain::TERRAIN_XY_SCALE,
+                "radius {radius} slack {world_slack} exceeds one terrain cell"
+            );
+        }
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::error::Error;
+use std::fmt::Write as _;
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -54,6 +55,7 @@ const USAGE: &str = "Usage:\n\
   cic-inspect map-polygons <virtual-path> <mount> [<mount> ...]\n\
   cic-inspect map-water <virtual-path> <mount> [<mount> ...]\n\
   cic-inspect map-objects <virtual-path> <mount> [<mount> ...]\n\
+  cic-inspect map-object-draws <virtual-path> <mount> [<mount> ...]\n\
   cic-inspect map-sides <virtual-path> <mount> [<mount> ...]\n\
   cic-inspect map-render [--size <pixels>] [--pixels-per-cell <pixels>] [--terrain-policy <legacy|modern>] [--time <seconds>] <virtual-path> [<output.png>] [<mount> ...]\n\
   cic-inspect map-view [--pixels-per-cell <pixels>] [--terrain-policy <legacy|modern>] [--time <seconds>] <virtual-path> [<mount> ...]\n\
@@ -162,6 +164,7 @@ fn run(arguments: impl IntoIterator<Item = String>) -> Result<String, Box<dyn Er
         "map-polygons" => report_map_polygons(arguments, &options),
         "map-water" => report_map_water(arguments, &options),
         "map-objects" => report_map_objects(arguments, &options),
+        "map-object-draws" => report_map_object_draws(arguments, &options),
         "map-sides" => report_map_sides(arguments, &options),
         "map-render" => render_terrain_capture(&mut arguments, &options),
         "map-view" => view_terrain(&mut arguments, &options),
@@ -437,6 +440,72 @@ where
     let map = load_map_for_report("map-objects", arguments, options)?;
     let world = decode_map_world_objects(&map, MapScenarioLimits::default())?;
     Ok(render_map_world_objects(&world))
+}
+
+/// Reports, per placed template, which draw module the object catalog resolves to.
+///
+/// The draw module is what decides presentation policy that the placement itself never states:
+/// tree sway is attached only to a `W3DTreeDraw` module, so a profile whose templates declare a
+/// different module produces still trees with no diagnostic to explain it. Mounting matches the
+/// terrain path so the object INIs are present.
+fn report_map_object_draws<I>(arguments: I, options: &CliOptions) -> Result<String, Box<dyn Error>>
+where
+    I: Iterator<Item = String>,
+{
+    let mut arguments = arguments;
+    let resource_name = arguments
+        .next()
+        .ok_or("map-object-draws requires a virtual path")?;
+    let mounts = arguments.collect::<Vec<_>>();
+    let vfs = mount_all("map-object-draws", &mounts, options, ResourceKind::Terrain)?;
+    let resource_path = VirtualPath::new(&resource_name)?;
+    let entry = vfs
+        .resolve(&resource_path)
+        .ok_or_else(|| format!("resource not found: {resource_path}"))?;
+    let limits = MapLimits::default();
+    let bytes = entry.read(limits.maximum_file_bytes)?;
+    let map = parse_map(&bytes, resource_path.as_str(), limits)?;
+    let world = decode_map_world_objects(&map, MapScenarioLimits::default())?;
+    let catalog = load_object_catalog(&vfs, &resource_path)?;
+
+    // One row per distinct template, counted over every placement, in stable name order.
+    let mut placements = BTreeMap::<Vec<u8>, (Vec<u8>, usize)>::new();
+    for object in world.objects() {
+        let key = ascii_fold(object.name_bytes());
+        let slot = placements
+            .entry(key)
+            .or_insert_with(|| (object.name_bytes().to_vec(), 0));
+        slot.1 += 1;
+    }
+
+    let mut report = String::from("template\tplacements\tdraw\tkind\tmodel\n");
+    for (key, (name, count)) in &placements {
+        let display = String::from_utf8_lossy(name);
+        match resolve_object_draws(&catalog, key) {
+            Some(draws) if !draws.is_empty() => {
+                for draw in draws {
+                    let kind = match draw.kind() {
+                        ObjectDrawKind::Tree => "tree",
+                        ObjectDrawKind::Model => "model",
+                    };
+                    let module = String::from_utf8_lossy(draw.module_bytes());
+                    let model = String::from_utf8_lossy(draw.model_bytes());
+                    writeln!(report, "{display}\t{count}\t{module}\t{kind}\t{model}")
+                        .expect("writing to a String cannot fail");
+                }
+            }
+            _ => {
+                let state = if catalog.contains_key(key) {
+                    "no-default-draw"
+                } else {
+                    "missing-definition"
+                };
+                writeln!(report, "{display}\t{count}\t{state}\t-\t-")
+                    .expect("writing to a String cannot fail");
+            }
+        }
+    }
+    Ok(report)
 }
 
 fn report_map_sides<I>(arguments: I, options: &CliOptions) -> Result<String, Box<dyn Error>>

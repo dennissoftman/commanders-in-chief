@@ -21,12 +21,58 @@ land under the active milestone heading.
   existing `HeadlessRenderer` boundary to a deterministic PPM plus RGBA SHA-256 hash. It has no
   images, text, gadget visuals, or scaling policy yet; it proves the immutable decoded value can
   drive a renderer capture ahead of the retained UI runtime.
+- Shadow cascades now crossfade near their boundaries and reuse their outer layers across frames.
+  Selecting a single cascade put a visible line on screen where sharp shadows met blurry ones,
+  because a fixed-width kernel spans an order of magnitude more world space in the outermost
+  cascade than the innermost. Every caster is static, so a cascade whose fitted matrix has not moved
+  since the previous frame keeps its depth and skips its pass entirely; the inner cascades always
+  redraw, since reuse would freeze animated tree sway where it is most visible.
+- Blended scenery now casts partial shadow instead of an opaque silhouette. A material without an
+  alpha test has no meaningful cutoff, so a translucent tree card tested against a near-zero one
+  wrote shadow depth across its whole surface and canopies read as solid blobs. Those materials are
+  now tested against a stable per-texel hash, so a texel of a given opacity occludes about that
+  fraction of the shadow samples and the receiver's filtering resolves it into real dappling.
+  Materials that do declare an alpha test keep their hard cutout.
+- Additive and multiply scenery draws no longer write shadow depth. An additive glow was casting a
+  solid silhouette, and multiply detail stages were re-rasterizing geometry whose base stage had
+  already written the same depth.
+- Added cascaded shadow maps to the MAP scene, replacing the single whole-map orthographic slice.
+  Three 2048-square layers of a depth array texture are fitted per frame to slices of the camera
+  frustum, with each cascade's centre snapped to whole texels in light space so shadow edges do not
+  crawl as the camera moves. Receivers select the first cascade that contains them, which is also
+  the densest one that does. Each cascade derives its own bias from its own texel extent, so the
+  near cascade is biased far more tightly than the far one.
+- Added ground-truth ambient occlusion (`crates/cic-render/src/terrain_ao.wgsl`) to the MAP scene,
+  evaluated in world space over the resolved G-buffer with a bilateral cross blur and consumed as
+  the ambient visibility term by deferred lighting. Sampling is purely spatial because the renderer
+  has no temporal antialiasing, so a temporally accumulated estimate would shimmer under camera
+  motion.
+- Added W3D vertex-material self-illumination to the MAP scene. Emissive strength is carried from
+  the decoded source material through the G-buffer's coverage channel and added after the light
+  loop, so a self-illuminated surface keeps glowing in full shade and takes its hue from its own
+  albedo. Per-vertex `DIFFUSE_ILLUMINATION` is decoded but not yet consumed.
 - Added an original synthetic `BIG4` fixture and truncation-at-every-prefix tests alongside the
   existing `BIGF` coverage, and a bounded `big` libFuzzer target, closing an R1 acceptance-test gap
   where BIG4 had no automated coverage and BIG archives had no fuzz target.
 
 ### Fixed
 
+- Specular highlights now come from the source material instead of a fixed constant. Scenery wrote
+  a hard-coded roughness and deferred lighting applied a fixed highlight strength once per light, so
+  stone, plaster, and wood all carried a sheen no W3D material asked for. Roughness is now derived
+  from the vertex material's specular color and shininess, a black source specular resolves to fully
+  rough, and highlight strength falls off with roughness so a fully rough surface has no highlight.
+- Cast shadows in the MAP scene are now actually legible. The primary directional light's shadow
+  previously removed only part of one light's diffuse term while three source terrain lights each
+  contributed unoccluded ambient, capping shadow contrast near ten percent, so object shadows were
+  effectively invisible except on large uniform surfaces. The primary light's ambient share is now
+  occluded alongside its direct term and the fully-shadowed floor was lowered. Water keeps its own
+  higher floor, since a transmissive surface still returns sky and bed light in shade.
+- Replaced the primary shadow map's fixed normalized-depth bias with normal-offset plus depth slack
+  derived in world units from the fitted light frustum's own depth range and texel extent. The old
+  constant epsilon scaled with the frustum, so it grew to roughly 8-17 world units of slack as maps
+  got larger and detached or erased the shadows of anything shorter than that. Raising the shadow
+  extent to 4096 squared now tightens the bias instead of loosening it.
 - Repaired the `map` libFuzzer target, which no longer compiled after `MapLimits` gained polygon
   and water-trigger fields during R3; fuzzing was not part of the workspace test suite so the
   regression was silent.

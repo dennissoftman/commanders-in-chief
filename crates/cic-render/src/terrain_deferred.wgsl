@@ -15,9 +15,18 @@ struct Camera {
     terrain_lights: array<DirectionalLight, 3>,
 }
 
-struct ShadowCamera {
+// `params` packs the presentation time in `x`, the world units spanned by the full normalized
+// depth range in `y`, and the world units covered by one shadow texel in `z`. `w` is reserved.
+// Both scales are per cascade, since the fitted frusta differ by more than an order of magnitude.
+struct ShadowCascade {
     view_projection: mat4x4<f32>,
-    time: vec4<f32>,
+    params: vec4<f32>,
+}
+
+const SHADOW_CASCADE_COUNT: i32 = 4;
+
+struct ShadowCamera {
+    cascades: array<ShadowCascade, 4>,
 }
 
 struct FullscreenOutput {
@@ -37,34 +46,121 @@ fn fullscreen_vertex(@builtin(vertex_index) vertex_index: u32) -> FullscreenOutp
 @group(0) @binding(1) var g_normal: texture_2d<f32>;
 @group(0) @binding(2) var g_world: texture_2d<f32>;
 @group(0) @binding(3) var<uniform> light_camera: Camera;
-@group(0) @binding(4) var primary_shadow: texture_depth_2d;
+@group(0) @binding(4) var primary_shadow: texture_depth_2d_array;
 @group(0) @binding(5) var primary_shadow_sampler: sampler_comparison;
 @group(0) @binding(6) var<uniform> shadow_camera: ShadowCamera;
+@group(0) @binding(8) var ambient_occlusion: texture_2d<f32>;
 
-fn shadow_visibility(world_position: vec3<f32>) -> f32 {
-    let clip = shadow_camera.view_projection * vec4<f32>(world_position, 1.0);
+// Both bias terms are expressed in world units and converted with the light frustum's own
+// depth range, so widening the fitted frustum for a larger map no longer inflates the bias in
+// world space. Nearly all of the slack is taken laterally by offsetting the receiver along its
+// normal — the depth slack that remains is a fraction of a texel, which keeps contact shadows
+// attached instead of peter-panning them away. Slope-dependent acne is handled by the shadow
+// pipelines' rasterizer slope-scaled bias rather than a second term here.
+const SHADOW_NORMAL_OFFSET_TEXELS: f32 = 1.5;
+const SHADOW_DEPTH_SLACK_TEXELS: f32 = 0.5;
+
+// How much of the primary light survives in full shade. The direct term is nearly extinguished;
+// its ambient share only drops part way, standing in for the sky light that still reaches a
+// shadowed surface. Ambient has to be attenuated at all because it dominates the sum: the three
+// source terrain lights each contribute their own unoccluded ambient, so leaving ambient whole in
+// shade caps achievable shadow contrast around ten percent and cast shadows read as absent.
+const SHADOW_DIRECT_FLOOR: f32 = 0.08;
+const SHADOW_AMBIENT_FLOOR: f32 = 0.45;
+
+// Ambient occlusion attenuates every light's ambient share, including the accent fills the sun's
+// shadow deliberately leaves alone: occlusion answers "how much of the sky can this point see",
+// which the directional shadow cannot, since that cannot tell a shadowed open field from an
+// enclosed corner. Clamped rather than applied whole so interiors darken without going black.
+const AO_AMBIENT_FLOOR: f32 = 0.25;
+
+// Peak highlight strength, reached only by a fully smooth material.
+const SPECULAR_STRENGTH: f32 = 0.06;
+
+// Fraction of a cascade's half-extent, measured inward from its outer boundary, over which its
+// result crossfades into the next cascade. The kernel spans a fixed three texels, so its
+// world-space width scales with the cascade's texel extent and penumbrae are an order of magnitude
+// wider in the outermost cascade than the innermost. Selecting one cascade outright therefore puts
+// a visible line on screen where sharp shadows meet blurry ones; fading between them over a band
+// turns that line into a gradient, which is what makes the transition imperceptible.
+const SHADOW_CASCADE_BLEND: f32 = 0.18;
+
+struct CascadeSample {
+    visibility: f32,
+    // 1.0 when this cascade contains the receiver at all.
+    covered: f32,
+    // 0.0 in the cascade's interior, ramping to 1.0 at its outer boundary.
+    edge: f32,
+}
+
+// `textureSampleCompareLevel` rather than `textureSampleCompare`: the caller's per-pixel loop exit
+// makes this non-uniform control flow, which the implicit-derivative variant does not permit.
+// Shadow maps never want a mip anyway.
+fn sample_cascade(index: i32, world_position: vec3<f32>, normal: vec3<f32>) -> CascadeSample {
+    var result: CascadeSample;
+    result.visibility = 1.0;
+    result.covered = 0.0;
+    result.edge = 0.0;
+    let cascade = shadow_camera.cascades[index];
+    let texel_world = cascade.params.z;
+    let depth_range = max(cascade.params.y, 1.0);
+    let offset_position = world_position + normal * texel_world * SHADOW_NORMAL_OFFSET_TEXELS;
+    let clip = cascade.view_projection * vec4<f32>(offset_position, 1.0);
     if clip.w <= 0.0 {
-        return 1.0;
+        return result;
     }
     let projected = clip.xyz / clip.w;
     let uv = projected.xy * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5);
     if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0))
         || projected.z < 0.0 || projected.z > 1.0 {
-        return 1.0;
+        return result;
     }
-    let texel = 1.0 / vec2<f32>(textureDimensions(primary_shadow));
+    let depth_slack = texel_world * SHADOW_DEPTH_SLACK_TEXELS / depth_range;
+    let texel = 1.0 / vec2<f32>(textureDimensions(primary_shadow).xy);
     var visible = 0.0;
     for (var y = -1; y <= 1; y += 1) {
         for (var x = -1; x <= 1; x += 1) {
-            visible += textureSampleCompare(
+            visible += textureSampleCompareLevel(
                 primary_shadow,
                 primary_shadow_sampler,
                 uv + vec2<f32>(f32(x), f32(y)) * texel,
-                projected.z - 0.0015
+                index,
+                projected.z - depth_slack
             );
         }
     }
-    return mix(0.35, 1.0, visible / 9.0);
+    result.visibility = visible / 9.0;
+    result.covered = 1.0;
+    let centered = abs(uv * 2.0 - vec2<f32>(1.0));
+    let inset = 1.0 - max(centered.x, centered.y);
+    result.edge = 1.0 - clamp(inset / SHADOW_CASCADE_BLEND, 0.0, 1.0);
+    return result;
+}
+
+// Returns the raw unoccluded fraction in `0..=1`. Callers apply their own floor, because opaque
+// terrain and the transmissive water surface keep different amounts of light in full shade.
+//
+// Cascades are fitted smallest first, so the first one that contains the receiver is also the
+// densest one that does; testing them in order is both the selection rule and the coverage test.
+// A receiver outside every cascade is beyond the shadowed distance and reads as fully lit. Near a
+// cascade's outer boundary the next cascade is sampled too and the two are crossfaded, so only the
+// band pays for a second lookup.
+fn shadow_visibility(world_position: vec3<f32>, normal: vec3<f32>) -> f32 {
+    for (var index = 0; index < SHADOW_CASCADE_COUNT; index += 1) {
+        let current = sample_cascade(index, world_position, normal);
+        if current.covered < 0.5 {
+            continue;
+        }
+        if current.edge <= 0.0 || index + 1 >= SHADOW_CASCADE_COUNT {
+            return current.visibility;
+        }
+        let outer = sample_cascade(index + 1, world_position, normal);
+        if outer.covered < 0.5 {
+            return current.visibility;
+        }
+        return mix(current.visibility, outer.visibility, current.edge);
+    }
+    return 1.0;
 }
 
 @fragment
@@ -79,25 +175,51 @@ fn lighting_fragment(input: FullscreenOutput) -> @location(0) vec4<f32> {
     let normal_roughness = textureLoad(g_normal, pixel, 0);
     let normal = normalize(normal_roughness.xyz);
     let view_direction = normalize(light_camera.camera_position_time.xyz - world.xyz);
-    let primary_visibility = shadow_visibility(world.xyz);
+    let primary_visibility = shadow_visibility(world.xyz, normal);
+    let occlusion = mix(
+        AO_AMBIENT_FLOOR,
+        1.0,
+        textureLoad(ambient_occlusion, pixel, 0).r
+    );
     var color = vec3<f32>(0.0);
     for (var index = 0; index < 3; index += 1) {
         let light = light_camera.terrain_lights[index];
-        color += albedo * light.ambient.rgb;
+        // Lights 1 and 2 are the source's accent fills and stay unoccluded; only the primary
+        // light is shadowed, in both its ambient and direct shares.
+        let shadowed = index == 0;
+        let ambient_scale = select(
+            1.0,
+            mix(SHADOW_AMBIENT_FLOOR, 1.0, primary_visibility),
+            shadowed
+        );
+        color += albedo * light.ambient.rgb * ambient_scale * occlusion;
         let direction_length = length(light.source_direction.xyz);
         if (direction_length > 0.00001) {
-            let visibility = select(1.0, primary_visibility, index == 0);
+            let visibility = select(
+                1.0,
+                mix(SHADOW_DIRECT_FLOOR, 1.0, primary_visibility),
+                shadowed
+            );
             let light_direction = -light.source_direction.xyz / direction_length;
             let diffuse_factor = max(dot(normal, light_direction), 0.0);
             color += albedo * light.diffuse.rgb * diffuse_factor * visibility;
+            // Highlight strength falls off with roughness, not just its width, so a fully rough
+            // material has no highlight at all. A fixed strength gave every surface in the scene a
+            // sheen regardless of what its source material declared, and did so once per light.
             let half_vector = normalize(light_direction + view_direction);
             let specular = pow(
                 max(dot(normal, half_vector), 0.0),
                 mix(64.0, 8.0, normal_roughness.w)
             );
-            color += light.diffuse.rgb * specular * 0.06 * visibility;
+            let specular_strength = SPECULAR_STRENGTH * (1.0 - normal_roughness.w);
+            color += light.diffuse.rgb * specular * specular_strength * visibility;
         }
     }
+    // W3D self-illumination, decoded from the G-buffer coverage channel (see
+    // `gbuffer_coverage_emissive` in `static_scenery.wgsl`). It is added after the light loop so
+    // it survives full shade, which is the whole point of a lamp: the emitted term takes its hue
+    // from the material's own albedo, and the intensity is the material's emissive strength.
+    color += albedo * max(world.a - 1.0, 0.0);
     return vec4<f32>(color, 1.0);
 }
 
