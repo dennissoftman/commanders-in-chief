@@ -279,6 +279,41 @@ impl UiShell {
         self.draw_order.iter().copied().map(UiScreenId).collect()
     }
 
+    /// Finds a control by its full decorated `<layout>:<control>` name across every screen.
+    ///
+    /// The comparison is exact and case-sensitive, because the original resolves such a name through
+    /// `nameToKey` — which compares with `strcmp` — against the window ids `winCreateFromScript`
+    /// derived from the same decorated spelling. Screens are searched from the bottom of the stack
+    /// upwards, and within a screen in source order, so a duplicate name resolves stably.
+    #[must_use]
+    pub fn find_control_by_decorated_name(&self, name: &str) -> Option<(UiScreenId, UiControlId)> {
+        if name.is_empty() {
+            return None;
+        }
+        for (index, screen) in self.screens.iter().enumerate() {
+            if let Some(control) = screen
+                .layout
+                .controls()
+                .iter()
+                .find(|control| control.name() == Some(name))
+            {
+                return Some((UiScreenId(index), control.id()));
+            }
+        }
+        None
+    }
+
+    /// Returns a screen's layout by stack index, for a caller holding a resolved screen id.
+    #[must_use]
+    pub fn layout(&self, screen: UiScreenId) -> Option<&UiLayout> {
+        self.screens.get(screen.0).map(UiScreen::layout)
+    }
+
+    /// Returns a screen's layout by stack index for mutation.
+    pub fn layout_mut(&mut self, screen: UiScreenId) -> Option<&mut UiLayout> {
+        self.screens.get_mut(screen.0).map(UiScreen::layout_mut)
+    }
+
     /// Returns whether a push or pop is waiting on a shutdown to complete.
     #[must_use]
     pub fn is_operation_pending(&self) -> bool {

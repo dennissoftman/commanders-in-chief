@@ -1971,6 +1971,15 @@ impl UiLayout {
         }
     }
 
+    /// Replaces a control's displayed label.
+    ///
+    /// This is `GadgetStaticTextSetText`, which the count-up transition uses to walk a score value
+    /// upwards. It writes the control's own retained text, so the change outlives the transition
+    /// exactly as it does in the original.
+    pub fn set_text_label(&mut self, id: UiControlId, text: impl Into<String>) {
+        self.controls[id.0].text_label = Some(text.into());
+    }
+
     /// Returns the control holding keyboard focus.
     #[must_use]
     pub const fn focus(&self) -> Option<UiControlId> {

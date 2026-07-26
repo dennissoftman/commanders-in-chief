@@ -25,6 +25,7 @@ mod retained;
 mod shell;
 #[cfg(test)]
 mod tests;
+mod transitions;
 
 pub use callbacks::{
     UI_CALLBACK_SLOTS, UI_CALLBACK_TABLES, UiActionAllowlist, UiCallbackBinding, UiCallbackEdition,
@@ -41,3 +42,7 @@ pub use retained::{
     UiLayoutError, UiLimits, UiPoint, UiPresentation, UiRect, UiScalePolicy, UiStatus, UiViewport,
 };
 pub use shell::{UI_MAX_SHELL_STACK, UiScreen, UiScreenId, UiShell, UiShellError, UiShellEvent};
+pub use transitions::{
+    UI_TRANSITION_FRAMES_PER_SECOND, UiTransitionDiagnostic, UiTransitionDiagnosticKind,
+    UiTransitionDraw, UiTransitionHandler, UiTransitionStep, UiTransitionTarget,
+};

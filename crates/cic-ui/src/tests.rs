@@ -4,14 +4,18 @@
 
 //! Retained-runtime tests over original synthetic layouts. No retail data appears here.
 
-use cic_formats::{WndColor, WndDrawDataSlot, WndLimits, parse_wnd};
+use cic_formats::{
+    TransitionStyle, UiIniLimits, WndColor, WndDrawDataSlot, WndLimits,
+    parse_window_transitions_ini, parse_wnd,
+};
 
 use crate::{
     UI_MAX_SHELL_STACK, UiActionAllowlist, UiCallbackBinding, UiCallbackSlot, UiCallbackTable,
     UiClipPolicy, UiControlFamily, UiControlId, UiControlKind, UiDemoAction, UiEvent, UiFrameItem,
     UiGadgetRole, UiKey, UiLayout, UiLayoutError, UiLimits, UiMouseButton, UiPoint, UiPresentation,
     UiRect, UiScalePolicy, UiScreen, UiShell, UiShellError, UiShellEvent, UiStatus, UiTextAlign,
-    UiViewport, classify_callback, is_none_callback,
+    UiTransitionDiagnosticKind, UiTransitionDraw, UiTransitionHandler, UiViewport,
+    classify_callback, is_none_callback,
 };
 
 fn viewport(width: i32, height: i32) -> UiViewport {
@@ -1650,4 +1654,418 @@ fn a_screen_is_found_by_its_path_case_insensitively() {
     assert_eq!(shell.find_screen_by_path("menus/mainmenu.wnd"), Some(top));
     assert_eq!(shell.find_screen_by_path("Menus/OptionsMenu.wnd"), None);
     assert_eq!(shell.find_screen_by_path(""), None);
+}
+
+/// A synthetic layout carrying one window per transition style under test, plus the companion windows
+/// the main-menu styles pair with.
+fn transition_layout() -> String {
+    let panel = draw_data("SynthPanel");
+    format!(
+        r#"FILE_VERSION = 2;
+STARTLAYOUTBLOCK
+  LAYOUTINIT = [NONE];
+  LAYOUTUPDATE = [NONE];
+  LAYOUTSHUTDOWN = [NONE];
+ENDLAYOUTBLOCK
+WINDOW
+  WINDOWTYPE = USER;
+  SCREENRECT = UPPERLEFT: 100 100,
+               BOTTOMRIGHT: 200 140,
+               CREATIONRESOLUTION: 800 600;
+  NAME = "SynthTrans.wnd:Fader";
+  STATUS = ENABLED+IMAGE;
+  ENABLEDDRAWDATA = {panel};
+END
+WINDOW
+  WINDOWTYPE = PUSHBUTTON;
+  SCREENRECT = UPPERLEFT: 300 100,
+               BOTTOMRIGHT: 400 140,
+               CREATIONRESOLUTION: 800 600;
+  NAME = "SynthTrans.wnd:Button";
+  STATUS = ENABLED+IMAGE;
+  ENABLEDDRAWDATA = {panel};
+END
+WINDOW
+  WINDOWTYPE = USER;
+  SCREENRECT = UPPERLEFT: 100 200,
+               BOTTOMRIGHT: 160 260,
+               CREATIONRESOLUTION: 800 600;
+  NAME = "SynthTrans.wnd:Logo";
+  STATUS = ENABLED+IMAGE;
+  ENABLEDDRAWDATA = {panel};
+END
+WINDOW
+  WINDOWTYPE = USER;
+  SCREENRECT = UPPERLEFT: 100 200,
+               BOTTOMRIGHT: 220 320,
+               CREATIONRESOLUTION: 800 600;
+  NAME = "SynthTrans.wnd:LogoMedium";
+  STATUS = ENABLED;
+END
+WINDOW
+  WINDOWTYPE = STATICTEXT;
+  SCREENRECT = UPPERLEFT: 400 200,
+               BOTTOMRIGHT: 500 230,
+               CREATIONRESOLUTION: 800 600;
+  NAME = "SynthTrans.wnd:Label";
+  STATUS = ENABLED;
+  TEXT = "Synth";
+END
+WINDOW
+  WINDOWTYPE = STATICTEXT;
+  SCREENRECT = UPPERLEFT: 400 250,
+               BOTTOMRIGHT: 500 280,
+               CREATIONRESOLUTION: 800 600;
+  NAME = "SynthTrans.wnd:Score";
+  STATUS = ENABLED;
+  TEXT = "4";
+END
+"#
+    )
+}
+
+/// A synthetic transition file exercising the styles the tests below assert on.
+fn transition_definitions() -> &'static [u8] {
+    br"WindowTransition SynthIn
+  Window
+    WinName = SynthTrans.wnd:Fader
+    Style   = WINFADE
+    FrameDelay = 0
+  END
+  Window
+    WinName = SynthTrans.wnd:Button
+    Style   = BUTTONFLASH
+    FrameDelay = 2
+  END
+END
+WindowTransition SynthText
+  Window
+    WinName = SynthTrans.wnd:Label
+    Style   = TYPETEXT
+    FrameDelay = 0
+  END
+  Window
+    WinName = SynthTrans.wnd:Score
+    Style   = COUNTUP
+    FrameDelay = 0
+  END
+END
+WindowTransition SynthGrow
+  Window
+    WinName = SynthTrans.wnd:Logo
+    Style   = MAINMENUMEDIUMSCALEUP
+    FrameDelay = 0
+  END
+END
+WindowTransition SynthMissing
+  Window
+    WinName = SynthTrans.wnd:Absent
+    Style   = WINFADE
+    FrameDelay = 0
+  END
+END
+WindowTransition SynthOnce
+  Window
+    WinName = SynthTrans.wnd:Fader
+    Style   = WINFADE
+    FrameDelay = 0
+  END
+  FireOnce = Yes
+END
+"
+}
+
+/// Builds a one-screen shell over the transition fixture, plus a handler over its definitions.
+fn transition_fixture() -> (UiShell, UiTransitionHandler) {
+    let mut shell = UiShell::new();
+    shell
+        .push(
+            UiScreen::new(
+                "Menus/SynthTrans.wnd",
+                instantiate_source(&transition_layout()),
+            ),
+            false,
+        )
+        .expect("push the transition fixture");
+    let definitions =
+        parse_window_transitions_ini(transition_definitions(), UiIniLimits::default())
+            .expect("decode the synthetic transition file");
+    let handler = UiTransitionHandler::new(&definitions);
+    (shell, handler)
+}
+
+/// Returns whether a control is currently hidden.
+fn hidden(shell: &UiShell, name: &str) -> bool {
+    let (screen, control) = shell
+        .find_control_by_decorated_name(name)
+        .expect("control is in the fixture");
+    shell
+        .layout(screen)
+        .expect("screen")
+        .control(control)
+        .is_hidden()
+}
+
+/// Returns a control's displayed text.
+fn label(shell: &UiShell, name: &str) -> String {
+    let (screen, control) = shell
+        .find_control_by_decorated_name(name)
+        .expect("control is in the fixture");
+    shell
+        .layout(screen)
+        .expect("screen")
+        .control(control)
+        .displayed_text()
+        .unwrap_or_default()
+        .to_owned()
+}
+
+#[test]
+fn a_group_hides_its_windows_at_the_start_and_shows_them_at_the_end() {
+    let (mut shell, mut handler) = transition_fixture();
+    handler.set_group(&mut shell, "SynthIn", false);
+
+    // `init` runs the start frame backwards, which hides every window the group animates.
+    assert!(hidden(&shell, "SynthTrans.wnd:Fader"));
+    assert!(hidden(&shell, "SynthTrans.wnd:Button"));
+    assert!(!handler.is_finished());
+    assert_eq!(handler.current_group(), Some("SynthIn"));
+
+    // The fade covers frames 1..9 and shows its window on 10; the button flash starts two frames
+    // later and runs 17, so the group finishes on 19.
+    assert_eq!(handler.group_total_frames("SynthIn"), 19);
+    for _ in 0..19 {
+        handler.update(&mut shell, 1.0);
+    }
+    assert!(!hidden(&shell, "SynthTrans.wnd:Fader"));
+    assert!(!hidden(&shell, "SynthTrans.wnd:Button"));
+    assert!(handler.is_finished());
+}
+
+#[test]
+fn a_windows_frame_delay_shifts_its_own_frames_inside_the_group() {
+    let (mut shell, mut handler) = transition_fixture();
+    handler.set_group(&mut shell, "SynthIn", false);
+
+    // The handler assigns its draw group before advancing, so one update already draws frame 1: the
+    // fade is one frame in, and the button flash, delayed two frames, has drawn nothing yet.
+    handler.update(&mut shell, 1.0);
+    let draws = handler.draws();
+    assert!(draws.iter().any(|draw| matches!(
+        draw,
+        UiTransitionDraw::ControlImage { color, .. } if color.channels() == [255, 255, 255, 25]
+    )));
+    assert!(
+        !draws
+            .iter()
+            .any(|draw| matches!(draw, UiTransitionDraw::Rect { .. }))
+    );
+
+    // Two frames later the button flash reaches its own first frame, which washes the button white.
+    handler.update(&mut shell, 1.0);
+    handler.update(&mut shell, 1.0);
+    let draws = handler.draws();
+    assert!(draws.iter().any(|draw| matches!(
+        draw,
+        UiTransitionDraw::Rect { fill: Some(fill), .. } if fill.channels() == [255, 255, 255, 75]
+    )));
+}
+
+#[test]
+fn one_update_runs_every_whole_frame_the_accumulator_crossed() {
+    let (mut shell, mut handler) = transition_fixture();
+    handler.set_group(&mut shell, "SynthIn", false);
+
+    // A scale below one frame accumulates without stepping, exactly as the source's `Real` frame
+    // counter does.
+    let step = handler.update(&mut shell, 0.4);
+    assert!(step.frames().is_empty());
+    let step = handler.update(&mut shell, 0.4);
+    assert!(step.frames().is_empty());
+    let step = handler.update(&mut shell, 0.4);
+    assert_eq!(step.frames(), [1]);
+
+    // A scale above one frame steps every frame it passed, so no state is skipped.
+    let step = handler.update(&mut shell, 3.0);
+    assert_eq!(step.frames(), [2, 3, 4]);
+}
+
+#[test]
+fn a_type_text_reveals_one_character_per_frame_and_a_count_up_rewrites_its_label() {
+    let (mut shell, mut handler) = transition_fixture();
+    handler.set_group(&mut shell, "SynthText", false);
+
+    // "Synth" is five characters, so the type-text runs five frames rather than the style's declared
+    // thirty, and the group's total shortens with it — `getTotalFrames` reads the armed length.
+    assert_eq!(handler.group_total_frames("SynthText"), 5);
+    handler.update(&mut shell, 1.0);
+    assert!(handler.draws().iter().any(|draw| matches!(
+        draw,
+        UiTransitionDraw::TypedText { text, .. } if text == "S"
+    )));
+    handler.update(&mut shell, 1.0);
+    handler.update(&mut shell, 1.0);
+    assert!(handler.draws().iter().any(|draw| matches!(
+        draw,
+        UiTransitionDraw::TypedText { text, .. } if text == "Syn"
+    )));
+
+    // The count-up steps toward its authored value and lands exactly on the authored text.
+    assert_eq!(label(&shell, "SynthTrans.wnd:Score"), "3");
+    for _ in 0..6 {
+        handler.update(&mut shell, 1.0);
+    }
+    assert_eq!(label(&shell, "SynthTrans.wnd:Score"), "4");
+    // A count-up never hides its window: it rewrites the text in place.
+    assert!(!hidden(&shell, "SynthTrans.wnd:Score"));
+}
+
+#[test]
+fn a_scale_style_pairs_with_a_companion_window_and_hands_over_to_it() {
+    let (mut shell, mut handler) = transition_fixture();
+    handler.set_group(&mut shell, "SynthGrow", false);
+
+    // The companion is the animated window's own name with `Medium` appended.
+    let targets = handler.group_targets("SynthGrow");
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].1, TransitionStyle::MainMenuMediumScaleUp);
+    assert!(targets[0].2.is_some());
+
+    // Mid-flight both windows are hidden and the stand-in grows from the smaller rect toward the
+    // larger one.
+    handler.update(&mut shell, 1.0);
+    assert!(hidden(&shell, "SynthTrans.wnd:Logo"));
+    assert!(hidden(&shell, "SynthTrans.wnd:LogoMedium"));
+    let draws = handler.draws();
+    let UiTransitionDraw::ControlImage { rect, .. } = &draws[0] else {
+        panic!("expected the grown stand-in, got {draws:?}");
+    };
+    // The 60x60 logo grows toward the 120x120 companion over three frames, so one frame in it is
+    // twenty pixels wider and still centred on the same point.
+    assert_eq!((rect.width, rect.height), (80, 80));
+    assert_eq!((rect.x, rect.y), (90, 190));
+
+    // At the end the animated window is hidden and the companion takes over.
+    handler.update(&mut shell, 1.0);
+    handler.update(&mut shell, 1.0);
+    assert!(hidden(&shell, "SynthTrans.wnd:Logo"));
+    assert!(!hidden(&shell, "SynthTrans.wnd:LogoMedium"));
+}
+
+#[test]
+fn a_window_or_companion_that_does_not_resolve_is_reported_and_draws_nothing() {
+    let (mut shell, mut handler) = transition_fixture();
+    let step = handler.set_group(&mut shell, "SynthMissing", false);
+    assert!(matches!(
+        step.diagnostics()[0].kind(),
+        UiTransitionDiagnosticKind::WindowNotFound { name } if &**name == "SynthTrans.wnd:Absent"
+    ));
+    assert_eq!(handler.group_targets("SynthMissing")[0].2, None);
+    for _ in 0..12 {
+        handler.update(&mut shell, 1.0);
+    }
+    assert!(handler.draws().is_empty());
+}
+
+#[test]
+fn setting_a_second_group_reverses_the_first_and_queues_the_second() {
+    let (mut shell, mut handler) = transition_fixture();
+    handler.set_group(&mut shell, "SynthIn", false);
+    for _ in 0..20 {
+        handler.update(&mut shell, 1.0);
+    }
+    assert!(handler.is_finished());
+    assert!(!hidden(&shell, "SynthTrans.wnd:Fader"));
+
+    // A group that is not fire-once reverses instead of being dropped, and the next group waits.
+    handler.set_group(&mut shell, "SynthGrow", false);
+    assert_eq!(handler.current_group(), Some("SynthIn"));
+    assert_eq!(handler.pending_group(), Some("SynthGrow"));
+    assert!(handler.is_reversed());
+
+    // Running it out backwards hides the window again and then the queued group takes over.
+    for _ in 0..25 {
+        handler.update(&mut shell, 1.0);
+    }
+    assert!(hidden(&shell, "SynthTrans.wnd:Fader"));
+    assert_eq!(handler.current_group(), Some("SynthGrow"));
+    assert_eq!(handler.pending_group(), None);
+}
+
+#[test]
+fn a_fire_once_group_clears_itself_and_an_immediate_set_skips_what_was_running() {
+    let (mut shell, mut handler) = transition_fixture();
+    handler.set_group(&mut shell, "SynthOnce", false);
+    for _ in 0..11 {
+        handler.update(&mut shell, 1.0);
+    }
+    // Finishing a fire-once group drops it rather than leaving it current to be reversed.
+    handler.update(&mut shell, 1.0);
+    assert_eq!(handler.current_group(), None);
+    assert!(!hidden(&shell, "SynthTrans.wnd:Fader"));
+
+    // An immediate set jumps whatever was running to its end and starts the named group at once.
+    handler.set_group(&mut shell, "SynthIn", false);
+    handler.update(&mut shell, 1.0);
+    assert!(hidden(&shell, "SynthTrans.wnd:Fader"));
+    handler.set_group(&mut shell, "SynthGrow", true);
+    assert_eq!(handler.current_group(), Some("SynthGrow"));
+    assert_eq!(handler.pending_group(), None);
+    // Skipping ran the fade's end frame, which showed its window.
+    assert!(!hidden(&shell, "SynthTrans.wnd:Fader"));
+}
+
+#[test]
+fn removing_and_reversing_a_group_by_name_follow_the_source_rules() {
+    let (mut shell, mut handler) = transition_fixture();
+    handler.set_group(&mut shell, "SynthIn", false);
+    handler.update(&mut shell, 1.0);
+
+    // Removing the current group skips it to its end and clears it.
+    handler.remove(&mut shell, "SynthIn", false);
+    assert_eq!(handler.current_group(), None);
+    assert!(!hidden(&shell, "SynthTrans.wnd:Fader"));
+
+    // Reversing a group that is not running starts it, skips it, and turns it around, which runs it
+    // back out from its finished state.
+    handler.reverse(&mut shell, "SynthIn");
+    assert_eq!(handler.current_group(), Some("SynthIn"));
+    assert!(handler.is_reversed());
+    for _ in 0..25 {
+        handler.update(&mut shell, 1.0);
+    }
+    assert!(hidden(&shell, "SynthTrans.wnd:Fader"));
+    // A reversed group clears itself once it has run out.
+    assert_eq!(handler.current_group(), None);
+
+    // An unknown name is a no-op rather than a panic, unlike the source's unchecked dereference.
+    assert!(
+        handler
+            .reverse(&mut shell, "SynthAbsent")
+            .frames()
+            .is_empty()
+    );
+    assert!(
+        handler
+            .remove(&mut shell, "SynthAbsent", true)
+            .frames()
+            .is_empty()
+    );
+}
+
+#[test]
+fn the_same_steps_produce_the_same_frames_and_draws() {
+    let run = || {
+        let (mut shell, mut handler) = transition_fixture();
+        handler.set_group(&mut shell, "SynthIn", false);
+        let mut frames = Vec::new();
+        let mut draws = Vec::new();
+        for _ in 0..25 {
+            let step = handler.update(&mut shell, 0.7);
+            frames.extend_from_slice(step.frames());
+            draws.push(handler.draws());
+        }
+        (frames, draws)
+    };
+    assert_eq!(run(), run());
 }
