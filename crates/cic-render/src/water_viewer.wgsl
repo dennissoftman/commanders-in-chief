@@ -13,6 +13,8 @@ struct Camera {
     water_surface: vec4<f32>,
     water_motion: vec4<f32>,
     terrain_lights: array<DirectionalLight, 3>,
+    // Inverse of `view_projection`, for reconstructing the lake bed's position from scene depth.
+    inverse_view_projection: mat4x4<f32>,
 }
 
 // `params` packs the presentation time in `x`, the world units spanned by the full normalized
@@ -35,7 +37,9 @@ struct WaterVertexOutput {
 }
 
 @group(0) @binding(0) var opaque_scene: texture_2d<f32>;
-@group(0) @binding(1) var terrain_world: texture_2d<f32>;
+// Geometry coverage of the opaque scene behind the water, in `r`. See `g_coverage` in
+// `terrain_deferred.wgsl`.
+@group(0) @binding(1) var terrain_coverage: texture_2d<f32>;
 @group(0) @binding(2) var<uniform> camera: Camera;
 @group(0) @binding(3) var caustic_frames: texture_2d_array<f32>;
 @group(0) @binding(4) var caustic_sampler: sampler;
@@ -43,6 +47,9 @@ struct WaterVertexOutput {
 @group(0) @binding(6) var standing_water_sampler: sampler;
 @group(0) @binding(7) var water_sky_texture: texture_2d<f32>;
 @group(0) @binding(8) var water_sky_sampler: sampler;
+// Resolved scene depth as a colour target. The water pass depth-tests against the depth texture
+// itself, which cannot also be sampled here, so it reads the copy the resolve pass writes.
+@group(0) @binding(14) var scene_depth: texture_2d<f32>;
 @group(0) @binding(9) var water_environment_texture: texture_2d<f32>;
 @group(0) @binding(10) var water_environment_sampler: sampler;
 @group(0) @binding(11) var primary_shadow: texture_depth_2d_array;
@@ -188,6 +195,22 @@ fn shadow_visibility(world_position: vec3<f32>, normal: vec3<f32>) -> f32 {
 // blocked.
 const WATER_SHADOW_FLOOR: f32 = 0.45;
 
+// Opaque geometry behind a water pixel: its world position in `xyz`, its coverage in `w`.
+//
+// Reconstructed from scene depth rather than read from a world-position target. Both consumers were
+// hurt by that target's half-float steps, which reached two world units on a map a few thousand
+// units across: the shore band is driven by the gap between this surface and the bed, and it is
+// under a unit wide, while the caustic projection took its coordinates from the same snapped `xy`.
+// See `world_from_depth` in `terrain_deferred.wgsl`.
+fn bed_geometry(pixel: vec2<i32>) -> vec4<f32> {
+    let coverage = textureLoad(terrain_coverage, pixel, 0).r;
+    let uv = (vec2<f32>(pixel) + vec2<f32>(0.5)) * camera.viewport.zw;
+    let ndc = vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+    let depth = textureLoad(scene_depth, pixel, 0).r;
+    let homogeneous = camera.inverse_view_projection * vec4<f32>(ndc, depth, 1.0);
+    return vec4<f32>(homogeneous.xyz / homogeneous.w, coverage);
+}
+
 @fragment
 fn water_fragment(input: WaterVertexOutput) -> @location(0) vec4<f32> {
     let dimensions = vec2<i32>(textureDimensions(opaque_scene));
@@ -202,7 +225,7 @@ fn water_fragment(input: WaterVertexOutput) -> @location(0) vec4<f32> {
     let refract_offset = vec2<i32>(round(normal.xy * 5.0));
     let refract_pixel = clamp(pixel + refract_offset, vec2<i32>(0), dimensions - vec2<i32>(1));
     let refracted_scene = textureLoad(opaque_scene, refract_pixel, 0).rgb;
-    let bed = textureLoad(terrain_world, pixel, 0);
+    let bed = bed_geometry(pixel);
     var thickness = 60.0;
     if (bed.a > 0.5) { thickness = max(input.world_position.z - bed.z, 0.0); }
     let depth_opacity = mix(

@@ -29,7 +29,7 @@ struct VertexOutput {
 struct GBufferOutput {
     @location(0) albedo: vec4<f32>,
     @location(1) normal_roughness: vec4<f32>,
-    @location(2) world_position: vec4<f32>,
+    @location(2) coverage: f32,
 }
 
 @group(0) @binding(0) var road_texture: texture_2d<f32>;
@@ -51,6 +51,6 @@ fn fragment_main(input: VertexOutput) -> GBufferOutput {
     // The pipeline disables writes for these attachments. Roads retain the underlying terrain
     // geometry buffers while alpha-compositing their authored sheet into albedo.
     output.normal_roughness = vec4<f32>(0.0);
-    output.world_position = vec4<f32>(0.0);
+    output.coverage = 0.0;
     return output;
 }
