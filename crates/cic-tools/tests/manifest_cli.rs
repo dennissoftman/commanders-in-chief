@@ -559,9 +559,9 @@ fn map_lighting_inside_big_produces_stable_semantic_report() {
     fs::remove_dir_all(root).expect("remove test tree");
 }
 
-#[test]
-fn map_render_inside_big_writes_a_textured_png() {
-    let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("map-render-cli");
+/// Builds a synthetic blend-MAP tree under a named temporary root and returns it with its archive.
+fn synthetic_map_tree(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
     if root.exists() {
         fs::remove_dir_all(&root).expect("remove stale test tree");
     }
@@ -600,20 +600,27 @@ fn map_render_inside_big_writes_a_textured_png() {
         b"Terrain DefaultTerrain\n  Texture = SyntheticGround.png\nEnd\nTerrain Base\n  BlendEdges = Yes\nEnd\nTerrain Shore\n  Texture = SyntheticEdge.png\nEnd\n",
     )
     .expect("write terrain catalog");
+    (root, archive_path)
+}
+
+#[test]
+fn map_view_output_inside_big_writes_a_deferred_png() {
+    let (root, archive_path) = synthetic_map_tree("map-view-cli");
     let output_path = root.join("terrain.png");
 
     let output = Command::new(env!("CARGO_BIN_EXE_cic-inspect"))
-        .arg("map-render")
+        .arg("map-view")
+        .arg("--output")
+        .arg(&output_path)
         .arg("--size")
         .arg("128")
         .arg("--time")
         .arg("2")
         .arg("maps/synthetic/blend.map")
-        .arg(&output_path)
         .arg(&archive_path)
         .arg(&root)
         .output()
-        .expect("run MAP terrain renderer");
+        .expect("run MAP scene capture");
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("requesting a graphics adapter"), "{stderr}");
@@ -637,12 +644,188 @@ fn map_render_inside_big_writes_a_textured_png() {
     assert!(stdout.contains("polygon_segments\t0\n"));
     assert!(stdout.contains("scenery_instances\t0\n"));
     assert!(stdout.contains("water_areas\t0\n"));
+    assert!(stdout.contains("capture\t128\t128\n"), "{stdout}");
+    assert!(stdout.contains("camera_yaw_degrees\t0\n"), "{stdout}");
+    assert!(stdout.contains("camera_focus\tcentered\n"), "{stdout}");
     let image = image::open(&output_path)
         .expect("open terrain PNG")
         .to_rgba8();
     assert_eq!(image.dimensions(), (128, 128));
 
     fs::remove_dir_all(root).expect("remove test tree");
+}
+
+#[test]
+fn map_view_output_is_reproducible_and_follows_the_explicit_pose() {
+    let (root, archive_path) = synthetic_map_tree("map-view-cli-pose");
+    let output_path = root.join("terrain.png");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cic-inspect"))
+        .arg("map-view")
+        .arg("--output")
+        .arg(&output_path)
+        .arg("--size")
+        .arg("128")
+        .arg("--time")
+        .arg("2")
+        .arg("maps/synthetic/blend.map")
+        .arg(&archive_path)
+        .arg(&root)
+        .output()
+        .expect("run MAP scene capture");
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("requesting a graphics adapter"), "{stderr}");
+        fs::remove_dir_all(root).expect("remove test tree");
+        return;
+    }
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 terrain report");
+    let first_hash = capture_hash(&stdout);
+
+    // Repeating the same explicit inputs must reproduce the image exactly: the whole point of a
+    // capture is that a tuning change is the only thing that can move the hash.
+    let repeat = Command::new(env!("CARGO_BIN_EXE_cic-inspect"))
+        .arg("map-view")
+        .arg("--output")
+        .arg(&output_path)
+        .arg("--size")
+        .arg("128")
+        .arg("--time")
+        .arg("2")
+        .arg("maps/synthetic/blend.map")
+        .arg(&archive_path)
+        .arg(&root)
+        .output()
+        .expect("repeat MAP scene capture");
+    assert!(repeat.status.success());
+    let repeat_stdout = String::from_utf8(repeat.stdout).expect("UTF-8 terrain report");
+    assert_eq!(capture_hash(&repeat_stdout), first_hash);
+
+    // A different pose through the same path must produce a different image.
+    let rotated_path = root.join("terrain-rotated.png");
+    let rotated = Command::new(env!("CARGO_BIN_EXE_cic-inspect"))
+        .arg("map-view")
+        .arg("--output")
+        .arg(&rotated_path)
+        .arg("--size")
+        .arg("96x64")
+        .arg("--yaw")
+        .arg("90")
+        .arg("--overlays")
+        .arg("off")
+        .arg("--time")
+        .arg("2")
+        .arg("maps/synthetic/blend.map")
+        .arg(&archive_path)
+        .arg(&root)
+        .output()
+        .expect("rotated MAP scene capture");
+    assert!(
+        rotated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rotated.stderr)
+    );
+    let rotated_stdout = String::from_utf8(rotated.stdout).expect("UTF-8 terrain report");
+    assert!(
+        rotated_stdout.contains("capture\t96\t64\n"),
+        "{rotated_stdout}"
+    );
+    assert!(
+        rotated_stdout.contains("camera_yaw_degrees\t90\n"),
+        "{rotated_stdout}"
+    );
+    assert_ne!(capture_hash(&rotated_stdout), first_hash);
+    assert_eq!(
+        image::open(&rotated_path)
+            .expect("open rotated PNG")
+            .to_rgba8()
+            .dimensions(),
+        (96, 64)
+    );
+
+    let refused = Command::new(env!("CARGO_BIN_EXE_cic-inspect"))
+        .arg("map-view")
+        .arg("--output")
+        .arg(root.join("terrain.bmp"))
+        .arg("maps/synthetic/blend.map")
+        .arg(&archive_path)
+        .arg(&root)
+        .output()
+        .expect("run MAP scene capture with an unknown extension");
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("must end in .png"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+
+    fs::remove_dir_all(root).expect("remove test tree");
+}
+
+/// `--modern` takes no value and selects every project-authored presentation policy at once, so it
+/// has to reach the report exactly as the explicit per-subsystem option does.
+#[test]
+fn map_view_modern_selects_the_project_authored_policies() {
+    let (root, archive_path) = synthetic_map_tree("map-view-cli-modern");
+    let output_path = root.join("terrain.png");
+
+    let capture = |modern: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_cic-inspect"));
+        command.arg("map-view").arg("--output").arg(&output_path);
+        if modern {
+            command.arg("--modern");
+        }
+        command
+            .arg("--size")
+            .arg("128")
+            .arg("--time")
+            .arg("2")
+            .arg("maps/synthetic/blend.map")
+            .arg(&archive_path)
+            .arg(&root)
+            .output()
+            .expect("run MAP scene capture")
+    };
+    let legacy = capture(false);
+    if !legacy.status.success() {
+        let stderr = String::from_utf8_lossy(&legacy.stderr);
+        assert!(stderr.contains("requesting a graphics adapter"), "{stderr}");
+        fs::remove_dir_all(root).expect("remove test tree");
+        return;
+    }
+    let legacy_stdout = String::from_utf8(legacy.stdout).expect("UTF-8 terrain report");
+    assert!(
+        legacy_stdout.contains(
+            "terrain_policy	legacy
+"
+        ),
+        "{legacy_stdout}"
+    );
+
+    let modern = capture(true);
+    assert!(
+        modern.status.success(),
+        "{}",
+        String::from_utf8_lossy(&modern.stderr)
+    );
+    let modern_stdout = String::from_utf8(modern.stdout).expect("UTF-8 terrain report");
+    assert!(
+        modern_stdout.contains(
+            "terrain_policy	modern
+"
+        ),
+        "{modern_stdout}"
+    );
+    assert_ne!(capture_hash(&modern_stdout), capture_hash(&legacy_stdout));
+
+    fs::remove_dir_all(root).expect("remove test tree");
+}
+
+fn capture_hash(stdout: &str) -> &str {
+    stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("rgba_sha256\t"))
+        .expect("capture report carries an RGBA hash")
 }
 
 fn map_fixture() -> Vec<u8> {

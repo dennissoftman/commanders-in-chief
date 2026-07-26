@@ -5,6 +5,63 @@ land under the active milestone heading.
 
 ## R4: WND user interface and navigable shell (active)
 
+### Changed
+
+- `map-view` now renders the MAP scene either into a window or, with `--output <file.png>`,
+  once into an offscreen texture it reads back — through the same shadow cascade, G-buffer,
+  occlusion, deferred lighting, and composite path in both cases. `map-render` is removed; it drew a
+  fixed-isometric terrain capture with roads, water, zones, and scenery composited on the CPU as flat
+  symbolic colours, so its pinned hashes protected none of the deferred lighting they appeared to
+  cover, and judging a shadow or lighting change meant opening a window and taking a screenshot.
+  One renderer means a capture is evidence about what the viewer shows rather than an approximation
+  of it.
+
+  `map-view` gains `--yaw`, `--height`, and `--focus` to place the view explicitly in either mode,
+  `--size <pixels|WxH>` for the capture target, `--overlays <on|off>` to drop the diagnostic ribbons
+  that otherwise cover the terrain a lighting question is about, and `--shadows <on|off>` /
+  `--occlusion <on|off>` to isolate one lighting contribution. Every capture input is explicit and
+  nothing in the path reads a clock or an RNG, so identical inputs reproduce an identical image.
+
+  `cic-render` correspondingly replaces its six `run_terrain_viewer*` entry points, four of which had
+  no caller, with one `MapScene` and one `run_map_view`, plus
+  `HeadlessRenderer::capture_map_view`.
+- Fixed `map-view --output` writing captures roughly three times too dark. The deferred composite
+  tonemaps into `0..=1` and returns the result unencoded, because it is written to a window surface
+  whose format applies the sRGB transfer function in hardware; the capture target was a plain `Unorm`
+  format, so the frame landed as linear values in a PNG that then declared itself sRGB. The scene
+  capture now uses an sRGB target and encodes exactly as the window does — median luminance on a
+  daylight `gla01` view went from 29 to 95. The interactive viewer was never affected. The simpler
+  captures keep their linear target and their pinned hashes, since they do not rely on the target's
+  encode.
+
+  The viewer also no longer trusts that its surface format happens to be an sRGB one.
+  `get_default_config` takes whichever format the backend lists first, which is an sRGB format on the
+  backends in use but is not promised to be; the viewer now prefers the sRGB pair of that format when
+  one is available, so the same mistake cannot appear on screen on some other backend.
+- Scenery casters are now culled per shadow cascade. Every instance used to be drawn into all five
+  cascades regardless of whether it could reach them; on `gla01` that was 9,170 instance submissions
+  a frame from 1,834 instances, and it is now 1,750 at the default view and 1,342 looking into the
+  crater — a little under a fifth of the draw work. Each model carries its instances' world-space
+  bounding spheres and a per-cascade instance buffer, rebuilt only for cascades whose pass is about
+  to run, so a cached outer cascade keeps the instance list that produced the depth it is keeping.
+
+  The cull is exact rather than conservative, and so cannot change the image: the light is
+  directional, so a caster that misses a cascade laterally rasterizes to no texels, and the depth
+  test rejects only what the cascade's own near and far planes would clip. Verified by capture —
+  three `map-view --output` frames on `gla01`, including a rotated one, produce byte-identical RGBA
+  hashes with the cull enabled and disabled. A unit test pins the cull volume against the volume each
+  cascade's matrix actually projects, and the sway bound that inflates a caster's radius is checked
+  against sampled sway at two thousand times per sway family.
+- Ambient occlusion and the primary light's shadowed ambient no longer compound. A point the sun
+  cannot reach because a hill is in the way is usually also a point that sees less sky, so
+  multiplying `SHADOW_AMBIENT_FLOOR` by `AO_AMBIENT_FLOOR` charged twice for one occluder. Measured
+  on `gla01` at its 18-degree morning sun, the product bottomed out at 0.117 of the unattenuated
+  value in linear light, where either term alone reached only 0.19 or 0.36, and tracked a
+  purely multiplicative model
+  to within 0.014. The primary light now takes the deeper of the two rather than their product,
+  which lifts the worst case to 0.181 and the first percentile from 0.200 to 0.326 while leaving
+  both floors, and so the worst case either term alone can produce, exactly as they were.
+
 ### Added
 
 - Added a retained shell stack (`UiShell`) reproducing the original's sixteen-screen pseudo-stack:
@@ -31,6 +88,39 @@ land under the active milestone heading.
   census, and diagnostics.
 - Controls now retain their `TOOLTIPCALLBACK` name alongside the system, input, and draw names, and a
   layout retains its own `LAYOUTINIT`, `LAYOUTUPDATE`, and `LAYOUTSHUTDOWN` names.
+
+- Modern water now has a moving surface instead of a flat sheet. Source water areas triangulate into
+  a handful of very long slivers with no interior vertices at all — gla01's entire lake is one
+  seven-point polygon at a constant height, five triangles over about 1340 by 1430 world units — so
+  there was nothing for a vertex shader to displace and all the motion came from scrolling textures.
+  Staging now subdivides the surface toward a 22-unit edge, and the vertex stage lifts it by the same
+  wave field the shading normal was already the analytic slope of, so displacement and specular agree
+  in phase and direction.
+
+  Peak displacement is a deliberate 0.55 world units. The fragment stage already fades the surface out
+  as the gap to the bed closes, so at this amplitude that fade does the shoreline unaided: a crest
+  thickens the water, a trough thins it, and a trough that dips below the bed fades to nothing rather
+  than clipping through it. Subdivision is bounded to 48,000 triangles; gla01's lake reaches the target
+  edge at 30,420.
+
+  Legacy presentation is untouched and byte-identical, verified by capture hash: it neither subdivides
+  nor displaces, because interpolating across smaller triangles rounds differently and would move the
+  depth fade by a hair even with displacement off. A unit test pins the subdivision watertight — every
+  interior edge shared by exactly two triangles at bit-identical positions, boundary length equal to
+  the input perimeter, and the result exactly coplanar with its input.
+- Added `map-view --modern`, which takes no value and selects every project-authored presentation
+  policy at once rather than requiring the per-subsystem option to be remembered. Terrain and water
+  already followed one switch, so this is `--terrain-policy modern` under a name worth typing.
+
+- Every `cic-render` test that needs a GPU device now lives in one target,
+  `crates/cic-render/tests/gpu_capture.rs`, sharing a single device created once behind a `OnceLock`.
+  Cargo runs separate test binaries in parallel, and two processes creating a headless wgpu adapter
+  at the same time crashed the driver, so a full `cargo test --workspace` was not reliably runnable
+  in one invocation. The new deferred-capture coverage would have made that worse rather than
+  better. Two device-creating unit tests moved out of `crates/cic-render/src/terrain_viewer.rs`: the
+  deferred pipeline-layout check is subsumed by the capture, which builds every one of those
+  pipelines on a real device, and the cascade bind group check keeps its CPU-side arithmetic guard
+  there while the capture covers the GPU half.
 
 - Added `cic-camera`, a dependency-free crate holding the real-time-strategy camera model so the
   inspection viewers, a future editor, and the game share one implementation. Callers translate their
@@ -408,13 +498,13 @@ land under the active milestone heading.
   test runs, so the non-blended scenery pipelines enable alpha-to-coverage to antialias leaf
   silhouettes per sample. The now-redundant blur became a bounded contrast-adaptive sharpen that
   restores mid-contrast detail without ringing edges multisampling already resolved. `map-view` is
-  visibly cleaner; `map-render` is unaffected, since deterministic headless capture does not use
-  this path and remains single-sampled with unchanged RGBA hashes.
+  visibly cleaner. Deterministic headless capture was unaffected at the time, being a separate
+  single-sampled path; folding capture into `map-view --output` later in R4 brought it onto this one.
 
 - Closed R3 and advanced the active objective to R4's bounded WND inventory/layout decoder and
   synthetic headless menu vertical slice. Version-1 height presentation now explicitly retains its
   native stored grid; source-editor preview/auxiliary chunks remain opaque and R4 previews are
-  generated from `map-render`.
+  generated from the completed renderer.
 - Inserted an R4 WND/UI compatibility milestone before simulation. The design selects a custom
   retained WND model and `wgpu` renderer, bounded UI resource loading, safe menu callback routing,
   a versioned post-parse WND patch layer, modern resolution/refresh-rate settings with confirmed
