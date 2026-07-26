@@ -175,6 +175,13 @@ without shipping its data.
 
 ## CI
 
+- **Documentation-only changes skip the job by design.** `ci.yml` sets `paths-ignore` for
+  `**/*.md`, `.claude/**`, and `.gitignore`, so a PR touching only those reports no checks at
+  all. That is expected, not a stuck run — do not wait on it and do not re-push to "trigger"
+  it. Anything outside that list still runs CI, and a PR mixing code with docs runs it too,
+  because `pull_request` evaluates the filter over the whole PR diff.
+- The local gate is the real gate. It is not conditional on file type: run it before every
+  push, including on branches CI will skip.
 - `gh pr checks <n> --watch` after pushing; do not mark a draft ready or merge while red.
 - The job is `rust` on `ubuntu-latest`. Failures are almost always one of the three gate
   commands, so reproduce locally with the exact command from the log rather than guessing.

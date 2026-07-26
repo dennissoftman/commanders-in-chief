@@ -1,8 +1,22 @@
 name: CI
 
+# Documentation-only changes skip the job entirely. `paths-ignore` names only paths that
+# cannot affect a build, rather than `paths` naming the ones that can, so a file type
+# nobody anticipated still runs CI instead of being silently skipped. On `pull_request`
+# the filter is evaluated over the whole PR diff, so a branch touching both code and docs
+# still runs. GitHub Actions does not expand YAML anchors, so the two lists are kept in
+# sync by hand.
 on:
   push:
+    paths-ignore:
+      - '**/*.md'
+      - '.claude/**'
+      - '.gitignore'
   pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - '.claude/**'
+      - '.gitignore'
 
 jobs:
   rust:
