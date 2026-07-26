@@ -9,6 +9,10 @@ rust-version.workspace = true
 [dependencies]
 cic-camera = { path = "../cic-camera" }
 cic-formats = { path = "../cic-formats" }
+cic-ui = { path = "../cic-ui" }
+cosmic-text = "0.19"
+glyphon = "0.12"
+png = "0.18"
 pollster = "0.4"
 sha2 = "0.10"
 wgpu = { version = "30", default-features = false, features = ["std", "dx12", "metal", "vulkan", "wgsl"] }

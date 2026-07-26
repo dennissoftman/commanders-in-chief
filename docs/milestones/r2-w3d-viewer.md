@@ -178,7 +178,7 @@ remains explicitly excluded until broader image comparisons exist.
   `7e1894e3ad60f3236f628efdef3e61f3d724e351a37bab9612273190fa8c1ee0`.
 - `cic-inspect w3d-render` now uses the same installed profile or explicit BIG overlay path as W3D
   inspection, resolves textures, and accepts explicit animation index/frame, mapper seconds, and
-  Z-up rotation before emitting a 512x512 PPM plus stable resource/draw/hash diagnostics.
+  Z-up rotation before emitting a 512x512 capture plus stable resource/draw/hash diagnostics.
 - `cic-inspect w3d-view` uses the same installed profile or explicit BIG overlay path, opens a
   960x720 surface, auto-fits a fixed 45-degree elevated camera, and continuously rotates the model
   around W3D's Z-up axis. It samples hierarchy/one-bone clips at explicit integer frames; Left/Right

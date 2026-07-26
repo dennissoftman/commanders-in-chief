@@ -29,7 +29,7 @@ land under the active milestone heading.
   generic fields, and diagnostics.
 - Added `cic-inspect wnd-render`, a surface-free proof-of-pipeline capture that stages every window
   rectangle as a flat colored quad (`crates/cic-render/src/wnd_scene.rs`) and renders it through the
-  existing `HeadlessRenderer` boundary to a deterministic PPM plus RGBA SHA-256 hash. It has no
+  existing `HeadlessRenderer` boundary to a deterministic PNG plus RGBA SHA-256 hash. It has no
   images, text, gadget visuals, or scaling policy yet; it proves the immutable decoded value can
   drive a renderer capture ahead of the retained UI runtime.
 - Shadow cascades now crossfade near their boundaries and reuse their outer layers across frames.
@@ -68,8 +68,247 @@ land under the active milestone heading.
   existing `BIGF` coverage, and a bounded `big` libFuzzer target, closing an R1 acceptance-test gap
   where BIG4 had no automated coverage and BIG archives had no fuzz target.
 
+- Added the project-owned WND patch overlay layer (`crates/cic-formats/src/wnd_patch.rs`), so
+  modern controls and profile-specific adjustments are auditable data rather than hardcoded window
+  names in the parser, renderer, or a menu callback. A versioned line-oriented patch targets one WND
+  virtual path and exact decorated control names, and supports `require-window`/`require-field`
+  preconditions plus `set-field`, `add-field`, and `set-rect`. Applying returns a new document —
+  the parsed source is never mutated, so one parse can be patched differently per profile — and
+  every write records provenance. A patched field is re-typed, so an overlay that rewrites `STATUS`
+  is visible through the typed accessor. The structural operations `reorder`, `reparent`, and
+  `insert-window` complete the set: an inserted subtree is parsed by the ordinary bounded WND
+  decoder, so it obeys the same grammar, limits, and typed-field rules as authored source, and its
+  window ids are renumbered so they cannot collide. `reparent` refuses to move a window beneath its
+  own descendant, and a failure after detaching restores the tree rather than dropping the subtree.
+  Verified end to end against the retail `OptionsMenu.wnd`, reusing and repositioning the stock
+  resolution combo while inserting a project-owned refresh-rate control beside it.
+- Added `cic-inspect wnd-patch`, reporting each patch's declared operations, the provenance of every
+  field written, and the resulting hierarchy, without ever rewriting the source WND.
+- Completed WND field decoding: the 21 draw-data arrays (nine `IMAGE`/`COLOR`/`BORDERCOLOR` entries
+  each, with `NoImage` decoded as an absent image) and all seven gadget `DATA` records
+  (`LISTBOXDATA`, `COMBOBOXDATA`, `SLIDERDATA`, `RADIOBUTTONDATA`, `TEXTENTRYDATA`,
+  `STATICTEXTDATA`, `TABCONTROLDATA`) plus `IMAGEOFFSET`, reported as `window_draw_entry` and
+  `window_gadget_data` rows. Every field name occurring in either retail edition is now typed, and
+  the whole corpus decodes with no malformed-field diagnostics: 7,875 of 7,875 draw-data arrays and
+  753 of 753 gadget records. `LISTBOXDATA`'s `SCROLLIFATEND` is decoded as genuinely optional, which
+  five retail records depend on; an omitted sub-record stays distinguishable from an explicit false.
+  `TABCONTROLDATA`'s pane count is bounded at the source's own array width, which the source reads
+  past without checking. `TOOLTIP` is deliberately left untyped: its parser ignores the record and
+  stores a placeholder marked `@todo`, so no grammar exists to decode.
+- Added typed decoding for the common WND window records — `STATUS`/`STYLE` flag lists, the four
+  callback names, `FONT`, `HEADERTEMPLATE`, `TOOLTIPDELAY`, `TEXT`, `TOOLTIPTEXT`, and `TEXTCOLOR`'s
+  six state colors — exposed as accessors on the immutable window value and as
+  `window_flag`/`window_callback`/`window_property`/`window_font`/`window_text_color` rows in
+  `cic-inspect wnd`, so a modded layout can be compared record by record without rendering it.
+  Typed values are views: every record also remains in the generic field list. Across both retail
+  editions this types every occurrence (1,667 of 1,667 `FONT` and `TEXTCOLOR` records, 6,668 of
+  6,668 callbacks) with no malformed-field diagnostics. A record that does not match its established
+  shape produces a `MalformedField` diagnostic and an absent typed view rather than failing the
+  document; required structural values (`FILE_VERSION`, `WINDOWTYPE`, `SCREENRECT`) remain hard
+  errors.
+- Added quoting- and punctuation-preserving WND record retention. Each field now carries an ordered
+  token sequence alongside its verbatim value, so `FONT = NAME: "Times New Roman", SIZE: 14;` is no
+  longer indistinguishable from the same characters written unquoted — previously the value
+  flattened to `NAME: Times New Roman , SIZE: 14`, leaving no way to delimit a font name containing
+  spaces. `,`, `:`, and `+` are tokenized outside quotes; quoted tokens are never split.
+- Added typed decorated window names (`WndWindow::name`/`control_name`), reported by
+  `cic-inspect wnd` in a new column, plus a `DuplicateWindowName` diagnostic for two windows sharing
+  a non-empty control name. Windows declaring only a layout prefix are treated as unnamed.
+- Added `STATUS` and `STYLE` flag validation over the `+`-separated name lists, against the union of
+  both editions' vocabularies. Applied to every retail layout in both editions, this produces no
+  false positives.
+- Added a bounded `wnd` libFuzzer target and a `maximum_record_tokens` limit (default 4,096) so one
+  record cannot allocate a token vector sized only by the much larger record byte limit.
+
+- Added the UI definition resources a WND layout names, so a decoded layout's images, fonts, header
+  templates, and localized text can be resolved instead of left as strings. Three bounded decoders
+  share one lexer derived from the original INI reader — `MappedImage` blocks over
+  `Data/INI/MappedImages`, `Data/<Language>/HeaderTemplate.ini`, and `Data/<Language>/Language.ini`
+  with all 25 fields including its 17 font roles. Field names and block keywords are case-sensitive
+  and `End` is not, matching the source's own `strcmp`/`stricmp` split. Source quirks are reproduced
+  rather than corrected, because a definition authored against the original reader must resolve the
+  same way: `Status = ROTATED_90_CLOCKWISE` swaps a region's presentation size at the point it is
+  read, so placing it before `Coords` behaves differently; a quoted string is rejoined from at most
+  two tokens and loses a one-character continuation; an unquoted multi-word value keeps only its
+  first token; and repeated `LocalFontFile` names apply in reverse file order. Unknown fields and
+  blocks become diagnostics instead of disappearing, and a duplicate definition overwrites field by
+  field like the original loader rather than replacing the whole definition.
+- Added `cic-inspect ui-resources`, which loads those catalogs through the VFS and reports every
+  demanded resource with its binding, every definition file that contributed, every name a later file
+  overrode, and per-kind resolved/unresolved counts. Verified against a real installation across every
+  layout in both editions: header templates resolve completely (209 of 209 in Zero Hour, 196 of 196 in
+  Generals) and mapped images resolve 1,849 of 1,978 and 1,789 of 1,932. What is left unresolved is
+  retail's own gap, now visible rather than silent — around 50 distinct image names no shipped INI
+  defines, three font families named but never shipped, and the 17 Zero Hour labels the string table
+  omits, which reproduces an earlier independent measurement exactly.
+- Added language selection to localization mounts. The localization archive and definition paths were
+  hardcoded to `English.big`/`EnglishZH.big`; a `--language <name>` option now selects
+  `<Language>.big`, `<Language>ZH.big`, and `Data/<Language>/`, which is what shipping a language the
+  original game never had requires. A new `Ui` mount profile adds the INI, texture, and selected
+  localization archives to the window archives, because header templates, fonts, and labels live in
+  the localization archive rather than the window archive.
+
+- Added `cic-ui`, the retained user-interface runtime, so an immutable WND definition becomes a live
+  control tree with presentation state. It depends only on `cic-formats`: it consumes definitions and
+  produces renderer-neutral frames, so it links to no rendering API and holds no simulation state.
+  Layout reproduces the original's scaling exactly — each stored corner scaled per axis by
+  viewport-over-creation-resolution and truncated, size derived from the scaled corners, and child
+  positions made relative to the parent's already-scaled origin — so an 800x600 layout on 1600x900
+  stretches the way the original does. A project-designed `Modern` policy applies one uniform ratio
+  and centres the result instead, for callers that would rather letterbox than stretch.
+- Added hit testing that reproduces the original's layered search: `ABOVE` windows first, then
+  unlayered, then `BELOW`, descending through children in source order and returning the first
+  visible, enabled one, with a hidden or disabled child skipped so the click falls through to the
+  parent instead of being swallowed. Edge tests are inclusive on both ends, which decides which of two
+  adjacent controls a boundary click reaches, and a control declaring `NO_INPUT` discards the result.
+- Added focus, tab traversal, and control invariants: `NOFOCUS` refusal with the original's
+  parent-walking acceptance; a wraparound tab cycle over declared `TABSTOP` controls that skips
+  disabled and hidden stops; radio-group exclusivity; slider clamping that orders an inverted
+  `MINVALUE`/`MAXVALUE` pair with a diagnostic; list and combo selection that refuses an out-of-range
+  index rather than clamping it to a different row; list scroll clamping that keeps the last page
+  full; and text entry that counts characters rather than bytes against its declared `MAXLEN`, so a
+  Unicode field holds what its definition promises. Hiding or disabling a control clears hover, press,
+  focus, and capture through its whole subtree.
+- Added renderer-neutral UI frames: an ordered list of quads carrying the mapped-image name and
+  colours of the draw-data slot the control's current state selects, text runs carrying the label,
+  font, state colour, and a mask flag for secret entries, and optional clip push/pop. Submission
+  order inverts the hit-test layering and emits each subtree parent before children, so a child draws
+  over its parent. Clipping is an explicit policy because the original does not clip and retail
+  layouts rely on that.
+
+- Added `cic-inspect ui-layout`, which instantiates a layout for an explicit viewport and scale
+  policy and reports the retained tree, tab order, frame submission order, and diagnostics without
+  reading the host display. Every one of the 80 Zero Hour and 78 Generals layouts instantiates at
+  800x600, 1920x1080, and 21:9 2560x1080 under both policies — 480 instantiations — with no failures
+  and zero diagnostics. The Zero Hour corpus yields 1,667 retained controls, matching the WND
+  census's window count. That pass also measured that the whole corpus declares only nine `TABSTOP`
+  controls, so keyboard traversal of a retail menu will need project-owned tab order.
+
+- Added custom `wgpu` presentation for retained UI, so a decoded layout renders as a real menu rather
+  than as flat rectangles. `cic-render` stages a frame into batched geometry - breaking a batch only
+  when the bound texture page or scissor rectangle changes - and executes it through the existing
+  surface-free capture boundary. Nested clips intersect and are clamped into the attachment, alpha is
+  straight rather than premultiplied to match the source's stored channel bytes, and texture pages
+  upload in the capture target's own colour space so a sampled byte reaches the attachment unchanged.
+  A border draws only for a control declaring `BORDER`; honouring a border colour alone outlines the
+  entire menu, because most retail controls carry one.
+- Added Unicode text shaping through `cosmic-text` 0.19 and `glyphon` 0.12, the pair ADR 0010
+  selected. `glyphon` 0.12 declares `wgpu ^30.0.0` and unifies with the workspace `wgpu` 30 rather
+  than pulling a second copy, and both licences are permissive. Fonts are always supplied as bytes by
+  the caller - nothing enumerates host fonts, because a capture that silently picked up a platform
+  face would hash differently on another machine. With no font supplied, a visible placeholder bar and
+  a diagnostic stand in for each run instead of the text silently disappearing, and a secret entry
+  field renders one mask glyph per character rather than its contents.
+- Added `cic-inspect ui-render`, which writes a deterministic PNG plus an RGBA SHA-256 hash from
+  explicit inputs only: viewport, scale policy, clip policy, language, texture-size selection, and
+  font files. Verified against a real installation at 1280x720 - `MainMenu.wnd` stages 37 quads in 12
+  batches over three texture pages with 29 shaped runs, `OptionsMenu.wnd` 41 quads and 25 runs,
+  `SkirmishGameOptionsMenu.wnd` 52 quads and 21 runs - with byte-identical hashes across repeated
+  runs and localized labels resolved through the CSF decoder before staging.
+
+- Added push-button draw-data composition and centred button text, so a retail menu renders as a menu
+  rather than as stretched single-piece art. `GadgetPushButton.h` fixes the indices (unselected left 0,
+  middle 5, right 6; pushed 1, 3, 4) and `W3DGadgetPushButtonImageDraw` takes the three-piece path only
+  when the middle image is present. The centre repeats in whole pieces, a final partial piece covers
+  the remainder, and the ends draw last over it, including the source's branch for ends that do not
+  fit. Button text is centred on both axes, as `drawButtonText` does.
+
+- Added draw-data composition for every remaining gadget family, completing Gate 6: radio buttons,
+  check boxes, text entry, both slider orientations, progress bars, tab controls, and the stretched
+  single-image path list boxes, combo boxes, and static text share. Each family's entry indices come
+  from its `Gadget*.h` accessors and its geometry from the matching `W3DGadget*ImageDraw`, so a
+  layout's art now reaches the screen the way the family that authored it intended rather than as one
+  stretched background. Several source behaviours are reproduced rather than smoothed over: a
+  selected radio button reads the hilite slot even while enabled, a horizontal slider takes its tick
+  art from fixed slots whatever its own state and sizes those ticks against an 800-pixel display
+  reference, a text entry and a vertical slider each draw one seam piece more than fits so the end
+  piece covers it, and a progress bar fills the unreached part of its track with the bar's right
+  piece. A check box draws only its box — the source leaves its background draw commented out — and
+  its label is now indented past that box rather than centred, which is what `drawCheckBoxText` does.
+  A new `crates/cic-render/tests/ui_capture.rs` renders an original all-families synthetic layout
+  through the surface-free capture boundary, byte-identically across runs.
+
+- Added the retained draw-callback name to the UI runtime, and with it the source's own two-step
+  choice of draw procedure: the `IMAGE` status bit picks a default when a gadget is created, and a
+  `DRAWCALLBACK` the function lexicon would resolve then replaces it. A layout naming
+  `GadgetStaticTextDraw` now draws colour-only even while declaring `IMAGE`, and the ubiquitous
+  `"[None]"` correctly leaves the status bit deciding.
+
+- Added gadget child creation to the retained UI runtime, so the controls the original builds at
+  gadget-creation time now exist instead of being silently absent. A slider gains a draggable thumb,
+  a scroll list box that asks for a scroll bar gains an up button, a down button, and a vertical
+  slider, and a combo box gains a drop-down button, an edit field, and a hidden drop-down list —
+  which, being a list box created with a scroll bar, builds one of its own. This is what all the
+  `COMBOBOXEDITBOX*`, `COMBOBOXDROPDOWNBUTTON*`, `COMBOBOXLISTBOX*`, `LISTBOX*UPBUTTON`/`DOWNBUTTON`/
+  `SLIDER`, and `SLIDERTHUMB*` draw-data records in a layout are for; until now nothing read them.
+  The retail Options menu's Resolution, Detail, and IP combo boxes rendered as bare black rectangles
+  and now render as retail draws them, and a list box shows its scroll arrows and thumb. Across the
+  Zero Hour corpus this adds 958 controls. Every part's size is a source literal applied to an
+  already-scaled parent, so a scroll button stays 21 pixels wide at every resolution, and each part
+  takes its art from the records of the window that declared them — which for a scroll bar's thumb
+  is the list box two levels above its slider, not the slider itself. Sliders and their thumbs also
+  gain the `TABSTOP` the creation code sets on them, so a layout's tab list is larger than its
+  declared `TABSTOP` count suggests. `cic-inspect ui-layout` reports each part in a new `role`
+  column.
+- Added the control id to every `cic-inspect ui-render` diagnostic. They previously reported only a
+  frame-item index, which nothing else in the tool is keyed by, so an unbound-image or uncomposed-art
+  report could not be traced back to the control it came from.
+
 ### Fixed
 
+- Fixed the whole-control border being drawn from the wrong rule, which was both adding outlines the
+  original never draws and omitting ones it does. This project had gated the border on the
+  `WIN_STATUS_BORDER` status bit and drawn it whichever draw path a control took. At the pinned
+  revision no draw procedure reads that bit at all, and the border belongs to the colour path alone:
+  `W3DGameWinDefaultDraw` and each gadget's colour draw open a one-pixel rectangle at the control's
+  bounds and then fill one pixel inside it, while every matching `...ImageDraw` outlines nothing and
+  leaves edges to the art. Each colour is compared against `GAME_COLOR_UNDEFINED` — `0x00FFFFFF`,
+  which is exactly the `255 255 255 0` retail writes into unused draw-data entries — and the fill and
+  outline are tested independently, so one being undefined still leaves the other. Rendering the
+  retail Options menu showed both halves of the old error at once: every check box wore a salmon
+  outline, and the panel frames dividing Display, Audio, Control, and Network were missing because
+  those windows take the colour path without declaring `BORDER`. `WIN_STATUS_BORDER` does drive a
+  second, ornamental border, tiled from mapped images by the window manager rather than by any draw
+  procedure; that is a separate feature this project does not implement, and its check-box and
+  slider cases draw nothing regardless.
+- Fixed push buttons that declare a single image drawing nothing.
+  `W3DGadgetPushButtonImageDraw` chooses between two procedures on whether the *enabled* slot
+  declares a middle image, and only the three-piece side was implemented; the other side,
+  `W3DGadgetPushButtonImageDrawOne`, stretches one image across the control from its image offset.
+  Retail depends on it — `SkirmishGameOptionsMenu.wnd`'s eight `ButtonMapStartPosition` markers
+  declare entry 0 alone and were invisible, and now draw. Because the original branches on a
+  resolved image pointer, a middle image whose name does not resolve reads as no middle and takes
+  the same path, so an unresolved name is reported only when the branch that draws it is taken.
+- Fixed images being tinted by their slot's `COLOR`. `winDrawImage` takes no colour - that field
+  belongs to the colour-only fill path - and retail frequently leaves an unused red there beside a
+  valid image, so every textured control rendered red. A control declaring `IMAGE` whose slot has no
+  entry-0 image first staged a visible placeholder instead of painting that same unused colour;
+  now that every family composes, such a control draws nothing — the source's own early return —
+  and records an `UncomposedArt` diagnostic naming the family, since a placeholder there would
+  invent a control retail never shows. Placeholders remain for a genuinely unresolved mapped image.
+- Corrected the recorded mapped-image load policy. This project had documented
+  `Data/INI/MappedImages/**` as a plain recursive merge, on the measured basis that the
+  `HandCreated/` and `TextureSize_512/` name sets were disjoint, and noted that the source loader had
+  not been located. It has been: `ImageCollection::load` loads the user-data directory, then one
+  `TextureSize_<N>` directory selected by its caller, then `HandCreated` last, sorting each
+  directory's own files before its subdirectories'. Re-measured with that order against a real
+  installation, the name sets are not disjoint — 23 definitions are overridden in Generals and 43 in
+  Zero Hour, and both editions ship a `HandCreatedMappedImages.ini` in both directories — so a
+  merge-everything loader resolves some names to the wrong texture region. The implemented loader
+  follows the source order.
+
+- Fixed the WND decoder rejecting Zero Hour's `Menus/MainMenu.wnd`, the layout the R4 main-menu
+  artifact is built around. The decoder required a `CHILD` marker before every child window, but
+  the source's child-list loop has no `CHILD` case at all — the marker is inert and a bare `WINDOW`
+  opens the next sibling. A census of all 80 retail layouts in both editions found exactly one
+  sibling written without its marker, and it is in that file. The decoder now accepts either
+  spelling once the child list is open and reports the unmarked form as a non-fatal
+  `MissingChildKeyword` diagnostic; a bare `WINDOW` before any `CHILD` is still a field name, and
+  `ENDALLCHILDREN` still closes the list. All 80 retail layouts in both editions now decode, with
+  one diagnostic across the whole corpus.
+- Corrected the documented WND status vocabulary, which listed only the `Generals` source path's 25
+  names. Zero Hour adds `ON_MOUSE_DOWN`, used 67 times in its retail layouts, so validating against
+  the Generals list alone would report 67 false unknowns against a stock Zero Hour install.
 - Fixed tree sway never applying in the Generals profile, where every tree stood perfectly still
   while the same scene swayed under `--zh`. Sway was attached only to draws decoded as
   `ObjectDrawKind::Tree`, which requires the `W3DTreeDraw` module. Zero Hour introduced that module
@@ -104,6 +343,15 @@ land under the active milestone heading.
 
 ### Changed
 
+- Changed every renderer capture from an uncompressed netpbm PPM to PNG, which also preserves the
+  alpha channel that PPM discarded and tags perceptual sRGB. `Capture::ppm` is replaced by
+  `Capture::png` at the renderer boundary, so `cic-inspect wnd-render`, `w3d-render`, and the
+  `headless_capture` example all emit `.png` and default their output name accordingly. Reported
+  hashes are taken over the capture's raw RGBA bytes before encoding, so determinism is unchanged;
+  ADR 0004 carries an amendment note recording this.
+- Added `*.png`/`*.ppm` to `.gitignore` (excluding `docs/`). The `*-render` commands write into the
+  working directory when given no output path, so a capture of a user-owned layout or map could
+  otherwise be committed as retail-derived output.
 - Extended `object_ini.rs` to decode one `KindOf` flag, `SHRUBBERY` ("tree, bush, etc." in the
   source `KindOf.h`), exposed as `ObjectDefinition::kind_of_shrubbery()`. It returns `Option<bool>`
   so an undeclared `KindOf` stays distinguishable from a declared one that omits the flag: shipped

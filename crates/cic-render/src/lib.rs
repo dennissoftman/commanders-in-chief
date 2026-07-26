@@ -11,6 +11,8 @@ mod scenery;
 mod terrain;
 mod terrain_viewer;
 mod terrain_virtual;
+mod ui;
+mod ui_text;
 mod viewer;
 mod water;
 mod wnd_scene;
@@ -49,6 +51,12 @@ pub use terrain_viewer::{
     run_terrain_viewer_with_map_at_time, run_terrain_viewer_with_roads,
     run_terrain_viewer_with_roads_at_time,
 };
+pub use ui::{
+    StagedUiFrame, StagedUiText, UI_PLACEHOLDER_COLOR, UiBatch, UiImageBinding,
+    UiStagingDiagnostic, UiStagingDiagnosticKind, UiStagingError, UiStagingLimits, UiTextPolicy,
+    UiTexturePage, UiVertex,
+};
+pub use ui_text::{UiFontSet, UiTextError};
 use viewer::{GpuResourceManager, MaterialPipelines, create_material_layout};
 pub use viewer::{ViewerError, run_model_viewer};
 pub use water::{
@@ -224,15 +232,25 @@ impl Capture {
         format!("{:x}", Sha256::digest(&self.rgba))
     }
 
-    /// Encodes a portable binary PPM for local visual inspection. Alpha is omitted.
-    #[must_use]
-    pub fn ppm(&self) -> Vec<u8> {
-        let mut bytes = format!("P6\n{} {}\n255\n", self.width, self.height).into_bytes();
-        bytes.reserve(self.rgba.len() / 4 * 3);
-        for pixel in self.rgba.chunks_exact(4) {
-            bytes.extend_from_slice(&pixel[..3]);
+    /// Encodes the capture as PNG, preserving alpha and tagging perceptual sRGB.
+    ///
+    /// The digest reported by [`Capture::sha256`] is taken over the raw RGBA bytes, before
+    /// encoding, so the container format never affects determinism.
+    ///
+    /// # Errors
+    ///
+    /// Returns the encoder's error if the image cannot be written.
+    pub fn png(&self) -> Result<Vec<u8>, png::EncodingError> {
+        let mut output = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut output, self.width, self.height);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
+            let mut writer = encoder.write_header()?;
+            writer.write_image_data(&self.rgba)?;
         }
-        bytes
+        Ok(output)
     }
 }
 
@@ -243,6 +261,9 @@ pub struct HeadlessRenderer {
     synthetic_pipeline: wgpu::RenderPipeline,
     model_pipeline: wgpu::RenderPipeline,
     wnd_pipeline: wgpu::RenderPipeline,
+    ui_pipeline: wgpu::RenderPipeline,
+    ui_viewport_layout: wgpu::BindGroupLayout,
+    ui_page_layout: wgpu::BindGroupLayout,
     terrain_pipeline: wgpu::RenderPipeline,
     terrain_edge_pipeline: wgpu::RenderPipeline,
     terrain_layout: wgpu::BindGroupLayout,
@@ -504,12 +525,17 @@ impl HeadlessRenderer {
             CAPTURE_FORMAT,
             "headless",
         );
+        let (ui_pipeline, ui_viewport_layout, ui_page_layout) =
+            create_ui_pipeline(&device, CAPTURE_FORMAT);
         Ok(Self {
             device,
             queue,
             synthetic_pipeline,
             model_pipeline,
             wnd_pipeline,
+            ui_pipeline,
+            ui_viewport_layout,
+            ui_page_layout,
             terrain_pipeline,
             terrain_edge_pipeline,
             terrain_layout,
@@ -828,6 +854,278 @@ impl HeadlessRenderer {
             pass.set_vertex_buffer(0, vertex_buffer.slice(..));
             pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..index_count, 0, 0..1);
+        }
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            texture.size(),
+        );
+        self.finish_capture(encoder, &readback, width, height, unpadded_row, padded_row)
+    }
+
+    /// Builds a font set for retained-UI text from explicit font file bytes.
+    ///
+    /// Callers never touch `wgpu` to do this: the renderer owns the device, so a font set is
+    /// requested from it. Nothing enumerates host fonts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no supplied byte slice parses as a font.
+    pub fn create_ui_font_set(&self, fonts: &[Vec<u8>]) -> Result<UiFontSet, RenderError> {
+        UiFontSet::new(&self.device, &self.queue, CAPTURE_FORMAT, fonts)
+            .map_err(|error| RenderError::UiText(error.to_string()))
+    }
+
+    /// Renders one staged retained-UI frame over an explicit background colour.
+    ///
+    /// Batches submit in the order `cic-ui` produced them, each with its scissor rectangle and page
+    /// applied, so the capture reflects the layout's own draw order. Shaped text draws after the
+    /// frame's quads, which is the order the retained model implies: a control's text sits over its
+    /// own background. No clock, host font, or display is consulted, so the same inputs produce the
+    /// same bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured error for an empty frame, a batch naming an unuploaded page, oversized
+    /// geometry or dimensions, text preparation failure, or GPU submission/readback failure.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one straight-line pass: upload pages, upload geometry, submit batches, read back"
+    )]
+    pub fn capture_ui_frame(
+        &self,
+        staged: &StagedUiFrame,
+        pages: &[UiTexturePage],
+        fonts: Option<&mut UiFontSet>,
+        background: [f64; 4],
+    ) -> Result<Capture, RenderError> {
+        if staged.indices().is_empty() && staged.text().is_empty() {
+            return Err(RenderError::EmptyUiFrame);
+        }
+        let [width, height] = staged.canvas();
+        let (unpadded_row, padded_row, buffer_size) = capture_layout(width, height)?;
+
+        // A colour-only batch still binds a page, so one opaque white pixel stands in and keeps the
+        // pipeline layout uniform across batches.
+        let white = UiTexturePage::new(1, 1, vec![255, 255, 255, 255])
+            .map_err(|_| RenderError::InvalidTexture)?;
+        let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("cic-render ui sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+        let mut bind_groups = Vec::with_capacity(pages.len() + 1);
+        for page in std::iter::once(&white).chain(pages) {
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("cic-render ui page"),
+                size: wgpu::Extent3d {
+                    width: page.width(),
+                    height: page.height(),
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                // Pages upload in the capture target's own space, so a sampled byte reaches the
+                // attachment unchanged. Declaring the page sRGB while the target is linear would
+                // linearize on read without re-encoding on write, darkening every image.
+                format: CAPTURE_FORMAT,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                page.rgba(),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(
+                        page.width()
+                            .checked_mul(4)
+                            .ok_or(RenderError::TextureTooLarge)?,
+                    ),
+                    rows_per_image: Some(page.height()),
+                },
+                texture.size(),
+            );
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            bind_groups.push(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("cic-render ui page bind group"),
+                layout: &self.ui_page_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&sampler),
+                    },
+                ],
+            }));
+        }
+
+        #[allow(clippy::cast_precision_loss)]
+        let viewport_uniform = [width as f32, height as f32, 0.0, 0.0];
+        let mut uniform_bytes = Vec::with_capacity(16);
+        for value in viewport_uniform {
+            uniform_bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        let uniform = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cic-render ui viewport uniform"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.queue.write_buffer(&uniform, 0, &uniform_bytes);
+        let viewport_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("cic-render ui viewport bind group"),
+            layout: &self.ui_viewport_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform.as_entire_binding(),
+            }],
+        });
+
+        let vertex_bytes = staged.vertex_bytes();
+        let index_bytes = staged.index_bytes();
+        let geometry = if vertex_bytes.is_empty() {
+            None
+        } else {
+            let vertex_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("cic-render ui vertices"),
+                size: u64::try_from(vertex_bytes.len())
+                    .map_err(|_| RenderError::GeometryTooLarge)?,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let index_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("cic-render ui indices"),
+                size: u64::try_from(index_bytes.len())
+                    .map_err(|_| RenderError::GeometryTooLarge)?,
+                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.queue.write_buffer(&vertex_buffer, 0, &vertex_bytes);
+            self.queue.write_buffer(&index_buffer, 0, &index_bytes);
+            Some((vertex_buffer, index_buffer))
+        };
+
+        let mut fonts = match fonts {
+            Some(fonts) if !staged.text().is_empty() => {
+                fonts
+                    .prepare(&self.device, &self.queue, staged.canvas(), staged.text())
+                    .map_err(|error| RenderError::UiText(error.to_string()))?;
+                Some(fonts)
+            }
+            _ => None,
+        };
+
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("cic-render ui target"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: CAPTURE_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cic-render ui readback"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("cic-render ui encoder"),
+            });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("cic-render ui pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: background[0],
+                            g: background[1],
+                            b: background[2],
+                            a: background[3],
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            if let Some((vertex_buffer, index_buffer)) = geometry.as_ref() {
+                pass.set_pipeline(&self.ui_pipeline);
+                pass.set_bind_group(0, &viewport_bind_group, &[]);
+                pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                for batch in staged.batches() {
+                    let bound = match batch.page() {
+                        Some(page) => page
+                            .checked_add(1)
+                            .filter(|index| *index < bind_groups.len())
+                            .ok_or(RenderError::MissingUiPage { page })?,
+                        None => 0,
+                    };
+                    pass.set_bind_group(1, &bind_groups[bound], &[]);
+                    match batch.scissor() {
+                        Some(rect) => {
+                            let Some(scissor) = clamp_scissor(rect, width, height) else {
+                                continue;
+                            };
+                            pass.set_scissor_rect(scissor.0, scissor.1, scissor.2, scissor.3);
+                        }
+                        None => pass.set_scissor_rect(0, 0, width, height),
+                    }
+                    let first = batch.first_index();
+                    pass.draw_indexed(first..first + batch.index_count(), 0, 0..1);
+                }
+                pass.set_scissor_rect(0, 0, width, height);
+            }
+            if let Some(fonts) = fonts.as_ref() {
+                fonts
+                    .draw(&mut pass)
+                    .map_err(|error| RenderError::UiText(error.to_string()))?;
+            }
+        }
+        if let Some(fonts) = fonts.as_mut() {
+            fonts.trim();
         }
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
@@ -1687,6 +1985,15 @@ pub enum RenderError {
     InvalidTexture,
     TextureTooLarge,
     EmptyWndScene,
+    /// A staged retained-UI frame produced neither geometry nor text.
+    EmptyUiFrame,
+    /// A staged batch referenced a texture page the caller did not upload.
+    MissingUiPage {
+        /// The requested page index.
+        page: usize,
+    },
+    /// Shaping or drawing retained-UI text failed.
+    UiText(String),
 }
 
 impl Display for RenderError {
@@ -1724,6 +2031,16 @@ impl Display for RenderError {
                 formatter.write_str("decoded texture resources exceed renderer limits")
             }
             Self::EmptyWndScene => formatter.write_str("staged WND scene contains no window quads"),
+            Self::EmptyUiFrame => {
+                formatter.write_str("staged retained-UI frame contains no geometry or text")
+            }
+            Self::MissingUiPage { page } => {
+                write!(
+                    formatter,
+                    "staged UI batch references unuploaded page {page}"
+                )
+            }
+            Self::UiText(message) => write!(formatter, "retained-UI text failed: {message}"),
         }
     }
 }
@@ -1739,6 +2056,136 @@ impl Error for RenderError {
             _ => None,
         }
     }
+}
+
+/// Clamps a scissor rectangle into the render target, returning `None` when nothing remains.
+///
+/// `wgpu` rejects a scissor that leaves the attachment, and a layout may legitimately clip against a
+/// region partly off screen, so the rectangle is intersected with the target rather than trusted.
+fn clamp_scissor(rect: cic_ui::UiRect, width: u32, height: u32) -> Option<(u32, u32, u32, u32)> {
+    let left = u32::try_from(rect.x.max(0)).ok()?.min(width);
+    let top = u32::try_from(rect.y.max(0)).ok()?.min(height);
+    let right = u32::try_from(rect.x.saturating_add(rect.width).max(0))
+        .ok()?
+        .min(width);
+    let bottom = u32::try_from(rect.y.saturating_add(rect.height).max(0))
+        .ok()?
+        .min(height);
+    if right <= left || bottom <= top {
+        return None;
+    }
+    Some((left, top, right - left, bottom - top))
+}
+
+/// Builds the retained-UI quad pipeline plus its viewport and page bind-group layouts.
+///
+/// Straight (non-premultiplied) alpha blending matches the source's stored channel bytes, and no
+/// depth buffer is used: painter's order from `cic-ui` decides overlap, as it does for any 2D UI.
+fn create_ui_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+) -> (
+    wgpu::RenderPipeline,
+    wgpu::BindGroupLayout,
+    wgpu::BindGroupLayout,
+) {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("cic-render ui shader"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("ui.wgsl").into()),
+    });
+    let viewport_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("cic-render ui viewport layout"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: wgpu::BufferSize::new(16),
+            },
+            count: None,
+        }],
+    });
+    let page_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("cic-render ui page layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("cic-render ui pipeline layout"),
+        bind_group_layouts: &[Some(&viewport_layout), Some(&page_layout)],
+        immediate_size: 0,
+    });
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("cic-render ui pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vertex_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[Some(wgpu::VertexBufferLayout {
+                array_stride: UiVertex::STRIDE,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &[
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x2,
+                        offset: 0,
+                        shader_location: 0,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x2,
+                        offset: 8,
+                        shader_location: 1,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x4,
+                        offset: 16,
+                        shader_location: 2,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Uint32,
+                        offset: 32,
+                        shader_location: 3,
+                    },
+                ],
+            })],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fragment_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            cull_mode: None,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    });
+    (pipeline, viewport_layout, page_layout)
 }
 
 #[cfg(test)]

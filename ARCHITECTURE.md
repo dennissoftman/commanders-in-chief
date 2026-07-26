@@ -39,19 +39,22 @@ definition database          asset database
                scripts, commands)
 ```
 
-The current workspace has five deliberately narrow crates:
+The current workspace has six deliberately narrow crates:
 
 - `cic-core`: dependency-free invariants and bounded binary input.
 - `cic-formats`: bounded decoders and immutable, renderer-neutral format values.
 - `cic-vfs`: normalized paths, providers, overlay order, and asset provenance.
+- `cic-ui`: retained UI state instantiated from immutable WND definitions — layout, hit testing,
+  focus, control invariants, typed events, and renderer-neutral frames. Depends only on
+  `cic-formats`.
 - `cic-render`: stable model staging, bounded texture resources, deterministic
   diagnostic capture, and interactive `wgpu` presentation.
-- `cic-tools`: diagnostic applications that compose the public VFS, format, and
+- `cic-tools`: diagnostic applications that compose the public VFS, format, UI, and
   renderer APIs.
 
-R4 will add a narrow `cic-ui` crate for retained UI state, input, and safe navigation while keeping
-WND parsing in `cic-formats` and GPU presentation in `cic-render`. Simulation, AI, networking, and
-script execution remain excluded until R5. R3 does include bounded
+`cic-ui` keeps WND parsing in `cic-formats` and GPU presentation in `cic-render`: it consumes
+immutable definitions and produces frames, so it links to no rendering API and holds no simulation
+state. Simulation, AI, networking, and script execution remain excluded until R5. R3 does include bounded
 MAP script decoding because scripts are part of the persisted map format; the resulting immutable
 tree has no evaluator, callbacks, timers, or access to live engine state.
 
@@ -123,7 +126,7 @@ decorated names, carry preconditions and provenance, and layer in explicit profi
 They may replace known fields or insert bounded subtrees, but never edit source bytes, execute code,
 or make the renderer/menu router search for hardcoded retail window names.
 
-The planned `cic-ui` layer instantiates those definitions into non-authoritative presentation state:
+The `cic-ui` layer instantiates those definitions into non-authoritative presentation state:
 visibility, enablement, focus, text editing, list/slider/combo selection, menu push/pop, transitions,
 and typed demo actions. Callback names are resolved only through an explicit allowlist supplied by
 the application. Unknown names remain inert diagnostics. Main-menu and skirmish UI state can bind
@@ -140,7 +143,11 @@ not simulation state.
 
 The UI renderer is custom `wgpu` presentation over stable colored/image quads, scissors, borders,
 cursors, and Unicode text. This preserves WND's exact retained layout and state-image semantics and
-composes naturally over R3 scenes. A full Rust GUI toolkit is not used as the compatibility model.
+composes naturally over R3 scenes. Where the original composes a control's nine draw-data entries
+into pieces, so does this renderer, per family and from that family's own indices; the retained model
+supplies every slot and the live state a composition branches on, because the original's draw
+procedures do not always read the slot the control's state selected. A full Rust GUI toolkit is not
+used as the compatibility model.
 Focused text technology is encouraged: `cosmic-text` for shaping/layout and `glyphon` for a `wgpu`
 atlas after dependency compatibility is verified. Host font discovery is excluded from
 deterministic captures; fonts come from explicit synthetic or user-owned VFS resources.

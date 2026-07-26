@@ -274,12 +274,86 @@ fn wnd_inside_big_produces_a_stable_inventory_report() {
          layout_update\tSyntheticMenuUpdate\n\
          layout_shutdown\tSyntheticMenuShutdown\n\
          top_level_field\tname\tvalue\tline\n\
-         window\tpath\tdepth\tid\twindow_type\tupper_left_x\tupper_left_y\tbottom_right_x\tbottom_right_y\tcreation_width\tcreation_height\n\
+         window\tpath\tdepth\tid\tname\twindow_type\tupper_left_x\tupper_left_y\tbottom_right_x\tbottom_right_y\tcreation_width\tcreation_height\n\
          window_field\tpath\tname\tvalue\tline\n\
-         window\t0\t0\t0\tPUSHBUTTON\t10\t20\t210\t70\t800\t600\n\
-         window_field\t0\tSTATUS\tACTIVE ENABLED\t11\n\
-         window\t0/0\t1\t1\tSTATICTEXT\t20\t30\t200\t50\t800\t600\n\
+         window_flag\tpath\tfield\tname\tknown\n\
+         window_callback\tpath\tkind\tname\n\
+         window_property\tpath\tproperty\tvalue\n\
+         window_font\tpath\tname\tsize\tbold\n\
+         window_text_color\tpath\tstate\tred\tgreen\tblue\talpha\n\
+         window_draw_entry\tpath\tslot\tindex\timage\tred\tgreen\tblue\talpha\tborder_red\tborder_green\tborder_blue\tborder_alpha\n\
+         window_gadget_data\tpath\tgadget\tproperty\tvalue\n\
+         window\t0\t0\t0\tSynthetic.wnd:ButtonStart\tPUSHBUTTON\t10\t20\t210\t70\t800\t600\n\
+         window_field\t0\tNAME\t\"Synthetic.wnd:ButtonStart\"\t11\n\
+         window_field\t0\tSTATUS\tENABLED+IMAGE\t12\n\
+         window_flag\t0\tSTATUS\tENABLED\tyes\n\
+         window_flag\t0\tSTATUS\tIMAGE\tyes\n\
+         window\t0/0\t1\t1\tSynthetic.wnd:LabelStart\tSTATICTEXT\t20\t30\t200\t50\t800\t600\n\
+         window_field\t0/0\tNAME\t\"Synthetic.wnd:LabelStart\"\t18\n\
+         window_field\t0/0\tFONT\tNAME: \"Times New Roman\", SIZE: 14, BOLD: 0\t19\n\
+         window_font\t0/0\tTimes New Roman\t14\tno\n\
          diagnostic\tline\twindow_id\tkind\tdetail\n"
+    );
+
+    fs::remove_dir_all(root).expect("remove test tree");
+}
+
+#[test]
+fn wnd_patch_reports_operations_provenance_and_the_patched_hierarchy() {
+    let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("wnd-patch-cli");
+    if root.exists() {
+        fs::remove_dir_all(&root).expect("remove stale test tree");
+    }
+    fs::create_dir_all(&root).expect("create test tree");
+    let archive_path = root.join("window.big");
+    fs::write(
+        &archive_path,
+        big_with_entry(r"Menus\Synthetic.wnd", wnd_fixture()),
+    )
+    .expect("write synthetic archive");
+    let patch_path = root.join("modern.cic-wnd-patch");
+    fs::write(
+        &patch_path,
+        "version 1\n\
+         target menus/synthetic.wnd\n\
+         require-window \"Synthetic.wnd:ButtonStart\"\n\
+         set-field \"Synthetic.wnd:ButtonStart\" STATUS \"ENABLED+HIDDEN\"\n\
+         insert-window \"Synthetic.wnd:ButtonStart\" 0\n\
+         WINDOW\n\
+         \x20 WINDOWTYPE = COMBOBOX;\n\
+         \x20 SCREENRECT = UPPERLEFT: 1 2 BOTTOMRIGHT: 3 4 CREATIONRESOLUTION: 800 600;\n\
+         \x20 NAME = \"Synthetic.wnd:ComboRefreshRate\";\n\
+         END\n\
+         end-window\n",
+    )
+    .expect("write patch");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cic-inspect"))
+        .arg("wnd-patch")
+        .arg("menus/synthetic.wnd")
+        .arg("--patch")
+        .arg(&patch_path)
+        .arg(&archive_path)
+        .output()
+        .expect("run cic-inspect wnd-patch");
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 report");
+    assert!(stdout.contains("\tmenus/synthetic.wnd\t1\t3\n"), "{stdout}");
+    assert!(stdout.contains("require-window\tSynthetic.wnd:ButtonStart\t\n"));
+    assert!(stdout.contains("set-field\tSynthetic.wnd:ButtonStart\tSTATUS=ENABLED+HIDDEN\n"));
+    assert!(stdout.contains("insert-window\tSynthetic.wnd:ButtonStart\tat 0\n"));
+    assert!(stdout.contains("provenance\tSynthetic.wnd:ComboRefreshRate\t(inserted)\t"));
+    // The patched hierarchy is reported, with the inserted control in place.
+    assert!(stdout.contains("\tSynthetic.wnd:ComboRefreshRate\tCOMBOBOX\t1\t2\t3\t4\t800\t600\n"));
+    // ButtonStart is the root window, so the re-typed STATUS flag is reported at path 0.
+    assert!(
+        stdout.contains("window_flag\t0\tSTATUS\tHIDDEN\tyes\n"),
+        "{stdout}"
     );
 
     fs::remove_dir_all(root).expect("remove test tree");
@@ -298,7 +372,7 @@ fn wnd_render_inside_big_writes_a_capture_with_adapter_fallback() {
         big_with_entry(r"Menus\Synthetic.wnd", wnd_fixture()),
     )
     .expect("write synthetic archive");
-    let output_path = root.join("synthetic.ppm");
+    let output_path = root.join("synthetic.png");
 
     let output = Command::new(env!("CARGO_BIN_EXE_cic-inspect"))
         .arg("wnd-render")
@@ -320,7 +394,12 @@ fn wnd_render_inside_big_writes_a_capture_with_adapter_fallback() {
     assert!(stdout.contains(
         "rgba_sha256\t94e0373ffd3bb085f68e55495fb8c0d58f37a40909c2c4a1335633b1daacec9e\n"
     ));
-    assert!(output_path.exists());
+    let written = fs::read(&output_path).expect("read WND capture");
+    assert_eq!(
+        &written[..8],
+        b"\x89PNG\r\n\x1a\n",
+        "the capture is written as PNG, not a raw netpbm dump"
+    );
 
     fs::remove_dir_all(root).expect("remove test tree");
 }
@@ -636,12 +715,15 @@ WINDOW\n\
   WINDOWTYPE = PUSHBUTTON;\n\
   SCREENRECT = UPPERLEFT: 10 20 BOTTOMRIGHT: 210 70\n\
                CREATIONRESOLUTION: 800 600;\n\
-  STATUS = ACTIVE ENABLED;\n\
+  NAME = \"Synthetic.wnd:ButtonStart\";\n\
+  STATUS = ENABLED+IMAGE;\n\
   CHILD\n\
     WINDOW\n\
       WINDOWTYPE = STATICTEXT;\n\
       SCREENRECT = UPPERLEFT: 20 30 BOTTOMRIGHT: 200 50\n\
                    CREATIONRESOLUTION: 800 600;\n\
+      NAME = \"Synthetic.wnd:LabelStart\";\n\
+      FONT = NAME: \"Times New Roman\", SIZE: 14, BOLD: 0;\n\
     END\n\
   ENDALLCHILDREN\n\
 END\n"
@@ -1113,11 +1195,14 @@ fn installed_profile_exports_single_glb_by_default_and_optional_gltf() {
         root.join("textured_textures/m000_t0000_checker_additive-preview.png")
             .is_file()
     );
-    let capture_path = root.join("textured.ppm");
+    let capture_path = root.join("textured.png");
     let output = run_model_render(&root, &capture_path);
     if output.status.success() {
         let capture = fs::read(&capture_path).expect("read W3D render capture");
-        assert!(capture.starts_with(b"P6\n512 512\n255\n"));
+        assert!(capture.starts_with(b"\x89PNG\r\n\x1a\n"));
+        // IHDR carries the dimensions as big-endian u32 immediately after the chunk type.
+        assert_eq!(u32::from_be_bytes(capture[16..20].try_into().unwrap()), 512);
+        assert_eq!(u32::from_be_bytes(capture[20..24].try_into().unwrap()), 512);
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.contains("animation\t0\n"));
         assert!(stdout.contains("frame\t1\n"));

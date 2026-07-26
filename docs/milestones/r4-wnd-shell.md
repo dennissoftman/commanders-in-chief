@@ -17,6 +17,322 @@ as a flat colored quad and writes a surface-free deterministic capture through t
 gadget-specific `DATA`), resource resolution (mapped images/fonts/CSF), the retained `cic-ui`
 runtime, and main-menu navigation remain unimplemented and are the next slice.
 
+Gate 1 is now verified against real data: every one of the 80 retail `.wnd` layouts reachable
+through the `Wnd` resource profile in both editions decodes under default limits, producing one
+non-fatal diagnostic across the whole corpus. That verification corrected two grammar facts —
+`CHILD` is an inert marker rather than a required prefix, and the status vocabulary is
+edition-dependent — and confirmed that no configured limit needs raising (deepest nesting 6,
+largest layout 113 windows, widest child list 80, longest record 833 bytes). A field census over
+the same corpus scopes Gate 2: 43 distinct window field names, 13 of them present on every window,
+with every gadget-specific record cleanly confined to its own window types.
+
+Gate 2 (immutable typed control definitions) is implemented. `parseWindow`'s 46-keyword field chain
+is enumerated from source and reconciled exactly with the census, and all 46 are accounted for:
+45 are typed — the common window records, the 21 draw-data arrays, the seven gadget `DATA` records,
+and `IMAGEOFFSET` — while `TOOLTIP` is deliberately untyped because its source parser ignores the
+record and stores a placeholder marked `@todo`. Every field name occurring anywhere in either
+retail edition decodes, corpus-wide, with no malformed-field diagnostics. Reports expose the typed
+values so a modded layout can be compared record by record without rendering it, satisfying this
+gate's stable-report requirement. Two records (`TABCONTROLDATA`, `IMAGEOFFSET`) rest on source
+evidence alone, having no retail occurrence to cross-check, and are marked as such.
+
+Gate 3 (bounded WND patch overlays) is implemented. The versioned patch document, its bounded
+decoder, and the apply engine cover preconditions, field replacement and addition, rectangle
+replacement, and the structural `reorder`, `reparent`, and `insert-window` operations — with
+per-field provenance, an unmodified source document, and structured errors for every failure mode
+including reparent cycles, duplicate inserted names, and out-of-range indices. An inserted subtree
+is parsed by the ordinary bounded WND decoder, so it obeys the same grammar, limits, and typed-field
+rules as authored source. `cic-inspect wnd-patch` reports operations, provenance, and the patched
+hierarchy.
+
+Gate 4 (UI resource resolution) is implemented for definition resources. Three narrow decoders over
+one shared bounded INI lexer cover `MappedImage` blocks, `HeaderTemplate.ini`, and `Language.ini`,
+each derived field by field from the pinned source parse tables, including the source's own quirks:
+the `Coords`/`Status` order dependence that swaps a rotated region's presentation size, the
+two-token quoted-string rejoin that drops a one-character continuation, the reversed
+`LocalFontFile` list order, and every constructor default. `cic-tools`' resolution layer composes the
+VFS, those decoders, and the existing CSF decoder into an immutable result where each demanded name
+either binds to a definition with its defining file recorded or is explicitly unresolved.
+
+Locating `ImageCollection::load` corrected a previously recorded conclusion: the mapped-image load is
+an ordered three-stage load with an explicit texture-size selection, not a recursive merge, and the
+directories' name sets are *not* disjoint in retail data — 23 overrides in Generals and 43 in Zero
+Hour. Implementing the source order is therefore required for correctness, not a fidelity nicety.
+
+Verified against a real installation across every layout in both editions: mapped images resolve
+1,849/1,978 in Zero Hour and 1,789/1,932 in Generals, header templates resolve completely (209 and
+196, zero unresolved), and Zero Hour's 17 unresolved labels reproduce the evidence pass's independent
+count exactly. What does not resolve is retail's own gap — 50 and 48 distinct image names no shipped
+INI defines, and the three font families (`Generals`, `Abadi MT Bold`, `Placard MT Condensed`) retail
+names but never ships — which is why placeholders and diagnostics are the ordinary path. The
+localization mount is now language-parameterized (`--language`, `<Language>.big`/`<Language>ZH.big`,
+`Data/<Language>/`) rather than hardcoded to English, which is what shipping a language the original
+never had requires. `cic-inspect ui-resources` reports all of it. Transitions, cursors, menu schemes,
+and the runtime-side visible placeholders remain the rest of Gate 4.
+
+Gate 5 (retained UI runtime) is implemented as the new `cic-ui` crate, which depends only on
+`cic-formats`: it consumes immutable definitions and produces renderer-neutral frames, so it links to
+no rendering API and holds no simulation state. Layout reproduces `parseScreenRect` exactly —
+per-axis ratios, a truncating cast, size derived from the scaled corners, and child positions made
+relative to the parent's already-scaled origin — alongside a project-designed uniform-scale
+`Modern` policy. Hit testing reproduces the three-pass `ABOVE`/unlayered/`BELOW` search, the
+source-order child descent that skips a hidden or disabled child and falls through to the parent, the
+inclusive edge test, the `NO_INPUT` discard, and mouse-captor confinement. Focus reproduces the
+`NOFOCUS` refusal and the parent-walking acceptance. Control invariants cover radio-group
+exclusivity, check toggling, slider clamping with an inverted-bounds diagnostic, list and combo
+selection that refuses an out-of-range index rather than clamping it, list scroll clamping,
+character-wise Unicode text entry against the declared `MAXLEN`, and progress clamping. Hiding or
+disabling a control clears hover, press, focus, and capture through its whole subtree. Twenty-one
+tests over one original synthetic layout covering every control family pass, including a determinism
+check that two instantiations of the same inputs produce identical controls and frames.
+
+Gate 5 is verified against real data through `cic-inspect ui-layout`, which instantiates a layout for
+an explicit viewport and scale policy and reports the tree, tab order, frame submission order, and
+diagnostics. Every one of the 80 Zero Hour layouts and 78 Generals layouts instantiates at 800x600,
+1920x1080, and 21:9 2560x1080 under both policies — 480 instantiations — with no failures and, after
+mapping the complete `WindowStatusNames` vocabulary, **zero diagnostics in either edition**. The 80
+Zero Hour layouts yield 1,667 retained controls, matching the WND census's window count exactly, and
+their family distribution is 539 static text, 424 push buttons, 411 windows with no gadget state, 115
+combo boxes, 45 check boxes, 39 list boxes, 34 progress bars, 32 entry fields, 19 radio buttons, and
+nine sliders.
+
+That pass also measured something the runtime gates need to know: the whole Zero Hour corpus declares
+only **nine** `TABSTOP` controls. Keyboard traversal of a retail menu therefore cannot come from the
+layouts, which is consistent with the original populating the manager's tab list from menu code rather
+than from the WND. A usable demo will need project-owned tab order, and that belongs to the shell gate
+rather than to the parser.
+
+Reading the runtime source produced one finding worth recording: `GameWindow::winNextTab` and
+`winPrevTab` are entirely commented out at the pinned revision and return success without moving
+focus, so per-window tab traversal is not source behavior. The live mechanism is the window manager's
+tab list, whose wraparound cycle `cic-ui` reproduces over the declared `TABSTOP` bits.
+
+Gate 6 (custom `wgpu` presentation) is implemented. `cic-render` stages a retained frame into batched
+geometry, breaking a batch only when the bound texture page or scissor rectangle changes, and executes
+it through the existing surface-free capture boundary. Nested clips intersect and are clamped into the
+attachment; alpha is straight to match the source's stored channel bytes; pages upload in the capture
+target's colour space, because declaring a page sRGB against a linear target linearizes on read
+without re-encoding on write and darkens every image. A border draws only for a control declaring
+`BORDER` — honouring a border colour alone outlines the entire menu, since most retail controls carry
+one.
+
+The text stack is settled and pinned: `cosmic-text` 0.19 for shaping and `glyphon` 0.12 for `wgpu`
+glyph rendering, the pair ADR 0010 selected. `glyphon` 0.12 declares `wgpu ^30.0.0` and unifies with
+the workspace `wgpu` 30 rather than pulling a second copy, verified with `cargo tree -i wgpu`; both
+licences are permissive and compatible with GPL-3.0-only. Fonts are always supplied as bytes, never
+enumerated from the host, and a capture with no font supplied stages a visible placeholder bar plus a
+diagnostic per run.
+
+Verified against a real installation at 1280x720 with a user-owned font: `MainMenu.wnd` stages 37
+quads in 12 batches over three texture pages with 29 shaped runs, `OptionsMenu.wnd` 41 quads and 25
+runs, `SkirmishGameOptionsMenu.wnd` 52 quads and 21 runs, with byte-identical hashes across repeated
+runs. Localized labels resolve through the CSF decoder before staging, so captures show real menu text
+in the right places.
+
+Push-button draw-data composition followed, taking the largest interactive family first: 424 of the
+1,667 retail controls. `GadgetPushButton.h` fixes the entry indices and
+`W3DGadgetPushButtonImageDrawThree` the geometry, both reproduced including the branch where the ends
+alone do not fit. Button text is centred on both axes as `drawButtonText` does. With that in place the
+retail main menu renders as a menu — background art, logo, gold-framed buttons, centred localized
+labels — and staged quads rise from 37 to 682.
+
+Rendering real data corrected two colour assumptions. An image draw is **untinted**: `winDrawImage`
+takes no colour argument, and a slot's `COLOR` belongs to the colour-only fill path, so multiplying an
+image by it painted every textured control in whatever that unused field held — frequently red in
+retail data. And a control declaring `IMAGE` whose slot has no entry-0 image keeps its art at indices
+only its own family reads, so filling with the slot colour there painted that same red; those controls
+staged a visible placeholder plus a diagnostic naming the family instead, until the family itself
+composed.
+
+The remaining families' composition followed and completes Gate 6's per-family work: radio buttons,
+check boxes, text entry, both slider orientations, progress bars, tab controls, and the stretched
+single-image path list boxes, combo boxes, and static text share. Each family's index map comes from
+its `Gadget*.h` accessors and its geometry from the matching `W3DGadget*ImageDraw`, both at the
+pinned revision, and the full table is in [docs/provenance/wnd.md](../provenance/wnd.md). The frame
+now carries all three draw-data slots and the live state a composition branches on, because a draw
+procedure does not always read the slot the control's own state selected.
+
+Reading those files corrected or established five behaviours worth recording:
+
+- A selected radio button reads the hilite slot's second image triple even while enabled, because
+  the source tests `WIN_STATE_SELECTED` before the enabled bit. It therefore never shows disabled
+  art while selected.
+- A horizontal slider ignores the control's state entirely when choosing art — fill and blank always
+  come from the disabled slot, the highlight row from the hilite slot — and scales its tick squares
+  against a fixed 800-pixel display reference rather than against the control.
+- A check box draws no background at all: the source leaves that draw commented out and renders only
+  the box, three pixels down and six shorter than the control. Its label is not centred the way a
+  button's is either; `drawCheckBoxText` centres vertically but indents by the control's own height.
+  That fixes a placement this project had previously centred.
+- A text entry and a vertical slider each draw one small-centre piece more than fits, deliberately
+  overrunning under the end piece that covers it.
+- A progress bar fills the *unreached* part of its track with the bar's right piece rather than
+  leaving it empty, with the whole bar inset ten pixels horizontally and five vertically.
+
+The image path is now chosen the way the source chooses it: the `IMAGE` status bit picks a default
+procedure at creation and a resolvable `DRAWCALLBACK` name replaces it, so a name reading as a draw
+procedure decides and `"[None]"` leaves the bit deciding. With every established family composed,
+the `UncomposedFamily` placeholder is retired. A control whose family finds nothing at its own
+indices now draws nothing, which is the source's early return, and records an `UncomposedArt`
+diagnostic naming the family; a visible placeholder there would have invented a control retail never
+shows. Placeholders remain for a genuinely unresolved mapped image.
+
+Two things about tab controls are reproduced as source behaviour and cannot be cross-checked, since
+no retail layout declares one: `TABWIDTH` and `TABHEIGHT` are read raw and never scaled, so a tab
+strip does not follow the creation-resolution scaling its own control does, and the strip's origin
+comes from `GadgetTabControlComputeTabRegion`'s edge and orientation arithmetic.
+
+Verification is synthetic *and* now retail. An original layout declaring every composed family
+(`crates/cic-render/tests/fixtures/synthetic-gadgets.wnd`) drives per-family geometry assertions and
+a surface-free capture that is byte-identical across runs, and the capture was rendered and looked
+at rather than only asserted.
+
+Retail verification then rendered every layout in both editions, at 1280x720 and 1920x1080, with a
+user-owned font. It found two presentation bugs that the synthetic fixture could not have shown,
+because both depend on how retail actually writes its layouts rather than on any family's geometry.
+
+The first was the whole-control border. This project had gated it on `WIN_STATUS_BORDER` and drawn
+it on both draw paths. The pinned source does neither: no draw procedure reads that bit, and the
+colour-path border belongs to the colour path alone — `W3DGameWinDefaultDraw`, `W3DGadgetPushButtonDraw`,
+`W3DGadgetCheckBoxDraw`, and `W3DGadgetComboBoxDraw` each open a one-pixel rectangle and then fill
+one pixel inside it, while every matching `...ImageDraw` outlines nothing. The retail Options menu
+showed both halves of the error together: check boxes wore a salmon outline the original never
+draws, and the panel frames dividing Display, Audio, Control, and Network were missing, because
+those windows take the colour path without declaring `BORDER`. The colour comparison is against
+`GAME_COLOR_UNDEFINED` — `0x00FFFFFF`, exactly the `255 255 255 0` retail writes into every unused
+entry — and the fill and the outline are tested separately.
+
+Reading further to implement the next gate turned up what `WIN_STATUS_BORDER` actually drives, and
+it is a second, unimplemented border rather than the one above. `GameWindowManager::drawWindow`
+calls `winDrawBorder()` when the bit is set, and `W3DGameWindow::winDrawBorder` tiles an ornamental
+frame from hardcoded mapped images — `BorderTop`, `BorderLeft`, `BorderRight`, `BorderBottom`, their
+`...Short` halves, and four `BorderCorner__` pieces — choosing geometry by the lowest set style bit.
+Two of those style cases deliberately draw nothing, `GWS_CHECK_BOX` and both sliders, which is why
+removing the wrong colour-path border from check boxes left them correct rather than bare. This
+project draws no ornamental border at all; it is recorded here as a known gap, not as something the
+border fix addressed.
+
+The second was a push-button path that had been read but not implemented.
+`W3DGadgetPushButtonImageDraw` branches on whether the *enabled* slot declares a middle image, and
+its false side, `W3DGadgetPushButtonImageDrawOne`, stretches one image across the control. Retail
+depends on it: `SkirmishGameOptionsMenu.wnd`'s eight `ButtonMapStartPosition` markers declare entry
+0 alone, and drew nothing at all. They now draw. Because the branch tests a resolved `Image *`, a
+middle image whose *name* does not resolve reads as no middle and takes the same path, so an
+unresolved name is reported only when the branch that draws it is the one taken.
+
+The corpus numbers below are the completion evidence for the composed families, and unlike the
+earlier figures they cover every family rather than push buttons and backgrounds.
+
+| Measure | Zero Hour | Generals |
+| --- | --- | --- |
+| Layouts rendered | 79 of 80 | 77 of 78 |
+| Staged quads at 1280x720 | 11,021 | 6,624 |
+| Staged quads at 1920x1080 | 16,386 | 9,509 |
+| Batches | 268 | 261 |
+| Shaped text runs | 626 | 650 |
+| Layouts with no diagnostic at all | 61 | 61 |
+| Diagnostics | 141 | 129 |
+
+Those figures predate gadget child creation, which adds the parts a layout never declares; the pass
+after it is tabulated further down.
+
+Only the quad count moves with the viewport, which is what a repeating-piece composition should do;
+batches, text runs, and the complete diagnostic list are identical at both viewports in both
+editions. Rendering the whole Zero Hour corpus twice produced the same 79 capture hashes both times.
+
+Every layout renders except `Window/ReplayControl.wnd` in both editions, and that one is not a
+failure of the renderer: its single root declares `HIDDEN`, so the whole tree is skipped and the
+tool refuses to write an empty capture rather than emit a blank PNG.
+
+Every remaining diagnostic was traced to a fact about retail data rather than to this layer:
+
+- `UnboundImage` names an image no shipped INI defines — `PushButtonEnabled`, `StaticTextEnabled`,
+  `ProgressBarEnabledLeftEnd`, the twelve `*General_slvr` portraits — which is the same retail gap
+  Gate 4 measured, now reaching the renderer as a visible placeholder.
+- `UncomposedArt` on a push button is the source's own early return. Zero Hour's thirteen are
+  `ChallengeMenu.wnd`'s general-portrait buttons and one in `GeneralsExpPoints.wnd`, which declare
+  art in the disabled slot only and take their enabled portrait from challenge-mode code. Generals
+  has none.
+- `UncomposedArt` on `Simple` — 105 in Zero Hour, 102 in Generals — is mostly combo boxes whose own
+  entry 0 declares no background image, which their draw procedure also draws nothing for.
+
+Separately, this pass found one substantial gap that no diagnostic named, because the missing
+controls were missing entirely: gadget child creation. It belongs to the retained runtime rather
+than to presentation. A combo box's own draw procedure paints only a background and a title; its
+edit box, drop-down button, and list box are separate child windows that `gogoGadgetComboBox` builds
+when the gadget is created, and a list box's scroll bar is the same. The WND already carries their
+art — that is what `COMBOBOXEDITBOX*DRAWDATA`, `COMBOBOXDROPDOWNBUTTON*DRAWDATA`,
+`COMBOBOXLISTBOX*DRAWDATA`, and the `LISTBOX*UPBUTTON`/`DOWNBUTTON`/`SLIDER` records are for — and
+`cic-ui` instantiated none of it, so `OptionsMenu.wnd`'s Resolution and Detail combos rendered as
+bare black rectangles. That gap is now closed; see below.
+
+Gadget child creation closes that gap, and it belongs to Gate 5's retained runtime. `cic-ui` now
+reproduces the three creation functions that build windows no layout declares: `gogoGadgetSlider`
+gives every slider a draggable thumb, `GadgetListboxCreateScrollbar` gives a list box that asks for
+one an up button, a down button, and a vertical slider, and `gogoGadgetComboBox` gives a combo box a
+drop-down button, an edit field, and a hidden drop-down list — which, being a list box created with
+a scroll bar, builds a scroll bar of its own. Every size is a source literal applied to an
+already-scaled parent, so a scroll button stays 21 pixels wide at every resolution. The full
+derivation is in [docs/provenance/wnd.md](../provenance/wnd.md).
+
+Over the Zero Hour corpus that adds 958 controls: 115 combo boxes contribute three parts each, 151
+list boxes carry a scroll bar (36 declared plus the 115 inside combo boxes), and 160 sliders carry a
+thumb (nine declared plus the 151 scroll bars). The combo-box count matches Gate 5's census exactly.
+Staged quads rise from 11,021 to 12,450 in Zero Hour and 6,624 to 7,846 in Generals, and
+`OptionsMenu.wnd`'s Resolution, Detail, and IP combos now render as retail draws them — a gold edit
+field with a drop-down arrow beside it — while `MapSelectMenu.wnd`'s list box gains its arrows and
+thumb.
+
+Three findings came out of building it:
+
+- Where a part's art lives is not where the part is. `winCreateFromScript` copies each part's arrays
+  in through file-scope statics holding the records of the window being created, so a scroll bar's
+  thumb reads `SLIDERTHUMB*` from the list box two levels above its slider, and a combo box's
+  internal scroll bar reads `LISTBOX*` and `SLIDERTHUMB*` from the combo box. Reading only the
+  immediate parent leaves those parts blank, which is exactly how the first attempt here rendered
+  before the records were carried down the tree.
+- `gogoGadgetSlider` sets `WIN_STATUS_TAB_STOP` on every slider it creates and the thumb inherits
+  it, so each slider contributes two tab stops the file never declared. Gate 5's measurement that
+  the Zero Hour corpus declares only nine `TABSTOP` controls therefore understates the real tab
+  list; keyboard traversal still needs project-owned order, but not because the list is nearly
+  empty.
+- Two new unresolved image names surfaced, `VSliderEnabledTopEnd` and `VsliderThumbEnabled`, both
+  demanded by scroll-bar parts that now exist. Neither is a lookup failure — the catalog already
+  matches case-insensitively — they are more of retail's own undefined names, the same gap Gate 4
+  measured, and they stage visible placeholders.
+
+The corpus after gadget child creation, over the same four passes:
+
+| Measure | Zero Hour | Generals |
+| --- | --- | --- |
+| Layouts rendered | 79 of 80 | 77 of 78 |
+| Synthesised gadget parts | 958 | — |
+| Staged quads at 1280x720 | 12,450 | 7,846 |
+| Staged quads at 1920x1080 | 18,368 | 11,171 |
+| Batches | 300 | 293 |
+| Shaped text runs | 626 | 650 |
+| Layouts with no diagnostic at all | 58 | 57 |
+| Diagnostics | 153 | 142 |
+
+Batches, text runs, and the complete diagnostic list are again identical at both viewports, and only
+the quad count moves with the viewport.
+
+Staging diagnostics now carry the control they belong to. They previously reported only a frame-item
+index, which nothing else in the tool is keyed by, so an art or resource complaint could not be
+traced to a control at all; that is what first hid which controls the `Simple` reports covered.
+
+One compatibility fact belongs to Gates 7 and 8 rather than to presentation: rendering
+`Menus/MainMenu.wnd` shows every subpanel at once, with labels overlapping. Retail hides those
+subpanels from menu code, not through `STATUS`, so a correct main menu needs the shell stack's
+show/hide semantics — the layout alone does not describe which subpanel is visible.
+
+The Gate 3 patch work was verified end to end against the retail `OptionsMenu.wnd`: the stock
+`ComboBoxResolution` is
+reused and repositioned while a project-owned refresh-rate combo is inserted beside it. That is
+precisely the Gate 9 composition ADR 0010 requires be expressible as auditable data rather than
+hardcoded window names, demonstrated before any of the Options UI exists. Profile-driven patch
+selection is the remaining integration step.
+
 **Scope:** Boundedly decode the complete source-established WND grammar and the UI definition
 resources required by it, then present those values through a retained, non-gameplay UI runtime.
 Cover nested layouts, exact creation rectangles, resolution scaling, status/style flags, draw and
@@ -110,26 +426,29 @@ source WND bytes are edited and no renderer path searches for special window nam
    defaults, fields, `DATA`, and exact `END` closure. Preserve callback names and unknown tokens as
    data; never resolve a WND string to a native function pointer in the parser. `DATA` and
    per-gadget field typing are still generic (Gate 2), but nothing is dropped.
-2. **Immutable control definitions.** Decode all established status/style names, fonts, text and
-   tooltip labels, state colors/borders, image offsets, draw-data arrays, header templates, and
-   gadget-specific records. Apply explicit limits to every nesting and variable-length surface.
-   Stable reports must be sufficient to compare a modded WND without rendering it.
-3. **Bounded WND patch overlays.** Define a versioned project-owned patch format targeting one WND
+2. **Immutable control definitions (implemented).** Decode all established status/style names,
+   fonts, text and tooltip labels, state colors/borders, image offsets, draw-data arrays, header
+   templates, and gadget-specific records. Apply explicit limits to every nesting and
+   variable-length surface. Stable reports must be sufficient to compare a modded WND without
+   rendering it.
+3. **Bounded WND patch overlays (implemented).** Define a versioned project-owned patch format targeting one WND
    virtual path and exact decorated window names. Support explicit preconditions, known-field
    replacement, hide/show/enable defaults, reparent/reorder where safe, and insertion of complete
    project-owned window subtrees. Apply patches in VFS/profile then file-operation order to produce
    a new immutable definition with per-field provenance; preserve the source document unchanged.
    Missing required targets, duplicate inserted IDs, cycles, limit excess, and invalid gadget data
    are structured errors. Version 1 has no wildcards, arbitrary callbacks, or imperative code.
-4. **UI resource resolution.** Add bounded mapped-image, font/language, transition/scheme, cursor,
+4. **UI resource resolution (definitions implemented; transitions, cursors, and schemes pending).**
+   Add bounded mapped-image, font/language, transition/scheme, cursor,
    and required menu-definition subsets. Resolve CSF labels through the existing localization
    decoder and images/fonts through the VFS. Missing resources use visible placeholders and stable
    diagnostics; system-font fallback is opt-in and never used by deterministic captures.
-5. **Retained UI runtime.** Instantiate immutable definitions into an isolated menu state tree with
+5. **Retained UI runtime (implemented).** Instantiate immutable definitions into an isolated menu state tree with
    show/hide/enable, parent-relative layout, classic/modern resolution policies, clipping, z-order,
    hit testing, capture, focus, tab order, hover, press, selection, text editing, scrolling, and
    control-specific invariants. UI state is presentation state, not simulation state.
-6. **Custom `wgpu` presentation.** Render ordered colored/image quads, borders, state overlays,
+6. **Custom `wgpu` presentation (implemented).**
+   Render ordered colored/image quads, borders, state overlays,
    scissor rectangles, cursors, and shaped Unicode text over either a 2D background or an R3 scene.
    Support source alpha and explicit color-space handling, bounded atlases, batched stable draws,
    explicit transition time, and surface-free deterministic capture.

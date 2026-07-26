@@ -1,24 +1,34 @@
 //! Bounded decoders and immutable format values.
 
 mod csf;
+mod header_template_ini;
+mod language_ini;
 mod map;
 mod map_blend;
 mod map_lighting;
 mod map_scenario;
 mod map_water;
+mod mapped_image_ini;
 mod object_ini;
 mod options_ini;
 mod refpack;
 mod road_ini;
 mod terrain_ini;
+mod ui_ini;
 mod w3d;
 mod w3d_material;
 mod w3d_mesh;
 mod w3d_scene;
 mod water_ini;
 mod wnd;
+mod wnd_patch;
 
 pub use csf::{CsfError, CsfFile, CsfHeader, CsfLabel, CsfLimits, CsfString, parse_csf};
+pub use header_template_ini::{HeaderTemplate, HeaderTemplateIni, parse_header_template_ini};
+pub use language_ini::{
+    LANGUAGE_FONT_ROLES, LanguageFontDesc, LanguageFontRole, LanguageIni, ResolutionFontSizeMethod,
+    parse_language_ini,
+};
 pub use map::{
     MapBoundary, MapChunk, MapCompression, MapError, MapFile, MapHeightError, MapHeightField,
     MapLimits, MapSymbol, decode_map_height, parse_map,
@@ -41,6 +51,11 @@ pub use map_water::{
     MapPolygonArea, MapPolygonData, MapPolygonError, MapPolygonPoint, MapWaterArea, MapWaterData,
     MapWaterError, MapWaterPoint, decode_map_polygons, decode_map_water,
 };
+pub use mapped_image_ini::{
+    MAPPED_IMAGE_STATUS_NAMES, MAPPED_IMAGE_STATUS_RAW_TEXTURE,
+    MAPPED_IMAGE_STATUS_ROTATED_90_CLOCKWISE, MappedImage, MappedImageCoords, MappedImageIni,
+    parse_mapped_image_ini,
+};
 pub use object_ini::{
     ObjectDefinition, ObjectDrawKind, ObjectIni, ObjectIniError, ObjectIniLimits, ObjectModelDraw,
     parse_object_ini,
@@ -56,6 +71,7 @@ pub use road_ini::{
 pub use terrain_ini::{
     TerrainDefinition, TerrainIni, TerrainIniError, TerrainIniLimits, parse_terrain_ini,
 };
+pub use ui_ini::{UiIniDiagnostic, UiIniDiagnosticKind, UiIniError, UiIniFormat, UiIniLimits};
 pub use w3d::{W3dChunk, W3dError, W3dFile, W3dLimits, W3dPayload, parse_w3d, w3d_chunk_name};
 pub use w3d_material::{
     W3dFaceIds, W3dMapper, W3dMapperMode, W3dMaterialError, W3dMaterialIds, W3dMaterialInfo,
@@ -77,6 +93,13 @@ pub use water_ini::{
     parse_water_ini, parse_water_transparency_ini,
 };
 pub use wnd::{
-    WndDiagnostic, WndDiagnosticKind, WndDocument, WndError, WndField, WndLayoutBlock, WndLimits,
-    WndScreenRect, WndWindow, parse_wnd,
+    WND_DRAW_DATA_ENTRIES, WND_TAB_PANES, WndCallbackKind, WndCallbacks, WndColor, WndComboBoxData,
+    WndDiagnostic, WndDiagnosticKind, WndDocument, WndDrawData, WndDrawDataSlot, WndDrawEntry,
+    WndError, WndField, WndFlag, WndFont, WndGadgetData, WndLayoutBlock, WndLimits, WndListBoxData,
+    WndScreenRect, WndSliderData, WndTabControlData, WndTextColors, WndTextEntryData, WndToken,
+    WndTokenKind, WndWindow, parse_wnd,
+};
+pub use wnd_patch::{
+    PatchedWndDocument, WND_PATCH_VERSION, WndPatch, WndPatchError, WndPatchLimits,
+    WndPatchOperation, WndPatchProvenance, WndPatchStep, apply_wnd_patches, parse_wnd_patch,
 };
