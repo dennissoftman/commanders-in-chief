@@ -247,10 +247,12 @@ pub enum UiFrameItem {
         /// The slot's fill colour, absent when the control declares no draw data for the slot.
         color: Option<WndColor>,
         /// The slot's border colour, absent when the control declares no draw data for the slot.
+        ///
+        /// It applies only on the colour path: `W3DGameWinDefaultDraw` and every gadget's colour
+        /// draw outline the control before filling it, while the matching `...ImageDraw` never
+        /// does. `WIN_STATUS_BORDER` exists in `GameWindow.h` but no draw procedure reads it, so
+        /// `image_draw` alone decides whether this colour is honoured.
         border_color: Option<WndColor>,
-        /// Whether the control declares `BORDER`, which is what makes the original draw its border
-        /// and corners at all. A colour alone does not.
-        border: bool,
         /// Every image name the control declares, by slot and entry index, so a family's
         /// composition can read the slots its own draw procedure reads.
         images: UiSlotImages,
@@ -338,7 +340,6 @@ impl UiLayout {
                 slot,
                 color: entry.map(WndDrawEntry::color),
                 border_color: entry.map(WndDrawEntry::border_color),
-                border: control.status().contains(UiStatus::BORDER),
                 images: control.slot_images(),
                 image_offset: control.image_offset().unwrap_or((0, 0)),
                 family: control.family(),

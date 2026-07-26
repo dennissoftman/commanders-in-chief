@@ -261,6 +261,17 @@ impl WndColor {
     pub const fn channels(self) -> [u8; 4] {
         [self.red, self.green, self.blue, self.alpha]
     }
+
+    /// Returns whether this is the source's "no colour here" sentinel.
+    ///
+    /// `Color.h` defines `GAME_COLOR_UNDEFINED = 0x00FFFFFF` and `GameMakeColor` packs `ARGB`, so
+    /// the sentinel is exactly white with zero alpha. Every draw procedure compares against it
+    /// rather than testing alpha, and retail writes it into every unused draw-data entry, which is
+    /// why unread slots read `COLOR: 255 255 255 0, BORDERCOLOR: 255 255 255 0`.
+    #[must_use]
+    pub const fn is_undefined(self) -> bool {
+        self.red == 255 && self.green == 255 && self.blue == 255 && self.alpha == 0
+    }
 }
 
 /// A decoded `FONT = NAME: "<name>", SIZE: <size>, BOLD: <flag>;` record.

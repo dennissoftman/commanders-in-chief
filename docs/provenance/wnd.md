@@ -278,6 +278,24 @@ edge, draws a final partial piece under a clip region, and draws the two ends la
 the centre, with a `centerWidth <= 0` branch giving each end half the control. `drawButtonText` in the
 same file centres a button's text on both axes unless the control declares `SHORTCUT_BUTTON`.
 
+Both sides of that branch are implemented. The test is
+`GadgetButtonGetMiddleEnabledImage` — the *enabled* slot's entry 5, whatever the control's own state
+— and its false side is `W3DGadgetPushButtonImageDrawOne`, one image stretched from the image offset
+across the control's own size. Retail depends on it: `SkirmishGameOptionsMenu.wnd`'s eight
+`ButtonMapStartPosition` markers declare entry 0 alone. Two details of that procedure are reproduced:
+
+- Its state chain reads the *hilite* slot's entry 1 for a selected button even when the button is
+  enabled and unhilited, so `GadgetButtonGetEnabledSelectedImage` (enabled entry 1) is declared in
+  the header and drawn by no push-button procedure.
+- Because the branch tests a resolved `Image *`, a middle image whose name does not resolve reads
+  exactly like no middle image and sends the button down the one-image path. An unresolved name is
+  therefore only reported when the branch that draws it is the one taken.
+
+The source has a third path that also forces the one-image procedure, and it is deliberately not
+implemented: it tests the *state* mask against `WIN_STATUS_USE_OVERLAY_STATES` (`0x00200000`), a
+status constant far above every `WIN_STATE_` bit, so the condition cannot be true. Its own
+`DEBUG_CRASH` text describes it as a mistake being corrected at runtime.
+
 This project's implementation trims the partial piece's texture coordinates where the source sets a
 clip region — the same pixels reach the target without a state change — and that substitution is the
 only intentional divergence. It also derives one rule from what the same file does *not* do:
@@ -330,6 +348,28 @@ assigns a default procedure from the `WIN_STATUS_IMAGE` bit (`getPushButtonImage
 resolves then replaces it in `winCreateFromScript`. So a name reading as a bound draw procedure
 decides, and anything else — including the overwhelmingly common `"[None]"` — leaves the status bit
 deciding.
+
+The colour path — the branch every `...Draw` procedure takes where its `...ImageDraw` twin exists —
+has one shape wherever it appears. `W3DGameWinDefaultDraw`, `W3DGadgetPushButtonDraw`,
+`W3DGadgetCheckBoxDraw`, and `W3DGadgetComboBoxDraw` all open a one-pixel rectangle at the control's
+full bounds with the slot's border colour, then fill from one pixel inside it. Three facts fix when
+that happens, and all three were established against a real installation rather than from reading
+alone:
+
+- Each colour is tested against `GAME_COLOR_UNDEFINED`, which `Color.h` defines as `0x00FFFFFF` and
+  `GameMakeColor` packs `ARGB` — so the sentinel is exactly `255 255 255 0`, the value retail writes
+  into every unused draw-data entry. The test is that value, not the alpha channel.
+- The two colours are tested independently, so an undefined border still leaves the fill and an
+  undefined fill still leaves the outline. The fill is inset by the outline's pixel either way.
+- `WIN_STATUS_BORDER` (`0x00001000`) exists in `GameWindow.h` and **no draw procedure reads it**.
+  Nothing about a border is conditioned on it. Correspondingly, no `...ImageDraw` procedure outlines
+  anything at all: art on the image path carries its own edges.
+
+This corrects a rule recorded earlier in this project, which gated the border on `WIN_STATUS_BORDER`
+and drew it on both paths. Rendering the retail Options menu showed both halves of the error at
+once: check boxes wore a salmon `255 128 128` outline the original never draws, while the panel
+frames that divide Display, Audio, Control, and Network — colour-path windows that declare no
+`BORDER` bit — were missing entirely.
 
 Where a family's own indices declare nothing, each source procedure returns early and draws nothing.
 This project reproduces that and records a diagnostic naming the family, rather than staging a

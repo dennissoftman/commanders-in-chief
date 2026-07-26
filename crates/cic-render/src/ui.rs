@@ -440,7 +440,6 @@ impl StagedUiFrame {
                     slot,
                     color,
                     border_color,
-                    border,
                     images,
                     image_offset,
                     family,
@@ -512,24 +511,33 @@ impl StagedUiFrame {
                             }
                         }
                     } else {
-                        let fill = color.map_or([0, 0, 0, 0], channels);
-                        if fill[3] > 0 {
-                            quads += 1;
-                            staged
-                                .push_quad(*rect, [0.0; 4], fill, None, scissor, quads, limits)?;
+                        // The colour path has one shape everywhere it appears —
+                        // `W3DGameWinDefaultDraw`, `W3DGadgetPushButtonDraw`,
+                        // `W3DGadgetCheckBoxDraw`, `W3DGadgetComboBoxDraw` — a one-pixel outline
+                        // at the full rectangle, then a fill inset by that pixel whether or not the
+                        // outline drew. Both are gated on the colour differing from
+                        // `GAME_COLOR_UNDEFINED`, never on alpha and never on `WIN_STATUS_BORDER`.
+                        // The matching `...ImageDraw` procedures draw neither, which is why this
+                        // sits inside the colour branch: honouring a border on the image path
+                        // outlines controls the original leaves to their art.
+                        if let Some(edge_color) = defined_color(*border_color) {
+                            for edge in border_edges(*rect) {
+                                quads += 1;
+                                staged.push_quad(
+                                    edge, [0.0; 4], edge_color, None, scissor, quads, limits,
+                                )?;
+                            }
                         }
-                    }
-                    // The original draws a border only for a control declaring `BORDER`; a border
-                    // colour on its own is inert, and most retail controls carry one.
-                    let edge_color = border_color
-                        .map(channels)
-                        .filter(|_| *border)
-                        .filter(|color| color[3] > 0);
-                    if let Some(edge_color) = edge_color {
-                        for edge in border_edges(*rect) {
+                        if let Some(fill) = defined_color(*color) {
                             quads += 1;
                             staged.push_quad(
-                                edge, [0.0; 4], edge_color, None, scissor, quads, limits,
+                                inset(*rect),
+                                [0.0; 4],
+                                fill,
+                                None,
+                                scissor,
+                                quads,
+                                limits,
                             )?;
                         }
                     }
@@ -804,6 +812,19 @@ impl<'a> SlotBinder<'a> {
         binding
     }
 
+    /// Returns whether a slot entry has art, without remembering a name that failed to bind.
+    ///
+    /// The original resolves every declared name to an `Image *` when the layout loads, so at draw
+    /// time a name that resolved to nothing is indistinguishable from an entry that declared
+    /// nothing. A procedure that only *branches* on one of those pointers therefore branches
+    /// identically for both, and the unresolved name belongs to whichever branch actually draws it.
+    fn declares(&self, slot: WndDrawDataSlot, index: usize) -> bool {
+        self.images
+            .image(slot, index)
+            .and_then(|name| (self.bind)(name))
+            .is_some()
+    }
+
     /// Turns a family's collected pieces into a result, distinguishing "the layout declares nothing
     /// here" from "the layout declares art that would not bind".
     fn finish(self, pieces: Option<Vec<Piece>>) -> Composed {
@@ -875,8 +896,56 @@ fn stretched(
     Some(vec![(offset_rect(rect, image_offset), image)])
 }
 
-/// `W3DGadgetPushButtonImageDrawThree`.
+/// The entry `GadgetButtonGetMiddleEnabledImage` reads, which is what picks a button's procedure.
+const PUSH_BUTTON_MIDDLE_ENABLED: usize = 5;
+
+/// `W3DGadgetPushButtonImageDraw`, which chooses between two procedures.
+///
+/// The test is whether the *enabled* slot declares a middle image, whatever the control's own state
+/// is: three pieces when it does, one stretched image when it does not. Retail relies on the second
+/// branch — a start-position marker declares entry 0 alone — so treating a missing middle as "this
+/// button draws nothing" hides controls the original shows.
+///
+/// The source has a third path that also forces the one-image procedure, but it cannot be reached:
+/// it tests the *state* mask against `WIN_STATUS_USE_OVERLAY_STATES`, a status constant far above
+/// any `WIN_STATE_` bit, so the condition is never true. It is left unimplemented deliberately.
 fn push_button(
+    binder: &mut SlotBinder<'_>,
+    rect: UiRect,
+    image_offset: (i32, i32),
+    state: UiDrawState,
+    slot: WndDrawDataSlot,
+) -> Option<Vec<Piece>> {
+    if binder.declares(WndDrawDataSlot::Enabled, PUSH_BUTTON_MIDDLE_ENABLED) {
+        push_button_three(binder, rect, image_offset, state, slot)
+    } else {
+        push_button_one(binder, rect, image_offset, state)
+    }
+}
+
+/// `W3DGadgetPushButtonImageDrawOne`: one image covering the control from its image offset.
+///
+/// Its state chain is not the plain slot selection. A selected button reads the hilite slot's
+/// entry 1 even when it is enabled and unhilited, so `GadgetButtonGetEnabledSelectedImage` —
+/// enabled entry 1 — exists in the header but no push-button procedure draws it here.
+fn push_button_one(
+    binder: &mut SlotBinder<'_>,
+    rect: UiRect,
+    image_offset: (i32, i32),
+    state: UiDrawState,
+) -> Option<Vec<Piece>> {
+    let (slot, index) = match (state.enabled, state.hilited, state.selected) {
+        (false, _, selected) => (WndDrawDataSlot::Disabled, usize::from(selected)),
+        (true, true, selected) => (WndDrawDataSlot::Hilite, usize::from(selected)),
+        (true, false, true) => (WndDrawDataSlot::Hilite, 1),
+        (true, false, false) => (WndDrawDataSlot::Enabled, 0),
+    };
+    let image = binder.image(slot, index)?;
+    Some(vec![(offset_rect(rect, image_offset), image)])
+}
+
+/// `W3DGadgetPushButtonImageDrawThree`.
+fn push_button_three(
     binder: &mut SlotBinder<'_>,
     rect: UiRect,
     image_offset: (i32, i32),
@@ -1563,6 +1632,28 @@ fn channels(color: cic_formats::WndColor) -> [u8; 4] {
     color.channels()
 }
 
+/// Returns a slot colour's channels when the source would treat it as defined and visible.
+///
+/// A slot the control never declared has no colour at all; a declared one is honoured unless it is
+/// `GAME_COLOR_UNDEFINED`. A defined but fully transparent colour is skipped because it cannot
+/// change a pixel, so staging it would only inflate the quad count.
+fn defined_color(color: Option<cic_formats::WndColor>) -> Option<[u8; 4]> {
+    color
+        .filter(|color| !color.is_undefined())
+        .map(channels)
+        .filter(|channels| channels[3] > 0)
+}
+
+/// Returns the rectangle the source's colour fill covers: one pixel inside the outline on each edge.
+const fn inset(rect: UiRect) -> UiRect {
+    UiRect {
+        x: rect.x + 1,
+        y: rect.y + 1,
+        width: rect.width.saturating_sub(2),
+        height: rect.height.saturating_sub(2),
+    }
+}
+
 /// Returns the four one-pixel edges of a rectangle, in top, bottom, left, right order.
 const fn border_edges(rect: UiRect) -> [UiRect; 4] {
     [
@@ -1711,8 +1802,11 @@ mod tests {
         wanted
     }
 
-    /// The panel stages one fill plus its four border edges before any child.
-    const PANEL_QUADS: usize = 5;
+    /// The panel stages one stretched image before any child.
+    ///
+    /// It declares `BORDER` and a border colour, and neither is staged: the panel is on the image
+    /// path, where the original's draw procedures outline nothing.
+    const PANEL_QUADS: usize = 1;
 
     /// Returns the quads a named control stages, with the panel's own removed.
     fn control_quads(name: &str) -> Vec<(i32, i32, i32, i32)> {
@@ -1732,6 +1826,14 @@ mod tests {
         assert_eq!(pieces[9], (102, 20, 8, 40));
         assert_eq!(pieces[10], (20, 20, 10, 40));
         assert_eq!(pieces[11], (110, 20, 10, 40));
+    }
+
+    #[test]
+    fn a_button_declaring_no_middle_draws_one_image_over_the_whole_control() {
+        // `W3DGadgetPushButtonImageDrawOne` stretches entry 0 from the image offset to the offset
+        // corner, so the control keeps its size and simply moves. Retail's start-position markers
+        // are this shape.
+        assert_eq!(control_quads("ButtonOneSynth"), [(132, 23, 60, 40)]);
     }
 
     #[test]
@@ -1860,25 +1962,138 @@ mod tests {
         assert!(colored[0].color()[3] > 0.9);
     }
 
-    #[test]
-    fn an_unbound_image_stages_a_visible_placeholder_and_reports_it() {
+    /// Stages the isolated push button with one image name refused, as an unresolved mapped image
+    /// would be.
+    fn button_without(missing: &'static str) -> StagedUiFrame {
         let mut layout = layout(800, 600);
         isolate(&mut layout, "ButtonSynth");
-        let frame = layout.frame(UiClipPolicy::None);
-        let staged = StagedUiFrame::from_frame(
-            &frame,
+        StagedUiFrame::from_frame(
+            &layout.frame(UiClipPolicy::None),
             [800, 600],
             UiTextPolicy::Shape,
             UiStagingLimits::default(),
-            &|name| (name != "SynthMiddle").then(|| bind_synth(name)).flatten(),
+            &|name| (name != missing).then(|| bind_synth(name)).flatten(),
         )
-        .expect("stage frame");
+        .expect("stage frame")
+    }
+
+    #[test]
+    fn an_unbound_image_stages_a_visible_placeholder_and_reports_it() {
+        // The end is a piece the three-piece path draws, so its absence is a resource failure.
+        let staged = button_without("SynthEnd");
         assert!(staged.diagnostics().iter().any(|diagnostic| matches!(
             diagnostic.kind(),
-            UiStagingDiagnosticKind::UnboundImage { name } if &**name == "SynthMiddle"
+            UiStagingDiagnosticKind::UnboundImage { name } if &**name == "SynthEnd"
         )));
         // One placeholder covers the whole control, because piece geometry needs the bound size.
         assert_eq!(quads(&staged).split_off(PANEL_QUADS), [(20, 20, 100, 40)]);
+    }
+
+    #[test]
+    fn a_button_whose_middle_does_not_bind_falls_back_to_the_one_image_path() {
+        // The middle is not a piece here, it is the branch condition, and the original branches on
+        // a resolved `Image *`. A name that does not resolve reads as no middle, so the button
+        // takes the one-image path and draws its enabled entry 0 stretched — no failure to report.
+        let staged = button_without("SynthMiddle");
+        assert_eq!(staged.diagnostics(), []);
+        assert_eq!(quads(&staged).split_off(PANEL_QUADS), [(20, 20, 100, 40)]);
+    }
+
+    /// Builds a one-window layout with the given `STATUS` and entry-0 colours, and returns its
+    /// staged quads.
+    fn colour_path_quads(
+        status: &str,
+        color: &str,
+        border_color: &str,
+    ) -> Vec<(i32, i32, i32, i32)> {
+        let mut entries = format!("IMAGE: NoImage, COLOR: {color}, BORDERCOLOR: {border_color}");
+        for _ in 1..9 {
+            entries.push_str(", IMAGE: NoImage, COLOR: 255 255 255 0, BORDERCOLOR: 255 255 255 0");
+        }
+        let source = format!(
+            "FILE_VERSION = 2;\n\
+             STARTLAYOUTBLOCK\n\
+               LAYOUTINIT = \"[None]\";\n\
+               LAYOUTUPDATE = \"[None]\";\n\
+               LAYOUTSHUTDOWN = \"[None]\";\n\
+             ENDLAYOUTBLOCK\n\
+             WINDOW\n\
+               WINDOWTYPE = USER;\n\
+               SCREENRECT = UPPERLEFT: 10 20,\n\
+                            BOTTOMRIGHT: 60 50,\n\
+                            CREATIONRESOLUTION: 800 600;\n\
+               NAME = \"SynthColor.wnd:Plain\";\n\
+               STATUS = {status};\n\
+               ENABLEDDRAWDATA = {entries};\n\
+             END\n"
+        );
+        let document = parse_wnd(source.as_bytes(), WndLimits::default()).expect("decode layout");
+        assert!(
+            document.diagnostics().is_empty(),
+            "{:?}",
+            document.diagnostics()
+        );
+        let layout = UiLayout::instantiate(
+            &document,
+            UiPresentation::new(
+                UiViewport::new(800, 600).expect("positive viewport"),
+                UiScalePolicy::Classic,
+            ),
+            UiLimits::default(),
+        )
+        .expect("instantiate layout");
+        quads(&stage(&layout.frame(UiClipPolicy::None), [800, 600]))
+    }
+
+    #[test]
+    fn the_colour_path_outlines_the_control_then_fills_one_pixel_inside_it() {
+        // `W3DGameWinDefaultDraw` opens the rectangle with the border colour, then fills from
+        // `origin + 1` to `origin + size - 1` whether or not the outline drew.
+        let quads = colour_path_quads("ENABLED", "10 20 30 255", "1 2 3 255");
+        assert_eq!(
+            quads,
+            [
+                (10, 20, 50, 1),
+                (10, 49, 50, 1),
+                (10, 20, 1, 30),
+                (59, 20, 1, 30),
+                (11, 21, 48, 28),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_colour_path_skips_whichever_of_its_two_colours_is_undefined() {
+        // `GAME_COLOR_UNDEFINED` is white with zero alpha, and each colour is tested separately, so
+        // an undefined border still leaves the fill and an undefined fill still leaves the outline.
+        assert_eq!(
+            colour_path_quads("ENABLED", "10 20 30 255", "255 255 255 0"),
+            [(11, 21, 48, 28)]
+        );
+        assert_eq!(
+            colour_path_quads("ENABLED", "255 255 255 0", "1 2 3 255"),
+            [
+                (10, 20, 50, 1),
+                (10, 49, 50, 1),
+                (10, 20, 1, 30),
+                (59, 20, 1, 30),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_image_path_never_outlines_a_control_however_it_declares_its_border() {
+        // The `IMAGE` bit selects `...ImageDraw`, and no image draw procedure outlines anything.
+        // `BORDER` is defined in `GameWindow.h` but read by no draw procedure, so declaring it
+        // changes nothing either way. Entry 0 names no image, so the family composes nothing.
+        for status in ["ENABLED+IMAGE", "ENABLED+IMAGE+BORDER"] {
+            assert_eq!(colour_path_quads(status, "10 20 30 255", "1 2 3 255"), []);
+        }
+        // And the same border colour on the colour path is honoured even without `BORDER`.
+        assert_eq!(
+            colour_path_quads("ENABLED+BORDER", "255 255 255 0", "1 2 3 255").len(),
+            4
+        );
     }
 
     #[test]
@@ -1888,9 +2103,17 @@ mod tests {
 
         assert!(staged.vertices()[0].is_textured());
         assert_eq!(staged.batches()[0].page(), Some(1));
-        // The panel declares a border, so four one-pixel untextured edges follow its fill and
-        // break the batch away from the textured page.
+        // The fixture's families draw from more than one page, so the run cannot be one batch.
         assert!(staged.batches().len() >= 2);
+        assert!(
+            staged
+                .batches()
+                .iter()
+                .filter_map(|batch| batch.page())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                >= 2
+        );
         assert_eq!(
             staged.indices().len(),
             staged

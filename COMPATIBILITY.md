@@ -76,7 +76,8 @@ observable behavior.
 | UI runtime | Retained controls, layout, focus, and input | implemented | Source-exact `parseScreenRect`, layered hit testing, focus, and control invariants; 480 instantiations over both corpora with zero diagnostics |
 | UI runtime | Menu stack and safe callback routing | unknown | Planned R4 gate 7; arbitrary callback execution forbidden |
 | UI renderer | Custom deterministic `wgpu` WND presentation | implemented | Batched quads, clips, colour space, and shaped text; installed main-menu/options/skirmish captures byte-identical across runs |
-| UI renderer | Per-family gadget draw-data composition | implemented | Every established family composed from its `Gadget*.h` indices and `W3DGadget*ImageDraw` geometry; synthetic all-families geometry tests and a repeatable capture, retail comparison beyond push buttons still open |
+| UI renderer | Per-family gadget draw-data composition | verified | Every established family composed from its `Gadget*.h` indices and `W3DGadget*ImageDraw` geometry; synthetic all-families geometry tests plus every installed layout in both editions rendered at two viewports, with each remaining diagnostic traced to retail's own data |
+| UI runtime | Gadget child creation (combo-box edit/button/list, list-box scroll bar) | unknown | The source builds these as child windows at gadget creation; `cic-ui` builds none, so installed combo boxes render as bare backgrounds |
 | UI shell | Working main-menu navigation | unknown | Planned user-owned Main Menu completion artifact |
 | UI shell | Modern resolution and refresh-rate Settings path | unknown | Planned patched Options WND + injected mode-catalog/rollback tests |
 | UI shell | Skirmish/map selection with R3 preview and spawn candidates | unknown | Planned non-simulating R4 compatibility harness |

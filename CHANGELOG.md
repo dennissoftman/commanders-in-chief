@@ -193,6 +193,26 @@ land under the active milestone heading.
 
 ### Fixed
 
+- Fixed the whole-control border being drawn from the wrong rule, which was both adding outlines the
+  original never draws and omitting ones it does. This project had gated the border on the
+  `WIN_STATUS_BORDER` status bit and drawn it whichever draw path a control took. At the pinned
+  revision no draw procedure reads that bit at all, and the border belongs to the colour path alone:
+  `W3DGameWinDefaultDraw` and each gadget's colour draw open a one-pixel rectangle at the control's
+  bounds and then fill one pixel inside it, while every matching `...ImageDraw` outlines nothing and
+  leaves edges to the art. Each colour is compared against `GAME_COLOR_UNDEFINED` — `0x00FFFFFF`,
+  which is exactly the `255 255 255 0` retail writes into unused draw-data entries — and the fill and
+  outline are tested independently, so one being undefined still leaves the other. Rendering the
+  retail Options menu showed both halves of the old error at once: every check box wore a salmon
+  outline, and the panel frames dividing Display, Audio, Control, and Network were missing because
+  those windows take the colour path without declaring `BORDER`.
+- Fixed push buttons that declare a single image drawing nothing.
+  `W3DGadgetPushButtonImageDraw` chooses between two procedures on whether the *enabled* slot
+  declares a middle image, and only the three-piece side was implemented; the other side,
+  `W3DGadgetPushButtonImageDrawOne`, stretches one image across the control from its image offset.
+  Retail depends on it — `SkirmishGameOptionsMenu.wnd`'s eight `ButtonMapStartPosition` markers
+  declare entry 0 alone and were invisible, and now draw. Because the original branches on a
+  resolved image pointer, a middle image whose name does not resolve reads as no middle and takes
+  the same path, so an unresolved name is reported only when the branch that draws it is taken.
 - Fixed images being tinted by their slot's `COLOR`. `winDrawImage` takes no colour - that field
   belongs to the colour-only fill path - and retail frequently leaves an unused red there beside a
   valid image, so every textured control rendered red. A control declaring `IMAGE` whose slot has no

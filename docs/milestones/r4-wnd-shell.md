@@ -182,12 +182,75 @@ no retail layout declares one: `TABWIDTH` and `TABHEIGHT` are read raw and never
 strip does not follow the creation-resolution scaling its own control does, and the strip's origin
 comes from `GadgetTabControlComputeTabRegion`'s edge and orientation arithmetic.
 
-Verification is synthetic: an original layout declaring every composed family
+Verification is synthetic *and* now retail. An original layout declaring every composed family
 (`crates/cic-render/tests/fixtures/synthetic-gadgets.wnd`) drives per-family geometry assertions and
 a surface-free capture that is byte-identical across runs, and the capture was rendered and looked
-at rather than only asserted. Retail verification of these families is still open — this pass had no
-installation available — so the earlier corpus-wide numbers still describe push buttons and
-backgrounds only.
+at rather than only asserted.
+
+Retail verification then rendered every layout in both editions, at 1280x720 and 1920x1080, with a
+user-owned font. It found two presentation bugs that the synthetic fixture could not have shown,
+because both depend on how retail actually writes its layouts rather than on any family's geometry.
+
+The first was the whole-control border. This project had gated it on `WIN_STATUS_BORDER` and drawn
+it on both draw paths. The pinned source does neither: no draw procedure reads that bit, and the
+border belongs to the colour path alone — `W3DGameWinDefaultDraw`, `W3DGadgetPushButtonDraw`,
+`W3DGadgetCheckBoxDraw`, and `W3DGadgetComboBoxDraw` each open a one-pixel rectangle and then fill
+one pixel inside it, while every matching `...ImageDraw` outlines nothing. The retail Options menu
+showed both halves of the error together: check boxes wore a salmon outline the original never
+draws, and the panel frames dividing Display, Audio, Control, and Network were missing, because
+those windows take the colour path without declaring `BORDER`. The colour comparison is against
+`GAME_COLOR_UNDEFINED` — `0x00FFFFFF`, exactly the `255 255 255 0` retail writes into every unused
+entry — and the fill and the outline are tested separately.
+
+The second was a push-button path that had been read but not implemented.
+`W3DGadgetPushButtonImageDraw` branches on whether the *enabled* slot declares a middle image, and
+its false side, `W3DGadgetPushButtonImageDrawOne`, stretches one image across the control. Retail
+depends on it: `SkirmishGameOptionsMenu.wnd`'s eight `ButtonMapStartPosition` markers declare entry
+0 alone, and drew nothing at all. They now draw. Because the branch tests a resolved `Image *`, a
+middle image whose *name* does not resolve reads as no middle and takes the same path, so an
+unresolved name is reported only when the branch that draws it is the one taken.
+
+The corpus numbers below are the completion evidence for the composed families, and unlike the
+earlier figures they cover every family rather than push buttons and backgrounds.
+
+| Measure | Zero Hour | Generals |
+| --- | --- | --- |
+| Layouts rendered | 79 of 80 | 77 of 78 |
+| Staged quads at 1280x720 | 11,021 | 6,624 |
+| Staged quads at 1920x1080 | 16,386 | 9,509 |
+| Batches | 268 | 261 |
+| Shaped text runs | 626 | 650 |
+| Layouts with no diagnostic at all | 61 | 61 |
+| Diagnostics | 141 | 129 |
+
+Only the quad count moves with the viewport, which is what a repeating-piece composition should do;
+batches, text runs, and the complete diagnostic list are identical at both viewports in both
+editions. Rendering the whole Zero Hour corpus twice produced the same 79 capture hashes both times.
+
+Every layout renders except `Window/ReplayControl.wnd` in both editions, and that one is not a
+failure of the renderer: its single root declares `HIDDEN`, so the whole tree is skipped and the
+tool refuses to write an empty capture rather than emit a blank PNG.
+
+Every remaining diagnostic was traced to a fact about retail data rather than to this layer:
+
+- `UnboundImage` names an image no shipped INI defines — `PushButtonEnabled`, `StaticTextEnabled`,
+  `ProgressBarEnabledLeftEnd`, the twelve `*General_slvr` portraits — which is the same retail gap
+  Gate 4 measured, now reaching the renderer as a visible placeholder.
+- `UncomposedArt` on a push button is the source's own early return. Zero Hour's thirteen are
+  `ChallengeMenu.wnd`'s general-portrait buttons and one in `GeneralsExpPoints.wnd`, which declare
+  art in the disabled slot only and take their enabled portrait from challenge-mode code. Generals
+  has none.
+- `UncomposedArt` on `Simple` — 105 in Zero Hour, 102 in Generals — is overwhelmingly combo boxes
+  and list boxes, and it points at the one substantial gap this pass found.
+
+That gap is gadget child creation, and it belongs to the retained runtime rather than to
+presentation. A combo box's own draw procedure paints only a background and a title; its edit box,
+drop-down button, and list box are separate child windows that `GadgetComboBoxCreate` builds when
+the gadget is created, and a list box's scroll bar is the same. The WND already carries their art —
+that is what `COMBOBOXEDITBOX*DRAWDATA`, `COMBOBOXDROPDOWNBUTTON*DRAWDATA`, `COMBOBOXLISTBOX*DRAWDATA`,
+and the `LISTBOX*UPBUTTON`/`DOWNBUTTON`/`SLIDER` records are for — and `cic-ui` instantiates none of
+it, so `OptionsMenu.wnd`'s Resolution and Detail combos render as bare black rectangles. Nothing in
+the presentation layer can fix that; the children have to exist first.
 
 One compatibility fact belongs to Gates 7 and 8 rather than to presentation: rendering
 `Menus/MainMenu.wnd` shows every subpanel at once, with labels overlapping. Retail hides those

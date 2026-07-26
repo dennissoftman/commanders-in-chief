@@ -87,11 +87,24 @@ procedure at creation and a resolvable `DRAWCALLBACK` replaces it — and a fami
 at its own indices draws nothing and reports it, matching the source's early return, instead of
 painting a placeholder over a control retail never shows.
 
-Verification for these families is synthetic only: an original all-families layout drives per-family
-geometry assertions and a byte-identical surface-free capture. **Retail verification of the newly
-composed families is the next verified step** — the earlier corpus-wide numbers cover push buttons
-and backgrounds only, and this pass had no installation available to render `OptionsMenu.wnd` or
-`SkirmishGameOptionsMenu.wnd` against.
+Those families are now verified against a real installation, not only synthetically: every layout in
+both editions renders at 1280x720 and 1920x1080, 79 of 80 in Zero Hour and 77 of 78 in Generals,
+with the one exception being a layout whose single root declares `HIDDEN`. That pass found and fixed
+two presentation bugs — the whole-control border, which was gated on a status bit the source never
+reads and drawn on the image path where the source draws none, and the missing
+`W3DGadgetPushButtonImageDrawOne` path, without which retail's eight skirmish start-position markers
+were invisible. Every remaining diagnostic traces to retail's own data: an image no shipped INI
+defines, or a control the source itself draws nothing for. Full numbers are in
+[docs/milestones/r4-wnd-shell.md](docs/milestones/r4-wnd-shell.md).
+
+**Gadget child creation is the next verified step**, and it is what that verification turned up. A
+combo box's draw procedure paints only a background and a title; its edit box, drop-down button, and
+list box are separate child windows `GadgetComboBoxCreate` builds at creation, and a list box's
+scroll bar is the same. `cic-ui` builds none of them, so `OptionsMenu.wnd`'s Resolution and Detail
+combos render as bare black rectangles and roughly 100 controls per edition report uncomposed art.
+The layouts already carry the children's art in the `COMBOBOXEDITBOX*`, `COMBOBOXDROPDOWNBUTTON*`,
+`COMBOBOXLISTBOX*`, and `LISTBOX*UPBUTTON`/`DOWNBUTTON`/`SLIDER` records, so this is retained-runtime
+work in `cic-ui` rather than anything the presentation layer can fix.
 
 Two smaller pieces remain queued behind it: the rest of Gate 4 — bounded `WindowTransition`,
 `MouseCursor`, and `ShellMenuScheme` subsets, which live in the same INI family and reuse the shared
