@@ -5,7 +5,8 @@
 //!
 //! `Object`, `ObjectReskin`, `Draw`, `DefaultConditionState`, `Model`, and `Scale` field meanings
 //! are derived from `W3DModelDraw.cpp`, `W3DModelDraw.h`, and `INI.cpp`; `W3DTreeDraw`'s flat
-//! `ModelName` and `TextureName` fields are derived from `W3DTreeDraw.cpp` and `.h`. All named
+//! `ModelName` and `TextureName` fields are derived from `W3DTreeDraw.cpp` and `.h`. The one
+//! decoded `KindOf` flag, `SHRUBBERY` ("tree, bush, etc."), is derived from `KindOf.h`. All named
 //! sources are from `GeneralsGameCode` revision `9f7abb866f5afd446db14149979e744c7216baaf`,
 //! licensed under GPL-3.0-or-later with Electronic Arts Section 7 terms. Full notices are recorded
 //! in `docs/provenance/map.md`. The bounded non-executing extraction state machine and resource
@@ -94,6 +95,7 @@ pub struct ObjectDefinition {
     name: Vec<u8>,
     reskin_of: Option<Vec<u8>>,
     draws: Vec<ObjectModelDraw>,
+    kind_of_shrubbery: Option<bool>,
 }
 
 impl ObjectDefinition {
@@ -110,6 +112,21 @@ impl ObjectDefinition {
     #[must_use]
     pub fn draws(&self) -> &[ObjectModelDraw] {
         &self.draws
+    }
+
+    /// Returns whether this definition's own `KindOf` declares the `SHRUBBERY` flag, or `None`
+    /// when it declares no `KindOf` at all.
+    ///
+    /// `SHRUBBERY` is the engine's own "tree, bush, etc." classification. `None` is distinct from
+    /// `Some(false)`: shipped tree templates are `ObjectReskin` blocks that restate only their
+    /// `Draw`, so an undeclared flag must be inherited from the reskin base rather than read as a
+    /// denial. Walking that chain is caller policy, as it is for [`Self::draws`].
+    ///
+    /// Only this one flag is decoded. The rest of `KindOf` selects gameplay and simulation
+    /// behavior, which stays an intentional, documented architectural exclusion.
+    #[must_use]
+    pub const fn kind_of_shrubbery(&self) -> Option<bool> {
+        self.kind_of_shrubbery
     }
 }
 
@@ -164,6 +181,7 @@ struct ActiveObject {
     name: Vec<u8>,
     reskin_of: Option<Vec<u8>>,
     draws: Vec<ObjectModelDraw>,
+    kind_of_shrubbery: Option<bool>,
 }
 
 #[derive(Debug)]
@@ -396,6 +414,16 @@ pub fn parse_object_ini(
             }
             continue;
         }
+        // `KindOf` lives in the object body, not a `Draw` body, so it is only read while no draw
+        // is open. Restricting it this way also keeps an unexpected in-draw `KindOf` reportable as
+        // an unrecognized draw field instead of being quietly consumed here.
+        if active_draw.is_none() && field_eq(line, b"KindOf") {
+            let value = field_value(line).unwrap_or_default();
+            if let Some(object) = active_object.as_mut() {
+                object.kind_of_shrubbery = Some(kind_of_sets_shrubbery(value));
+            }
+            continue;
+        }
         let Some(draw) = active_draw.as_mut() else {
             continue;
         };
@@ -521,6 +549,7 @@ fn parse_object_header(
         name: name.to_vec(),
         reskin_of,
         draws: Vec::new(),
+        kind_of_shrubbery: None,
     })
 }
 
@@ -558,6 +587,7 @@ fn finish_object(
         name: object.name,
         reskin_of: object.reskin_of,
         draws: object.draws,
+        kind_of_shrubbery: object.kind_of_shrubbery,
     });
     Ok(())
 }
@@ -611,6 +641,30 @@ fn is_known_draw_field(field: &[u8]) -> bool {
     ]
     .iter()
     .any(|candidate| field.eq_ignore_ascii_case(candidate))
+}
+
+/// Returns whether a `KindOf` value list leaves the `SHRUBBERY` flag set.
+///
+/// Tokens are whitespace-separated and matched case-insensitively. A leading `+` (set) or `-`
+/// (clear) is honored so a mod that toggles the flag instead of restating the whole list still
+/// classifies correctly; the shipped Generals and Zero Hour nature data use no prefixed tokens.
+/// That prefix tolerance is project-authored rather than source-derived.
+fn kind_of_sets_shrubbery(value: &[u8]) -> bool {
+    let mut set = false;
+    for token in value
+        .split(u8::is_ascii_whitespace)
+        .filter(|token| !token.is_empty())
+    {
+        let (clears, name) = match token.first() {
+            Some(b'+') => (false, &token[1..]),
+            Some(b'-') => (true, &token[1..]),
+            _ => (false, token),
+        };
+        if name.eq_ignore_ascii_case(b"SHRUBBERY") {
+            set = !clears;
+        }
+    }
+    set
 }
 
 fn token_eq(line: &[u8], expected: &[u8]) -> bool {
@@ -684,6 +738,54 @@ mod tests {
             parsed.definitions()[0].draws()[0].scale().to_bits(),
             1.0_f32.to_bits()
         );
+    }
+
+    #[test]
+    fn decodes_shrubbery_kind_of_and_distinguishes_undeclared_from_denied() {
+        // Mirrors how both editions actually spell foliage: the base object carries `KindOf` and
+        // the shipped tree reskins restate only their `Draw`, so an undeclared flag must stay
+        // `None` for the caller to inherit rather than collapsing to `Some(false)`.
+        let bytes = b"Object GenericTree\n  Draw = W3DModelDraw ModuleTag_01\n    DefaultConditionState\n      Model = PTDogwod01\n    End\n  End\n  EditorSorting    = SHRUBBERY\n  KindOf           = SHRUBBERY IMMOBILE IGNORED_IN_GUI\nEnd\nObjectReskin TreeDogwood3 GenericTree\n  Draw = W3DModelDraw ModuleTag_01\n    DefaultConditionState\n      Model = PTDogwod03\n    End\n  End\nEnd\nObject RockLarge\n  Draw = W3DModelDraw ModuleTag_01\n    DefaultConditionState\n      Model = PMRock01\n    End\n  End\n  KindOf = IMMOBILE\nEnd\nObject NoKindOfAtAll\n  Draw = W3DModelDraw ModuleTag_01\n    DefaultConditionState\n      Model = PMThing\n    End\n  End\nEnd\n";
+        let parsed = parse_object_ini(bytes, ObjectIniLimits::default()).expect("object INI");
+        let by_name = |name: &[u8]| {
+            parsed
+                .definitions()
+                .iter()
+                .find(|definition| definition.name_bytes() == name)
+                .expect("definition")
+        };
+        assert_eq!(by_name(b"GenericTree").kind_of_shrubbery(), Some(true));
+        assert_eq!(by_name(b"TreeDogwood3").kind_of_shrubbery(), None);
+        assert_eq!(by_name(b"RockLarge").kind_of_shrubbery(), Some(false));
+        assert_eq!(by_name(b"NoKindOfAtAll").kind_of_shrubbery(), None);
+        // `EditorSorting = SHRUBBERY` sits beside the real flag and must not be mistaken for it.
+        assert_eq!(
+            by_name(b"GenericTree").draws()[0].kind(),
+            ObjectDrawKind::Model
+        );
+        // `KindOf` is an object-body field, not a draw-body one, so it is not diagnosed.
+        assert!(parsed.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn shrubbery_kind_of_is_case_insensitive_and_honors_toggle_prefixes() {
+        let parse = |body: &[u8]| {
+            let mut bytes = b"Object Probe\n  ".to_vec();
+            bytes.extend_from_slice(body);
+            bytes.extend_from_slice(b"\nEnd\n");
+            parse_object_ini(&bytes, ObjectIniLimits::default())
+                .expect("object INI")
+                .definitions()[0]
+                .kind_of_shrubbery()
+        };
+        assert_eq!(parse(b"KindOf = shrubbery immobile"), Some(true));
+        assert_eq!(parse(b"kindof = SHRUBBERY"), Some(true));
+        assert_eq!(parse(b"KindOf = IMMOBILE +SHRUBBERY"), Some(true));
+        assert_eq!(parse(b"KindOf = SHRUBBERY -SHRUBBERY"), Some(false));
+        assert_eq!(parse(b"KindOf = NONE"), Some(false));
+        assert_eq!(parse(b"KindOf ="), Some(false));
+        // A different flag that merely contains the word must not match.
+        assert_eq!(parse(b"KindOf = NOT_SHRUBBERY"), Some(false));
     }
 
     #[test]

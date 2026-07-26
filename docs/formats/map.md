@@ -405,6 +405,14 @@ breeze with explicit time, a stable placement-ID family, and bounded source rand
 not execute `SET_TREE_SWAY`; custom scripted wind remains decoded data until R5 owns script
 execution. Additional unsupported draw modules remain explicit diagnostics.
 
+Which objects sway is a presentation policy, not a decoded property. The retail client sways only
+objects whose draw module is `W3DTreeDraw`, which Zero Hour added for its optimized client-side
+tree renderer; Generals draws the same trees with `W3DModelDraw` and so has no swaying foliage at
+all. This project instead keys sway off `KindOf = SHRUBBERY`, the engine's own "tree, bush, etc."
+classification, which both editions carry. Because shipped tree templates are `ObjectReskin` blocks
+that restate only their `Draw`, the flag is resolved by walking `ObjectReskin` bases until one
+declares a `KindOf`. This is a deliberate divergence recorded in COMPATIBILITY.md.
+
 ### Playable-boundary presentation
 
 The first positive signed height-field boundary is presented as a renderer-only translucent fence.
