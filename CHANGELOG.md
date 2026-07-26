@@ -64,6 +64,19 @@ land under the active milestone heading.
 
 ### Added
 
+- Added the transition runtime (`UiTransitionHandler`), which runs the decoded groups over the retained
+  shell: one current group, one queued behind it, and the two that still have something to draw, with
+  set, reverse, remove, skip, and fire-once semantics. Timing belongs to the caller — the source
+  multiplies its frame pacer's ratio by the user's transition-speed preference, and this takes that
+  scale as an argument — and every whole frame the accumulator crosses is stepped, so a discrete state
+  machine cannot skip a state at any present rate. All fifteen styles are implemented, including the
+  three that pair with a companion window and the two that shorten their own length from the text they
+  animate. Draws are renderer-neutral records; `cic-render` does not execute them yet, so transitions
+  run and report but do not reach a surface.
+- Added `cic-inspect ui-transitions --run`, which arms every group in a transition file, loads the
+  layouts its window names point at, steps it to completion, and reports what resolved, how long it
+  took, what it drew, and every observation. Both installed editions resolve every window of every
+  group: 379 named windows across Zero Hour's 56 groups and 377 across Generals' 55, none unresolved.
 - Added a retained shell stack (`UiShell`) reproducing the original's sixteen-screen pseudo-stack:
   push, pop, immediate pop, show-shell, hide-shell, hiding every screen, updates from the stack top
   downwards, and a draw order separate from the stack so bringing a screen forward does not change
@@ -371,6 +384,13 @@ land under the active milestone heading.
 
 ### Fixed
 
+- Two source conditions that stop a transition group finishing are now reported instead of hanging
+  silently. A group naming a window no loaded layout carries never finishes, because the arm that
+  would set the flag tests the window first. And `TYPETEXT` cannot finish when its label is under
+  thirty characters: it finishes only on the state numbered by its declared length, while arming
+  shortens that length to the character count and the per-window frame filter refuses anything past
+  it. That is four retail groups in each edition — the difficulty screen's label. `COUNTUP` shortens
+  identically and does finish, thanks to one extra assignment `TYPETEXT` lacks.
 - Hit testing searched top-level windows and children in file order, but the original's window manager
   links every new window at the head of its list, so it tests the last window in the file first — which
   is also the front-most one, since drawing runs from the tail backwards. Overlapping siblings

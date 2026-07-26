@@ -129,17 +129,35 @@ its list, so the original tests the last window in the file first — which is a
 since `winRepaint` draws from the tail backwards. Only overlapping siblings could tell the difference,
 which is why the Gate 6 sweeps never surfaced it.
 
-**Gate 7's transition runtime is the next verified step**: driving the decoded groups' current,
-pending, and draw-group scheduling, per-window frame delays, reverse, skip, and fire-once semantics,
-and each style's hide/show state machine. After it, Gate 8's main-menu artifact — which the shell
-stack has now unblocked, since rendering `MainMenu.wnd` still shows every subpanel at once because
-retail hides them from menu code rather than through `STATUS`.
+The transition runtime completed Gate 7. `UiTransitionHandler` reproduces the handler's scheduling —
+current, pending, and the two draw groups, set/reverse/remove, fire-once, and the accumulator that
+steps every whole frame it crosses so a discrete state machine cannot skip one — over each of the
+fifteen styles' own per-frame machine of hidden-state changes and draw states. Time is the caller's, so
+a capture advances exactly one frame with no clock involved. `cic-inspect ui-transitions --run` arms
+every group, loads the layouts its window names point at, and steps it to completion: every window of
+every retail group resolves, 0 unresolved of 379 named in Zero Hour and 377 in Generals, and the sweep
+is byte-identical across runs.
 
-Two smaller pieces remain queued alongside it. The rest of Gate 4 is bounded `MouseCursor` and
-`ShellMenuScheme` subsets, which live in the same INI family and reuse the shared lexer. And the
-ornamental border is unimplemented: `WIN_STATUS_BORDER` makes the window manager tile a frame from
-hardcoded `BorderTop`/`BorderCorner__`-style mapped images, which is a different border from the
-colour-path outline and is drawn by no draw procedure.
+Building it found two source conditions, both now reported where they happen. A group naming a window
+no loaded layout carries never finishes, because the arm that would set the flag tests the window
+first. And `TYPETEXT` cannot finish when its label is under thirty characters: it finishes only on the
+state numbered by its declared length, while arming shortens that length to the character count and
+the per-window frame filter refuses anything past it. That is the four unfinished groups in each
+edition. `COUNTUP` shortens identically and does finish, thanks to one extra assignment `TYPETEXT`
+lacks.
+
+**Gate 8's main-menu artifact is the next verified step**: loading the user-owned `Menus/MainMenu.wnd`
+with its images, fonts, and labels, and driving hover, focus, click, the subpanels, Back, Options,
+Skirmish, and a safe Exit through the shell stack and the action allowlist. Rendering `MainMenu.wnd`
+still shows every subpanel at once, because retail hides them from menu code rather than through
+`STATUS`; the shell stack is what will hide them.
+
+Three smaller pieces remain queued alongside it. Transition draws are renderer-neutral records that
+`cic-render` does not execute yet, so transitions run and report but do not reach a surface. The rest
+of Gate 4 is bounded `MouseCursor` and `ShellMenuScheme` subsets, which live in the same INI family and
+reuse the shared lexer. And the ornamental border is unimplemented: `WIN_STATUS_BORDER` makes the
+window manager tile a frame from hardcoded `BorderTop`/`BorderCorner__`-style mapped images, which is a
+different border from the colour-path outline and is drawn by no draw procedure.
 
 Separately, [docs/formats/csf.md](docs/formats/csf.md) records the language-selection mechanism
 against the pinned source, for the planned goal of shipping languages the original game never had.

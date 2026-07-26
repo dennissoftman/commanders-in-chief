@@ -8,6 +8,7 @@ Retained, renderer-neutral user-interface state instantiated from immutable WND 
 - Own presentation state: visibility, enablement, hover, press, focus, selection, text, scroll.
 - Answer layout, hit-testing, focus-traversal, and control-invariant questions.
 - Hold the shell's screen stack, its separate draw order, and its push/pop shutdown protocol.
+- Schedule transition groups and run each style's frame machine, emitting renderer-neutral draws.
 - Classify a retained callback name against the original's own function tables, and decide through a
   project-owned allowlist which controls may run a typed action.
 - Emit typed UI events and renderer-neutral frames.
@@ -26,3 +27,4 @@ Retained, renderer-neutral user-interface state instantiated from immutable WND 
 - Source order controls the tree, focus traversal, and draw submission, and its reverse controls hit
   testing, because that is the order the original's window manager stores windows in. No iteration
   depends on a host hash, a clock, or filesystem order.
+- Time is always the caller's. A transition advances by a scale it is given, never by reading a clock.

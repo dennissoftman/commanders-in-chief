@@ -326,8 +326,8 @@ One compatibility fact belongs to Gates 7 and 8 rather than to presentation: ren
 subpanels from menu code, not through `STATUS`, so a correct main menu needs the shell stack's
 show/hide semantics — the layout alone does not describe which subpanel is visible.
 
-Gate 7 (safe callbacks and the shell stack) is implemented, less its transition runtime. Two new
-`cic-ui` modules and one new `cic-formats` decoder cover it, and the format-level derivation lives in
+Gate 7 (safe callbacks, shell stack, and transitions) is implemented. Three new `cic-ui` modules and
+one new `cic-formats` decoder cover it, and the format-level derivation lives in
 [docs/formats/wnd.md](../formats/wnd.md).
 
 The callback allowlist did not need inventing: the original already has one. `FunctionLexicon` holds
@@ -395,6 +395,54 @@ One smaller fact: Zero Hour's lexicon is a strict superset of base Generals', ad
 `ChallengeMenu*` entries and `PopupHostGameUpdate`, with identical device tables. No retail Generals
 layout names any of the six, so both corpora classify identically today; classification is still
 edition-parameterized for modded content.
+
+The transition runtime completed the gate. `UiTransitionHandler` reproduces the handler's scheduling —
+current, pending, and the two draw groups, set/reverse/remove, fire-once, and the accumulator that
+steps every whole frame it crosses so a discrete state machine cannot skip a state — over each of the
+fifteen styles' own per-frame machine of hidden-state changes and draw states. Time is the caller's:
+the source multiplies its frame pacer's ratio by the user's transition-speed preference, and this takes
+that scale as an argument so a capture advances exactly one frame. Draws are renderer-neutral records;
+executing them in `cic-render` is separate work, so transitions run and report but do not yet reach a
+surface.
+
+`cic-inspect ui-transitions --run` arms every group, loads the layouts its window names point at, and
+steps it to completion under a bounded budget:
+
+| Measure | Zero Hour | Generals |
+| --- | --- | --- |
+| Groups stepped | 56 | 55 |
+| Declared windows | 381 | 379 |
+| Windows naming a control | 379 | 377 |
+| Unresolved windows | 0 | 0 |
+| Groups that never finish | 4 | 4 |
+| Frames stepped | 1,008 | 996 |
+| Draw records produced | 3,047 | 3,029 |
+
+Every window of every retail group resolves. Two source conditions account for the rest, and building
+the sweep is what found them:
+
+- **A group naming a missing window never finishes**, because the arm that would set the flag tests the
+  window first. No retail group is in that state once its own layouts are loaded, but a modded one
+  could be, and it is reported rather than silently hung.
+- **`TYPETEXT` cannot finish when its label is under thirty characters.** It sets its finished flag only
+  on the state numbered by its declared length of thirty, while arming shortens the length to the
+  label's character count and the per-window frame filter refuses anything past it. That is exactly the
+  four unfinished groups in each edition — the difficulty screen's `StaticTextSelectDifficulty`, armed
+  for twenty frames. `COUNTUP` shortens identically and does finish, because it carries one extra
+  assignment at its armed length that `TYPETEXT` lacks, which is what makes this look like an oversight
+  in the original rather than a design.
+
+Three further source facts shaped the implementation. Two styles animate no window at all —
+`SCREENFADE` covers the viewport, `CONTROLBARARROW` slides the control bar's own arrow — and retail
+writes both with no `WinName`, so an absent name is not a missing window. Three styles pair with a
+companion window and hand over to it, found by fixed name for `MAINMENUSCALEUP` or by suffixing the
+animated window's own decorated name for the other two, and leave themselves unarmed when it is
+missing. And reversing walks `BUTTONFLASH`'s wash back out through mirrored draw states rather than
+replaying it forwards.
+
+`CONTROLBARARROW` runs its state machine but reports its draw: the arrow image comes from the
+control-bar definitions, which are neither a WND nor a mapped image, and it belongs to the in-game bar
+rather than to the shell. Audio cues are reported rather than played, R4 having no audio.
 
 The Gate 3 patch work was verified end to end against the retail `OptionsMenu.wnd`: the stock
 `ComboBoxResolution` is
@@ -522,8 +570,8 @@ source WND bytes are edited and no renderer path searches for special window nam
    scissor rectangles, cursors, and shaped Unicode text over either a 2D background or an R3 scene.
    Support source alpha and explicit color-space handling, bounded atlases, batched stable draws,
    explicit transition time, and surface-free deterministic capture.
-7. **Safe callbacks, shell stack, and transitions (callbacks and shell implemented; transition
-   runtime pending).** Retain source system/input/draw/tooltip and
+7. **Safe callbacks, shell stack, and transitions (implemented).** Retain source
+   system/input/draw/tooltip and
    layout callback names, then route only allowlisted demo actions through typed events. Implement
    push/pop/bring-forward/hide semantics and established transition groups without invoking MAP
    scripts or arbitrary symbols. Unknown callbacks remain reportable and inert.

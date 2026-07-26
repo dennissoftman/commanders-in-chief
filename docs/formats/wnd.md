@@ -566,6 +566,90 @@ Four further `TYPETEXT` windows are present but commented out, which the decoder
 `cic-inspect ui-transitions` reports the inventory, per-style census, and diagnostics; it defaults to
 `Data/INI/WindowTransitions.ini` and accepts any other virtual path for a modded file.
 
+#### Implemented transition runtime
+
+`UiTransitionHandler` reproduces `GameWindowTransitionsHandler`. At most one group is current, one
+waits behind it, and two more still have something to draw — the group that drew last frame, kept so
+an outgoing group's final frame is not dropped. Setting a group while one runs reverses the running
+one, unless it is fire-once or already reversed, and queues the new one; setting it *immediately*
+skips the running one to its end instead. A fire-once group clears itself on finishing, and so does a
+reversed one once it has run back out.
+
+Timing is the caller's. The source advances a real-valued accumulator by
+`getBaseOverUpdateFpsRatio() * m_gameWindowTransitionSpeedMultiplier` and then steps **every whole
+frame the accumulator crossed**, precisely so a discrete state machine cannot skip a state when the
+present rate dips. That stepping is reproduced with the scale as an argument, so a deterministic
+capture passes `1.0` and advances exactly one frame with no clock involved.
+
+Each window inside a group carries its own `FrameDelay`, and a frame outside `delay ..= delay +
+length` is not delivered to it at all. That filter is what makes several of the facts below matter.
+
+Every style follows one shape. Arming captures the target's screen rectangle, runs the start frame
+*backwards* so the start state applies, then clears the finished flag and faces forward. A frame then
+hides or shows windows and selects a draw state; the draw state is what produces output, and the real
+window is hidden for most of the animation because the transition is drawing a stand-in over it.
+Skipping is `update(END)`. Four behaviours are worth naming:
+
+- **Two styles animate no window at all.** `SCREENFADE` covers the viewport and `CONTROLBARARROW`
+  slides the control bar's own arrow, and retail writes both with no `WinName`. An absent name is
+  therefore not a missing window.
+- **Three styles pair with a companion window** and hand over to it at the end. `MAINMENUSCALEUP`
+  names `MainMenu.wnd:WinGrowMarker` outright and copies the animated window's *disabled* art onto it;
+  the medium and small variants append `Medium` or `Small` to the animated window's own decorated name.
+  A style whose companion is missing returns from arming unarmed — never finishing, never drawing.
+- **Two styles shorten their own length from data.** `TYPETEXT` runs one frame per character of the
+  label it types, and `COUNTUP` one frame per one, hundred, or thousand of the integer it counts to, so
+  a group's total frames depend on its text rather than on its definition.
+- **Two styles produce no draw**, because their effect is retained state rather than an overlay:
+  `COUNTUP` rewrites its own label in place, and `TEXTONFRAME` only unhides one.
+
+Draws are renderer-neutral records rather than immediate calls: a filled and/or outlined rectangle, one
+of a control's own images scaled into an arbitrary rectangle, a style-named mapped image such as the
+button flash's `Gradient`, a push button's three-piece art at one alpha, or a partially typed label.
+`drawTypeText` places that label using the *complete* string's measured size, so a centred label stays
+anchored where the finished text will sit instead of sliding as characters arrive. Executing these
+records in the renderer is separate work; the runtime is complete and produces them, and nothing draws
+them to a surface yet.
+
+Audio is reported, not played: R4 has no audio, so each cue a frame fires — `GUIBoarderFadeIn`,
+`GUIButtonsFadeIn`, `GUITypeText`, `GUIScoreScreenTick`, and the rest — becomes an observation naming
+the event and the frame it belongs to.
+
+##### Measured transition-runtime coverage
+
+`cic-inspect ui-transitions --run` arms every group in a file, loads the layouts its window names point
+at, and steps it to completion under a bounded frame budget. Both installed editions resolve
+completely:
+
+| Measure | Zero Hour | Generals |
+| --- | --- | --- |
+| Groups stepped | 56 | 55 |
+| Declared windows | 381 | 379 |
+| Windows naming a control | 379 | 377 |
+| Unresolved windows | 0 | 0 |
+| Groups that never finish | 4 | 4 |
+| Frames stepped | 1,008 | 996 |
+| Draw records produced | 3,047 | 3,029 |
+
+Two source conditions account for everything that is not a clean finish, and both are reported where
+they happen rather than worked around:
+
+- A group naming a window no loaded layout carries **never finishes**, because the arm that would set
+  the flag tests the window first. No retail group is in this state once each group's own layouts are
+  loaded.
+- `TYPETEXT` sets its finished flag only on the state numbered by its **declared** length of thirty,
+  but arming shortens the length to the label's character count and the per-window frame filter refuses
+  anything past it. A label under thirty characters therefore never delivers the state that would
+  finish it, and its group runs forever. This is what the four unfinished groups in each edition are:
+  the difficulty screen's `StaticTextSelectDifficulty`, armed for twenty frames. `COUNTUP` shortens
+  identically and *does* finish, because it carries one extra assignment at its armed length that
+  `TYPETEXT` lacks — which is what makes this look like an oversight in the original rather than a
+  design.
+
+`CONTROLBARARROW` runs its state machine but reports its draw instead of composing it: the arrow comes
+from the control-bar definitions, which are neither a WND nor a mapped image, and it belongs to the
+in-game bar rather than to the shell.
+
 ## Custom `wgpu` presentation
 
 Gate 6 is implemented in `crates/cic-render/src/ui.rs` (staging), `ui.wgsl` (the quad pipeline), and

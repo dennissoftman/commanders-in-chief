@@ -97,8 +97,9 @@
   - `Core/GameEngine/Source/GameClient/GUI/GameWindowTransitions.cpp`
     (`INI::parseWindowTransitions`, the group parse table, `parseWindow`, `getNewGroup`, `findGroup`,
     `TransitionWindow::getTotalFrames`)
-  - `GeneralsMD/Code/GameEngine/Source/GameClient/GUI/GameWindowTransitionsStyles.cpp` (each
-    transition's constructor and `init`, which set `m_frameLength`)
+  - `GeneralsMD/Code/GameEngine/Source/GameClient/GUI/GameWindowTransitionsStyles.cpp` (every style's
+    constructor, `init`, `update`, `draw`, `reverse`, and `skip`, plus the `drawTypeText` and
+    `PushButtonImageDrawThree` helpers)
 - Main-menu and R3 map-selection integration evidence:
   - `Generals/Code/GameEngine/Source/GameClient/GUI/GUICallbacks/Menus/MainMenu.cpp`
   - `Generals/Code/GameEngine/Source/GameClient/GUI/GUICallbacks/Menus/SkirmishGameOptionsMenu.cpp`
