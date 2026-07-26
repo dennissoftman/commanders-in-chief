@@ -15,9 +15,18 @@ struct Camera {
     terrain_lights: array<DirectionalLight, 3>,
 }
 
-struct ShadowCamera {
+// `params` packs the presentation time in `x`, the world units spanned by the full normalized
+// depth range in `y`, and the world units covered by one shadow texel in `z`. `w` is reserved.
+// Both scales are per cascade, since the fitted frusta differ by more than an order of magnitude.
+struct ShadowCascade {
     view_projection: mat4x4<f32>,
-    time: vec4<f32>,
+    params: vec4<f32>,
+}
+
+const SHADOW_CASCADE_COUNT: i32 = 5;
+
+struct ShadowCamera {
+    cascades: array<ShadowCascade, 5>,
 }
 
 struct WaterVertexOutput {
@@ -36,7 +45,7 @@ struct WaterVertexOutput {
 @group(0) @binding(8) var water_sky_sampler: sampler;
 @group(0) @binding(9) var water_environment_texture: texture_2d<f32>;
 @group(0) @binding(10) var water_environment_sampler: sampler;
-@group(0) @binding(11) var primary_shadow: texture_depth_2d;
+@group(0) @binding(11) var primary_shadow: texture_depth_2d_array;
 @group(0) @binding(12) var primary_shadow_sampler: sampler_comparison;
 @group(0) @binding(13) var<uniform> shadow_camera: ShadowCamera;
 
@@ -66,31 +75,87 @@ fn sampled_caustic(position: vec2<f32>, time: f32) -> f32 {
     return smoothstep(0.28, 0.47, sample);
 }
 
-fn shadow_visibility(world_position: vec3<f32>) -> f32 {
-    let clip = shadow_camera.view_projection * vec4<f32>(world_position, 1.0);
+// Kept in step with `shadow_visibility` in `terrain_deferred.wgsl`: both bias terms are world
+// units converted with the light frustum's own depth range, with the bulk of the slack taken
+// laterally along the receiver normal. Only the fully-shadowed floor differs, because the water
+// surface keeps more of its own transmitted light than opaque terrain does.
+const SHADOW_NORMAL_OFFSET_TEXELS: f32 = 1.5;
+const SHADOW_DEPTH_SLACK_TEXELS: f32 = 0.5;
+
+// Kept in step with `terrain_deferred.wgsl`: the fixed three-texel kernel makes penumbra width
+// scale with each cascade's texel extent, so selecting one cascade outright puts a visible line
+// where sharp meets blurry. Crossfading over a band near the boundary turns it into a gradient.
+const SHADOW_CASCADE_BLEND: f32 = 0.18;
+
+struct CascadeSample {
+    visibility: f32,
+    covered: f32,
+    edge: f32,
+}
+
+fn sample_cascade(index: i32, world_position: vec3<f32>, normal: vec3<f32>) -> CascadeSample {
+    var result: CascadeSample;
+    result.visibility = 1.0;
+    result.covered = 0.0;
+    result.edge = 0.0;
+    let cascade = shadow_camera.cascades[index];
+    let texel_world = cascade.params.z;
+    let depth_range = max(cascade.params.y, 1.0);
+    let offset_position = world_position + normal * texel_world * SHADOW_NORMAL_OFFSET_TEXELS;
+    let clip = cascade.view_projection * vec4<f32>(offset_position, 1.0);
     if clip.w <= 0.0 {
-        return 1.0;
+        return result;
     }
     let projected = clip.xyz / clip.w;
     let uv = projected.xy * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5);
     if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0))
         || projected.z < 0.0 || projected.z > 1.0 {
-        return 1.0;
+        return result;
     }
-    let texel = 1.0 / vec2<f32>(textureDimensions(primary_shadow));
+    let depth_slack = texel_world * SHADOW_DEPTH_SLACK_TEXELS / depth_range;
+    let texel = 1.0 / vec2<f32>(textureDimensions(primary_shadow).xy);
     var visible = 0.0;
     for (var y = -1; y <= 1; y += 1) {
         for (var x = -1; x <= 1; x += 1) {
-            visible += textureSampleCompare(
+            visible += textureSampleCompareLevel(
                 primary_shadow,
                 primary_shadow_sampler,
                 uv + vec2<f32>(f32(x), f32(y)) * texel,
-                projected.z - 0.0015
+                index,
+                projected.z - depth_slack
             );
         }
     }
-    return mix(0.45, 1.0, visible / 9.0);
+    result.visibility = visible / 9.0;
+    result.covered = 1.0;
+    let centered = abs(uv * 2.0 - vec2<f32>(1.0));
+    let inset = 1.0 - max(centered.x, centered.y);
+    result.edge = 1.0 - clamp(inset / SHADOW_CASCADE_BLEND, 0.0, 1.0);
+    return result;
 }
+
+fn shadow_visibility(world_position: vec3<f32>, normal: vec3<f32>) -> f32 {
+    for (var index = 0; index < SHADOW_CASCADE_COUNT; index += 1) {
+        let current = sample_cascade(index, world_position, normal);
+        if current.covered < 0.5 {
+            continue;
+        }
+        if current.edge <= 0.0 || index + 1 >= SHADOW_CASCADE_COUNT {
+            return current.visibility;
+        }
+        let outer = sample_cascade(index + 1, world_position, normal);
+        if outer.covered < 0.5 {
+            return current.visibility;
+        }
+        return mix(current.visibility, outer.visibility, current.edge);
+    }
+    return 1.0;
+}
+
+// Fraction of the primary light the water surface keeps in full shade. Higher than the opaque
+// terrain floor because a transmissive surface still returns sky and bed light where the sun is
+// blocked.
+const WATER_SHADOW_FLOOR: f32 = 0.45;
 
 @fragment
 fn water_fragment(input: WaterVertexOutput) -> @location(0) vec4<f32> {
@@ -98,7 +163,11 @@ fn water_fragment(input: WaterVertexOutput) -> @location(0) vec4<f32> {
     let pixel = clamp(vec2<i32>(input.position.xy), vec2<i32>(0), dimensions - vec2<i32>(1));
     let source_scroll = camera.water_motion.xy * camera.camera_position_time.w * 1000.0;
     let normal = wave_normal(input.world_position.xy + source_scroll, camera.camera_position_time.w);
-    let surface_shadow = shadow_visibility(input.world_position);
+    let surface_shadow = mix(
+        WATER_SHADOW_FLOOR,
+        1.0,
+        shadow_visibility(input.world_position, normal)
+    );
     let refract_offset = vec2<i32>(round(normal.xy * 5.0));
     let refract_pixel = clamp(pixel + refract_offset, vec2<i32>(0), dimensions - vec2<i32>(1));
     let refracted_scene = textureLoad(opaque_scene, refract_pixel, 0).rgb;

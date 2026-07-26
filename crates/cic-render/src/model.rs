@@ -134,6 +134,15 @@ pub(crate) struct StagedMaterial {
     pub(crate) alpha_test: bool,
     pub(crate) depth_write: bool,
     pub(crate) two_sided: bool,
+    /// Exact source `W3D_CHUNK_VERTEX_MATERIAL` emissive bytes. Kept as the on-disk `u8` triple so
+    /// materials stay `Ord` for stable draw grouping and so no source precision is invented here.
+    pub(crate) emissive: [u8; 3],
+    /// Exact source specular color bytes. A black specular means the material declares no
+    /// highlight at all, which is the common case for stone, plaster, and wood.
+    pub(crate) specular: [u8; 3],
+    /// Source shininess as raw bits, so the field stays `Ord` for draw grouping without
+    /// quantizing away a value the renderer converts to roughness later.
+    pub(crate) shininess_bits: u32,
 }
 
 // Provenance: `W3D_MESH_FLAG_TWO_SIDED` is defined as 0x00002000 in `w3d_file.h` at
@@ -1524,6 +1533,26 @@ fn staged_material(
             preview_blend(shader.source_blend(), shader.destination_blend())
         })
     };
+    // Vertex material IDs are indexed per vertex, so the triangle's first vertex selects the
+    // record. A staged material is shared by a whole draw range and cannot express per-vertex
+    // variation; taking the first corner keeps the choice explicit rather than incidental.
+    let vertex_material = pass
+        .and_then(W3dMaterialPass::vertex_material_ids)
+        .and_then(|ids| {
+            let vertex = mesh.triangles().get(triangle)?.vertex_indices()[0];
+            ids.for_vertex(usize::try_from(vertex).ok()?)
+        })
+        .and_then(|id| usize::try_from(id).ok())
+        .and_then(|id| mesh.materials().vertex_materials().get(id));
+    let emissive = vertex_material.map_or([0; 3], |material| {
+        let color = material.emissive();
+        [color.red(), color.green(), color.blue()]
+    });
+    let specular = vertex_material.map_or([0; 3], |material| {
+        let color = material.specular();
+        [color.red(), color.green(), color.blue()]
+    });
+    let shininess_bits = vertex_material.map_or(0, |material| material.shininess().to_bits());
     StagedMaterial {
         texture,
         clamp_u: attributes & 0x8 != 0,
@@ -1532,6 +1561,9 @@ fn staged_material(
         alpha_test: shader.is_some_and(|shader| shader.alpha_test() != 0),
         depth_write: pass_index == 0 && stage_index == 0 && blend == BlendMode::Opaque,
         two_sided: mesh_is_two_sided(mesh.header().attributes()),
+        emissive,
+        specular,
+        shininess_bits,
     }
 }
 

@@ -7,6 +7,17 @@ land under the active milestone heading.
 
 ### Added
 
+- Added `cic-camera`, a dependency-free crate holding the real-time-strategy camera model so the
+  inspection viewers, a future editor, and the game share one implementation. Callers translate their
+  own bindings into semantic intents and supply terrain elevation through a trait, so the crate
+  depends on no window, input, or GPU library. Limits and rates come from the source `GameData`
+  camera fields; `CameraAdjustSpeed` is converted through the source logic rate so smoothing feels
+  identical at any present rate, and an absolute height ceiling plus a ground-sample rate limit are
+  project-authored because source data cannot bound a malformed heightfield.
+- `map-view` now uses that camera instead of free flight: a fixed source tilt holding a height above
+  the terrain beneath the view centre, WASD or arrows to scroll, the wheel to zoom, and the middle
+  button to rotate as the original does. Vertical and boost keys are gone, having nothing to do.
+
 - Added a bounded WND text-format decoder (`crates/cic-formats/src/wnd.rs`) covering `FILE_VERSION`,
   the `STARTLAYOUTBLOCK`/`ENDLAYOUTBLOCK` layout block, and the complete `WINDOW`/`CHILD`/`END`/
   `ENDALLCHILDREN` hierarchy with `WINDOWTYPE`/`SCREENRECT` typed. Every other field is retained
@@ -21,6 +32,38 @@ land under the active milestone heading.
   existing `HeadlessRenderer` boundary to a deterministic PNG plus RGBA SHA-256 hash. It has no
   images, text, gadget visuals, or scaling policy yet; it proves the immutable decoded value can
   drive a renderer capture ahead of the retained UI runtime.
+- Shadow cascades now crossfade near their boundaries and reuse their outer layers across frames.
+  Selecting a single cascade put a visible line on screen where sharp shadows met blurry ones,
+  because a fixed-width kernel spans an order of magnitude more world space in the outermost
+  cascade than the innermost. Every caster is static, so a cascade whose fitted matrix has not moved
+  since the previous frame keeps its depth and skips its pass entirely; the inner cascades always
+  redraw, since reuse would freeze animated tree sway where it is most visible.
+- Blended scenery now casts partial shadow instead of an opaque silhouette. A material without an
+  alpha test has no meaningful cutoff, so a translucent tree card tested against a near-zero one
+  wrote shadow depth across its whole surface and canopies read as solid blobs. Those materials are
+  now tested against a stable per-texel hash, so a texel of a given opacity occludes about that
+  fraction of the shadow samples and the receiver's filtering resolves it into real dappling.
+  Materials that do declare an alpha test keep their hard cutout.
+- Additive and multiply scenery draws no longer write shadow depth. An additive glow was casting a
+  solid silhouette, and multiply detail stages were re-rasterizing geometry whose base stage had
+  already written the same depth.
+- Added cascaded shadow maps to the MAP scene, replacing the single whole-map orthographic slice.
+  Five 3072-square layers of a depth array texture are fitted per frame to slices of the camera
+  frustum, each fitted with a light-space box rather than a bounding sphere for roughly twice the
+  effective texel density. Each cascade's centre snaps to whole texels and its extent quantizes onto
+  a fixed ladder, because a box fit is not invariant to camera yaw and an unquantized extent would
+  rescale every texel as the view turned. Receivers take the first cascade containing them, which is
+  also the densest one that does, and each cascade derives its own bias from its own texel extent,
+  so the near cascade is biased far more tightly than the far one.
+- Added ground-truth ambient occlusion (`crates/cic-render/src/terrain_ao.wgsl`) to the MAP scene,
+  evaluated in world space over the resolved G-buffer with a bilateral cross blur and consumed as
+  the ambient visibility term by deferred lighting. Sampling is purely spatial because the renderer
+  has no temporal antialiasing, so a temporally accumulated estimate would shimmer under camera
+  motion.
+- Added W3D vertex-material self-illumination to the MAP scene. Emissive strength is carried from
+  the decoded source material through the G-buffer's coverage channel and added after the light
+  loop, so a self-illuminated surface keeps glowing in full shade and takes its hue from its own
+  albedo. Per-vertex `DIFFUSE_ILLUMINATION` is decoded but not yet consumed.
 - Added an original synthetic `BIG4` fixture and truncation-at-every-prefix tests alongside the
   existing `BIGF` coverage, and a bounded `big` libFuzzer target, closing an R1 acceptance-test gap
   where BIG4 had no automated coverage and BIG archives had no fuzz target.
@@ -266,6 +309,33 @@ land under the active milestone heading.
 - Corrected the documented WND status vocabulary, which listed only the `Generals` source path's 25
   names. Zero Hour adds `ON_MOUSE_DOWN`, used 67 times in its retail layouts, so validating against
   the Generals list alone would report 67 false unknowns against a stock Zero Hour install.
+- Fixed tree sway never applying in the Generals profile, where every tree stood perfectly still
+  while the same scene swayed under `--zh`. Sway was attached only to draws decoded as
+  `ObjectDrawKind::Tree`, which requires the `W3DTreeDraw` module. Zero Hour introduced that module
+  for its optimized client-side tree renderer and reparented its tree reskins onto `GenericOptTree`;
+  Generals predates it and draws the same trees with plain `W3DModelDraw` off `GenericTree`, so
+  shipped Generals `NatureProp.ini` contains no `W3DTreeDraw` at all. Foliage is now classified by
+  the engine's own `KindOf = SHRUBBERY` flag, which both editions carry, so Generals scenes sway.
+  This is a deliberate divergence from the retail client rather than a decoder correction, and is
+  recorded as such in COMPATIBILITY.md. Verified on an installed Generals map: renders at two
+  explicit times were previously byte-identical and now differ only across the scenery footprint.
+- Specular highlights now come from the source material instead of a fixed constant. Scenery wrote
+  a hard-coded roughness and deferred lighting applied a fixed highlight strength once per light, so
+  stone, plaster, and wood all carried a sheen no W3D material asked for. Roughness is now derived
+  from the vertex material's specular color and shininess, a black source specular resolves to fully
+  rough, and highlight strength falls off with roughness so a fully rough surface has no highlight.
+- Cast shadows in the MAP scene are now actually legible. The primary directional light's shadow
+  previously removed only part of one light's diffuse term while three source terrain lights each
+  contributed unoccluded ambient, capping shadow contrast near ten percent, so object shadows were
+  effectively invisible except on large uniform surfaces. The primary light's ambient share is now
+  occluded alongside its direct term and the fully-shadowed floor was lowered. Water keeps its own
+  higher floor, since a transmissive surface still returns sky and bed light in shade.
+- Replaced the primary shadow map's fixed normalized-depth bias with normal-offset plus depth slack
+  derived in world units from the fitted light frustum's own depth range and texel extent. The old
+  constant epsilon scaled with the frustum, so it grew to roughly 8-17 world units of slack as maps
+  got larger and detached or erased the shadows of anything shorter than that. Because both terms
+  now follow each cascade's own texel extent, raising shadow resolution tightens the bias instead of
+  leaving it untouched.
 - Repaired the `map` libFuzzer target, which no longer compiled after `MapLimits` gained polygon
   and water-trigger fields during R3; fuzzing was not part of the workspace test suite so the
   regression was silent.
@@ -282,6 +352,13 @@ land under the active milestone heading.
 - Added `*.png`/`*.ppm` to `.gitignore` (excluding `docs/`). The `*-render` commands write into the
   working directory when given no output path, so a capture of a user-owned layout or map could
   otherwise be committed as retail-derived output.
+- Extended `object_ini.rs` to decode one `KindOf` flag, `SHRUBBERY` ("tree, bush, etc." in the
+  source `KindOf.h`), exposed as `ObjectDefinition::kind_of_shrubbery()`. It returns `Option<bool>`
+  so an undeclared `KindOf` stays distinguishable from a declared one that omits the flag: shipped
+  tree templates are `ObjectReskin` blocks that restate only their `Draw`, so the flag has to be
+  inherited from the reskin base rather than read as a denial. Resolving that chain stays caller
+  policy, as it already is for draws. The rest of `KindOf` selects gameplay and simulation behavior
+  and remains an intentional, documented architectural exclusion.
 
 - Changed `terrain_ini.rs`, `water_ini.rs`, `road_ini.rs`, and `object_ini.rs` (owned by R3) so an
   unrecognized field name inside a block they otherwise decode is never silently dropped. Each
@@ -292,6 +369,16 @@ land under the active milestone heading.
   Already-recognized fields keep their exact prior behavior; entirely unrelated INI blocks and
   `object_ini`'s intentionally out-of-scope gameplay modules (`Behavior`, `Body`, and similar)
   remain excluded as before, since that boundary is architectural, not a dropped field.
+
+- Replaced the terrain viewer's single-pass FXAA-style composite blur with hardware anti-aliasing.
+  The opaque G-buffer pass (terrain, streamed detail, custom edges, roads, and static scenery) now
+  rasterizes at four samples and resolves before lighting, with an explicit depth-resolve pass
+  because `wgpu` has no automatic one. Alpha-tested cutout foliage decides coverage before the alpha
+  test runs, so the non-blended scenery pipelines enable alpha-to-coverage to antialias leaf
+  silhouettes per sample. The now-redundant blur became a bounded contrast-adaptive sharpen that
+  restores mid-contrast detail without ringing edges multisampling already resolved. `map-view` is
+  visibly cleaner; `map-render` is unaffected, since deterministic headless capture does not use
+  this path and remains single-sampled with unchanged RGBA hashes.
 
 - Closed R3 and advanced the active objective to R4's bounded WND inventory/layout decoder and
   synthetic headless menu vertical slice. Version-1 height presentation now explicitly retains its

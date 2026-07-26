@@ -31,6 +31,19 @@ background bake.
   independently from sampled alpha so authored transparent edge coverage never triggers a
   lower-resolution fallback. A fullscreen directional-light resolve writes linear `RGBA16F` scene
   color; a final surface pass tone maps that scene.
+- Interactive anti-aliasing is hardware multisampling, not a post-process filter. The opaque
+  G-buffer pass — terrain, streamed detail, custom edges, roads, and static scenery — rasterizes at
+  four samples and resolves to single-sample targets before lighting. Depth has no automatic
+  resolve, so an explicit pass copies sample zero of the multisampled depth into the single-sample
+  depth buffer that the later forward passes reuse. Sample zero is sufficient because that depth is
+  only a depth-test reference for water and the boundary, not a reconstruction input. Alpha-tested
+  cutout foliage decides coverage before the alpha test runs and gains nothing from geometric
+  multisampling, so the non-blended scenery pipelines enable alpha-to-coverage instead; genuinely
+  translucent pipelines already resolve their edges through blending and do not. The final composite tone maps and then applies a bounded
+  contrast-adaptive sharpen whose strength falls to zero near luminance extremes and at hard edges,
+  so it restores mid-contrast detail lost to mip and texture filtering without ringing the
+  silhouettes multisampling already resolved. Sample count is a presentation choice: deterministic
+  headless capture is unaffected because it does not use this path.
 - Water is a later forward, depth-tested, no-depth-write pass under an explicit presentation
   policy. `ZeroHourLegacy` resolves the source standing-water texture, selected diffuse tint/alpha,
   additive choice, texture scale, minimum opacity, and opaque depth; it uses terrain depth to

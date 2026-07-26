@@ -1,5 +1,16 @@
+// `values.x` is the alpha-test cutoff, `values.y` the W3D self-illumination strength, and
+// `values.z` the roughness derived from the source specular color and shininess.
 struct Material {
     values: vec4<f32>,
+}
+
+// The G-buffer's world-position alpha channel is a coverage flag that deferred lighting tests
+// against 0.5. Encoding self-illumination as an offset above the covered value carries emissive
+// strength to the lighting pass without a fourth G-buffer target, and leaves the coverage test
+// and the cleared background value (0.0) untouched. Terrain and roads write a plain 1.0 and so
+// decode to no emission.
+fn gbuffer_coverage_emissive(emissive: f32) -> f32 {
+    return 1.0 + max(emissive, 0.0);
 }
 
 struct DirectionalLight {
@@ -98,7 +109,10 @@ fn fragment_main(input: VertexOutput) -> GBufferOutput {
     }
     var output: GBufferOutput;
     output.albedo = color;
-    output.normal_roughness = vec4<f32>(normalize(input.normal), 0.72);
-    output.world_position = vec4<f32>(input.world_position, 1.0);
+    output.normal_roughness = vec4<f32>(normalize(input.normal), material.values.z);
+    output.world_position = vec4<f32>(
+        input.world_position,
+        gbuffer_coverage_emissive(material.values.y)
+    );
     return output;
 }

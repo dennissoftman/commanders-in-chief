@@ -74,6 +74,7 @@ therefore uses a bounded state machine rather than indentation to close draw mod
 - Tree draw and ambient breeze boundary:
   - `Core/GameEngineDevice/Source/W3DDevice/GameClient/Drawable/Draw/W3DTreeDraw.cpp`
   - `Core/GameEngineDevice/Source/W3DDevice/GameClient/W3DTreeBuffer.cpp`
+  - `GeneralsMD/Code/GameEngine/Include/Common/KindOf.h`
   - `GeneralsMD/Code/GameEngine/Include/GameLogic/ScriptEngine.h`
   - `GeneralsMD/Code/GameEngine/Source/GameLogic/ScriptEngine/ScriptEngine.cpp`
 - Side, team, build-list, and player-script boundary:
@@ -209,6 +210,13 @@ establishes explicit-frame cosine sway consumption. R3 uses those default scalar
 explicit presentation time. Selection of ten placement-ID sway families and the stable bounded
 random factors is project-authored deterministic policy. R3 does not execute `SET_TREE_SWAY`;
 custom scripted wind remains data until R5.
+
+`KindOf.h` establishes the `KINDOF_SHRUBBERY` flag and its "tree, bush, etc." meaning, which the
+project decodes and uses to classify foliage for sway. Which objects sway is a deliberate project
+divergence, not a source claim: in the retail client `W3DTreeDraw::addToTreeBuffer` is the only
+path into `W3DTreeBuffer`, so sway is gated on that Zero Hour-only draw module and `KindOf` has no
+part in it. Generals therefore has no swaying foliage at all. The project keys sway off the
+`SHRUBBERY` flag so both editions animate; see COMPATIBILITY.md.
 
 `W3DModelDraw.cpp`/`.h` and the generic INI reader establish top-level `Object`/`ObjectReskin`
 declarations, draw-module naming, `DefaultConditionState` model selection, and per-draw `Scale`.
@@ -439,8 +447,8 @@ The Rust implementations in `crates/cic-formats/src/map.rs`, `map_blend.rs`, `ma
 `map_scenario.rs`, `object_ini.rs`,
 `refpack.rs`, `road_ini.rs`, `terrain_ini.rs`, and `water_ini.rs`, terrain/water/road/scenery staging in
 `crates/cic-render/src/terrain.rs`, `water.rs`, `map_scene.rs`, `road.rs`, `scenery.rs`, and
-`boundary.rs`, the project-authored `scene_shadow.wgsl` and edge-aware composite in
-`terrain_deferred.wgsl`, plus report/CLI integration
+`boundary.rs`, the project-authored `scene_shadow.wgsl` and the multisample-resolve and
+contrast-adaptive-sharpen composite in `terrain_deferred.wgsl`, plus report/CLI integration
 in `crates/cic-tools`, were authored for this project from the documented facts. No C++ source code
 was copied, translated line by line, or imported. The immutable values, structured errors, explicit
 limits, exact closure checks, top-level opaque-payload policy, stable staging/report schemas, and

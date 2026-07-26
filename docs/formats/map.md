@@ -368,7 +368,7 @@ global and sibling `Map.ini` overrides.
 The Modern policy combines authored sky/environment inputs with a bounded screen-space reflection,
 and `map-view --time` freezes presentation time for repeatable comparison. Water stays outside the
 opaque G-buffer in an ordered forward pass, samples the same primary directional shadow map as the
-opaque scene, and is followed by edge-aware post-process anti-aliasing. Deterministic explicit-time
+opaque scene, and precedes the viewer's final composite (see ADR 0007). Deterministic explicit-time
 overview hashes and repeatable user-owned comparisons establish the R3 baseline; legacy
 compatibility and Modern presentation remain separate policies, and exact Direct3D 8 pixel
 equivalence is not claimed.
@@ -405,6 +405,14 @@ breeze with explicit time, a stable placement-ID family, and bounded source rand
 not execute `SET_TREE_SWAY`; custom scripted wind remains decoded data until R5 owns script
 execution. Additional unsupported draw modules remain explicit diagnostics.
 
+Which objects sway is a presentation policy, not a decoded property. The retail client sways only
+objects whose draw module is `W3DTreeDraw`, which Zero Hour added for its optimized client-side
+tree renderer; Generals draws the same trees with `W3DModelDraw` and so has no swaying foliage at
+all. This project instead keys sway off `KindOf = SHRUBBERY`, the engine's own "tree, bush, etc."
+classification, which both editions carry. Because shipped tree templates are `ObjectReskin` blocks
+that restate only their `Draw`, the flag is resolved by walking `ObjectReskin` bases until one
+declares a `KindOf`. This is a deliberate divergence recorded in COMPATIBILITY.md.
+
 ### Playable-boundary presentation
 
 The first positive signed height-field boundary is presented as a renderer-only translucent fence.
@@ -422,7 +430,7 @@ playable extent only: it does not create collision, pathing, or simulation state
 - `map-view` integrates source lighting and forward water, source-topology roads, initial instanced
   static drawables, intact bridges, and the playable-boundary fence. M toggles full-scene wireframe
   when polygon-line rasterization is available. It also includes explicit-time default tree sway,
-  shared directional shadows, and edge-aware anti-aliasing.
+  shared directional shadows, and the multisampled composite described in ADR 0007.
 
 Lighting/water inputs, object/world decoding, endpoint staging, sides/teams/spawns, and nested script
 data are implemented, as are source-topology roads, pristine bridges with tower scenery, initial
