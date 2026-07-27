@@ -19,7 +19,8 @@ The formats look inconsistent until you notice where the line is drawn.
 occasionally repaired when a tool misbehaves. Every one of those needs the file to be readable.
 
 **Bulk numeric data is tight binary.** A heightfield is generated, read only by machines, and needs to
-reach the GPU without a conversion pass. Its regularity is what makes terrain cheap, and a
+reach the GPU without a conversion pass — its `u16` samples are copied straight into an `R16Uint`
+texture. Its regularity is what makes terrain cheap, and a
 general-purpose encoding throws that away.
 
 **Geometry uses a standard.** glTF is published, versioned, and exported by every content tool that

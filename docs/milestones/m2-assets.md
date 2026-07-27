@@ -16,7 +16,7 @@ models and packages.
 | Data | Format | Why |
 |---|---|---|
 | Models, props, units | glTF 2.0 (`.glb`) | A published standard every content tool already exports. A custom mesh format would mean writing an exporter before anyone could author an asset. |
-| Terrain heightfield and layers | Custom chunked binary (`.cict`) | A regular numeric grid, which no standard describes well. `u16` elevations upload directly as an `R16Unorm` GPU texture. |
+| Terrain heightfield and layers | Custom chunked binary (`.cict`) | A regular numeric grid, which no standard describes well. `u16` elevations upload directly as a baseline `R16Uint` GPU texture. |
 | Scenario: placements, players, waypoints | JSON (`map.json`) | Diffable, reviewable, hand-fixable. The bulk numerics live in the terrain container, so the size argument for a binary encoding does not apply. |
 | A whole map | zip (`.cicmap`) | Already has a directory, per-member compression, and universal tooling. |
 
@@ -33,9 +33,10 @@ both halves and cross-check that authored positions lie inside the terrain's ext
 
 ## Design notes
 
-`u16` elevations rather than `f32`: this halves the heightfield, and — the load-bearing reason — `u16`
-normalized is a native GPU texture format, so the payload uploads as a height texture with no
-conversion pass.
+`u16` elevations rather than `f32`: this halves the heightfield, and — the load-bearing reason — a
+16-bit integer texture (`R16Uint`) is baseline-supported, so the payload uploads as a height texture
+byte-for-byte with no conversion pass. Note the integer rather than the normalized form: `R16Unorm`
+needs an optional device feature, and heights are only ever loaded, never filtered.
 
 Scenario JSON **rejects** unknown fields rather than ignoring them. A typo in a hand-edited map is
 then a loud error at load rather than a silently-defaulted value that surfaces later as a gameplay

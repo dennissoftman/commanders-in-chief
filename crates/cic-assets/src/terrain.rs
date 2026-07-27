@@ -21,9 +21,9 @@
 //! ```
 //!
 //! Elevations are `u16` rather than `f32`. That halves the heightfield, and — the actual reason —
-//! `u16` normalized is a native GPU texture format (`R16Unorm`), so the payload uploads as a height
-//! texture with no conversion pass. 65,536 quantization levels across a sane vertical range is far
-//! finer than terrain needs.
+//! 16-bit integer is a baseline GPU texture format (`R16Uint`), so the payload uploads as a height
+//! texture byte-for-byte with no conversion pass. 65,536 quantization levels across a sane
+//! vertical range is far finer than terrain needs.
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};

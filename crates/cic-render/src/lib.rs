@@ -1,31 +1,45 @@
-//! Renderer foundations: the WGSL shader set, GPU-independent bookkeeping, and texture resources.
+//! Terrain rendering, GPU-independent bookkeeping, and the WGSL shader set.
 //!
-//! # Scope
+//! # What is here
 //!
-//! This crate currently holds the parts of the renderer that need neither a GPU device nor an
-//! asset decoder, which makes all of them testable without either:
-//!
+//! - **A forward terrain pass** ([`terrain`]), which renders a [`cic_assets::Terrain`] with heights
+//!   and layer weights held in *writable* GPU textures rather than a baked mesh. See that module for
+//!   why that choice is load-bearing rather than incidental.
+//! - **Headless rendering and capture** ([`gpu`]). Headless comes before any window, because a
+//!   capture is the only rendering verification that runs in CI.
+//! - **View and projection** ([`view`]), kept out of `cic-camera` because a projection depends on
+//!   the viewport and the API's clip-space convention.
 //! - **The WGSL shader set.** Every shader is parsed and validated at test time by the same front
-//!   end the GPU backend uses. A shader is code that `cargo build` does not compile, so without
-//!   this a copy error or a syntax regression would produce a clean build and a blank frame.
-//! - **Virtual-page residency bookkeeping** ([`terrain_virtual`]), which decides which terrain
-//!   pages to stage and evict for a given view. That is arithmetic, and the subtle bugs live in it,
-//!   so it is kept separate from device calls.
+//!   end the GPU backend uses. A shader is code that `cargo build` does not compile, so without this
+//!   a copy error or a syntax regression would produce a clean build and a blank frame.
+//! - **Virtual-page residency bookkeeping** ([`terrain_virtual`]), which decides which terrain pages
+//!   to stage and evict for a given view. That is arithmetic, and the subtle bugs live in it, so it
+//!   is kept separate from device calls.
 //! - **Texture resources** ([`resource`]), which deduplicate decoded images by content hash under
 //!   explicit byte budgets.
 //!
-//! The pipelines are next: terrain meshing and the deferred pass, models, shadow cascades, ambient
-//! occlusion, water, and the frame loop, all built against [`cic_assets`]. See
-//! `docs/milestones/m3-renderer.md`.
+//! # What is next
+//!
+//! The deferred chain — G-buffer, cascaded shadows, ambient occlusion — plus models, water, and
+//! windowed presentation. The shaders for most of that are already here and validated; what they
+//! need is the pipeline scaffolding around them. See `docs/milestones/m3-renderer.md`.
 
 pub mod detail;
+pub mod gpu;
 pub mod resource;
+pub mod scene;
+pub mod terrain;
 pub mod terrain_virtual;
+pub mod view;
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
+pub use gpu::{Capture, CaptureTarget, GpuContext};
 pub use resource::{TextureId, TextureResourceManager};
+pub use scene::{TerrainFrame, capture_terrain, render_terrain_into};
+pub use terrain::{DirectionalLight, LayerColour, TerrainRenderer};
+pub use view::{Projection, view_projection};
 
 /// Every WGSL shader in the set, as `(name, source)`.
 ///
@@ -56,24 +70,112 @@ pub fn shader(name: &str) -> Option<&'static str> {
 }
 
 /// A failure in a renderer operation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum RenderError {
     /// A texture's dimensions, byte length, or declared size were inconsistent or out of range.
     InvalidTexture,
     /// A texture, or the texture set as a whole, exceeded its explicit byte budget.
     TextureTooLarge,
+    /// No adapter, native or fallback, could be acquired.
+    RequestAdapter(wgpu::RequestAdapterError),
+    /// An adapter was found but no device could be created from it.
+    RequestDevice(wgpu::RequestDeviceError),
+    /// Waiting for submitted work to complete failed.
+    Poll(wgpu::PollError),
+    /// Mapping the readback buffer failed.
+    MapBuffer(wgpu::BufferAsyncError),
+    /// Taking a mapped range of the readback buffer failed.
+    MapRange(wgpu::MapRangeError),
+    /// The map callback did not fire within its timeout.
+    MapCallbackTimeout,
+    /// A capture was requested with a zero width or height.
+    EmptyCapture,
+    /// A capture's dimensions or buffer size exceeded the renderer's explicit bounds.
+    CaptureTooLarge,
+    /// Encoding a capture as a PNG failed.
+    EncodePng(String),
+    /// A terrain declared more layers than the forward pass blends.
+    TooManyLayers {
+        /// Layers the terrain declared.
+        actual: usize,
+        /// Layers the pass supports.
+        maximum: usize,
+    },
+    /// A layer index was outside the terrain's layer set.
+    LayerOutOfRange {
+        /// The requested layer.
+        layer: u32,
+        /// Layers the terrain declares.
+        layers: u32,
+    },
+    /// A write region left the terrain, was empty, or disagreed with the supplied data length.
+    RegionOutOfRange {
+        /// Requested origin.
+        origin: [u32; 2],
+        /// Requested size.
+        size: [u32; 2],
+        /// The terrain's sample dimensions.
+        terrain: [u32; 2],
+    },
 }
 
 impl Display for RenderError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::InvalidTexture => "texture dimensions or byte length are invalid",
-            Self::TextureTooLarge => "texture exceeds its explicit byte budget",
-        })
+        match self {
+            Self::InvalidTexture => {
+                formatter.write_str("texture dimensions or byte length are invalid")
+            }
+            Self::TextureTooLarge => {
+                formatter.write_str("texture exceeds its explicit byte budget")
+            }
+            Self::RequestAdapter(error) => write!(formatter, "no usable adapter: {error}"),
+            Self::RequestDevice(error) => write!(formatter, "no usable device: {error}"),
+            Self::Poll(error) => write!(formatter, "waiting for the queue failed: {error}"),
+            Self::MapBuffer(error) => write!(formatter, "mapping the readback failed: {error}"),
+            Self::MapRange(error) => {
+                write!(formatter, "taking the mapped range failed: {error}")
+            }
+            Self::MapCallbackTimeout => {
+                formatter.write_str("the buffer map callback did not fire in time")
+            }
+            Self::EmptyCapture => formatter.write_str("a capture cannot be zero-sized"),
+            Self::CaptureTooLarge => {
+                formatter.write_str("capture size exceeds the renderer's explicit bounds")
+            }
+            Self::EncodePng(message) => write!(formatter, "encoding a PNG failed: {message}"),
+            Self::TooManyLayers { actual, maximum } => write!(
+                formatter,
+                "terrain declares {actual} layers, but the forward pass blends at most {maximum}"
+            ),
+            Self::LayerOutOfRange { layer, layers } => write!(
+                formatter,
+                "layer {layer} is outside the {layers} the terrain declares"
+            ),
+            Self::RegionOutOfRange {
+                origin,
+                size,
+                terrain,
+            } => write!(
+                formatter,
+                "region {size:?} at {origin:?} does not fit a {terrain:?} terrain, \
+                 or its data length disagrees"
+            ),
+        }
     }
 }
 
-impl Error for RenderError {}
+impl Error for RenderError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::RequestAdapter(error) => Some(error),
+            Self::RequestDevice(error) => Some(error),
+            Self::Poll(error) => Some(error),
+            Self::MapBuffer(error) => Some(error),
+            Self::MapRange(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 #[cfg(test)]
 mod shader_tests {

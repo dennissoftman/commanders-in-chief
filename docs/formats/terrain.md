@@ -58,8 +58,11 @@ on. `0` is absent, `255` is fully covering.
 Two reasons, the second being the one that decided it:
 
 1. Half the size of `f32`, which matters at 8,192 × 8,192.
-2. `u16` normalized is a native GPU texture format (`R16Unorm`), so the payload uploads as a height
-   texture with no conversion pass.
+2. 16-bit integer is a *baseline* GPU texture format (`R16Uint`), so the payload uploads as a
+   height texture byte-for-byte with no conversion pass. The normalized variants (`R16Unorm`) are
+   not baseline — they need an optional device feature — which is why the integer form is used.
+   Nothing is lost by it: elevations are only ever loaded at exact texel coordinates, never
+   filtered.
 
 65,536 quantization levels across any sane vertical range is far finer than terrain needs. At a
 vertical scale of 0.25 world units, the range is over 16 km with 25 cm resolution.

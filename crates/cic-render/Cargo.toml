@@ -6,12 +6,24 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+cic-assets.workspace = true
+cic-camera.workspace = true
+png = "0.18"
 sha2 = "0.10"
+wgpu = { version = "30", default-features = false, features = [
+    "std",
+    "dx12",
+    "metal",
+    "vulkan",
+    "wgsl",
+] }
 
 [dev-dependencies]
 # The same WGSL front end `wgpu` uses, so validating with it means the shaders really compile.
-# A dev-dependency because nothing at runtime needs to parse WGSL -- `wgpu` does that itself.
 naga = { version = "27", features = ["wgsl-in"] }
+pollster = "0.4"
+# The capture tests construct encoders directly, so they need the graphics API in scope.
+wgpu = { version = "30", default-features = false, features = ["std", "dx12", "metal", "vulkan", "wgsl"] }
 
 [lints]
 workspace = true

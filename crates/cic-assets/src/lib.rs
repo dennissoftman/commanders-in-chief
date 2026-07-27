@@ -5,7 +5,7 @@
 //! | Data | Format | Why |
 //! |---|---|---|
 //! | Models, props, units | **glTF 2.0** (`.glb`) | A published standard every DCC tool exports. Writing a mesh format would mean writing a Blender exporter first. |
-//! | Terrain heightfield and layers | **custom chunked binary** (`.cict`) | A regular numeric grid. No standard describes one well, and `u16` elevations upload directly as an `R16Unorm` GPU texture. |
+//! | Terrain heightfield and layers | **custom chunked binary** (`.cict`) | A regular numeric grid. No standard describes one well, and `u16` elevations upload directly as a baseline `R16Uint` GPU texture. |
 //! | Scenario: placements, players, waypoints | **JSON** (`map.json`) | Diffable, reviewable, hand-fixable. The bulk numerics are elsewhere, so the size argument for a binary encoding does not apply. |
 //! | A whole map | **zip** (`.cicmap`) | Already has a directory, per-member compression, and universal tooling. |
 //!

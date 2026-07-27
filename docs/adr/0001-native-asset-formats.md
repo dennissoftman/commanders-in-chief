@@ -30,8 +30,8 @@ and must not be followed.
 
 **Terrain → custom binary.** No standard describes a heightfield well. JSON would store `"1024"` as five
 bytes where two suffice and round-trip floats lossily. glTF describes meshes, and expressing a
-heightfield as one discards the regularity that makes terrain cheap. `u16` elevations because `u16`
-normalized is a native GPU texture format, so the payload uploads with no conversion pass.
+heightfield as one discards the regularity that makes terrain cheap. `u16` elevations because a 16-bit
+integer texture (`R16Uint`) is baseline-supported, so the payload uploads with no conversion pass.
 
 **Scenario → JSON.** The bulk numerics live in the terrain container, so a scenario is kilobytes and the
 package compresses it anyway — which erases most of a binary encoding's size advantage. What JSON buys
