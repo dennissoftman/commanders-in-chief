@@ -1,40 +1,53 @@
+// Deferred lighting over the terrain G-buffer, plus the tone-mapping composite.
+//
+// Lighting is deferred because the shadow and occlusion terms are screen-space: both need the whole
+// depth buffer resolved before any pixel can be lit, which a forward pass cannot provide.
+
 struct DirectionalLight {
     ambient: vec4<f32>,
     diffuse: vec4<f32>,
+    // Unit direction the light travels *along*, so a receiver is lit by `-source_direction`.
+    // A zero vector marks an unused slot.
     source_direction: vec4<f32>,
 }
 
-struct Camera {
+/// The number of light slots the pass reads. Slot 0 is the primary and is the only shadowed one; the
+/// rest are unshadowed fills standing in for sky and bounce until an irradiance probe exists.
+const LIGHT_COUNT: i32 = 3;
+
+struct SceneCamera {
     view_projection: mat4x4<f32>,
-    camera_position_time: vec4<f32>,
-    viewport: vec4<f32>,
-    detail_fade_caustics: vec4<f32>,
-    water_material: vec4<f32>,
-    water_surface: vec4<f32>,
-    water_motion: vec4<f32>,
-    terrain_lights: array<DirectionalLight, 3>,
     // Inverse of `view_projection`, for reconstructing a pixel's world position from scene depth.
     inverse_view_projection: mat4x4<f32>,
+    // xyz camera position, w unused.
+    camera_position: vec4<f32>,
+    // xy viewport size in pixels, zw its reciprocal.
+    viewport: vec4<f32>,
+    lights: array<DirectionalLight, 3>,
 }
 
-// `params` packs the presentation time in `x`, the world units spanned by the full normalized
-// depth range in `y`, and the world units covered by one shadow texel in `z`. `w` is reserved.
-// Both scales are per cascade, since the fitted frusta differ by more than an order of magnitude.
+// `params` packs the world units spanned by the full normalized depth range in `y` and the world
+// units covered by one shadow texel in `z`. `x` and `w` are reserved. Both scales are per cascade,
+// since the fitted frusta differ by more than an order of magnitude.
 struct ShadowCascade {
     view_projection: mat4x4<f32>,
     params: vec4<f32>,
 }
 
-const SHADOW_CASCADE_COUNT: i32 = 5;
+/// Four cascades rather than more. An RTS camera has a bounded height range, so the depth interval
+/// needing shadows is far narrower than a free-flight camera's, and a fifth cascade would fit a
+/// frustum slice the camera cannot reach.
+const SHADOW_CASCADE_COUNT: i32 = 4;
 
 struct ShadowCamera {
-    cascades: array<ShadowCascade, 5>,
+    cascades: array<ShadowCascade, 4>,
 }
 
 struct FullscreenOutput {
     @builtin(position) position: vec4<f32>,
 }
 
+/// A single oversized triangle covering the viewport, so no vertex buffer is needed.
 @vertex
 fn fullscreen_vertex(@builtin(vertex_index) vertex_index: u32) -> FullscreenOutput {
     let x = f32(i32(vertex_index) - 1) * 3.0;
@@ -47,16 +60,16 @@ fn fullscreen_vertex(@builtin(vertex_index) vertex_index: u32) -> FullscreenOutp
 @group(0) @binding(0) var g_albedo: texture_2d<f32>;
 @group(0) @binding(1) var g_normal: texture_2d<f32>;
 // Geometry coverage in `r`: below 0.5 no geometry was drawn, 1.0 is opaque geometry, and anything
-// above 1.0 carries that much emissive strength (see `gbuffer_coverage_emissive`).
+// above 1.0 carries that much emissive strength.
 @group(0) @binding(2) var g_coverage: texture_2d<f32>;
-@group(0) @binding(3) var<uniform> light_camera: Camera;
+@group(0) @binding(3) var<uniform> camera: SceneCamera;
 @group(0) @binding(4) var primary_shadow: texture_depth_2d_array;
 @group(0) @binding(5) var primary_shadow_sampler: sampler_comparison;
 @group(0) @binding(6) var<uniform> shadow_camera: ShadowCamera;
-@group(0) @binding(8) var ambient_occlusion: texture_2d<f32>;
-// Resolved scene depth as a colour target, written by `depth_resolve_fragment`. Binding 9 rather
-// than 7 because this module also declares the multisampled depth that pass reads at 7.
-@group(0) @binding(9) var scene_depth: texture_2d<f32>;
+@group(0) @binding(7) var ambient_occlusion: texture_2d<f32>;
+// The scene depth buffer, read directly. There is no multisample resolve step: this pass is not
+// multisampled, so the depth attachment the G-buffer wrote is sampleable as-is.
+@group(0) @binding(8) var scene_depth: texture_depth_2d;
 
 // Reconstructs a G-buffer pixel's world position from its depth.
 //
@@ -74,14 +87,14 @@ fn fullscreen_vertex(@builtin(vertex_index) vertex_index: u32) -> FullscreenOutp
 // depth already had to be resolved for the forward passes.
 fn world_from_depth(pixel: vec2<i32>, depth: f32) -> vec3<f32> {
     // `viewport.zw` holds the reciprocal viewport, and clip space is y-up while pixels are y-down.
-    let uv = (vec2<f32>(pixel) + vec2<f32>(0.5)) * light_camera.viewport.zw;
+    let uv = (vec2<f32>(pixel) + vec2<f32>(0.5)) * camera.viewport.zw;
     let ndc = vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
-    let homogeneous = light_camera.inverse_view_projection * vec4<f32>(ndc, depth, 1.0);
+    let homogeneous = camera.inverse_view_projection * vec4<f32>(ndc, depth, 1.0);
     return homogeneous.xyz / homogeneous.w;
 }
 
 fn world_at(pixel: vec2<i32>) -> vec3<f32> {
-    return world_from_depth(pixel, textureLoad(scene_depth, pixel, 0).r);
+    return world_from_depth(pixel, textureLoad(scene_depth, pixel, 0));
 }
 
 // Both bias terms are expressed in world units and converted with the light frustum's own
@@ -96,10 +109,13 @@ const SHADOW_DEPTH_SLACK_TEXELS: f32 = 0.5;
 // How much of the primary light survives in full shade. The direct term is nearly extinguished;
 // its ambient share only drops part way, standing in for the sky light that still reaches a
 // shadowed surface. Ambient has to be attenuated at all because it dominates the sum: the three
-// source terrain lights each contribute their own unoccluded ambient, so leaving ambient whole in
+// fill light contributes its own unoccluded ambient, so leaving ambient whole in
 // shade caps achievable shadow contrast around ten percent and cast shadows read as absent.
 const SHADOW_DIRECT_FLOOR: f32 = 0.08;
-const SHADOW_AMBIENT_FLOOR: f32 = 0.45;
+// Lowered from a larger value once the ambient term itself grew: the floor is a *fraction*, so a
+// generous fraction of a realistic skylight ambient leaves shadows nearly as bright as open ground.
+// The two have to be tuned together, which is the trap this constant sits in.
+const SHADOW_AMBIENT_FLOOR: f32 = 0.32;
 
 // Ambient occlusion attenuates every light's ambient share, including the accent fills the sun's
 // shadow deliberately leaves alone: occlusion answers "how much of the sky can this point see",
@@ -109,10 +125,8 @@ const AO_AMBIENT_FLOOR: f32 = 0.25;
 
 // The two attenuations above overlap rather than compose. A point the sun cannot reach because a
 // hill stands in the way is usually also a point that sees less sky, so multiplying both floors
-// charges twice for one occluder. Measured on `gla01` at its 18-degree morning sun, the product
-// bottomed out at 0.117 of the unattenuated value — an eight-fold drop where either term alone
-// reached only 0.19 or 0.36 — and matched a purely multiplicative model to within 0.014, so the
-// compounding was the whole of it.
+// charges twice for one occluder, and the product bottoms out several times deeper than either
+// term alone ever reaches.
 //
 // Taking the deeper of the two instead of their product keeps whichever term has the better claim on
 // a given pixel and stops the other adding to it. The floors themselves are unchanged, so the worst
@@ -215,14 +229,14 @@ fn lighting_fragment(input: FullscreenOutput) -> @location(0) vec4<f32> {
     let pixel = vec2<i32>(input.position.xy);
     let coverage = textureLoad(g_coverage, pixel, 0).r;
     if (coverage < 0.5) {
-        let horizon = clamp(input.position.y / light_camera.viewport.y, 0.0, 1.0);
+        let horizon = clamp(input.position.y / camera.viewport.y, 0.0, 1.0);
         return vec4<f32>(mix(vec3<f32>(0.025, 0.04, 0.065), vec3<f32>(0.12, 0.20, 0.30), horizon), 1.0);
     }
     let world = world_at(pixel);
     let albedo = textureLoad(g_albedo, pixel, 0).rgb;
     let normal_roughness = textureLoad(g_normal, pixel, 0);
     let normal = normalize(normal_roughness.xyz);
-    let view_direction = normalize(light_camera.camera_position_time.xyz - world);
+    let view_direction = normalize(camera.camera_position.xyz - world);
     let primary_visibility = shadow_visibility(world, normal);
     let occlusion = mix(
         AO_AMBIENT_FLOOR,
@@ -230,10 +244,11 @@ fn lighting_fragment(input: FullscreenOutput) -> @location(0) vec4<f32> {
         textureLoad(ambient_occlusion, pixel, 0).r
     );
     var color = vec3<f32>(0.0);
-    for (var index = 0; index < 3; index += 1) {
-        let light = light_camera.terrain_lights[index];
-        // Lights 1 and 2 are the source's accent fills and stay unoccluded; only the primary
-        // light is shadowed, in both its ambient and direct shares.
+    for (var index = 0; index < LIGHT_COUNT; index += 1) {
+        let light = camera.lights[index];
+        // Slot 0 is the primary and is the only shadowed light, in both its ambient and direct
+        // shares. The rest are fills: shadowing them would darken the scene twice for one
+        // occluder and defeat the purpose of having them.
         let shadowed = index == 0;
         // Only the primary light is both shadowed and occluded, so it is the only one where the two
         // could compound; the accent fills take occlusion alone and are unaffected by this.
@@ -254,8 +269,8 @@ fn lighting_fragment(input: FullscreenOutput) -> @location(0) vec4<f32> {
             let diffuse_factor = max(dot(normal, light_direction), 0.0);
             color += albedo * light.diffuse.rgb * diffuse_factor * visibility;
             // Highlight strength falls off with roughness, not just its width, so a fully rough
-            // material has no highlight at all. A fixed strength gave every surface in the scene a
-            // sheen regardless of what its source material declared, and did so once per light.
+            // material has no highlight at all. A fixed strength instead gives every surface a
+            // sheen regardless of what its material declared, once per light.
             let half_vector = normalize(light_direction + view_direction);
             let specular = pow(
                 max(dot(normal, half_vector), 0.0),
@@ -275,20 +290,29 @@ fn lighting_fragment(input: FullscreenOutput) -> @location(0) vec4<f32> {
 @group(1) @binding(0) var scene_color: texture_2d<f32>;
 @group(1) @binding(1) var scene_sampler: sampler;
 
+// Scene exposure, applied before the tone curve.
+//
+// Reinhard maps 1.0 to 0.5, so an unexposed scene whose brightest surfaces sit near unity lands
+// entirely in the lower half of the range and reads as flat and grey -- the same mistake as tone
+// mapping the forward pass at all. Exposing first puts fully lit ground near the top of the range and
+// leaves the curve doing what it is for: rolling off the values that genuinely exceed one.
+const EXPOSURE: f32 = 1.6;
+
 fn reinhard(hdr: vec3<f32>) -> vec3<f32> {
-    return hdr / (vec3<f32>(1.0) + hdr);
+    let exposed = hdr * EXPOSURE;
+    return exposed / (vec3<f32>(1.0) + exposed);
 }
 
 // A contrast-adaptive sharpen in the spirit of AMD FidelityFX CAS: it boosts an unsharp-mask
 // style detail term by an amount that scales down toward zero both near luminance extremes
-// (avoids blooming/crushing) and at genuinely hard edges (avoids ringing on the very silhouette
-// edges MSAA already resolved), so it only restores softer mid-contrast detail lost to mip/
-// texture filtering — real MSAA has already handled geometric edge aliasing by this point.
+// (avoids blooming/crushing) and at genuinely hard edges (avoids ringing on silhouette
+// edges), so it only restores softer mid-contrast detail lost to texture filtering. It is not an
+// antialiasing pass and does not pretend to be one.
 const SHARPEN_STRENGTH: f32 = 0.6;
 
 @fragment
 fn composite_fragment(input: FullscreenOutput) -> @location(0) vec4<f32> {
-    let inverse_viewport = 1.0 / light_camera.viewport.xy;
+    let inverse_viewport = camera.viewport.zw;
     let uv = (input.position.xy + vec2<f32>(0.5)) * inverse_viewport;
     let center = reinhard(textureSampleLevel(scene_color, scene_sampler, uv, 0.0).rgb);
     let north = reinhard(textureSampleLevel(
@@ -322,25 +346,4 @@ fn composite_fragment(input: FullscreenOutput) -> @location(0) vec4<f32> {
     let neighbor_average = (north + south + west + east) * 0.25;
     let sharpened = center + (center - neighbor_average) * amplitude;
     return vec4<f32>(clamp(sharpened, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
-}
-
-@group(0) @binding(7) var gbuffer_depth_ms: texture_depth_multisampled_2d;
-
-struct ResolvedDepth {
-    // The depth attachment the boundary, overlay, and water passes depth-test against.
-    @builtin(frag_depth) attachment: f32,
-    // The same value as a sampleable colour target. A depth texture cannot be attached for depth
-    // testing and sampled in the same pass, and the water pass needs both, so the resolve writes
-    // its result twice rather than forcing a second resolve or a copy.
-    @location(0) sampleable: f32,
-}
-
-@fragment
-fn depth_resolve_fragment(input: FullscreenOutput) -> ResolvedDepth {
-    let pixel = vec2<i32>(input.position.xy);
-    let depth = textureLoad(gbuffer_depth_ms, pixel, 0);
-    var output: ResolvedDepth;
-    output.attachment = depth;
-    output.sampleable = depth;
-    return output;
 }

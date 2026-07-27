@@ -1,18 +1,11 @@
-struct DirectionalLight {
-    ambient: vec4<f32>,
-    diffuse: vec4<f32>,
-    source_direction: vec4<f32>,
-}
-
+// Staged for the virtual-texture path; see `docs/milestones/m3-renderer.md`. Its own struct rather
+// than the deferred pass's `SceneCamera`, because the detail fade is meaningless to every other pass.
 struct Camera {
     view_projection: mat4x4<f32>,
-    camera_position_time: vec4<f32>,
-    viewport: vec4<f32>,
-    detail_fade_caustics: vec4<f32>,
-    water_material: vec4<f32>,
-    water_surface: vec4<f32>,
-    water_motion: vec4<f32>,
-    terrain_lights: array<DirectionalLight, 3>,
+    // xyz camera position, w unused.
+    camera_position: vec4<f32>,
+    // x fade start distance, y fade end distance, zw reserved.
+    detail_fade: vec4<f32>,
 }
 
 struct VertexInput {
@@ -105,15 +98,15 @@ fn terrain_sample(uv: vec2<f32>, world_position: vec3<f32>) -> vec4<f32> {
         vec2<f32>(virtual_config.cell_source.xy) - vec2<f32>(0.0001),
     );
     let fallback = textureSample(terrain_texture, terrain_sampler, uv);
-    let view_distance = distance(world_position, camera.camera_position_time.xyz);
+    let view_distance = distance(world_position, camera.camera_position.xyz);
     let fine_fade = smoothstep(
-        camera.detail_fade_caustics.x,
-        camera.detail_fade_caustics.y,
+        camera.detail_fade.x,
+        camera.detail_fade.y,
         view_distance,
     );
     let coarse_fade = smoothstep(
-        camera.detail_fade_caustics.x * 2.0,
-        camera.detail_fade_caustics.y * 2.0,
+        camera.detail_fade.x * 2.0,
+        camera.detail_fade.y * 2.0,
         view_distance,
     );
     let coarse = page_sample(coarse_page_table, cell_position, 16u);

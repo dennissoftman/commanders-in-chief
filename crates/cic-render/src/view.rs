@@ -60,6 +60,38 @@ pub fn perspective(projection: Projection) -> [[f32; 4]; 4] {
     ]
 }
 
+/// Returns a right-handed orthographic matrix mapping depth to `0..=1`.
+///
+/// Used for shadow cascades, where a perspective projection would give the light a viewpoint it does
+/// not have: a directional light is parallel by definition, so its frustum is a box.
+///
+/// Column-major: `matrix[column][row]`.
+#[must_use]
+pub fn orthographic(
+    left: f32,
+    right: f32,
+    bottom: f32,
+    top: f32,
+    near: f32,
+    far: f32,
+) -> [[f32; 4]; 4] {
+    let width = (right - left).abs().max(1.0e-6) * (right - left).signum();
+    let height = (top - bottom).abs().max(1.0e-6) * (top - bottom).signum();
+    let depth = (far - near).abs().max(1.0e-6) * (far - near).signum();
+    [
+        [2.0 / width, 0.0, 0.0, 0.0],
+        [0.0, 2.0 / height, 0.0, 0.0],
+        // Negative because a right-handed view looks down -Z while depth increases into the screen.
+        [0.0, 0.0, -1.0 / depth, 0.0],
+        [
+            -(right + left) / width,
+            -(top + bottom) / height,
+            -near / depth,
+            1.0,
+        ],
+    ]
+}
+
 /// Returns a right-handed view matrix looking from `eye` toward `target`.
 ///
 /// Column-major: `matrix[column][row]`.
@@ -91,6 +123,76 @@ pub fn view_projection(pose: CameraPose, projection: Projection) -> [[f32; 4]; 4
         perspective(projection),
         look_at(pose.eye, pose.focus, WORLD_UP),
     )
+}
+
+/// Inverts a column-major 4x4 matrix, or returns `None` when it is singular.
+///
+/// The deferred pass needs the inverse view-projection to reconstruct a pixel's world position from
+/// its depth. Returning `None` rather than a garbage matrix matters: a silently singular inverse
+/// puts every reconstructed position at the origin, which reads as "all shadows broken" instead of
+/// "the camera matrix is degenerate".
+#[must_use]
+#[allow(clippy::many_single_char_names)]
+pub fn invert(matrix: [[f32; 4]; 4]) -> Option<[[f32; 4]; 4]> {
+    // Written against a row-indexed view of the column-major input, so the cofactor expansion below
+    // reads like the textbook one.
+    let m = |row: usize, column: usize| matrix[column][row];
+
+    let s0 = m(0, 0) * m(1, 1) - m(1, 0) * m(0, 1);
+    let s1 = m(0, 0) * m(1, 2) - m(1, 0) * m(0, 2);
+    let s2 = m(0, 0) * m(1, 3) - m(1, 0) * m(0, 3);
+    let s3 = m(0, 1) * m(1, 2) - m(1, 1) * m(0, 2);
+    let s4 = m(0, 1) * m(1, 3) - m(1, 1) * m(0, 3);
+    let s5 = m(0, 2) * m(1, 3) - m(1, 2) * m(0, 3);
+
+    let c5 = m(2, 2) * m(3, 3) - m(3, 2) * m(2, 3);
+    let c4 = m(2, 1) * m(3, 3) - m(3, 1) * m(2, 3);
+    let c3 = m(2, 1) * m(3, 2) - m(3, 1) * m(2, 2);
+    let c2 = m(2, 0) * m(3, 3) - m(3, 0) * m(2, 3);
+    let c1 = m(2, 0) * m(3, 2) - m(3, 0) * m(2, 2);
+    let c0 = m(2, 0) * m(3, 1) - m(3, 0) * m(2, 1);
+
+    let determinant = s0 * c5 - s1 * c4 + s2 * c3 + s3 * c2 - s4 * c1 + s5 * c0;
+    if determinant.abs() < 1.0e-20 || !determinant.is_finite() {
+        return None;
+    }
+    let inverse_determinant = 1.0 / determinant;
+
+    let rows = [
+        [
+            (m(1, 1) * c5 - m(1, 2) * c4 + m(1, 3) * c3) * inverse_determinant,
+            (-m(0, 1) * c5 + m(0, 2) * c4 - m(0, 3) * c3) * inverse_determinant,
+            (m(3, 1) * s5 - m(3, 2) * s4 + m(3, 3) * s3) * inverse_determinant,
+            (-m(2, 1) * s5 + m(2, 2) * s4 - m(2, 3) * s3) * inverse_determinant,
+        ],
+        [
+            (-m(1, 0) * c5 + m(1, 2) * c2 - m(1, 3) * c1) * inverse_determinant,
+            (m(0, 0) * c5 - m(0, 2) * c2 + m(0, 3) * c1) * inverse_determinant,
+            (-m(3, 0) * s5 + m(3, 2) * s2 - m(3, 3) * s1) * inverse_determinant,
+            (m(2, 0) * s5 - m(2, 2) * s2 + m(2, 3) * s1) * inverse_determinant,
+        ],
+        [
+            (m(1, 0) * c4 - m(1, 1) * c2 + m(1, 3) * c0) * inverse_determinant,
+            (-m(0, 0) * c4 + m(0, 1) * c2 - m(0, 3) * c0) * inverse_determinant,
+            (m(3, 0) * s4 - m(3, 1) * s2 + m(3, 3) * s0) * inverse_determinant,
+            (-m(2, 0) * s4 + m(2, 1) * s2 - m(2, 3) * s0) * inverse_determinant,
+        ],
+        [
+            (-m(1, 0) * c3 + m(1, 1) * c1 - m(1, 2) * c0) * inverse_determinant,
+            (m(0, 0) * c3 - m(0, 1) * c1 + m(0, 2) * c0) * inverse_determinant,
+            (-m(3, 0) * s3 + m(3, 1) * s1 - m(3, 2) * s0) * inverse_determinant,
+            (m(2, 0) * s3 - m(2, 1) * s1 + m(2, 2) * s0) * inverse_determinant,
+        ],
+    ];
+
+    // Back to column-major.
+    let mut result = [[0.0f32; 4]; 4];
+    for (row_index, row) in rows.iter().enumerate() {
+        for (column_index, value) in row.iter().enumerate() {
+            result[column_index][row_index] = *value;
+        }
+    }
+    Some(result)
 }
 
 /// Multiplies two column-major matrices.
@@ -239,6 +341,42 @@ mod tests {
             (at_target[2] + 5.0).abs() < 1.0e-4,
             "target should sit 5 units down -Z, got {at_target:?}"
         );
+    }
+
+    #[test]
+    fn the_inverse_round_trips_a_view_projection() {
+        // The deferred pass reconstructs world position through this. A wrong inverse puts every
+        // pixel at the origin, which looks like broken shadows rather than a broken matrix.
+        use super::invert;
+        let matrix = multiply(
+            perspective(Projection::for_viewport(1280, 720)),
+            look_at([120.0, -300.0, 220.0], [0.0, 40.0, 0.0], [0.0, 0.0, 1.0]),
+        );
+        let inverse = invert(matrix).expect("a view-projection must be invertible");
+        let product = multiply(matrix, inverse);
+        for column in 0..4 {
+            for row in 0..4 {
+                let expected = if column == row { 1.0 } else { 0.0 };
+                assert!(
+                    (product[column][row] - expected).abs() < 1.0e-3,
+                    "matrix times its inverse is not identity: {product:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_singular_matrix_has_no_inverse() {
+        use super::invert;
+        assert!(invert([[0.0; 4]; 4]).is_none());
+        // A projection collapsed to zero depth range is the realistic degenerate case.
+        let collapsed = perspective(Projection {
+            vertical_fov: 0.0,
+            aspect_ratio: 1.0,
+            near: 1.0,
+            far: 1.0,
+        });
+        assert!(invert(collapsed).is_none());
     }
 
     #[test]

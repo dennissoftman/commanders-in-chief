@@ -54,6 +54,24 @@ impl Default for DirectionalLight {
     }
 }
 
+impl DirectionalLight {
+    /// A daylight rig for a pass that computes ambient occlusion.
+    ///
+    /// The ambient term is markedly higher than [`Self::default`], and that is the point of having
+    /// occlusion at all: a constant ambient is a stand-in for skylight, and the reason it normally has
+    /// to be kept low is that nothing removes it from creases and hollows where the sky cannot
+    /// actually reach. With an occlusion term doing that removal, a realistic amount of skylight
+    /// becomes affordable — so unlit faces read as shadowed rather than as black holes.
+    #[must_use]
+    pub fn daylight_with_occlusion() -> Self {
+        Self {
+            direction: normalize([-0.45, -0.30, 0.84]),
+            ambient: [0.30, 0.34, 0.42],
+            diffuse: [1.05, 0.98, 0.86],
+        }
+    }
+}
+
 /// One layer's flat colour, until material textures exist.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LayerColour(pub [f32; 3]);
@@ -63,6 +81,7 @@ pub struct LayerColour(pub [f32; 3]);
 pub struct TerrainRenderer {
     pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
+    bind_group_layout: wgpu::BindGroupLayout,
     uniform_buffer: wgpu::Buffer,
     height_texture: wgpu::Texture,
     weight_texture: wgpu::Texture,
@@ -72,6 +91,7 @@ pub struct TerrainRenderer {
     height_scale: f32,
     layer_count: u32,
     palette: [[f32; 3]; MAX_LAYERS],
+    height_range: f32,
 }
 
 impl TerrainRenderer {
@@ -119,6 +139,7 @@ impl TerrainRenderer {
         Ok(Self {
             pipeline,
             bind_group,
+            bind_group_layout: layout,
             uniform_buffer,
             height_texture,
             weight_texture,
@@ -130,7 +151,39 @@ impl TerrainRenderer {
             height_scale: terrain.vertical_scale(),
             layer_count: u32::try_from(terrain.layers().len()).unwrap_or(0),
             palette: resolved,
+            // Kept so the shadow fit can size each cascade's reach toward the light without the
+            // caller having to know or remember to supply it.
+            height_range: terrain
+                .elevations()
+                .iter()
+                .copied()
+                .max()
+                .map_or(0.0, |peak| f32::from(peak) * terrain.vertical_scale()),
         })
+    }
+
+    /// Returns the terrain's bind group, so another pipeline can draw the same terrain.
+    ///
+    /// The G-buffer and shadow-depth passes need exactly these bindings — the uniforms, the height
+    /// texture, and the layer weights — so they share this group rather than duplicating it.
+    #[must_use]
+    pub const fn bind_group(&self) -> &wgpu::BindGroup {
+        &self.bind_group
+    }
+
+    /// Returns the layout the bind group was built against, for creating compatible pipelines.
+    #[must_use]
+    pub const fn bind_group_layout(&self) -> &wgpu::BindGroupLayout {
+        &self.bind_group_layout
+    }
+
+    /// Returns the world-space elevation of the terrain's highest sample.
+    ///
+    /// Used to size how far a shadow cascade reaches toward the light, since the tallest thing in the
+    /// scene bounds how far away a caster can be.
+    #[must_use]
+    pub const fn height_range(&self) -> f32 {
+        self.height_range
     }
 
     /// Returns the number of vertices a full terrain draw submits.

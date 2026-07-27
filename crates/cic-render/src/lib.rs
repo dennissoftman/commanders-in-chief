@@ -24,10 +24,12 @@
 //! windowed presentation. The shaders for most of that are already here and validated; what they
 //! need is the pipeline scaffolding around them. See `docs/milestones/m3-renderer.md`.
 
+pub mod deferred;
 pub mod detail;
 pub mod gpu;
 pub mod resource;
 pub mod scene;
+pub mod shadow;
 pub mod terrain;
 pub mod terrain_virtual;
 pub mod view;
@@ -35,9 +37,11 @@ pub mod view;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
+pub use deferred::{DeferredFrame, DeferredRenderer, DeferredTargets};
 pub use gpu::{Capture, CaptureTarget, GpuContext};
 pub use resource::{TextureId, TextureResourceManager};
 pub use scene::{TerrainFrame, capture_terrain, render_terrain_into};
+pub use shadow::{CASCADE_COUNT, Cascade, fit_cascades};
 pub use terrain::{DirectionalLight, LayerColour, TerrainRenderer};
 pub use view::{Projection, view_projection};
 
@@ -54,6 +58,8 @@ pub const SHADERS: &[(&str, &str)] = &[
     ("terrain", include_str!("terrain.wgsl")),
     ("terrain_ao", include_str!("terrain_ao.wgsl")),
     ("terrain_deferred", include_str!("terrain_deferred.wgsl")),
+    ("terrain_forward", include_str!("terrain_forward.wgsl")),
+    ("terrain_gbuffer", include_str!("terrain_gbuffer.wgsl")),
     ("terrain_shadow", include_str!("terrain_shadow.wgsl")),
     ("terrain_viewer", include_str!("terrain_viewer.wgsl")),
     ("terrain_virtual", include_str!("terrain_virtual.wgsl")),
@@ -90,6 +96,9 @@ pub enum RenderError {
     MapCallbackTimeout,
     /// A capture was requested with a zero width or height.
     EmptyCapture,
+    /// The camera's view-projection could not be inverted, so no world position could be
+    /// reconstructed from depth.
+    SingularCamera,
     /// A capture's dimensions or buffer size exceeded the renderer's explicit bounds.
     CaptureTooLarge,
     /// Encoding a capture as a PNG failed.
@@ -139,6 +148,9 @@ impl Display for RenderError {
                 formatter.write_str("the buffer map callback did not fire in time")
             }
             Self::EmptyCapture => formatter.write_str("a capture cannot be zero-sized"),
+            Self::SingularCamera => {
+                formatter.write_str("the camera view-projection is singular and cannot be inverted")
+            }
             Self::CaptureTooLarge => {
                 formatter.write_str("capture size exceeds the renderer's explicit bounds")
             }
@@ -201,7 +213,11 @@ mod shader_tests {
 
     #[test]
     fn the_shader_set_is_complete_and_addressable() {
-        assert_eq!(SHADERS.len(), 13, "the seeded, licence-clean shader set");
+        assert_eq!(
+            SHADERS.len(),
+            15,
+            "13 seeded shaders plus the forward and G-buffer passes"
+        );
         for (name, source) in SHADERS {
             assert!(!source.trim().is_empty(), "{name}.wgsl is empty");
             assert_eq!(shader(name), Some(*source));

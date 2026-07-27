@@ -1,18 +1,7 @@
-struct DirectionalLight {
-    ambient: vec4<f32>,
-    diffuse: vec4<f32>,
-    source_direction: vec4<f32>,
-}
-
+// This pass needs only the view transform. A pass that grows a lighting term should bind the
+// deferred pass's `SceneCamera` rather than widening this.
 struct Camera {
     view_projection: mat4x4<f32>,
-    camera_position_time: vec4<f32>,
-    viewport: vec4<f32>,
-    detail_fade_caustics: vec4<f32>,
-    water_material: vec4<f32>,
-    water_surface: vec4<f32>,
-    water_motion: vec4<f32>,
-    terrain_lights: array<DirectionalLight, 3>,
 }
 
 struct VertexInput {

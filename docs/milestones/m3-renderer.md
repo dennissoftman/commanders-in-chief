@@ -33,12 +33,17 @@ Draw a map: terrain, water, models, lighting, and shadows, in a window and headl
 - **Texture resources**, deduplicated by content hash under explicit byte budgets.
 - **The camera**, as a standalone model with no window, input, or GPU dependency.
 
+- **The deferred chain**, in six passes: four depth-only shadow cascades, a G-buffer, ground-truth
+  ambient occlusion with a bilateral blur, deferred lighting that reconstructs world position from
+  depth, and a tone-mapping composite. The lighting and occlusion shaders were adapted rather than
+  rewritten, keeping their technique and their reasoning; only their legacy camera layout and
+  three-light model were replaced.
+- **Cascade fitting**, as pure arithmetic with no GPU involvement: bounding-sphere fits for rotation
+  invariance, texel-grid snapping against shimmer, and a light-axis reach sized from the scene's
+  height and the sun's elevation.
+
 ## Remaining
 
-- The deferred chain: G-buffer, cascaded shadows, ambient occlusion. Shaders exist and validate; they
-  need pipeline scaffolding and matching bind group layouts. This is also what the forward pass most
-  visibly lacks — terrain currently reads as correctly shaped but flatly lit, because nothing occludes
-  anything.
 - Model pipeline against imported glTF geometry and PBR materials.
 - Water surfaces, including re-authoring the shader whose constants were left behind.
 - Albedo textures per terrain layer, replacing the current flat palette colours.
@@ -75,6 +80,16 @@ differentiates slopes from flats.
 
 **One GPU device per test binary, not per test.** Creating and destroying several devices concurrently
 on one adapter crashed the driver outright — an access violation rather than a test failure.
+
+**Shadow tests need a control that differs only in shadowing.** Comparing an oblique sun against an
+overhead one is not one: moving the sun changes every surface's incidence, so the two frames differ even
+with the shadow pass deleted. Collapsing `shadow_distance` instead holds the light, camera, geometry, and
+occlusion identical and puts every receiver outside all four cascades.
+
+**A shadow fixture has to be shaped for the sun it is lit by.** Two separate versions of the test
+measured nothing: one placed the sun so every shadow fell behind its own caster and out of frame; the
+other used a ridge wider than its own shadow was long, so the shadow landed entirely on the ridge's
+unlit back slope. Neither was a renderer fault, and neither was visible from the assertions.
 
 ## Explicitly not done
 
