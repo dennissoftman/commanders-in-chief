@@ -31,11 +31,13 @@ use std::error::Error;
 use std::sync::Arc;
 use std::time::Instant;
 
+use cic_assets::model::{Model, ModelMaterial, ModelPrimitive, ModelVertex};
 use cic_assets::{MapPackage, PackageLimits, Terrain, TerrainLayer};
 use cic_camera::{RtsCamera, RtsCameraProfile};
 use cic_render::terrain::LayerColour;
 use cic_render::{
-    Action, DeferredFrame, GpuContext, InputState, SurfaceRenderer, TerrainGround, TerrainRenderer,
+    Action, DeferredFrame, GpuContext, InputState, ModelBatch, ModelInstance, SurfaceRenderer,
+    TerrainGround, TerrainRenderer,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -151,6 +153,147 @@ fn generated_terrain() -> Terrain {
     .expect("generated terrain is valid")
 }
 
+/// A simple building: a box with a distinct roof material.
+///
+/// Built in Rust rather than loaded, so the viewer runs with no asset files at all. The importer that
+/// would replace this is already tested in `cic-assets`; what this exercises is rendering.
+fn building_model() -> Model {
+    let half = 18.0f32;
+    let height = 46.0f32;
+    let faces: [([f32; 3], [[f32; 3]; 4]); 6] = [
+        (
+            [0.0, 0.0, 1.0],
+            [
+                [-half, -half, height],
+                [half, -half, height],
+                [half, half, height],
+                [-half, half, height],
+            ],
+        ),
+        (
+            [0.0, 0.0, -1.0],
+            [
+                [-half, half, 0.0],
+                [half, half, 0.0],
+                [half, -half, 0.0],
+                [-half, -half, 0.0],
+            ],
+        ),
+        (
+            [0.0, -1.0, 0.0],
+            [
+                [-half, -half, 0.0],
+                [half, -half, 0.0],
+                [half, -half, height],
+                [-half, -half, height],
+            ],
+        ),
+        (
+            [0.0, 1.0, 0.0],
+            [
+                [half, half, 0.0],
+                [-half, half, 0.0],
+                [-half, half, height],
+                [half, half, height],
+            ],
+        ),
+        (
+            [1.0, 0.0, 0.0],
+            [
+                [half, -half, 0.0],
+                [half, half, 0.0],
+                [half, half, height],
+                [half, -half, height],
+            ],
+        ),
+        (
+            [-1.0, 0.0, 0.0],
+            [
+                [-half, half, 0.0],
+                [-half, -half, 0.0],
+                [-half, -half, height],
+                [-half, half, height],
+            ],
+        ),
+    ];
+
+    let primitives = faces
+        .into_iter()
+        .enumerate()
+        .map(|(index, (normal, corners))| ModelPrimitive {
+            vertices: corners
+                .into_iter()
+                .enumerate()
+                .map(|(corner, position)| ModelVertex {
+                    position,
+                    normal,
+                    uv: [(corner & 1) as f32, ((corner >> 1) & 1) as f32],
+                })
+                .collect(),
+            indices: vec![0, 1, 2, 0, 2, 3],
+            material: Some(usize::from(index == 0)),
+        })
+        .collect();
+
+    Model {
+        name: "building".to_owned(),
+        primitives,
+        materials: vec![
+            ModelMaterial {
+                name: "wall".to_owned(),
+                base_color: [0.66, 0.62, 0.55, 1.0],
+                metallic: 0.0,
+                roughness: 0.85,
+                base_color_texture: None,
+                blended: false,
+            },
+            ModelMaterial {
+                name: "roof".to_owned(),
+                base_color: [0.36, 0.20, 0.16, 1.0],
+                metallic: 0.0,
+                roughness: 0.65,
+                base_color_texture: None,
+                blended: false,
+            },
+        ],
+        has_skin: false,
+        has_animation: false,
+    }
+}
+
+/// Scatters buildings across the terrain, each sitting on the ground beneath it.
+///
+/// Placements follow the heightfield rather than a fixed Z, which is the same lookup the camera uses to
+/// hold its height -- and the reason a building on a slope does not float or sink.
+fn building_placements(terrain: &Terrain) -> Vec<ModelInstance> {
+    let [extent_x, extent_y] = terrain.world_extent();
+    let mut placed = Vec::new();
+    for row in 0..6u16 {
+        for column in 0..6u16 {
+            let x = extent_x * (0.10 + 0.16 * f32::from(column));
+            let y = extent_y * (0.06 + 0.13 * f32::from(row));
+            // Skip anything the terrain does not cover, rather than placing it at zero.
+            let Some(ground) = terrain.elevation_at_world(x, y) else {
+                continue;
+            };
+            // Leave the steepest ground clear, so buildings do not obviously intersect a slope.
+            let slope_probe = terrain.elevation_at_world(x + 20.0, y).unwrap_or(ground);
+            if (slope_probe - ground).abs() > 14.0 {
+                continue;
+            }
+            let rotation = 0.41 * f32::from(row * 6 + column);
+            let instance =
+                ModelInstance::placed([x, y, ground], rotation, 0.8 + 0.05 * f32::from(column));
+            placed.push(if (row + column) % 4 == 0 {
+                instance.with_tint([0.62, 0.74, 0.86, 1.0])
+            } else {
+                instance
+            });
+        }
+    }
+    placed
+}
+
 fn palette() -> Vec<LayerColour> {
     vec![
         LayerColour([0.74, 0.68, 0.50]),
@@ -165,6 +308,7 @@ struct Active {
     context: GpuContext,
     terrain_renderer: TerrainRenderer,
     surface: SurfaceRenderer,
+    models: Vec<ModelBatch>,
 }
 
 struct Viewer {
@@ -238,11 +382,32 @@ impl ApplicationHandler for Viewer {
         };
         eprintln!("surface: {:?} at {:?}", surface.format(), surface.size());
 
+        // A scattering of buildings, so the scene has something with a silhouette in it and the
+        // shadow pass has a caster that is not terrain.
+        let placements = building_placements(&self.terrain);
+        let models = match ModelBatch::new(
+            &context,
+            &building_model(),
+            &placements,
+            surface.material_layout(),
+        ) {
+            Ok(batch) => {
+                eprintln!(
+                    "models: {} instances of {} triangles",
+                    batch.instance_count(),
+                    batch.triangle_count()
+                );
+                vec![batch]
+            }
+            Err(error) => return self.fail(event_loop, error.to_string()),
+        };
+
         self.active = Some(Active {
             window,
             context,
             terrain_renderer,
             surface,
+            models,
         });
     }
 
@@ -337,7 +502,12 @@ impl Viewer {
         let frame = DeferredFrame::new(self.camera.pose(), width, height);
         active
             .surface
-            .render(&active.context, &active.terrain_renderer, frame)
+            .render(
+                &active.context,
+                &active.terrain_renderer,
+                &active.models,
+                frame,
+            )
             .map_err(|error| error.to_string())
     }
 }

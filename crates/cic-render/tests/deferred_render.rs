@@ -186,11 +186,12 @@ fn encoder(context: &GpuContext) -> wgpu::CommandEncoder {
 fn render(context: &GpuContext, harness: &Harness, frame: DeferredFrame) -> Capture {
     harness
         .deferred
-        .set_frame(context, &harness.renderer, frame, WIDTH, HEIGHT)
+        .set_frame(context, &harness.renderer, &[], frame, WIDTH, HEIGHT)
         .expect("upload frame uniforms");
     harness.deferred.render(
         context,
         &harness.renderer,
+        &[],
         &harness.targets,
         harness.output.colour_view(),
     );
@@ -347,11 +348,12 @@ fn ambient_occlusion_is_computed_and_varies() {
     let frame = DeferredFrame::new(pose(&harness.terrain), WIDTH, HEIGHT);
     harness
         .deferred
-        .set_frame(context, &harness.renderer, frame, WIDTH, HEIGHT)
+        .set_frame(context, &harness.renderer, &[], frame, WIDTH, HEIGHT)
         .expect("upload frame uniforms");
     harness.deferred.render(
         context,
         &harness.renderer,
+        &[],
         &harness.targets,
         harness.output.colour_view(),
     );
@@ -385,11 +387,12 @@ fn ambient_occlusion_is_computed_and_varies() {
     let flat_output = CaptureTarget::new(context, WIDTH, HEIGHT).expect("flat output");
     let flat_frame = DeferredFrame::new(pose(&harness.terrain), WIDTH, HEIGHT);
     flat_deferred
-        .set_frame(context, &flat_renderer, flat_frame, WIDTH, HEIGHT)
+        .set_frame(context, &flat_renderer, &[], flat_frame, WIDTH, HEIGHT)
         .expect("upload flat uniforms");
     flat_deferred.render(
         context,
         &flat_renderer,
+        &[],
         &flat_targets,
         flat_output.colour_view(),
     );
@@ -421,7 +424,7 @@ fn a_singular_camera_is_reported_rather_than_rendered() {
     frame.projection.vertical_fov = 0.0;
     let error = harness
         .deferred
-        .set_frame(context, &harness.renderer, frame, WIDTH, HEIGHT)
+        .set_frame(context, &harness.renderer, &[], frame, WIDTH, HEIGHT)
         .expect_err("a singular camera must be refused");
     assert!(
         matches!(error, cic_render::RenderError::SingularCamera),
@@ -462,9 +465,9 @@ fn the_chain_renders_into_a_bgra_target() {
 
     let frame = DeferredFrame::new(pose(&terrain), WIDTH, HEIGHT);
     deferred
-        .set_frame(context, &renderer, frame, WIDTH, HEIGHT)
+        .set_frame(context, &renderer, &[], frame, WIDTH, HEIGHT)
         .expect("upload frame uniforms");
-    deferred.render(context, &renderer, &targets, &view);
+    deferred.render(context, &renderer, &[], &targets, &view);
 
     // Validation errors surface asynchronously, so drain the queue before declaring success.
     context

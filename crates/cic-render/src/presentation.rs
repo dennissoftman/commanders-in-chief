@@ -16,6 +16,7 @@ use cic_camera::{CameraIntent, GroundHeight};
 
 use crate::RenderError;
 use crate::deferred::{DeferredFrame, DeferredRenderer, DeferredTargets};
+use crate::model::ModelBatch;
 use crate::terrain::TerrainRenderer;
 
 /// Adapts a [`Terrain`] to the camera's ground-height lookup.
@@ -95,6 +96,12 @@ impl SurfaceRenderer {
         (self.configuration.width, self.configuration.height)
     }
 
+    /// Returns the layout a [`ModelBatch`] binds its materials through.
+    #[must_use]
+    pub const fn material_layout(&self) -> &wgpu::BindGroupLayout {
+        self.deferred.material_layout()
+    }
+
     /// Returns the format the composite writes.
     #[must_use]
     pub const fn format(&self) -> wgpu::TextureFormat {
@@ -146,6 +153,7 @@ impl SurfaceRenderer {
         &mut self,
         context: &crate::GpuContext,
         terrain: &TerrainRenderer,
+        models: &[ModelBatch],
         frame: DeferredFrame,
     ) -> Result<(), RenderError> {
         // Every non-success case here is a "skip this frame" rather than an error. A resize, a
@@ -183,11 +191,13 @@ impl SurfaceRenderer {
         self.deferred.set_frame(
             context,
             terrain,
+            models,
             frame,
             self.configuration.width,
             self.configuration.height,
         )?;
-        self.deferred.render(context, terrain, &self.targets, &view);
+        self.deferred
+            .render(context, terrain, models, &self.targets, &view);
         // Presenting is the queue's operation in this API version, not the texture's.
         context.queue().present(surface_frame);
         Ok(())

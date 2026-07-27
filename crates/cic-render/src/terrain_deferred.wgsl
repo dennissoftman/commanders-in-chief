@@ -198,6 +198,20 @@ fn sample_cascade(index: i32, world_position: vec3<f32>, normal: vec3<f32>) -> C
     return result;
 }
 
+// Incidence below which a receiver stops being shadowed at all.
+//
+// A surface facing away from a light cannot be meaningfully shadowed by it, and the depth comparison
+// there is least trustworthy: on a face nearly parallel to the light, the far side of a solid is
+// laterally rather than deeply offset, so the near and far depths fall within a texel of each other and
+// the test flickers. The direct term hides that, being near zero at such incidence -- but the *ambient*
+// term is shadow-attenuated too and does not depend on incidence, so the flicker surfaces there as
+// diagonal striping across the face.
+//
+// Fading the attenuation out as incidence approaches zero removes it at its cause rather than by
+// inflating a bias, and costs nothing that was visible: the geometry it stops shadowing receives no
+// direct light anyway.
+const SHADOW_INCIDENCE_FADE: f32 = 0.22;
+
 // Returns the raw unoccluded fraction in `0..=1`. Callers apply their own floor, because opaque
 // terrain and the transmissive water surface keep different amounts of light in full shade.
 //
@@ -237,7 +251,15 @@ fn lighting_fragment(input: FullscreenOutput) -> @location(0) vec4<f32> {
     let normal_roughness = textureLoad(g_normal, pixel, 0);
     let normal = normalize(normal_roughness.xyz);
     let view_direction = normalize(camera.camera_position.xyz - world);
-    let primary_visibility = shadow_visibility(world, normal);
+    var primary_visibility = shadow_visibility(world, normal);
+    // Fade toward fully lit at grazing incidence to the primary light. See SHADOW_INCIDENCE_FADE.
+    let primary = camera.lights[0].source_direction.xyz;
+    let primary_length = length(primary);
+    if (primary_length > 0.00001) {
+        let incidence = dot(normal, -primary / primary_length);
+        let trust = smoothstep(0.0, SHADOW_INCIDENCE_FADE, incidence);
+        primary_visibility = mix(1.0, primary_visibility, trust);
+    }
     let occlusion = mix(
         AO_AMBIENT_FLOOR,
         1.0,

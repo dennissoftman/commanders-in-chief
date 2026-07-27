@@ -27,6 +27,7 @@
 pub mod deferred;
 pub mod detail;
 pub mod gpu;
+pub mod model;
 pub mod presentation;
 pub mod resource;
 pub mod scene;
@@ -40,6 +41,7 @@ use std::fmt::{self, Display, Formatter};
 
 pub use deferred::{DeferredFrame, DeferredRenderer, DeferredTargets};
 pub use gpu::{Capture, CaptureTarget, GpuContext};
+pub use model::{ModelBatch, ModelInstance};
 pub use presentation::{Action, InputState, SurfaceRenderer, TerrainGround};
 pub use resource::{TextureId, TextureResourceManager};
 pub use scene::{TerrainFrame, capture_terrain, render_terrain_into};
@@ -61,6 +63,7 @@ pub const SHADERS: &[(&str, &str)] = &[
     ("terrain_ao", include_str!("terrain_ao.wgsl")),
     ("terrain_deferred", include_str!("terrain_deferred.wgsl")),
     ("terrain_forward", include_str!("terrain_forward.wgsl")),
+    ("model_gbuffer", include_str!("model_gbuffer.wgsl")),
     ("terrain_gbuffer", include_str!("terrain_gbuffer.wgsl")),
     ("terrain_shadow", include_str!("terrain_shadow.wgsl")),
     ("terrain_viewer", include_str!("terrain_viewer.wgsl")),
@@ -107,6 +110,10 @@ pub enum RenderError {
     SurfaceLost(String),
     /// The surface reported no format this renderer can present to.
     NoSurfaceFormat,
+    /// A model had no geometry to upload.
+    EmptyModel,
+    /// A model vertex, index, or instance count exceeded the addressable range.
+    ModelTooLarge,
     /// A capture's dimensions or buffer size exceeded the renderer's explicit bounds.
     CaptureTooLarge,
     /// Encoding a capture as a PNG failed.
@@ -167,6 +174,10 @@ impl Display for RenderError {
             }
             Self::NoSurfaceFormat => {
                 formatter.write_str("the surface offers no format this renderer can present to")
+            }
+            Self::EmptyModel => formatter.write_str("the model has no geometry"),
+            Self::ModelTooLarge => {
+                formatter.write_str("the model exceeds the addressable vertex range")
             }
             Self::CaptureTooLarge => {
                 formatter.write_str("capture size exceeds the renderer's explicit bounds")
@@ -232,8 +243,8 @@ mod shader_tests {
     fn the_shader_set_is_complete_and_addressable() {
         assert_eq!(
             SHADERS.len(),
-            15,
-            "13 seeded shaders plus the forward and G-buffer passes"
+            16,
+            "13 seeded shaders plus the forward, terrain G-buffer, and model passes"
         );
         for (name, source) in SHADERS {
             assert!(!source.trim().is_empty(), "{name}.wgsl is empty");

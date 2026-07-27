@@ -46,9 +46,14 @@ Draw a map: terrain, water, models, lighting, and shadows, in a window and headl
   everything sized to the surface, and an input-to-intent mapping that is testable without a window.
   The `terrain_viewer` example ties it together.
 
+- **Instanced models**, sharing the terrain G-buffer and every shadow cascade, with per-instance
+  transform and colour tint. Material index is a per-vertex attribute rather than bound state, so a
+  model's primitives concatenate and the whole model draws in one call.
+
 ## Remaining
 
-- Model pipeline against imported glTF geometry and PBR materials.
+- Base-colour textures for model materials, and albedo textures per terrain layer. Both currently use
+  flat factors.
 - Water surfaces, including re-authoring the shader whose constants were left behind.
 - Albedo textures per terrain layer, replacing the current flat palette colours.
 - Wiring the residency bookkeeping to a real virtual-texture cache, so terrain detail scales past what
@@ -89,6 +94,17 @@ on one adapter crashed the driver outright — an access violation rather than a
 overhead one is not one: moving the sun changes every surface's incidence, so the two frames differ even
 with the shadow pass deleted. Collapsing `shadow_distance` instead holds the light, camera, geometry, and
 occlusion identical and puts every receiver outside all four cascades.
+
+**Shadow acne on a face nearly parallel to the light is an *ambient* artifact.** Front-face culling in
+the shadow pass separates near from far depth along the light, but on a grazing face the far surface is
+laterally rather than deeply offset, so the two land within a texel. The direct term hides it — incidence
+is near zero there — while the ambient term is shadow-attenuated and does *not* depend on incidence, so
+the flicker surfaces as diagonal striping. Fading the attenuation out as incidence approaches zero fixes
+it at the cause and costs nothing visible, since that geometry receives no direct light anyway.
+
+**A cascade's reach toward the light must be sized from the tallest *caster*, not the tallest terrain.**
+A model standing on terrain reaches higher than the terrain does, so a cascade sized from the
+heightfield alone fails to record it as an occluder at a low sun.
 
 **Surface capabilities must be queried through the adapter that owns the surface.** Reconstructing an
 adapter from a second `wgpu::Instance` to ask about a surface belonging to the first is not a wrong

@@ -26,6 +26,7 @@ use cic_camera::CameraPose;
 
 use crate::RenderError;
 use crate::gpu::{DEPTH_FORMAT, GpuContext};
+use crate::model::{ModelBatch, buffer_layouts};
 use crate::shadow::{CASCADE_COUNT, CASCADE_RESOLUTION, Cascade, fit_cascades};
 use crate::terrain::{DirectionalLight, TerrainRenderer};
 use crate::view::{Projection, invert, look_at, multiply, perspective};
@@ -201,6 +202,9 @@ impl DeferredTargets {
 pub struct DeferredRenderer {
     shadow_pipeline: wgpu::RenderPipeline,
     gbuffer_pipeline: wgpu::RenderPipeline,
+    model_shadow_pipeline: wgpu::RenderPipeline,
+    model_gbuffer_pipeline: wgpu::RenderPipeline,
+    material_layout: wgpu::BindGroupLayout,
     ao: AoStage,
     lighting: LightingStage,
     scene_uniform: wgpu::Buffer,
@@ -233,11 +237,13 @@ impl DeferredRenderer {
             uniform_buffer(device, "cic-render shadow camera", SHADOW_UNIFORM_BYTES);
 
         let gbuffer_shader = shader_module(device, "gbuffer", include_str!("terrain_gbuffer.wgsl"));
+        let model_shader = shader_module(device, "model", include_str!("model_gbuffer.wgsl"));
         let deferred_shader =
             shader_module(device, "deferred", include_str!("terrain_deferred.wgsl"));
         let ao_shader = shader_module(device, "ao", include_str!("terrain_ao.wgsl"));
 
         let (cascade_layout, cascade_uniforms, cascade_groups) = build_cascade_bindings(device);
+        let material_layout = ModelBatch::material_layout(device);
 
         Ok(Self {
             shadow_pipeline: build_shadow_pipeline(
@@ -251,6 +257,19 @@ impl DeferredRenderer {
                 terrain.bind_group_layout(),
                 &gbuffer_shader,
             ),
+            model_shadow_pipeline: build_model_shadow_pipeline(
+                device,
+                terrain.bind_group_layout(),
+                &cascade_layout,
+                &model_shader,
+            ),
+            model_gbuffer_pipeline: build_model_gbuffer_pipeline(
+                device,
+                terrain.bind_group_layout(),
+                &material_layout,
+                &model_shader,
+            ),
+            material_layout,
             ao: build_ao(device, targets, &scene_uniform, &ao_shader),
             lighting: build_lighting(
                 device,
@@ -267,6 +286,15 @@ impl DeferredRenderer {
         })
     }
 
+    /// Returns the layout a [`ModelBatch`] binds its materials through.
+    ///
+    /// Shared rather than created per batch, so the pipelines and every batch bind group are built
+    /// against the same layout and cannot drift apart.
+    #[must_use]
+    pub const fn material_layout(&self) -> &wgpu::BindGroupLayout {
+        &self.material_layout
+    }
+
     /// Uploads every per-frame uniform: the scene camera, the fitted cascades, and each cascade view.
     ///
     /// # Errors
@@ -277,6 +305,7 @@ impl DeferredRenderer {
         &self,
         context: &GpuContext,
         terrain: &TerrainRenderer,
+        models: &[ModelBatch],
         frame: DeferredFrame,
         width: u32,
         height: u32,
@@ -295,7 +324,13 @@ impl DeferredRenderer {
             frame.projection,
             frame.light.direction,
             frame.shadow_distance,
-            terrain.height_range(),
+            // The tallest caster, not the tallest terrain. A model standing on terrain reaches higher
+            // than the terrain does, and a cascade sized from terrain alone would fail to record it as
+            // an occluder at a low sun.
+            models
+                .iter()
+                .map(ModelBatch::world_top)
+                .fold(terrain.height_range(), f32::max),
         );
 
         let queue = context.queue();
@@ -326,10 +361,15 @@ impl DeferredRenderer {
     }
 
     /// Records the whole chain, ending with the composite into `output`.
+    ///
+    /// Models draw into the *same* G-buffer pass as terrain and into every shadow cascade, so both
+    /// share one depth buffer and occlude each other correctly. Whatever wrote into the G-buffer is
+    /// lit identically afterwards, which is the point of deferring.
     pub fn render(
         &self,
         context: &GpuContext,
         terrain: &TerrainRenderer,
+        models: &[ModelBatch],
         targets: &DeferredTargets,
         output: &wgpu::TextureView,
     ) {
@@ -354,6 +394,17 @@ impl DeferredRenderer {
             pass.set_bind_group(0, terrain.bind_group(), &[]);
             pass.set_bind_group(1, group, &[]);
             pass.draw(0..terrain.vertex_count(), 0..1);
+
+            // Models cast into the same cascade. Without this a model is lit as though it were
+            // present but throws no shadow, which reads as the model floating.
+            if !models.is_empty() {
+                pass.set_pipeline(&self.model_shadow_pipeline);
+                pass.set_bind_group(0, terrain.bind_group(), &[]);
+                pass.set_bind_group(1, group, &[]);
+                for batch in models {
+                    batch.draw(&mut pass, None);
+                }
+            }
         }
 
         // 2. G-buffer. Coverage clears to zero, which the lighting pass reads as "sky".
@@ -373,6 +424,14 @@ impl DeferredRenderer {
             pass.set_pipeline(&self.gbuffer_pipeline);
             pass.set_bind_group(0, terrain.bind_group(), &[]);
             pass.draw(0..terrain.vertex_count(), 0..1);
+
+            if !models.is_empty() {
+                pass.set_pipeline(&self.model_gbuffer_pipeline);
+                pass.set_bind_group(0, terrain.bind_group(), &[]);
+                for batch in models {
+                    batch.draw(&mut pass, Some(2));
+                }
+            }
         }
 
         // 3 and 4. Occlusion, then its bilateral blur.
@@ -576,6 +635,109 @@ fn build_gbuffer_pipeline(
                 Some(colour_target(COVERAGE_FORMAT)),
             ],
         }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+/// Builds the instanced model G-buffer pipeline.
+///
+/// Group 1 is left empty: the shader declares the shadow cascade there, and this entry point does not
+/// use it. The pipeline layout takes an optional layout per slot for exactly this case.
+fn build_model_gbuffer_pipeline(
+    device: &wgpu::Device,
+    terrain_layout: &wgpu::BindGroupLayout,
+    material_layout: &wgpu::BindGroupLayout,
+    model_shader: &wgpu::ShaderModule,
+) -> wgpu::RenderPipeline {
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("cic-render model gbuffer pipeline layout"),
+        bind_group_layouts: &[Some(terrain_layout), None, Some(material_layout)],
+        immediate_size: 0,
+    });
+    let buffers = buffer_layouts();
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("cic-render model gbuffer pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: model_shader,
+            entry_point: Some("gbuffer_vertex"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &buffers,
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            // Back faces are culled, unlike terrain. A model is a closed solid, so its back faces are
+            // its interior; drawing them wastes fill and can win the depth test at grazing angles.
+            cull_mode: Some(wgpu::Face::Back),
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: model_shader,
+            entry_point: Some("gbuffer_fragment"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[
+                Some(colour_target(ALBEDO_FORMAT)),
+                Some(colour_target(NORMAL_FORMAT)),
+                Some(colour_target(COVERAGE_FORMAT)),
+            ],
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+/// Builds the instanced model depth-only shadow pipeline.
+fn build_model_shadow_pipeline(
+    device: &wgpu::Device,
+    terrain_layout: &wgpu::BindGroupLayout,
+    cascade_layout: &wgpu::BindGroupLayout,
+    model_shader: &wgpu::ShaderModule,
+) -> wgpu::RenderPipeline {
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("cic-render model shadow pipeline layout"),
+        bind_group_layouts: &[Some(terrain_layout), Some(cascade_layout)],
+        immediate_size: 0,
+    });
+    let buffers = buffer_layouts();
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("cic-render model shadow pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: model_shader,
+            entry_point: Some("shadow_vertex"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &buffers,
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            // Front faces are culled here, not back. Recording only the far side of a solid moves the
+            // stored depth away from the receiver, which removes self-shadowing acne at its source
+            // rather than biasing it away afterwards.
+            cull_mode: Some(wgpu::Face::Front),
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState {
+                constant: 2,
+                slope_scale: 2.5,
+                clamp: 0.0,
+            },
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        fragment: None,
         multiview_mask: None,
         cache: None,
     })
