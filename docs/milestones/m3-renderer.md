@@ -50,15 +50,22 @@ Draw a map: terrain, water, models, lighting, and shadows, in a window and headl
   transform and colour tint. Material index is a per-vertex attribute rather than bound state, so a
   model's primitives concatenate and the whole model draws in one call.
 
+- **Texturing**, for both surfaces, through one shared mechanism: a colour texture array per drawing
+  unit, indexed by a slice number the material carries. Terrain layers get an albedo tiled in *world*
+  space at a per-layer detail scale, plus a per-layer roughness blended by the same weights as the
+  colour; model materials get a base colour from the images their glTF carried. Mip chains are generated
+  on the CPU in linear light. See [ADR 0004](../adr/0004-texture-arrays-and-world-space-tiling.md).
+
 ## Remaining
 
-- Base-colour textures for model materials, and albedo textures per terrain layer. Both currently use
-  flat factors.
 - Water surfaces, including re-authoring the shader whose constants were left behind.
-- Albedo textures per terrain layer, replacing the current flat palette colours.
+- Normal, roughness, and metallic *maps*. Only base colour is textured; the other channels are still
+  per-material or per-layer factors.
+- Alpha-tested materials. Everything is opaque, so the shadow passes have no fragment stage — foliage
+  will need one.
 - Wiring the residency bookkeeping to a real virtual-texture cache, so terrain detail scales past what
   one texture can hold.
-- Surface creation, the frame loop, and windowed presentation.
+- Multisampling. Terrain silhouettes against the sky show stair-stepping.
 - Committed reference captures and the comparison harness.
 
 ## Exit condition
@@ -104,7 +111,30 @@ it at the cause and costs nothing visible, since that geometry receives no direc
 
 **A cascade's reach toward the light must be sized from the tallest *caster*, not the tallest terrain.**
 A model standing on terrain reaches higher than the terrain does, so a cascade sized from the
-heightfield alone fails to record it as an occluder at a low sun.
+heightfield alone fails to record it as an occluder at a low sun. That figure has to be *recomputed*
+when instances change, not merged with the previous one: taking a maximum against the old value means
+removing the tallest instance leaves every cascade reaching toward a caster that is no longer there.
+
+**A terrain detail texture must be addressed in world units, not in the terrain's own `uv`.** Normalized
+coordinates fit exactly one copy of an image across the whole map — about four metres per texel on a
+two-kilometre map, which is uniform blur at every zoom a player uses. This is the single decision that
+separates ground from a stretched photograph.
+
+**Mip levels must be averaged in linear light.** The sRGB transfer curve is concave, so the mean of two
+encoded values sits above the encoding of their mean. Averaging stored bytes makes a high-contrast
+texture pale as it recedes — a gradient the eye reads as fog that nobody added.
+
+**A texture sample cannot be branched around on a per-fragment condition.** `textureSample` takes its mip
+level from screen-space derivatives, defined only in uniform control flow. Skipping the sample for
+materials without a texture leaves the mip level undefined for the ones *with* one. Sample
+unconditionally and discard with `select`; the shader validation test catches a regression, because
+`naga` runs the same uniformity analysis the backend does.
+
+**A wrong UV mapping is invisible until something is mapped through it.** Both box fixtures assigned
+corner coordinates as `[corner & 1, corner >> 1]`, which walks the unit square in Z order while the
+corners walk it in a ring — so the last two swapped and every face was sheared along a diagonal. It cost
+nothing for as long as the fixtures were untextured, and showed up in the first capture that sampled
+them.
 
 **Surface capabilities must be queried through the adapter that owns the surface.** Reconstructing an
 adapter from a second `wgpu::Instance` to ask about a surface belonging to the first is not a wrong
@@ -129,3 +159,8 @@ unlit back slope. Neither was a renderer fault, and neither was visible from the
   cheap; model LOD wants measurement first.
 - No multisampling. Terrain silhouettes against the sky currently show stair-stepping, which is the
   expected cost and a known, deliberate gap.
+- No anisotropic filtering. It is an optional device capability, and a sampler that fails to create on a
+  software adapter would take the headless suite with it. Trilinear until there is a measured reason and
+  a capability check.
+- No texture compression. Colour arrays upload as `Rgba8UnormSrgb`; the block-compressed formats differ
+  per backend and want an offline pipeline, which belongs with M8's tooling.

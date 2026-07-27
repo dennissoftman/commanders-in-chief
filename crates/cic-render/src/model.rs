@@ -16,10 +16,28 @@
 //! Instances carry a colour multiplier as well as a transform. Recovered equipment that keeps its
 //! original silhouette under different markings is a shared mesh with a per-instance colour, so the
 //! channel exists from the start rather than being retrofitted into the vertex format later.
+//!
+//! # Base-colour textures, without a bind group per material
+//!
+//! The same problem as the material factors, one step harder: a texture is a bound resource, and
+//! binding one per material is exactly the per-primitive state change this module exists to avoid.
+//! So the model's images upload as the slices of one array, and each material stores the *slice* it
+//! reads — an index in the storage buffer rather than a resource in a bind group. One bind group per
+//! model, whatever its material and texture count.
+//!
+//! The array's cost is that every slice shares a size, so a model mixing a 1024-pixel hull texture
+//! with a 256-pixel decal sheet stores the decal upsampled. That is memory, not quality. See
+//! [`crate::texture`] for why the alternative — one atlas per model — was not taken.
+//!
+//! A material with no texture still names slice 0 and still samples it. Sampling is not skipped for
+//! it, and the result is discarded by a `select` instead: mip level comes from screen-space
+//! derivatives, which are undefined in non-uniform control flow, and the material index is per-vertex
+//! and therefore not uniform. Branching would make every textured fragment's mip level undefined.
 
 use cic_assets::Model;
 
 use crate::RenderError;
+use crate::texture::{TextureArray, TextureImage, array_sampler};
 
 /// Bytes per model vertex: position, normal, texture coordinates, material index.
 const VERTEX_STRIDE: usize = 3 * 4 + 3 * 4 + 2 * 4 + 4;
@@ -27,7 +45,8 @@ const VERTEX_STRIDE: usize = 3 * 4 + 3 * 4 + 2 * 4 + 4;
 /// Bytes per instance: a column-major transform and a tint.
 const INSTANCE_STRIDE: usize = 64 + 16;
 
-/// Bytes per material: base colour, then metallic and roughness with padding to a 16-byte boundary.
+/// Bytes per material: base colour, then metallic, roughness, texture slice, and whether that slice
+/// is real — four factors that exactly fill the 16-byte boundary the base colour already needed.
 const MATERIAL_STRIDE: usize = 16 + 16;
 
 /// One placement of a model.
@@ -89,8 +108,12 @@ pub struct ModelBatch {
     index_buffer: wgpu::Buffer,
     instance_buffer: wgpu::Buffer,
     material_group: wgpu::BindGroup,
+    base_colour: TextureArray,
     index_count: u32,
     instance_count: u32,
+    /// The model's own upper bound corner, retained so a later instance change can recompute the
+    /// batch's world height exactly rather than approximating it from the instance origins.
+    maximum: Option<[f32; 3]>,
     top: f32,
 }
 
@@ -103,18 +126,36 @@ impl ModelBatch {
     pub fn material_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
         device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("cic-render model material layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    // Storage rather than uniform: a uniform array would have to be a fixed size, and
-                    // a model's material count is whatever its author gave it.
-                    ty: wgpu::BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        // Storage rather than uniform: a uniform array would have to be a fixed size,
+                        // and a model's material count is whatever its author gave it.
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
         })
     }
 
@@ -136,31 +177,18 @@ impl ModelBatch {
 
         let (vertices, indices, index_count) = pack_geometry(model)?;
 
-        // Slot 0 is a neutral default for primitives that declare no material; the model's own
-        // materials follow it, which is why the index above is shifted by one.
-        let mut materials: Vec<u8> =
-            Vec::with_capacity((model.materials.len() + 1) * MATERIAL_STRIDE);
-        push_material(&mut materials, [0.8, 0.8, 0.8, 1.0], 0.0, 0.7);
-        for material in &model.materials {
-            push_material(
-                &mut materials,
-                material.base_color,
-                material.metallic,
-                material.roughness,
-            );
-        }
+        // One array slice per source image, in source order, so a material's recorded image index is
+        // its slice index. A model with no images still gets a one-slice array — every material then
+        // names slice 0 and discards what it reads, which keeps the sampling call unconditional.
+        let slices: Vec<TextureImage> = model
+            .images
+            .iter()
+            .map(|image| TextureImage::new(image.width, image.height, image.rgba.clone()))
+            .collect::<Result<_, _>>()?;
+        let base_colour = TextureArray::new(context, "cic-render model base colour", &slices)?;
+        let materials = pack_materials(model, base_colour.layer_count());
 
-        let mut instance_bytes: Vec<u8> = Vec::with_capacity(instances.len() * INSTANCE_STRIDE);
-        for instance in instances {
-            for column in instance.transform {
-                for value in column {
-                    instance_bytes.extend_from_slice(&value.to_le_bytes());
-                }
-            }
-            for value in instance.tint {
-                instance_bytes.extend_from_slice(&value.to_le_bytes());
-            }
-        }
+        let mut instance_bytes = pack_instances(instances);
         // An empty batch is legal and draws nothing, but a zero-sized buffer is not, so one instance
         // worth of zeroes is allocated and the draw is skipped by `instance_count`.
         if instance_bytes.is_empty() {
@@ -201,13 +229,24 @@ impl ModelBatch {
             .queue()
             .write_buffer(&material_buffer, 0, &materials);
 
+        let sampler = array_sampler(device, "cic-render model base colour sampler");
         let material_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("cic-render model materials"),
             layout: material_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: material_buffer.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: material_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(base_colour.view()),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
         });
 
         Ok(Self {
@@ -215,10 +254,12 @@ impl ModelBatch {
             index_buffer,
             instance_buffer,
             material_group,
+            base_colour,
             index_count,
             instance_count: u32::try_from(instances.len())
                 .map_err(|_| RenderError::ModelTooLarge)?,
-            top: world_top(model, instances),
+            maximum: model.bounds().map(|(_, maximum)| maximum),
+            top: world_top(model.bounds().map(|(_, maximum)| maximum), instances),
         })
     }
 
@@ -240,29 +281,17 @@ impl ModelBatch {
         if u64::from(count) * INSTANCE_STRIDE as u64 > self.instance_buffer.size() {
             return Err(RenderError::ModelTooLarge);
         }
-        let mut bytes = Vec::with_capacity(instances.len() * INSTANCE_STRIDE);
-        for instance in instances {
-            for column in instance.transform {
-                for value in column {
-                    bytes.extend_from_slice(&value.to_le_bytes());
-                }
-            }
-            for value in instance.tint {
-                bytes.extend_from_slice(&value.to_le_bytes());
-            }
-        }
+        let bytes = pack_instances(instances);
         if !bytes.is_empty() {
             context
                 .queue()
                 .write_buffer(&self.instance_buffer, 0, &bytes);
         }
         self.instance_count = count;
-        // The tallest instance may have changed, and the cascades are sized from it.
-        self.top = instances
-            .iter()
-            .map(|instance| instance.transform[3][2])
-            .fold(f32::NEG_INFINITY, f32::max)
-            .max(self.top);
+        // Recomputed from the new set alone, not merged with the old high-water mark: removing the
+        // tallest instance has to *lower* this, or every cascade keeps reaching toward a caster that
+        // is no longer in the scene and spends its resolution on empty space.
+        self.top = world_top(self.maximum, instances);
         Ok(())
     }
 
@@ -286,6 +315,12 @@ impl ModelBatch {
     #[must_use]
     pub const fn triangle_count(&self) -> u32 {
         self.index_count / 3
+    }
+
+    /// Returns the base-colour array the model's materials index into.
+    #[must_use]
+    pub const fn base_colour(&self) -> &TextureArray {
+        &self.base_colour
     }
 
     /// Records a draw. The caller has already set the pipeline and any other bind groups.
@@ -429,9 +464,9 @@ fn pack_geometry(model: &Model) -> Result<(Vec<u8>, Vec<u8>, u32), RenderError> 
     Ok((vertices, indices, index_count))
 }
 
-/// Highest world-space Z reached by any instance of a model.
-fn world_top(model: &Model, instances: &[ModelInstance]) -> f32 {
-    let Some((_, maximum)) = model.bounds() else {
+/// Highest world-space Z reached by any instance of a model with the given upper bound corner.
+fn world_top(maximum: Option<[f32; 3]>, instances: &[ModelInstance]) -> f32 {
+    let Some(maximum) = maximum else {
         return 0.0;
     };
     let mut top = f32::NEG_INFINITY;
@@ -448,11 +483,68 @@ fn world_top(model: &Model, instances: &[ModelInstance]) -> f32 {
     if top.is_finite() { top } else { 0.0 }
 }
 
-fn push_material(bytes: &mut Vec<u8>, base_color: [f32; 4], metallic: f32, roughness: f32) {
+/// Packs the instance buffer: each transform column-major, then the tint.
+fn pack_instances(instances: &[ModelInstance]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(instances.len() * INSTANCE_STRIDE);
+    for instance in instances {
+        for column in instance.transform {
+            for value in column {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        for value in instance.tint {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    bytes
+}
+
+/// Packs the material storage buffer, resolving each material's base-colour slice.
+///
+/// Slot 0 is a neutral default for primitives that declare no material; the model's own materials
+/// follow it, which is why `pack_geometry` shifts its index by one.
+fn pack_materials(model: &Model, slice_count: u32) -> Vec<u8> {
+    let mut materials: Vec<u8> = Vec::with_capacity((model.materials.len() + 1) * MATERIAL_STRIDE);
+    push_material(&mut materials, [0.8, 0.8, 0.8, 1.0], 0.0, 0.7, None);
+    for material in &model.materials {
+        // An index past the images actually decoded is dropped rather than clamped onto some other
+        // material's picture, which would be a wrong answer presented confidently.
+        let slice = material
+            .base_color_texture
+            .and_then(|index| u32::try_from(index).ok())
+            .filter(|index| *index < slice_count);
+        push_material(
+            &mut materials,
+            material.base_color,
+            material.metallic,
+            material.roughness,
+            slice,
+        );
+    }
+    materials
+}
+
+/// Appends one material record: base colour, then metallic, roughness, texture slice, and a flag for
+/// whether that slice holds anything.
+///
+/// The slice travels as a float because the record is a `vec4<f32>` either way and a separate integer
+/// field would cost 16 more bytes to alignment. Slice counts are bounded far below the point where a
+/// float stops representing consecutive integers exactly.
+fn push_material(
+    bytes: &mut Vec<u8>,
+    base_color: [f32; 4],
+    metallic: f32,
+    roughness: f32,
+    slice: Option<u32>,
+) {
     for value in base_color {
         bytes.extend_from_slice(&value.to_le_bytes());
     }
-    for value in [metallic, roughness, 0.0, 0.0] {
+    // Slice indices are bounded by the image limit, well inside exact f32 range.
+    #[allow(clippy::cast_precision_loss)]
+    let slice_index = slice.unwrap_or(0) as f32;
+    let textured = f32::from(u8::from(slice.is_some()));
+    for value in [metallic, roughness, slice_index, textured] {
         bytes.extend_from_slice(&value.to_le_bytes());
     }
 }

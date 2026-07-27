@@ -18,6 +18,10 @@
 //! node's world transform into its vertices. Skins and animations are read as far as detecting that
 //! they exist — a skinned model imports its bind-pose geometry and reports `has_skin`, rather than
 //! silently dropping the rig without telling the caller.
+//!
+//! Images embedded in the container are decoded and normalized to straight-alpha RGBA8. That
+//! normalization happens here rather than in the renderer because it is a property of the *format* —
+//! glTF permits ten pixel layouts and a renderer should not have to know any of them.
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -35,6 +39,12 @@ pub struct ModelLimits {
     pub maximum_materials: usize,
     /// Maximum node-hierarchy depth walked while accumulating transforms.
     pub maximum_depth: usize,
+    /// Maximum images retained from one model.
+    pub maximum_images: usize,
+    /// Maximum pixels along either axis of one image.
+    pub maximum_image_dimension: u32,
+    /// Maximum RGBA bytes summed across every retained image.
+    pub maximum_image_bytes: usize,
 }
 
 impl Default for ModelLimits {
@@ -45,8 +55,24 @@ impl Default for ModelLimits {
             maximum_primitives: 4_096,
             maximum_materials: 1_024,
             maximum_depth: 128,
+            maximum_images: 256,
+            // The baseline device limit for a 2D texture. Anything larger cannot be uploaded, so
+            // accepting it would only move the failure somewhere less informative.
+            maximum_image_dimension: 8_192,
+            maximum_image_bytes: 512 * 1_024 * 1_024,
         }
     }
+}
+
+/// One decoded image from a model, as straight-alpha RGBA8.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelImage {
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+    /// Row-major RGBA bytes from the top-left, `width * height * 4` long.
+    pub rgba: Vec<u8>,
 }
 
 /// One imported vertex.
@@ -97,6 +123,8 @@ pub struct Model {
     pub primitives: Vec<ModelPrimitive>,
     /// Materials referenced by `primitives`.
     pub materials: Vec<ModelMaterial>,
+    /// Decoded images, indexed by [`ModelMaterial::base_color_texture`].
+    pub images: Vec<ModelImage>,
     /// Whether the source declared any skin, so a caller knows bind-pose geometry was imported
     /// rather than assuming the model is genuinely static.
     pub has_skin: bool,
@@ -143,7 +171,7 @@ impl Model {
 /// Returns a structured [`ModelError`] when the container is malformed, references external files,
 /// omits required attributes, uses a non-triangle topology, or exceeds a [`ModelLimits`] bound.
 pub fn import_model(bytes: &[u8], limits: ModelLimits) -> Result<Model, ModelError> {
-    let (document, buffers, _images) =
+    let (document, buffers, images) =
         gltf::import_slice(bytes).map_err(|error| ModelError::Gltf(Box::new(error)))?;
 
     if document.materials().len() > limits.maximum_materials {
@@ -153,6 +181,7 @@ pub fn import_model(bytes: &[u8], limits: ModelLimits) -> Result<Model, ModelErr
             maximum: limits.maximum_materials,
         });
     }
+    let images = import_images(&images, limits)?;
 
     let materials = document
         .materials()
@@ -194,9 +223,116 @@ pub fn import_model(bytes: &[u8], limits: ModelLimits) -> Result<Model, ModelErr
         name: scene.name().unwrap_or_default().to_owned(),
         primitives,
         materials,
+        images,
         has_skin: document.skins().len() > 0,
         has_animation: document.animations().len() > 0,
     })
+}
+
+/// Normalizes every decoded image to straight-alpha RGBA8, under explicit bounds.
+///
+/// The index of each image is preserved, because [`ModelMaterial::base_color_texture`] is that index.
+/// An image that cannot be normalized therefore fails the import rather than being dropped, which
+/// would silently shift every later material onto the wrong picture.
+fn import_images(
+    images: &[gltf::image::Data],
+    limits: ModelLimits,
+) -> Result<Vec<ModelImage>, ModelError> {
+    if images.len() > limits.maximum_images {
+        return Err(ModelError::LimitExceeded {
+            what: "image count",
+            actual: images.len(),
+            maximum: limits.maximum_images,
+        });
+    }
+    let mut total = 0usize;
+    let mut output = Vec::with_capacity(images.len());
+    for image in images {
+        let width = usize::try_from(image.width).unwrap_or(usize::MAX);
+        let height = usize::try_from(image.height).unwrap_or(usize::MAX);
+        if image.width > limits.maximum_image_dimension
+            || image.height > limits.maximum_image_dimension
+        {
+            return Err(ModelError::LimitExceeded {
+                what: "image dimension",
+                actual: width.max(height),
+                maximum: usize::try_from(limits.maximum_image_dimension).unwrap_or(usize::MAX),
+            });
+        }
+        let pixels = width.saturating_mul(height);
+        // Accumulated and checked before the conversion allocates, not after.
+        total = total.saturating_add(pixels.saturating_mul(4));
+        if total > limits.maximum_image_bytes {
+            return Err(ModelError::LimitExceeded {
+                what: "image bytes",
+                actual: total,
+                maximum: limits.maximum_image_bytes,
+            });
+        }
+        output.push(ModelImage {
+            width: image.width,
+            height: image.height,
+            rgba: to_rgba8(image, pixels)?,
+        });
+    }
+    Ok(output)
+}
+
+/// Widens one decoded image to RGBA8.
+///
+/// The 16-bit layouts keep their high byte. That is a real loss and it is the right one here: the
+/// renderer's colour arrays are 8-bit, so the alternative is not more precision but a second format
+/// path that discards the same bits one stage later.
+///
+/// The floating-point layouts are refused rather than tone mapped. They carry linear values outside
+/// `0..=1`, and guessing an exposure for them would produce a picture nobody authored.
+fn to_rgba8(image: &gltf::image::Data, pixels: usize) -> Result<Vec<u8>, ModelError> {
+    use gltf::image::Format;
+
+    // Channels per pixel, and bytes per channel. A 16-bit channel keeps its most significant byte,
+    // which is the second one: the decoder emits native-endian samples and every target this builds
+    // for is little-endian.
+    let (channels, channel_bytes) = match image.format {
+        Format::R8 => (1usize, 1usize),
+        Format::R8G8 => (2, 1),
+        Format::R8G8B8 => (3, 1),
+        Format::R8G8B8A8 => (4, 1),
+        Format::R16 => (1, 2),
+        Format::R16G16 => (2, 2),
+        Format::R16G16B16 => (3, 2),
+        Format::R16G16B16A16 => (4, 2),
+        format => {
+            return Err(ModelError::UnsupportedImageFormat {
+                format: format!("{format:?}"),
+            });
+        }
+    };
+
+    let stride = channels * channel_bytes;
+    let mut rgba = Vec::with_capacity(pixels.saturating_mul(4));
+    for pixel in image.pixels.chunks_exact(stride) {
+        // `channel` is below `channels` and the chunk is exactly `channels * channel_bytes` long, so
+        // the highest index reached is the chunk's last byte.
+        let at = |channel: usize| pixel[channel * channel_bytes + (channel_bytes - 1)];
+        let red = at(0);
+        rgba.push(red);
+        // One and two channels mean greyscale, with the second channel as alpha where it exists —
+        // which is what the glTF material rules amount to for a base-colour texture.
+        rgba.push(if channels >= 3 { at(1) } else { red });
+        rgba.push(if channels >= 3 { at(2) } else { red });
+        rgba.push(match channels {
+            2 => at(1),
+            4 => at(3),
+            _ => u8::MAX,
+        });
+    }
+    if rgba.len() != pixels.saturating_mul(4) {
+        return Err(ModelError::TruncatedImage {
+            width: image.width,
+            height: image.height,
+        });
+    }
+    Ok(rgba)
 }
 
 #[derive(Debug, Default)]
@@ -482,6 +618,18 @@ pub enum ModelError {
         /// Configured maximum.
         maximum: usize,
     },
+    /// An image used a pixel layout this importer does not normalize to RGBA8.
+    UnsupportedImageFormat {
+        /// The declared layout.
+        format: String,
+    },
+    /// An image's payload was shorter than its declared dimensions.
+    TruncatedImage {
+        /// Declared width.
+        width: u32,
+        /// Declared height.
+        height: u32,
+    },
 }
 
 impl Display for ModelError {
@@ -507,6 +655,13 @@ impl Display for ModelError {
                 actual,
                 maximum,
             } => write!(formatter, "{what} {actual} exceeds maximum {maximum}"),
+            Self::UnsupportedImageFormat { format } => {
+                write!(formatter, "unsupported image pixel layout {format}")
+            }
+            Self::TruncatedImage { width, height } => write!(
+                formatter,
+                "an image's payload is shorter than the {width}x{height} it declares"
+            ),
         }
     }
 }

@@ -51,6 +51,96 @@ pub(crate) fn glb(document: &Value, binary: &[u8]) -> Vec<u8> {
     output
 }
 
+/// Builds a one-triangle `.glb` whose material carries an embedded base-colour texture.
+///
+/// The image is a real PNG in the binary chunk, referenced through a buffer view — the form an
+/// exporter actually produces for a self-contained `.glb`. A fixture that skipped the encoding and
+/// handed over raw pixels would not exercise the decode path at all.
+///
+/// The four texels are distinct primary-ish colours in a known order, so a test can tell a correct
+/// decode from a channel swap or a flipped row, which a uniform image cannot.
+pub(crate) fn textured_triangle_glb() -> Vec<u8> {
+    let positions: [[f32; 3]; 3] = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+    let uvs: [[f32; 2]; 3] = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]];
+
+    let mut binary = Vec::new();
+    for position in positions {
+        for value in position {
+            binary.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    let uvs_offset = binary.len();
+    for uv in uvs {
+        for value in uv {
+            binary.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    // The image view must start on a four-byte boundary like every other one.
+    while !binary.len().is_multiple_of(4) {
+        binary.push(0);
+    }
+    let image_offset = binary.len();
+    let image = png_rgba(2, 2, TEXEL_COLOURS.as_flattened());
+    let image_length = image.len();
+    binary.extend_from_slice(&image);
+
+    let document = json!({
+        "asset": { "version": "2.0" },
+        "scene": 0,
+        "scenes": [ { "name": "textured", "nodes": [0] } ],
+        "nodes": [ { "mesh": 0 } ],
+        "meshes": [ { "primitives": [
+            { "attributes": { "POSITION": 0, "TEXCOORD_0": 1 }, "material": 0 }
+        ] } ],
+        "materials": [ {
+            "name": "painted",
+            "pbrMetallicRoughness": {
+                "baseColorFactor": [1.0, 1.0, 1.0, 1.0],
+                "baseColorTexture": { "index": 0 }
+            }
+        } ],
+        "textures": [ { "source": 0 } ],
+        "images": [ { "bufferView": 2, "mimeType": "image/png" } ],
+        "accessors": [
+            {
+                "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
+                "min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, 0.0]
+            },
+            { "bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC2" },
+        ],
+        "bufferViews": [
+            { "buffer": 0, "byteOffset": 0, "byteLength": 36 },
+            { "buffer": 0, "byteOffset": uvs_offset, "byteLength": 24 },
+            { "buffer": 0, "byteOffset": image_offset, "byteLength": image_length },
+        ],
+        "buffers": [ { "byteLength": binary.len() } ],
+    });
+
+    glb(&document, &binary)
+}
+
+/// The four texels of the fixture image, row-major from the top-left, as opaque RGBA.
+pub(crate) const TEXEL_COLOURS: [[u8; 4]; 4] = [
+    [255, 0, 0, 255],
+    [0, 255, 0, 255],
+    [0, 0, 255, 255],
+    [255, 255, 0, 255],
+];
+
+/// Encodes RGBA bytes as a PNG.
+fn png_rgba(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
+    let mut output = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut output, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("write png header");
+        writer.write_image_data(rgba).expect("write png data");
+        writer.finish().expect("finish png");
+    }
+    output
+}
+
 /// How a triangle fixture should differ from the straightforward case.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct TriangleOptions {

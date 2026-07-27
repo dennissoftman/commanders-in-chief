@@ -1,8 +1,10 @@
-//! Whole-frame composition: set up a pass, draw what is in it, resolve a capture.
+//! The forward terrain path: set up one pass, draw the terrain, resolve a capture.
 //!
-//! One function rather than a builder, because there is currently one pass. When the deferred chain
-//! lands this becomes the place that sequences G-buffer, shadow, ambient-occlusion, and lighting
-//! passes — so it exists now to keep that sequencing out of the terrain module.
+//! Deliberately *not* the deferred chain, which sequences its own six passes in [`crate::deferred`].
+//! This is the single-pass path, kept because it is the cheapest way to answer one question — did the
+//! terrain, its layers, and its lighting come out right — without the shadow cascades, the occlusion
+//! blur, and the tone-mapping composite all standing between the fixture and the answer. Several
+//! terrain tests are only diagnosable because they use it.
 
 use cic_assets::Terrain;
 use cic_camera::CameraPose;

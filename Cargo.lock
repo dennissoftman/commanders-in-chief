@@ -292,6 +292,7 @@ dependencies = [
  "cic-core",
  "cic-vfs",
  "gltf",
+ "png",
  "serde",
  "serde_json",
 ]

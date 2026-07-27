@@ -31,13 +31,12 @@ use std::error::Error;
 use std::sync::Arc;
 use std::time::Instant;
 
-use cic_assets::model::{Model, ModelMaterial, ModelPrimitive, ModelVertex};
+use cic_assets::model::{Model, ModelImage, ModelMaterial, ModelPrimitive, ModelVertex};
 use cic_assets::{MapPackage, PackageLimits, Terrain, TerrainLayer};
 use cic_camera::{RtsCamera, RtsCameraProfile};
-use cic_render::terrain::LayerColour;
 use cic_render::{
-    Action, DeferredFrame, GpuContext, InputState, ModelBatch, ModelInstance, SurfaceRenderer,
-    TerrainGround, TerrainRenderer,
+    Action, DeferredFrame, GpuContext, InputState, LayerMaterial, ModelBatch, ModelInstance,
+    SurfaceRenderer, TerrainGround, TerrainRenderer, TextureImage,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -227,7 +226,7 @@ fn building_model() -> Model {
                 .map(|(corner, position)| ModelVertex {
                     position,
                     normal,
-                    uv: [(corner & 1) as f32, ((corner >> 1) & 1) as f32],
+                    uv: quad_uv(corner),
                 })
                 .collect(),
             indices: vec![0, 1, 2, 0, 2, 3],
@@ -244,7 +243,7 @@ fn building_model() -> Model {
                 base_color: [0.66, 0.62, 0.55, 1.0],
                 metallic: 0.0,
                 roughness: 0.85,
-                base_color_texture: None,
+                base_color_texture: Some(0),
                 blended: false,
             },
             ModelMaterial {
@@ -252,13 +251,160 @@ fn building_model() -> Model {
                 base_color: [0.36, 0.20, 0.16, 1.0],
                 metallic: 0.0,
                 roughness: 0.65,
-                base_color_texture: None,
+                base_color_texture: Some(1),
                 blended: false,
             },
         ],
+        images: vec![wall_image(), roof_image()],
         has_skin: false,
         has_animation: false,
     }
+}
+
+/// Texture coordinates for one corner of a quad whose corners run anticlockwise from `[-, -]`.
+///
+/// Not `[corner & 1, corner >> 1]`: that walks the unit square in Z order while the corners walk it
+/// in a ring, so the last two swap and the texture arrives sheared along a diagonal.
+fn quad_uv(corner: usize) -> [f32; 2] {
+    const RING: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+    RING[corner % 4]
+}
+
+/// Rows of windows over rendered concrete, generated rather than loaded.
+///
+/// Both this and the terrain layers below are procedural for the same reason the geometry is: the
+/// viewer must run with no asset files at all, and what it is here to exercise is the renderer.
+fn wall_image() -> ModelImage {
+    const SIZE: u32 = 128;
+    let mut rgba = Vec::with_capacity((SIZE * SIZE * 4) as usize);
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let in_window = (y % 32) >= 8 && (y % 32) < 22 && (x % 24) >= 5 && (x % 24) < 19;
+            let grain = noise(x, y, 11) * 0.14;
+            let colour = if in_window {
+                [0.10 + grain * 0.4, 0.13 + grain * 0.4, 0.17 + grain * 0.4]
+            } else {
+                [0.70 - grain, 0.67 - grain, 0.61 - grain]
+            };
+            push_srgb(&mut rgba, colour);
+        }
+    }
+    ModelImage {
+        width: SIZE,
+        height: SIZE,
+        rgba,
+    }
+}
+
+/// Corrugated roofing: ribs along one axis, with rust breaking them up.
+fn roof_image() -> ModelImage {
+    const SIZE: u32 = 128;
+    let mut rgba = Vec::with_capacity((SIZE * SIZE * 4) as usize);
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let rib = if (x / 6) % 2 == 0 { 0.0 } else { 0.18 };
+            let rust = noise(x, y, 29).powi(2) * 0.5;
+            push_srgb(
+                &mut rgba,
+                [
+                    0.42 + rib + rust * 0.35,
+                    0.30 + rib + rust * 0.10,
+                    0.26 + rib,
+                ],
+            );
+        }
+    }
+    ModelImage {
+        width: SIZE,
+        height: SIZE,
+        rgba,
+    }
+}
+
+/// Terrain layer surfaces, one per weight layer, at the world scale each tiles at.
+fn layer_materials() -> Vec<LayerMaterial> {
+    vec![
+        LayerMaterial::colour([1.0; 3])
+            .with_albedo(grain_image(96, [0.78, 0.70, 0.49], 0.22, 7), 14.0)
+            .with_roughness(0.94),
+        LayerMaterial::colour([1.0; 3])
+            .with_albedo(
+                clumped_image(96, [0.15, 0.26, 0.10], [0.44, 0.54, 0.24], 13),
+                20.0,
+            )
+            .with_roughness(0.90),
+        LayerMaterial::colour([1.0; 3])
+            .with_albedo(
+                clumped_image(96, [0.26, 0.25, 0.24], [0.62, 0.60, 0.56], 23),
+                30.0,
+            )
+            .with_roughness(0.78),
+    ]
+}
+
+/// Fine even grain, for sand.
+fn grain_image(size: u32, base: [f32; 3], spread: f32, seed: u32) -> TextureImage {
+    let mut rgba = Vec::with_capacity((size * size * 4) as usize);
+    for y in 0..size {
+        for x in 0..size {
+            let shade = (noise(x, y, seed) - 0.5) * 2.0 * spread;
+            push_srgb(
+                &mut rgba,
+                [base[0] + shade, base[1] + shade, base[2] + shade],
+            );
+        }
+    }
+    TextureImage::new(size, size, rgba).expect("generated layer image is valid")
+}
+
+/// Two colours in soft patches, for grass and rock.
+fn clumped_image(size: u32, low: [f32; 3], high: [f32; 3], seed: u32) -> TextureImage {
+    let mut rgba = Vec::with_capacity((size * size * 4) as usize);
+    for y in 0..size {
+        for x in 0..size {
+            // Two frequencies, so the result has both patches and a grain inside them rather than a
+            // single scale that reads as uniform static at any distance.
+            let coarse = noise(x / 8, y / 8, seed);
+            let fine = noise(x, y, seed.wrapping_add(1));
+            let mix = (coarse * 0.75 + fine * 0.25).clamp(0.0, 1.0);
+            push_srgb(
+                &mut rgba,
+                [
+                    low[0] + (high[0] - low[0]) * mix,
+                    low[1] + (high[1] - low[1]) * mix,
+                    low[2] + (high[2] - low[2]) * mix,
+                ],
+            );
+        }
+    }
+    TextureImage::new(size, size, rgba).expect("generated layer image is valid")
+}
+
+/// A deterministic hash in `0..=1`. Not good noise; good enough to break up a flat colour, and it
+/// costs no dependency and no asset file.
+fn noise(x: u32, y: u32, seed: u32) -> f32 {
+    let mut value = x
+        .wrapping_mul(374_761_393)
+        .wrapping_add(y.wrapping_mul(668_265_263))
+        .wrapping_add(seed.wrapping_mul(2_246_822_519));
+    value ^= value >> 13;
+    value = value.wrapping_mul(1_274_126_177);
+    value ^= value >> 16;
+    f32::from(value as u16) / f32::from(u16::MAX)
+}
+
+/// Appends one linear colour as sRGB-encoded opaque RGBA.
+fn push_srgb(rgba: &mut Vec<u8>, colour: [f32; 3]) {
+    for channel in colour {
+        let clamped = channel.clamp(0.0, 1.0);
+        let encoded = if clamped <= 0.003_130_8 {
+            clamped * 12.92
+        } else {
+            1.055 * clamped.powf(1.0 / 2.4) - 0.055
+        };
+        rgba.push((encoded * 255.0 + 0.5) as u8);
+    }
+    rgba.push(u8::MAX);
 }
 
 /// Scatters buildings across the terrain, each sitting on the ground beneath it.
@@ -292,14 +438,6 @@ fn building_placements(terrain: &Terrain) -> Vec<ModelInstance> {
         }
     }
     placed
-}
-
-fn palette() -> Vec<LayerColour> {
-    vec![
-        LayerColour([0.74, 0.68, 0.50]),
-        LayerColour([0.30, 0.42, 0.22]),
-        LayerColour([0.48, 0.46, 0.43]),
-    ]
 }
 
 /// Everything created once a window exists.
@@ -365,10 +503,18 @@ impl ApplicationHandler for Viewer {
         };
         eprintln!("adapter: {}", context.adapter_info().name);
 
-        let terrain_renderer = match TerrainRenderer::new(&context, &self.terrain, &palette()) {
-            Ok(renderer) => renderer,
-            Err(error) => return self.fail(event_loop, error.to_string()),
-        };
+        let terrain_renderer =
+            match TerrainRenderer::with_materials(&context, &self.terrain, &layer_materials()) {
+                Ok(renderer) => renderer,
+                Err(error) => return self.fail(event_loop, error.to_string()),
+            };
+        let albedo = terrain_renderer.layer_albedo();
+        eprintln!(
+            "terrain layers: {} slices at {:?}, {} mip levels",
+            albedo.layer_count(),
+            albedo.size(),
+            albedo.mip_level_count()
+        );
         let size = window.inner_size();
         let surface = match SurfaceRenderer::new(
             &context,

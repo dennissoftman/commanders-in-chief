@@ -20,7 +20,8 @@ struct Uniforms {
     palette: array<vec4<f32>, 8>,
 }
 
-/// Base colour in `base_color`; metallic in `factors.x` and roughness in `factors.y`.
+/// Base colour in `base_color`; metallic in `factors.x`, roughness in `factors.y`, the base-colour
+/// array slice in `factors.z`, and whether that slice holds anything in `factors.w`.
 struct Material {
     base_color: vec4<f32>,
     factors: vec4<f32>,
@@ -42,6 +43,10 @@ struct ShadowCascadeView {
 @group(1) @binding(0) var<uniform> cascade: ShadowCascadeView;
 
 @group(2) @binding(0) var<storage, read> materials: array<Material>;
+// One slice per image the model carried, in source order. Bound once for the whole model, which is
+// what lets every material have its own picture without a bind group change between primitives.
+@group(2) @binding(1) var base_color_texture: texture_2d_array<f32>;
+@group(2) @binding(2) var base_color_sampler: sampler;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -63,6 +68,7 @@ struct VertexOutput {
     // Flat, because a material index must not be interpolated between vertices — a fragment halfway
     // between materials 2 and 5 would read material 3.
     @location(2) @interpolate(flat) material: u32,
+    @location(3) uv: vec2<f32>,
 }
 
 struct GBufferOutput {
@@ -102,14 +108,27 @@ fn gbuffer_vertex(input: VertexInput) -> VertexOutput {
     output.normal = instance_normal(input, input.normal);
     output.tint = input.tint;
     output.material = input.material;
+    output.uv = input.uv;
     return output;
 }
 
 @fragment
 fn gbuffer_fragment(input: VertexOutput) -> GBufferOutput {
     let material = materials[input.material];
+    // Sampled whether or not this material has a texture, then discarded by the `select` below if it
+    // does not. The branch that looks obviously cheaper is not available: `textureSample` derives its
+    // mip level from screen-space derivatives, which exist only in uniform control flow, and the
+    // material index varies per fragment. Guarding the call would leave the mip level of every
+    // *textured* fragment undefined -- the surfaces that matter, not the ones being skipped.
+    let sampled = textureSample(
+        base_color_texture,
+        base_color_sampler,
+        input.uv,
+        i32(material.factors.z),
+    );
+    let base = select(vec3<f32>(1.0), sampled.rgb, material.factors.w > 0.5);
     var output: GBufferOutput;
-    output.albedo = vec4<f32>(material.base_color.rgb * input.tint.rgb, 1.0);
+    output.albedo = vec4<f32>(material.base_color.rgb * base * input.tint.rgb, 1.0);
     // Unlike terrain, a model's normal is not flipped toward the viewer: a model has a genuine inside
     // and outside, and forcing its normals to face the camera would light the interior of a hull as
     // though it were the exterior.

@@ -53,6 +53,24 @@ chunk carries no count of its own.
 `layer_count * width * height` `u8` weights: all of layer 0's samples, then all of layer 1's, and so
 on. `0` is absent, `255` is fully covering.
 
+## What a layer name means
+
+A name and nothing else. The container carries *where* each layer is and *how much* of it there is; it
+carries no colour, no image reference, and no tiling scale. Those are the renderer's business, resolved
+against the name.
+
+That split is deliberate. A surface is a rendering concern that will change — texture, roughness, and
+detail scale are all things an artist adjusts without touching a map, and several of them did not exist
+when this format was first written. Putting them in the terrain container would have meant a format
+version bump for each, and would have forced every editor and tool that reads a heightfield to
+understand materials it has no use for.
+
+The consequence worth stating: a `.cict` is not self-describing as an *image*. Open one without the
+material set it was authored against and you get correct geometry with a placeholder surface, which is
+the right failure — visibly unfinished rather than silently wrong.
+
+See [ADR 0004](../adr/0004-texture-arrays-and-world-space-tiling.md) for how the renderer resolves it.
+
 ## Why `u16` elevations
 
 Two reasons, the second being the one that decided it:

@@ -21,7 +21,8 @@ pub mod terrain;
 mod testing;
 
 pub use model::{
-    Model, ModelError, ModelLimits, ModelMaterial, ModelPrimitive, ModelVertex, import_model,
+    Model, ModelError, ModelImage, ModelLimits, ModelMaterial, ModelPrimitive, ModelVertex,
+    import_model,
 };
 pub use package::{MapPackage, PackageError, PackageLimits};
 pub use scenario::{
@@ -36,7 +37,7 @@ mod model_tests {
     // weaken these tests rather than make them robust.
     #![allow(clippy::float_cmp)]
     use crate::model::{ModelError, ModelLimits, import_model};
-    use crate::testing::{TriangleOptions, triangle_glb};
+    use crate::testing::{TEXEL_COLOURS, TriangleOptions, textured_triangle_glb, triangle_glb};
 
     #[test]
     fn imports_a_triangle_with_its_attributes_and_material() {
@@ -64,6 +65,54 @@ mod model_tests {
         assert_eq!(material.roughness, 0.9);
         assert!(!material.blended);
         assert_eq!(material.base_color_texture, None);
+        assert!(
+            model.images.is_empty(),
+            "a fixture with no texture must carry no image"
+        );
+    }
+
+    #[test]
+    fn decodes_an_embedded_image_and_links_it_to_its_material() {
+        // The whole texture path from container to pixels: a PNG in the binary chunk, reached through
+        // a buffer view, decoded, and normalized to RGBA8 with its index preserved so the renderer can
+        // resolve `base_color_texture` against `images`.
+        let glb = textured_triangle_glb();
+        let model = import_model(&glb, ModelLimits::default()).expect("import");
+
+        assert_eq!(model.images.len(), 1);
+        let image = &model.images[0];
+        assert_eq!((image.width, image.height), (2, 2));
+        assert_eq!(
+            image.rgba,
+            TEXEL_COLOURS.as_flattened(),
+            "the decode must preserve channel order and row order, not merely the byte count"
+        );
+        assert_eq!(model.materials[0].base_color_texture, Some(0));
+    }
+
+    #[test]
+    fn refuses_an_image_past_the_declared_bound() {
+        // The bound is checked before the conversion allocates, so a hostile declaration cannot make
+        // the importer reserve the memory it is being refused.
+        let glb = textured_triangle_glb();
+        let error = import_model(
+            &glb,
+            ModelLimits {
+                maximum_image_bytes: 8,
+                ..ModelLimits::default()
+            },
+        )
+        .expect_err("a 2x2 RGBA image needs sixteen bytes");
+        assert!(
+            matches!(
+                error,
+                ModelError::LimitExceeded {
+                    what: "image bytes",
+                    ..
+                }
+            ),
+            "got {error:?}"
+        );
     }
 
     #[test]

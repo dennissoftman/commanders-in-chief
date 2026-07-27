@@ -12,19 +12,48 @@
 //! a faction that grades roads across the map is editing layer weights, and terrain deformation is
 //! editing heights. Both are texture writes here. Had the mesh been baked on the CPU, both would be
 //! a remesh plus a buffer upload on every edit.
+//!
+//! # Layer surfaces are tiled in *world* space
+//!
+//! Each layer carries an optional albedo image, and the whole set uploads as one array so a fragment
+//! can blend up to eight of them without a bind group change. The coordinate they are sampled at is
+//! world position divided by the layer's own detail scale — not the terrain's normalized `uv`.
+//!
+//! That distinction is the difference between a terrain that reads as ground and one that reads as a
+//! stretched photograph. Normalized coordinates fit exactly one copy of the image across the entire
+//! map, so a 512-pixel grass texture on a two-kilometre map resolves at about four metres per texel
+//! and is pure blur at any tactical zoom. A world-space divisor fixes the repeat at a real size — a
+//! layer that repeats every thirty-two units looks the same on a small map and a large one, which is
+//! also what makes an authored value portable between them.
+//!
+//! The palette colour survives as a *multiplier* over the sampled texel rather than being replaced by
+//! it. A layer with no image multiplies white and comes out exactly as before, so a terrain authored
+//! against flat colours renders unchanged, and a greyscale detail texture can be recoloured per map
+//! without a second copy of the image.
 
 use cic_assets::Terrain;
 
 use crate::RenderError;
 use crate::gpu::{CAPTURE_FORMAT, DEPTH_FORMAT, GpuContext};
+use crate::texture::{TextureArray, TextureImage, array_sampler};
 
 /// Largest layer count the forward pass blends, matching `MAX_LAYERS` in the shader.
 pub const MAX_LAYERS: usize = 8;
 
+/// Roughness a layer takes when its material does not state one. Terrain is a rough dielectric.
+pub const DEFAULT_LAYER_ROUGHNESS: f32 = 0.88;
+
+/// World units one repeat of a layer's albedo covers when its material does not state a scale.
+///
+/// Roughly the width of a road: fine enough that the repeat is not obvious at a tactical zoom, coarse
+/// enough that a strategic view is not sampling the deep end of the mip chain everywhere.
+pub const DEFAULT_DETAIL_SCALE: f32 = 32.0;
+
 /// Byte size of the uniform block, which must match the shader's `Uniforms` exactly.
 ///
-/// A mat4x4 (64), five vec4<f32> (80), one vec4<u32> (16), and eight vec4<f32> of palette (128).
-const UNIFORM_BYTES: usize = 64 + 80 + 16 + 128;
+/// A mat4x4 (64), five vec4<f32> (80), one vec4<u32> (16), eight vec4<f32> of palette (128), and
+/// eight vec4<f32> of per-layer detail parameters (128).
+const UNIFORM_BYTES: usize = 64 + 80 + 16 + 128 + 128;
 
 /// A directional light, in the terms the forward pass consumes.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -72,9 +101,68 @@ impl DirectionalLight {
     }
 }
 
-/// One layer's flat colour, until material textures exist.
+/// One layer's flat colour, for a caller with no textures to supply.
+///
+/// A shorthand for a [`LayerMaterial`] with default roughness and detail scale and no image.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LayerColour(pub [f32; 3]);
+
+/// How one terrain layer's surface is shaded.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayerMaterial {
+    /// Multiplied into the sampled albedo. `[1.0; 3]` leaves a textured layer as authored; a layer
+    /// with no image renders exactly this colour.
+    pub colour: [f32; 3],
+    /// Surface roughness in `0..=1`, blended across layers by the same weights as the colour.
+    pub roughness: f32,
+    /// World units one repeat of `albedo` covers. Larger is coarser.
+    pub detail_scale: f32,
+    /// The layer's albedo image, tiled across the map, or `None` for a flat colour.
+    pub albedo: Option<TextureImage>,
+}
+
+impl Default for LayerMaterial {
+    fn default() -> Self {
+        Self {
+            colour: [0.5, 0.5, 0.5],
+            roughness: DEFAULT_LAYER_ROUGHNESS,
+            detail_scale: DEFAULT_DETAIL_SCALE,
+            albedo: None,
+        }
+    }
+}
+
+impl LayerMaterial {
+    /// A flat-coloured layer with no image.
+    #[must_use]
+    pub fn colour(colour: [f32; 3]) -> Self {
+        Self {
+            colour,
+            ..Self::default()
+        }
+    }
+
+    /// Returns the material with an albedo image tiled at a world-space scale.
+    #[must_use]
+    pub fn with_albedo(mut self, albedo: TextureImage, detail_scale: f32) -> Self {
+        self.albedo = Some(albedo);
+        self.detail_scale = detail_scale;
+        self
+    }
+
+    /// Returns the material with a stated roughness.
+    #[must_use]
+    pub const fn with_roughness(mut self, roughness: f32) -> Self {
+        self.roughness = roughness;
+        self
+    }
+}
+
+impl From<LayerColour> for LayerMaterial {
+    fn from(colour: LayerColour) -> Self {
+        Self::colour(colour.0)
+    }
+}
 
 /// A terrain uploaded to the GPU, with its pipeline.
 #[derive(Debug)]
@@ -85,17 +173,23 @@ pub struct TerrainRenderer {
     uniform_buffer: wgpu::Buffer,
     height_texture: wgpu::Texture,
     weight_texture: wgpu::Texture,
+    albedo: TextureArray,
     width: u32,
     height: u32,
     horizontal_scale: f32,
     height_scale: f32,
     layer_count: u32,
-    palette: [[f32; 3]; MAX_LAYERS],
+    /// Per layer: `rgb` colour multiplier, `w` roughness.
+    palette: [[f32; 4]; MAX_LAYERS],
+    /// Per layer: world units per albedo repeat.
+    detail_scale: [f32; MAX_LAYERS],
     height_range: f32,
 }
 
 impl TerrainRenderer {
-    /// Uploads a terrain and builds the forward pipeline.
+    /// Uploads a terrain with flat layer colours and builds the forward pipeline.
+    ///
+    /// Equivalent to [`Self::with_materials`] over layers that carry no image.
     ///
     /// # Errors
     ///
@@ -105,6 +199,26 @@ impl TerrainRenderer {
         context: &GpuContext,
         terrain: &Terrain,
         palette: &[LayerColour],
+    ) -> Result<Self, RenderError> {
+        let materials: Vec<LayerMaterial> =
+            palette.iter().copied().map(LayerMaterial::from).collect();
+        Self::with_materials(context, terrain, &materials)
+    }
+
+    /// Uploads a terrain with full layer materials and builds the forward pipeline.
+    ///
+    /// `materials` is matched to the terrain's layers positionally; a layer past the end of the slice
+    /// takes [`LayerMaterial::default`], so a caller may supply materials for only the layers it cares
+    /// about.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RenderError::TooManyLayers`] when the terrain declares more layers than the pass
+    /// blends, or a structured texture error when the albedo images exceed their bounds.
+    pub fn with_materials(
+        context: &GpuContext,
+        terrain: &Terrain,
+        materials: &[LayerMaterial],
     ) -> Result<Self, RenderError> {
         if terrain.layers().len() > MAX_LAYERS {
             return Err(RenderError::TooManyLayers {
@@ -120,6 +234,23 @@ impl TerrainRenderer {
         let height_texture = upload_heights(device, queue, terrain);
         let weight_texture = upload_weights(device, queue, terrain)?;
 
+        // One slice per weight layer, in the same order, so the shader indexes both with the same
+        // number and cannot pair a weight with another layer's surface. A layer with no image takes
+        // an opaque-white slice, which multiplies its colour through unchanged.
+        let slice_count = terrain.layers().len().max(1);
+        let default = LayerMaterial::default();
+        let slices: Vec<TextureImage> = (0..slice_count)
+            .map(|index| {
+                materials
+                    .get(index)
+                    .unwrap_or(&default)
+                    .albedo
+                    .clone()
+                    .unwrap_or_else(|| TextureImage::solid(1, 1, [u8::MAX; 4]))
+            })
+            .collect();
+        let albedo = TextureArray::new(context, "cic-render terrain layer albedo", &slices)?;
+
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("cic-render terrain uniforms"),
             size: UNIFORM_BYTES as u64,
@@ -127,13 +258,32 @@ impl TerrainRenderer {
             mapped_at_creation: false,
         });
 
-        let (layout, bind_group) =
-            build_bindings(device, &uniform_buffer, &height_texture, &weight_texture);
+        let (layout, bind_group) = build_bindings(
+            device,
+            &uniform_buffer,
+            &height_texture,
+            &weight_texture,
+            &albedo,
+        );
         let pipeline = build_render_pipeline(device, &layout);
 
-        let mut resolved = [[0.5f32, 0.5, 0.5]; MAX_LAYERS];
-        for (slot, colour) in resolved.iter_mut().zip(palette) {
-            *slot = colour.0;
+        let mut palette = [[0.5f32, 0.5, 0.5, DEFAULT_LAYER_ROUGHNESS]; MAX_LAYERS];
+        let mut detail_scale = [DEFAULT_DETAIL_SCALE; MAX_LAYERS];
+        for (index, slot) in palette.iter_mut().enumerate() {
+            let material = materials.get(index).unwrap_or(&default);
+            *slot = [
+                material.colour[0],
+                material.colour[1],
+                material.colour[2],
+                material.roughness,
+            ];
+            // A zero or negative scale would divide the sampling coordinate to infinity, so it is
+            // clamped here rather than guarded in the shader on every fragment.
+            detail_scale[index] = if material.detail_scale.is_finite() {
+                material.detail_scale.max(1.0e-3)
+            } else {
+                DEFAULT_DETAIL_SCALE
+            };
         }
 
         Ok(Self {
@@ -143,6 +293,7 @@ impl TerrainRenderer {
             uniform_buffer,
             height_texture,
             weight_texture,
+            albedo,
             width,
             height,
             horizontal_scale: terrain.horizontal_scale(),
@@ -150,7 +301,8 @@ impl TerrainRenderer {
             // applies directly with no normalization to undo.
             height_scale: terrain.vertical_scale(),
             layer_count: u32::try_from(terrain.layers().len()).unwrap_or(0),
-            palette: resolved,
+            palette,
+            detail_scale,
             // Kept so the shadow fit can size each cascade's reach toward the light without the
             // caller having to know or remember to supply it.
             height_range: terrain
@@ -160,6 +312,12 @@ impl TerrainRenderer {
                 .max()
                 .map_or(0.0, |peak| f32::from(peak) * terrain.vertical_scale()),
         })
+    }
+
+    /// Returns the layer albedo array, for reporting what was actually uploaded.
+    #[must_use]
+    pub const fn layer_albedo(&self) -> &TextureArray {
+        &self.albedo
     }
 
     /// Returns the terrain's bind group, so another pipeline can draw the same terrain.
@@ -352,8 +510,11 @@ impl TerrainRenderer {
         for value in [self.layer_count, 0, 0, 0] {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
-        for colour in self.palette {
-            push_vec4([colour[0], colour[1], colour[2], 1.0], &mut bytes);
+        for entry in self.palette {
+            push_vec4(entry, &mut bytes);
+        }
+        for scale in self.detail_scale {
+            push_vec4([scale, 0.0, 0.0, 0.0], &mut bytes);
         }
         debug_assert_eq!(bytes.len(), UNIFORM_BYTES, "uniform block size drifted");
         context
@@ -369,31 +530,14 @@ impl TerrainRenderer {
     }
 }
 
-/// Builds the bind group and the forward render pipeline.
+/// Builds the terrain bind group layout.
 ///
-/// The layout is fixed rather than derived, so a shader binding that drifts out of agreement with
-/// the Rust side fails at pipeline creation rather than rendering something wrong.
-/// Builds the bind group layout and the bind group.
-///
-/// The layout is fixed rather than derived, so a shader binding that drifts out of agreement with
-/// the Rust side fails at pipeline creation rather than rendering something wrong.
-fn build_bindings(
-    device: &wgpu::Device,
-    uniform_buffer: &wgpu::Buffer,
-    height_texture: &wgpu::Texture,
-    weight_texture: &wgpu::Texture,
-) -> (wgpu::BindGroupLayout, wgpu::BindGroup) {
-    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-        label: Some("cic-render terrain weight sampler"),
-        address_mode_u: wgpu::AddressMode::ClampToEdge,
-        address_mode_v: wgpu::AddressMode::ClampToEdge,
-        address_mode_w: wgpu::AddressMode::ClampToEdge,
-        mag_filter: wgpu::FilterMode::Linear,
-        min_filter: wgpu::FilterMode::Linear,
-        ..Default::default()
-    });
-
-    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+/// Fixed rather than derived from a shader, so a binding that drifts out of agreement with the Rust
+/// side fails at pipeline creation rather than rendering something wrong. Every terrain pipeline —
+/// forward, G-buffer, and the four shadow cascades — is built against this one layout and binds this
+/// one group, which is what keeps them from disagreeing about the terrain they are drawing.
+fn build_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("cic-render terrain layout"),
         entries: &[
             wgpu::BindGroupLayoutEntry {
@@ -433,8 +577,48 @@ fn build_bindings(
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 count: None,
             },
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 5,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
         ],
+    })
+}
+
+/// Builds the terrain bind group and the layout it was made against.
+fn build_bindings(
+    device: &wgpu::Device,
+    uniform_buffer: &wgpu::Buffer,
+    height_texture: &wgpu::Texture,
+    weight_texture: &wgpu::Texture,
+    albedo: &TextureArray,
+) -> (wgpu::BindGroupLayout, wgpu::BindGroup) {
+    // Two samplers, because the two arrays want opposite behaviour. Weights are a per-map field
+    // addressed in normalized coordinates and must clamp at the edge; albedo is a detail texture
+    // addressed in world units and must repeat, with the mip chain filtered between levels.
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("cic-render terrain weight sampler"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        ..Default::default()
     });
+    let albedo_sampler = array_sampler(device, "cic-render terrain albedo sampler");
+    let layout = build_bind_group_layout(device);
 
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("cic-render terrain bindings"),
@@ -462,6 +646,14 @@ fn build_bindings(
             wgpu::BindGroupEntry {
                 binding: 3,
                 resource: wgpu::BindingResource::Sampler(&sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::TextureView(albedo.view()),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: wgpu::BindingResource::Sampler(&albedo_sampler),
             },
         ],
     });

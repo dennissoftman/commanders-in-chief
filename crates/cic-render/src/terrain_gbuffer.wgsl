@@ -20,13 +20,18 @@ struct Uniforms {
     terrain: vec4<f32>,
     // x layer count, yzw unused.
     layers: vec4<u32>,
+    // Per layer: rgb colour multiplier, w roughness.
     palette: array<vec4<f32>, 8>,
+    // Per layer: x world units per albedo repeat, yzw unused.
+    detail: array<vec4<f32>, 8>,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 @group(0) @binding(1) var height_texture: texture_2d<u32>;
 @group(0) @binding(2) var weight_texture: texture_2d_array<f32>;
 @group(0) @binding(3) var weight_sampler: sampler;
+@group(0) @binding(4) var albedo_texture: texture_2d_array<f32>;
+@group(0) @binding(5) var albedo_sampler: sampler;
 
 // The cascade being rendered, for the depth-only pass. A separate group so the terrain group can be
 // bound once and this one swapped per cascade.
@@ -109,19 +114,39 @@ fn gbuffer_vertex(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     return output;
 }
 
-fn surface_albedo(uv: vec2<f32>) -> vec3<f32> {
+/// World XY of a fragment, recovered from its normalized grid coordinate. Identical to the forward
+/// pass's, deliberately: the two must agree on where a detail texture tiles or the same terrain
+/// captured through each path would not match.
+fn world_xy(uv: vec2<f32>) -> vec2<f32> {
+    let cells = max(
+        vec2<f32>(uniforms.terrain.z, uniforms.terrain.w) - vec2<f32>(1.0),
+        vec2<f32>(1.0),
+    );
+    return uv * cells * uniforms.terrain.x;
+}
+
+/// Blends the layer surfaces by per-sample weight. Albedo in `xyz`, roughness in `w`.
+///
+/// See `terrain_forward.wgsl` for why every layer is sampled regardless of its weight, and why the
+/// albedo coordinate is world-space rather than `uv`.
+fn surface(uv: vec2<f32>) -> vec4<f32> {
     let count = min(uniforms.layers.x, MAX_LAYERS);
+    let world = world_xy(uv);
     var accumulated = vec3<f32>(0.0);
+    var roughness = 0.0;
     var total = 0.0;
     for (var index = 0u; index < count; index = index + 1u) {
         let weight = textureSample(weight_texture, weight_sampler, uv, i32(index)).r;
-        accumulated = accumulated + uniforms.palette[index].rgb * weight;
+        let tile = world / uniforms.detail[index].x;
+        let detail = textureSample(albedo_texture, albedo_sampler, tile, i32(index)).rgb;
+        accumulated = accumulated + uniforms.palette[index].rgb * detail * weight;
+        roughness = roughness + uniforms.palette[index].w * weight;
         total = total + weight;
     }
     if (total <= 0.0001) {
-        return vec3<f32>(0.32, 0.30, 0.27);
+        return vec4<f32>(0.32, 0.30, 0.27, 0.88);
     }
-    return accumulated / total;
+    return vec4<f32>(accumulated / total, roughness / total);
 }
 
 @fragment
@@ -130,11 +155,12 @@ fn gbuffer_fragment(input: VertexOutput) -> GBufferOutput {
     if (normal.z < 0.0) {
         normal = -normal;
     }
+    let surface_value = surface(input.uv);
     var output: GBufferOutput;
-    output.albedo = vec4<f32>(surface_albedo(input.uv), 1.0);
-    // Terrain is a rough dielectric. A single constant for now; a per-layer roughness belongs with
-    // the material textures that replace the flat palette.
-    output.normal_roughness = vec4<f32>(normal, 0.88);
+    output.albedo = vec4<f32>(surface_value.rgb, 1.0);
+    // Roughness is per layer and blended by the same weights as the colour, so a gravel layer and a
+    // wet-asphalt layer can meet on one fragment and each contribute its own specular response.
+    output.normal_roughness = vec4<f32>(normal, surface_value.w);
     output.coverage = 1.0;
     return output;
 }

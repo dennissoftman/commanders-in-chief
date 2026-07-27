@@ -2,11 +2,20 @@
 //!
 //! # What is here
 //!
-//! - **A forward terrain pass** ([`terrain`]), which renders a [`cic_assets::Terrain`] with heights
-//!   and layer weights held in *writable* GPU textures rather than a baked mesh. See that module for
-//!   why that choice is load-bearing rather than incidental.
+//! - **The deferred chain** ([`deferred`]): four depth-only shadow cascades, a G-buffer, ambient
+//!   occlusion with a bilateral blur, lighting that reconstructs world position from depth, and a
+//!   tone-mapping composite.
+//! - **Terrain** ([`terrain`]), rendered from a [`cic_assets::Terrain`] with heights and layer weights
+//!   held in *writable* GPU textures rather than a baked mesh, and per-layer albedo tiled in world
+//!   space. See that module for why the writable-texture choice is load-bearing rather than incidental.
+//! - **Models** ([`model`]), instanced, with per-instance transform and tint and one draw call per
+//!   model however many materials it has.
+//! - **Colour texture arrays** ([`texture`]), which resample to a common slice size and generate their
+//!   mip chain on the CPU in linear light. Both terrain layers and model materials index into one.
 //! - **Headless rendering and capture** ([`gpu`]). Headless comes before any window, because a
 //!   capture is the only rendering verification that runs in CI.
+//! - **Windowed presentation** ([`presentation`]): the same chain pointed at a swapchain, plus an
+//!   input-to-intent mapping that is testable without a window.
 //! - **View and projection** ([`view`]), kept out of `cic-camera` because a projection depends on
 //!   the viewport and the API's clip-space convention.
 //! - **The WGSL shader set.** Every shader is parsed and validated at test time by the same front
@@ -20,9 +29,8 @@
 //!
 //! # What is next
 //!
-//! The deferred chain — G-buffer, cascaded shadows, ambient occlusion — plus models, water, and
-//! windowed presentation. The shaders for most of that are already here and validated; what they
-//! need is the pipeline scaffolding around them. See `docs/milestones/m3-renderer.md`.
+//! Water, multisampling, a real virtual-texture cache behind the residency bookkeeping, and the
+//! committed reference captures that close the milestone. See `docs/milestones/m3-renderer.md`.
 
 pub mod deferred;
 pub mod detail;
@@ -34,6 +42,7 @@ pub mod scene;
 pub mod shadow;
 pub mod terrain;
 pub mod terrain_virtual;
+pub mod texture;
 pub mod view;
 
 use std::error::Error;
@@ -46,7 +55,8 @@ pub use presentation::{Action, InputState, SurfaceRenderer, TerrainGround};
 pub use resource::{TextureId, TextureResourceManager};
 pub use scene::{TerrainFrame, capture_terrain, render_terrain_into};
 pub use shadow::{CASCADE_COUNT, Cascade, fit_cascades};
-pub use terrain::{DirectionalLight, LayerColour, TerrainRenderer};
+pub use terrain::{DirectionalLight, LayerColour, LayerMaterial, TerrainRenderer};
+pub use texture::{TextureArray, TextureImage};
 pub use view::{Projection, view_projection};
 
 /// Every WGSL shader in the set, as `(name, source)`.

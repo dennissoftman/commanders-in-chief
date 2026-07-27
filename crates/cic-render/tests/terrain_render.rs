@@ -22,8 +22,8 @@ use std::sync::OnceLock;
 use cic_assets::{Terrain, TerrainLayer};
 use cic_render::terrain::LayerColour;
 use cic_render::{
-    Capture, CaptureTarget, GpuContext, TerrainFrame, TerrainRenderer, capture_terrain,
-    render_terrain_into,
+    Capture, CaptureTarget, GpuContext, LayerMaterial, TerrainFrame, TerrainRenderer, TextureImage,
+    capture_terrain, render_terrain_into,
 };
 
 const WIDTH: u32 = 640;
@@ -145,6 +145,39 @@ fn palette() -> Vec<LayerColour> {
     ]
 }
 
+/// The same three layers, each carrying a striped albedo, tiled at a different world scale.
+///
+/// Stripes rather than noise: a stripe has a direction and a period, so a capture shows immediately
+/// whether the tiling is world-aligned and at the size that was asked for. Noise would only show that
+/// *something* was sampled.
+fn textured_layers() -> Vec<LayerMaterial> {
+    let colours = palette();
+    [(24.0f32, 4u32), (40.0, 6), (64.0, 3)]
+        .into_iter()
+        .zip(colours)
+        .map(|((detail_scale, stripes), colour)| {
+            LayerMaterial::colour(colour.0).with_albedo(striped(64, stripes), detail_scale)
+        })
+        .collect()
+}
+
+/// A square image of horizontal stripes alternating between a quarter and full brightness.
+fn striped(size: u32, stripes: u32) -> TextureImage {
+    let period = size.div_ceil(stripes.max(1));
+    let mut rgba = Vec::with_capacity((size * size * 4) as usize);
+    for y in 0..size {
+        let value = if (y / period).is_multiple_of(2) {
+            64
+        } else {
+            255
+        };
+        for _ in 0..size {
+            rgba.extend_from_slice(&[value, value, value, u8::MAX]);
+        }
+    }
+    TextureImage::new(size, size, rgba).expect("valid stripe image")
+}
+
 fn capture_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
 }
@@ -212,6 +245,131 @@ fn renders_a_terrain_overview() {
         green > 1_000,
         "the grass layer should be visible, got {green} pixels"
     );
+}
+
+/// Renders one terrain with the given layer materials and returns the capture.
+fn capture_with(context: &GpuContext, terrain: &Terrain, materials: &[LayerMaterial]) -> Capture {
+    let renderer =
+        TerrainRenderer::with_materials(context, terrain, materials).expect("build renderer");
+    let target = CaptureTarget::new(context, WIDTH, HEIGHT).expect("target");
+    let frame = TerrainFrame::overview(terrain, WIDTH, HEIGHT);
+    renderer.set_frame(
+        context,
+        &cic_render::view_projection(frame.pose, frame.projection),
+        frame.pose.eye,
+        frame.light,
+    );
+    render_terrain_into(context, &target, &renderer).expect("pass");
+    target.resolve(context, encoder(context)).expect("resolve")
+}
+
+#[test]
+fn layer_albedo_reaches_the_frame_and_tiles_in_world_space() {
+    let Some(context) = context() else { return };
+    let terrain = test_terrain();
+
+    let flat_materials: Vec<LayerMaterial> =
+        palette().into_iter().map(LayerMaterial::from).collect();
+    let flat = capture_with(context, &terrain, &flat_materials);
+    let textured = capture_with(context, &terrain, &textured_layers());
+    write_capture("terrain-flat-layers.png", &flat);
+    write_capture("terrain-textured-layers.png", &textured);
+
+    let mut changed = 0usize;
+    for (bare, patterned) in flat
+        .rgba()
+        .chunks_exact(4)
+        .zip(textured.rgba().chunks_exact(4))
+    {
+        if bare[0..3] != patterned[0..3] {
+            changed += 1;
+        }
+    }
+    let total = flat.rgba().len() / 4;
+    eprintln!("pixels changed by layer albedo: {changed} of {total}");
+    assert!(
+        changed > total / 4,
+        "layer textures should change most of the covered surface, got {changed} of {total}"
+    );
+    assert!(
+        textured.luminance_deviation() > flat.luminance_deviation(),
+        "a striped surface should vary more than a flat one: {} vs {}",
+        textured.luminance_deviation(),
+        flat.luminance_deviation()
+    );
+
+    // Halving every detail scale doubles the number of repeats across the same map. That is the
+    // claim world-space tiling makes and normalized `uv` sampling cannot: with `uv` the image is
+    // stretched to the map either way, so the two frames would be identical.
+    let finer: Vec<LayerMaterial> = textured_layers()
+        .into_iter()
+        .map(|material| LayerMaterial {
+            detail_scale: material.detail_scale * 0.5,
+            ..material
+        })
+        .collect();
+    let tighter = capture_with(context, &terrain, &finer);
+    write_capture("terrain-textured-layers-fine.png", &tighter);
+    assert_ne!(
+        textured.rgba(),
+        tighter.rgba(),
+        "the detail scale must change where the texture repeats"
+    );
+}
+
+#[test]
+fn a_layer_without_an_image_renders_as_its_flat_colour() {
+    // The compatibility claim: albedo multiplies the palette rather than replacing it, so a terrain
+    // authored before textures existed renders byte for byte as it did. If the white fallback slice
+    // were anything but opaque white -- or were sampled at the wrong mip -- this would drift.
+    let Some(context) = context() else { return };
+    let terrain = test_terrain();
+
+    let through_colours = capture_terrain(
+        context,
+        &terrain,
+        &palette(),
+        TerrainFrame::overview(&terrain, WIDTH, HEIGHT),
+        WIDTH,
+        HEIGHT,
+    )
+    .expect("render terrain");
+    let through_materials = capture_with(
+        context,
+        &terrain,
+        &palette()
+            .into_iter()
+            .map(LayerMaterial::from)
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(
+        through_colours.rgba(),
+        through_materials.rgba(),
+        "an imageless material must render exactly as the flat palette did"
+    );
+}
+
+#[test]
+fn the_layer_array_reports_what_it_uploaded() {
+    let Some(context) = context() else { return };
+    let terrain = test_terrain();
+    let renderer = TerrainRenderer::with_materials(context, &terrain, &textured_layers())
+        .expect("build renderer");
+    let albedo = renderer.layer_albedo();
+    assert_eq!(albedo.layer_count(), 3, "one slice per weight layer");
+    assert_eq!(albedo.size(), (64, 64));
+    assert_eq!(
+        albedo.mip_level_count(),
+        7,
+        "a 64-pixel slice reduces to 1x1 in seven levels"
+    );
+
+    // A terrain with no layers at all still gets a one-slice array, because the bind group layout is
+    // fixed and an array texture cannot have zero layers.
+    let bare = Terrain::new(4, 4, SPACING, VERTICAL, vec![100; 16], Vec::new()).expect("valid");
+    let bare = TerrainRenderer::with_materials(context, &bare, &[]).expect("build renderer");
+    assert_eq!(bare.layer_albedo().layer_count(), 1);
+    assert_eq!(bare.layer_albedo().size(), (1, 1));
 }
 
 #[test]

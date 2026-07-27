@@ -36,7 +36,7 @@ cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings
 | `cic-vfs` | Virtual paths, ordered mounts, overlay resolution, zip and tar containers. |
 | `cic-assets` | glTF model import, the terrain container, JSON scenarios, map packages. |
 | `cic-camera` | The RTS camera model, free of window, input, and GPU dependencies. |
-| `cic-render` | WGSL shader set, terrain page residency, texture resources. |
+| `cic-render` | Deferred chain, terrain, instanced models, texturing, windowed presentation, the WGSL shader set. |
 
 ## Asset formats
 
@@ -61,6 +61,11 @@ Two documents that later work is measured against, both of them load-bearing rat
   diagnosis all reduce to the same requirement, and it cannot be retrofitted.
 
 `unsafe_code` is forbidden at workspace scope. Strict lints are errors in CI.
+
+Design decisions with consequences are recorded as [ADRs](docs/adr/), and what the game *is* — as
+distinct from how it is built — lives in [docs/design/](docs/design/README.md). That is not decoration
+either: the factions described there are why terrain heights and layer weights are writable GPU
+textures rather than a baked mesh, and why a model instance carries its own colour.
 
 ## Contributing
 

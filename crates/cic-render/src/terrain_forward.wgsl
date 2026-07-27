@@ -26,7 +26,10 @@ struct Uniforms {
     terrain: vec4<f32>,
     // x layer count, yzw unused.
     layers: vec4<u32>,
+    // Per layer: rgb colour multiplier, w roughness.
     palette: array<vec4<f32>, 8>,
+    // Per layer: x world units per albedo repeat, yzw unused.
+    detail: array<vec4<f32>, 8>,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -36,6 +39,12 @@ struct Uniforms {
 @group(0) @binding(1) var height_texture: texture_2d<u32>;
 @group(0) @binding(2) var weight_texture: texture_2d_array<f32>;
 @group(0) @binding(3) var weight_sampler: sampler;
+// One albedo slice per weight layer, in the same order, so a single index reaches both. A layer with
+// no authored image gets an opaque-white slice and comes out as its palette colour alone.
+@group(0) @binding(4) var albedo_texture: texture_2d_array<f32>;
+// Repeating and mip-filtered, unlike the weight sampler above: weights are a per-map field in
+// normalized coordinates that must clamp, albedo is a detail texture in world units that must tile.
+@group(0) @binding(5) var albedo_sampler: sampler;
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -105,25 +114,52 @@ fn vertex_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     return output;
 }
 
-/// Blends the layer palette by per-sample weight.
+/// World XY of a fragment, recovered from its normalized grid coordinate.
+///
+/// Derived rather than interpolated as its own attribute: `uv` is the grid coordinate divided by the
+/// cell count and the world position is that coordinate times the sample spacing, so multiplying back
+/// is exact and costs no interpolator.
+fn world_xy(uv: vec2<f32>) -> vec2<f32> {
+    let cells = max(
+        vec2<f32>(uniforms.terrain.z, uniforms.terrain.w) - vec2<f32>(1.0),
+        vec2<f32>(1.0),
+    );
+    return uv * cells * uniforms.terrain.x;
+}
+
+/// Blends the layer surfaces by per-sample weight. Albedo in `xyz`, roughness in `w`.
 ///
 /// Weights are normalized by their own total rather than assumed to sum to one, so a partially
 /// painted map does not darken toward black where coverage is incomplete.
-fn surface_albedo(uv: vec2<f32>) -> vec3<f32> {
+///
+/// Every layer is sampled whatever its weight. Skipping the zero ones is the obvious saving and is
+/// not available: `textureSample` picks its mip level from screen-space derivatives, which exist only
+/// in uniform control flow, and a branch on *this fragment's* weight is not uniform. The loop bound
+/// comes from the uniform block, so the loop itself is.
+///
+/// Albedo is addressed in world units divided by the layer's detail scale, not in `uv`. A normalized
+/// coordinate fits exactly one copy of the image across the whole map, which is blur at any zoom a
+/// player uses.
+fn surface(uv: vec2<f32>) -> vec4<f32> {
     let count = min(uniforms.layers.x, MAX_LAYERS);
+    let world = world_xy(uv);
     var accumulated = vec3<f32>(0.0);
+    var roughness = 0.0;
     var total = 0.0;
     for (var index = 0u; index < count; index = index + 1u) {
         let weight = textureSample(weight_texture, weight_sampler, uv, i32(index)).r;
-        accumulated = accumulated + uniforms.palette[index].rgb * weight;
+        let tile = world / uniforms.detail[index].x;
+        let detail = textureSample(albedo_texture, albedo_sampler, tile, i32(index)).rgb;
+        accumulated = accumulated + uniforms.palette[index].rgb * detail * weight;
+        roughness = roughness + uniforms.palette[index].w * weight;
         total = total + weight;
     }
     if (total <= 0.0001) {
         // No layer covers this sample. A neutral surface is more useful than black: it keeps the
         // terrain's shape readable in a capture rather than hiding an authoring gap as a void.
-        return vec3<f32>(0.32, 0.30, 0.27);
+        return vec4<f32>(0.32, 0.30, 0.27, 0.88);
     }
-    return accumulated / total;
+    return vec4<f32>(accumulated / total, roughness / total);
 }
 
 @fragment
@@ -132,7 +168,8 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
     if (normal.z < 0.0) {
         normal = -normal;
     }
-    let albedo = surface_albedo(input.uv);
+    // This pass has no specular term, so the surface's roughness is carried but unused here.
+    let albedo = surface(input.uv).rgb;
     let incidence = max(dot(normal, normalize(uniforms.light_direction.xyz)), 0.0);
     let lit = uniforms.light_ambient.rgb + uniforms.light_diffuse.rgb * incidence;
     // Clamped rather than tone mapped. This pass is not HDR -- albedo and the light terms are both

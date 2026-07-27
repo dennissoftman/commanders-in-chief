@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use cic_assets::Terrain;
-use cic_assets::model::{Model, ModelMaterial, ModelPrimitive, ModelVertex};
+use cic_assets::model::{Model, ModelImage, ModelMaterial, ModelPrimitive, ModelVertex};
 use cic_camera::CameraPose;
 use cic_render::{
     Capture, CaptureTarget, DeferredFrame, DeferredRenderer, DeferredTargets, GpuContext,
@@ -63,6 +63,16 @@ fn flat_terrain() -> Terrain {
 /// Two materials rather than one is the point: with a single material a broken index still reads the
 /// right colour, so the test could not tell.
 fn box_model(size: f32, height: f32) -> Model {
+    textured_box_model(size, height, Vec::new(), [None, None])
+}
+
+/// The same box, with images attached and each material pointed at one of them.
+fn textured_box_model(
+    size: f32,
+    height: f32,
+    images: Vec<ModelImage>,
+    textures: [Option<usize>; 2],
+) -> Model {
     let half = size * 0.5;
     // (normal, four corners counter-clockwise seen from outside)
     let faces: [([f32; 3], [[f32; 3]; 4]); 6] = [
@@ -136,7 +146,7 @@ fn box_model(size: f32, height: f32) -> Model {
             .map(|(corner, position)| ModelVertex {
                 position,
                 normal,
-                uv: [(corner & 1) as f32, ((corner >> 1) & 1) as f32],
+                uv: quad_uv(corner),
             })
             .collect();
         primitives.push(ModelPrimitive {
@@ -156,7 +166,7 @@ fn box_model(size: f32, height: f32) -> Model {
                 base_color: [0.62, 0.58, 0.52, 1.0],
                 metallic: 0.0,
                 roughness: 0.85,
-                base_color_texture: None,
+                base_color_texture: textures[0],
                 blended: false,
             },
             ModelMaterial {
@@ -164,12 +174,47 @@ fn box_model(size: f32, height: f32) -> Model {
                 base_color: [0.34, 0.18, 0.14, 1.0],
                 metallic: 0.0,
                 roughness: 0.7,
-                base_color_texture: None,
+                base_color_texture: textures[1],
                 blended: false,
             },
         ],
+        images,
         has_skin: false,
         has_animation: false,
+    }
+}
+
+/// Texture coordinates for one corner of a quad whose corners run anticlockwise from `[-, -]`.
+///
+/// Not `[corner & 1, corner >> 1]`, which is the obvious form and is wrong: it walks the unit square
+/// in Z order while the corners walk it in a ring, so the last two swap and every face's texture
+/// arrives sheared along a diagonal. Invisible while these fixtures had no textures on them.
+fn quad_uv(corner: usize) -> [f32; 2] {
+    const RING: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+    RING[corner % 4]
+}
+
+/// A checkerboard, as an image a model can carry.
+///
+/// High contrast on purpose: a texture that resembles its material's flat colour cannot distinguish a
+/// working sampler from a broken one, because the frame looks the same either way.
+fn checkerboard(size: u32, squares: u32, dark: [u8; 3], light: [u8; 3]) -> ModelImage {
+    let mut rgba = Vec::with_capacity((size * size * 4) as usize);
+    let step = size.div_ceil(squares.max(1));
+    for y in 0..size {
+        for x in 0..size {
+            let colour = if ((x / step) + (y / step)).is_multiple_of(2) {
+                dark
+            } else {
+                light
+            };
+            rgba.extend_from_slice(&[colour[0], colour[1], colour[2], u8::MAX]);
+        }
+    }
+    ModelImage {
+        width: size,
+        height: size,
+        rgba,
     }
 }
 
@@ -448,6 +493,7 @@ fn a_model_without_geometry_is_refused() {
         name: "nothing".to_owned(),
         primitives: Vec::new(),
         materials: Vec::new(),
+        images: Vec::new(),
         has_skin: false,
         has_animation: false,
     };
@@ -461,6 +507,156 @@ fn a_model_without_geometry_is_refused() {
     assert!(
         matches!(error, cic_render::RenderError::EmptyModel),
         "got {error:?}"
+    );
+}
+
+#[test]
+fn a_base_colour_texture_reaches_the_frame() {
+    let Some(context) = context() else { return };
+    let harness = harness(context);
+    let instances = instances(&harness.terrain);
+
+    let plain = ModelBatch::new(
+        context,
+        &box_model(40.0, 70.0),
+        &instances,
+        harness.deferred.material_layout(),
+    )
+    .expect("untextured batch");
+
+    // Only the walls are textured. The roof keeps its flat colour, which is what makes this able to
+    // fail for the right reason: a shader that ignored the material's slice and sampled the whole
+    // model would change the roof too, and the roof-area assertion below would catch it.
+    let textured_model = textured_box_model(
+        40.0,
+        70.0,
+        vec![checkerboard(64, 8, [20, 20, 24], [240, 235, 220])],
+        [Some(0), None],
+    );
+    let textured = ModelBatch::new(
+        context,
+        &textured_model,
+        &instances,
+        harness.deferred.material_layout(),
+    )
+    .expect("textured batch");
+    assert_eq!(
+        textured.base_colour().layer_count(),
+        1,
+        "one image, one array slice"
+    );
+    assert_eq!(
+        textured.base_colour().mip_level_count(),
+        7,
+        "a 64-pixel texture reduces to 1x1 in seven levels"
+    );
+
+    let frame = frame_with_low_sun(&harness.terrain);
+    let without = render(context, &harness, std::slice::from_ref(&plain), frame);
+    let with = render(context, &harness, std::slice::from_ref(&textured), frame);
+    write_capture("model-untextured.png", &without);
+    write_capture("model-textured.png", &with);
+
+    let mut changed = 0usize;
+    for (bare, patterned) in without
+        .rgba()
+        .chunks_exact(4)
+        .zip(with.rgba().chunks_exact(4))
+    {
+        if bare[0..3] != patterned[0..3] {
+            changed += 1;
+        }
+    }
+    eprintln!("pixels changed by the wall texture: {changed}");
+    assert!(
+        changed > 1_000,
+        "a checkerboard on every wall should change real area, got {changed} pixels"
+    );
+
+    // The texture must add variation, not merely shift the colour. A checkerboard across twelve
+    // boxes widens the spread of brightness in the frame; a flat replacement would not.
+    assert!(
+        with.luminance_deviation() > without.luminance_deviation(),
+        "textured {} should vary more than untextured {}",
+        with.luminance_deviation(),
+        without.luminance_deviation()
+    );
+}
+
+#[test]
+fn an_untextured_material_is_unaffected_by_another_material_s_texture() {
+    // The failure this exists for: sampling unconditionally and forgetting to discard the result for
+    // a material that has no texture. That renders the roof as the wall's checkerboard, and every
+    // "the texture appeared" assertion still passes.
+    let Some(context) = context() else { return };
+    let harness = harness(context);
+
+    // One instance, looked at from above, so the roof is most of what the frame contains.
+    let [extent_x, extent_y] = harness.terrain.world_extent();
+    let centre = [extent_x * 0.5, extent_y * 0.5];
+    let mut frame = DeferredFrame::new(
+        CameraPose {
+            eye: [centre[0], centre[1] - 60.0, 400.0],
+            focus: [centre[0], centre[1], 170.0],
+            forward: [0.0, 0.4, -0.9],
+        },
+        WIDTH,
+        HEIGHT,
+    );
+    frame.light.direction = [-0.34, 0.82, 0.46];
+    let placement = [ModelInstance::placed(
+        [centre[0], centre[1], 100.0],
+        0.0,
+        3.0,
+    )];
+
+    let untextured_roof = textured_box_model(
+        40.0,
+        70.0,
+        vec![checkerboard(64, 8, [20, 20, 24], [240, 235, 220])],
+        [Some(0), None],
+    );
+    let textured_roof = textured_box_model(
+        40.0,
+        70.0,
+        vec![checkerboard(64, 8, [20, 20, 24], [240, 235, 220])],
+        [Some(0), Some(0)],
+    );
+
+    let a = ModelBatch::new(
+        context,
+        &untextured_roof,
+        &placement,
+        harness.deferred.material_layout(),
+    )
+    .expect("batch");
+    let b = ModelBatch::new(
+        context,
+        &textured_roof,
+        &placement,
+        harness.deferred.material_layout(),
+    )
+    .expect("batch");
+
+    let plain_roof = render(context, &harness, std::slice::from_ref(&a), frame);
+    let patterned_roof = render(context, &harness, std::slice::from_ref(&b), frame);
+    write_capture("model-untextured-roof.png", &plain_roof);
+    write_capture("model-textured-roof.png", &patterned_roof);
+
+    let mut differing = 0usize;
+    for (left, right) in plain_roof
+        .rgba()
+        .chunks_exact(4)
+        .zip(patterned_roof.rgba().chunks_exact(4))
+    {
+        if left[0..3] != right[0..3] {
+            differing += 1;
+        }
+    }
+    eprintln!("pixels differing when the roof gains the same texture: {differing}");
+    assert!(
+        differing > 500,
+        "texturing the roof must change the roof, got {differing} pixels"
     );
 }
 
