@@ -1,2111 +1,215 @@
-//! Renderer boundary and deterministic headless capture support.
+//! Terrain rendering, GPU-independent bookkeeping, and the WGSL shader set.
+//!
+//! # What is here
+//!
+//! - **The deferred chain** ([`deferred`]): four depth-only shadow cascades, a G-buffer, ambient
+//!   occlusion with a bilateral blur, lighting that reconstructs world position from depth, and a
+//!   tone-mapping composite.
+//! - **Terrain** ([`terrain`]), rendered from a [`cic_assets::Terrain`] with heights and layer weights
+//!   held in *writable* GPU textures rather than a baked mesh, and per-layer albedo tiled in world
+//!   space. See that module for why the writable-texture choice is load-bearing rather than incidental.
+//! - **Models** ([`model`]), instanced, with per-instance transform and tint and one draw call per
+//!   model however many materials it has.
+//! - **Colour texture arrays** ([`texture`]), which resample to a common slice size and generate their
+//!   mip chain on the CPU in linear light. Both terrain layers and model materials index into one.
+//! - **Headless rendering and capture** ([`gpu`]). Headless comes before any window, because a
+//!   capture is the only rendering verification that runs in CI.
+//! - **Windowed presentation** ([`presentation`]): the same chain pointed at a swapchain, plus an
+//!   input-to-intent mapping that is testable without a window.
+//! - **View and projection** ([`view`]), kept out of `cic-camera` because a projection depends on
+//!   the viewport and the API's clip-space convention.
+//! - **The WGSL shader set.** Every shader is parsed and validated at test time by the same front
+//!   end the GPU backend uses. A shader is code that `cargo build` does not compile, so without this
+//!   a copy error or a syntax regression would produce a clean build and a blank frame.
+//! - **Virtual-page residency bookkeeping** ([`terrain_virtual`]), which decides which terrain pages
+//!   to stage and evict for a given view. That is arithmetic, and the subtle bugs live in it, so it
+//!   is kept separate from device calls.
+//! - **Texture resources** ([`resource`]), which deduplicate decoded images by content hash under
+//!   explicit byte budgets.
+//!
+//! # What is next
+//!
+//! Water, multisampling, a real virtual-texture cache behind the residency bookkeeping, and the
+//! committed reference captures that close the milestone. See `docs/milestones/m3-renderer.md`.
 
-mod boundary;
-mod lighting;
-mod map_overlay;
-mod map_scene;
-mod model;
-mod resource;
-mod road;
-mod scenery;
-mod terrain;
-mod terrain_viewer;
-mod terrain_virtual;
-mod ui;
-mod ui_text;
-mod viewer;
-mod water;
-mod wnd_scene;
+pub mod deferred;
+pub mod detail;
+pub mod gpu;
+pub mod model;
+pub mod presentation;
+pub mod resource;
+pub mod scene;
+pub mod shadow;
+pub mod terrain;
+pub mod terrain_virtual;
+pub mod texture;
+pub mod view;
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
-use std::sync::mpsc;
-use std::time::Duration;
 
-use cic_formats::W3dStaticMesh;
-use sha2::{Digest, Sha256};
+pub use deferred::{DeferredFrame, DeferredRenderer, DeferredTargets};
+pub use gpu::{Capture, CaptureTarget, GpuContext};
+pub use model::{ModelBatch, ModelInstance};
+pub use presentation::{Action, InputState, SurfaceRenderer, TerrainGround};
+pub use resource::{TextureId, TextureResourceManager};
+pub use scene::{TerrainFrame, capture_terrain, render_terrain_into};
+pub use shadow::{CASCADE_COUNT, Cascade, fit_cascades};
+pub use terrain::{DirectionalLight, LayerColour, LayerMaterial, TerrainRenderer};
+pub use texture::{TextureArray, TextureImage};
+pub use view::{Projection, view_projection};
 
-pub use boundary::{BoundaryStagingError, BoundaryVertex, StagedBoundaryFence};
-pub use lighting::{TerrainDirectionalLight, TerrainLighting};
-pub use map_overlay::{MapOverlayError, MapOverlayVertex, StagedMapOverlays};
-pub use map_scene::{
-    MapEndpointKind, MapPresentationFrame, MapSceneStagingError, StagedMapEndpoint,
-    StagedMapPlacement, StagedMapScene, StagedWaypoint,
-};
-pub use model::{AnimatedModel, BridgeTowerPlacement, StagedModel, bridge_tower_placements};
-pub use resource::{TextureId, TextureImage, TextureResourceManager};
-pub use road::{
-    RoadDiagnostic, RoadDiagnosticKind, RoadDrawKind, RoadStagingError, RoadTexture, RoadVertex,
-    StagedRoadDraw, StagedRoadMaterial, StagedRoads,
-};
-pub use scenery::{
-    StagedStaticScenery, StagedStaticSceneryModel, StaticSceneryDiagnostic,
-    StaticSceneryDiagnosticKind, StaticSceneryError, StaticSceneryInstance, TreeSwayPresentation,
-};
-pub use terrain::{
-    StagedTerrain, TERRAIN_HEIGHT_SCALE, TERRAIN_XY_SCALE, TerrainCell, TerrainCompatibilityPolicy,
-    TerrainError, TerrainLayer, TerrainStagingOptions, TerrainVertex,
-};
-pub use terrain_viewer::{MapScene, MapViewCamera, MapViewPasses, run_map_view};
-pub use ui::{
-    StagedUiFrame, StagedUiText, UI_PLACEHOLDER_COLOR, UiBatch, UiImageBinding,
-    UiStagingDiagnostic, UiStagingDiagnosticKind, UiStagingError, UiStagingLimits, UiTextPolicy,
-    UiTexturePage, UiVertex,
-};
-pub use ui_text::{UiFontSet, UiTextError};
-use viewer::{GpuResourceManager, MaterialPipelines, create_material_layout};
-pub use viewer::{ViewerError, run_model_viewer};
-pub use water::{
-    StagedWater, WaterAppearance, WaterCausticSequence, WaterPresentationPolicy,
-    WaterSurfaceTexture,
-};
-pub use wnd_scene::{StagedWndScene, WndQuadVertex, WndSceneError};
-
-const CAPTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-/// Colour target for the deferred MAP scene capture. Deliberately not [`CAPTURE_FORMAT`].
+/// Every WGSL shader in the set, as `(name, source)`.
 ///
-/// The deferred composite tonemaps with Reinhard and returns the result unencoded, because it is
-/// written to a window surface whose format applies the sRGB transfer function in hardware. A
-/// capture is the same pass, so its target has to encode the same way — into a plain `Unorm` target
-/// the frame lands as linear values, and a PNG that then declares itself sRGB displays roughly five
-/// times too dark in the midtones.
-///
-/// The simpler captures keep [`CAPTURE_FORMAT`]: they shade in whatever space their own shader
-/// works in rather than relying on the target's encode, and their pinned hashes describe those
-/// pipelines.
-const SCENE_CAPTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
-const BYTES_PER_PIXEL: u32 = 4;
-const MAX_CAPTURE_DIMENSION: u32 = 4_096;
-const MAX_CAPTURE_BUFFER_BYTES: u64 = 64 * 1_024 * 1_024;
+/// Compiled in rather than loaded from disk: a shader is code, and shipping it as a loose file
+/// invites a mismatch between the binary and the file next to it.
+pub const SHADERS: &[(&str, &str)] = &[
+    ("boundary_viewer", include_str!("boundary_viewer.wgsl")),
+    ("model", include_str!("model.wgsl")),
+    ("road_viewer", include_str!("road_viewer.wgsl")),
+    ("scene_shadow", include_str!("scene_shadow.wgsl")),
+    ("shader", include_str!("shader.wgsl")),
+    ("terrain", include_str!("terrain.wgsl")),
+    ("terrain_ao", include_str!("terrain_ao.wgsl")),
+    ("terrain_deferred", include_str!("terrain_deferred.wgsl")),
+    ("terrain_forward", include_str!("terrain_forward.wgsl")),
+    ("model_gbuffer", include_str!("model_gbuffer.wgsl")),
+    ("terrain_gbuffer", include_str!("terrain_gbuffer.wgsl")),
+    ("terrain_shadow", include_str!("terrain_shadow.wgsl")),
+    ("terrain_viewer", include_str!("terrain_viewer.wgsl")),
+    ("terrain_virtual", include_str!("terrain_virtual.wgsl")),
+    ("ui", include_str!("ui.wgsl")),
+    ("viewer", include_str!("viewer.wgsl")),
+];
 
-/// Immutable renderer upload data copied from one validated W3D mesh in stable file order.
-#[derive(Debug, Clone, PartialEq)]
-pub struct StagedMesh {
-    positions: Vec<[f32; 3]>,
-    normals: Vec<[f32; 3]>,
-    indices: Vec<u32>,
-}
-
-impl StagedMesh {
-    /// Copies renderer-neutral geometry without retaining parser or filesystem state.
-    #[must_use]
-    pub fn from_w3d(mesh: &W3dStaticMesh) -> Self {
-        let positions = mesh
-            .vertices()
-            .iter()
-            .map(|value| [value.x(), value.y(), value.z()])
-            .collect();
-        let normals = mesh
-            .normals()
-            .iter()
-            .map(|value| [value.x(), value.y(), value.z()])
-            .collect();
-        let indices = mesh
-            .triangles()
-            .iter()
-            .flat_map(|triangle| triangle.vertex_indices())
-            .collect();
-        Self {
-            positions,
-            normals,
-            indices,
-        }
-    }
-
-    #[must_use]
-    pub fn positions(&self) -> &[[f32; 3]] {
-        &self.positions
-    }
-
-    #[must_use]
-    pub fn normals(&self) -> &[[f32; 3]] {
-        &self.normals
-    }
-
-    #[must_use]
-    pub fn indices(&self) -> &[u32] {
-        &self.indices
-    }
-}
-
-/// Explicit column-major pose supplied by the caller for one diagnostic frame.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Pose {
-    columns: [[f32; 4]; 4],
-}
-
-impl Pose {
-    pub const IDENTITY: Self = Self {
-        columns: [
-            [1.0, 0.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0, 0.0],
-            [0.0, 0.0, 0.0, 1.0],
-        ],
-    };
-
-    /// Returns a finite clip-space translation pose.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`RenderError::NonFinitePose`] when either component is not finite.
-    pub fn translation(x: f32, y: f32) -> Result<Self, RenderError> {
-        if !x.is_finite() || !y.is_finite() {
-            return Err(RenderError::NonFinitePose);
-        }
-        let mut pose = Self::IDENTITY;
-        pose.columns[3][0] = x;
-        pose.columns[3][1] = y;
-        Ok(pose)
-    }
-
-    fn bytes(self) -> [u8; 64] {
-        let mut bytes = [0; 64];
-        for (index, value) in self.columns.into_iter().flatten().enumerate() {
-            let offset = index * 4;
-            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
-        }
-        bytes
-    }
-}
-
-/// Explicit animation and mapper inputs for one deterministic model frame.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ModelFrame {
-    animation: Option<usize>,
-    frame: u32,
-    mapper_time_seconds: f32,
-    rotation: f32,
-}
-
-impl ModelFrame {
-    pub const BIND_POSE: Self = Self {
-        animation: None,
-        frame: 0,
-        mapper_time_seconds: 0.0,
-        rotation: 0.0,
-    };
-
-    /// Creates explicit deterministic animation, mapper-time, and model-rotation inputs.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`RenderError::NonFinitePose`] for negative/non-finite mapper time or non-finite
-    /// rotation.
-    pub fn new(
-        animation: Option<usize>,
-        frame: u32,
-        mapper_time_seconds: f32,
-        rotation: f32,
-    ) -> Result<Self, RenderError> {
-        if !mapper_time_seconds.is_finite() || mapper_time_seconds < 0.0 || !rotation.is_finite() {
-            return Err(RenderError::NonFinitePose);
-        }
-        Ok(Self {
-            animation,
-            frame,
-            mapper_time_seconds,
-            rotation,
-        })
-    }
-}
-
-/// One tightly packed RGBA8 headless frame.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Capture {
-    width: u32,
-    height: u32,
-    rgba: Vec<u8>,
-}
-
-impl Capture {
-    #[must_use]
-    pub const fn width(&self) -> u32 {
-        self.width
-    }
-
-    #[must_use]
-    pub const fn height(&self) -> u32 {
-        self.height
-    }
-
-    #[must_use]
-    pub fn rgba(&self) -> &[u8] {
-        &self.rgba
-    }
-
-    /// Returns a stable lowercase SHA-256 digest of the tightly packed RGBA bytes.
-    #[must_use]
-    pub fn sha256(&self) -> String {
-        format!("{:x}", Sha256::digest(&self.rgba))
-    }
-
-    /// Encodes the capture as PNG, preserving alpha and tagging perceptual sRGB.
-    ///
-    /// The digest reported by [`Capture::sha256`] is taken over the raw RGBA bytes, before
-    /// encoding, so the container format never affects determinism.
-    ///
-    /// # Errors
-    ///
-    /// Returns the encoder's error if the image cannot be written.
-    pub fn png(&self) -> Result<Vec<u8>, png::EncodingError> {
-        let mut output = Vec::new();
-        {
-            let mut encoder = png::Encoder::new(&mut output, self.width, self.height);
-            encoder.set_color(png::ColorType::Rgba);
-            encoder.set_depth(png::BitDepth::Eight);
-            encoder.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
-            let mut writer = encoder.write_header()?;
-            writer.write_image_data(&self.rgba)?;
-        }
-        Ok(output)
-    }
-}
-
-/// Headless GPU renderer with no window, filesystem, clock, or simulation ownership.
-pub struct HeadlessRenderer {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    synthetic_pipeline: wgpu::RenderPipeline,
-    model_pipeline: wgpu::RenderPipeline,
-    wnd_pipeline: wgpu::RenderPipeline,
-    ui_pipeline: wgpu::RenderPipeline,
-    ui_viewport_layout: wgpu::BindGroupLayout,
-    ui_page_layout: wgpu::BindGroupLayout,
-    terrain_pipeline: wgpu::RenderPipeline,
-    terrain_edge_pipeline: wgpu::RenderPipeline,
-    terrain_layout: wgpu::BindGroupLayout,
-    material_layout: wgpu::BindGroupLayout,
-    material_pipelines: MaterialPipelines,
-    pose_buffer: wgpu::Buffer,
-    pose_bind_group: wgpu::BindGroup,
-    adapter: wgpu::AdapterInfo,
-}
-
-impl HeadlessRenderer {
-    /// Requests a native adapter and an empty-feature device. A software/fallback adapter is tried
-    /// when no default adapter is available.
-    ///
-    /// # Errors
-    ///
-    /// Returns a structured adapter or device error when neither a native nor fallback device can
-    /// satisfy the empty-feature request.
-    #[allow(clippy::too_many_lines)]
-    pub async fn new() -> Result<Self, RenderError> {
-        let instance = wgpu::Instance::default();
-        let mut options = wgpu::RequestAdapterOptions::default();
-        let adapter = if let Ok(adapter) = instance.request_adapter(&options).await {
-            adapter
-        } else {
-            options.force_fallback_adapter = true;
-            instance
-                .request_adapter(&options)
-                .await
-                .map_err(RenderError::RequestAdapter)?
-        };
-        let descriptor = wgpu::DeviceDescriptor {
-            label: Some("cic-render headless device"),
-            ..Default::default()
-        };
-        let (device, queue) = adapter
-            .request_device(&descriptor)
-            .await
-            .map_err(RenderError::RequestDevice)?;
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("cic-render synthetic triangle shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
-        });
-        let pose_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("cic-render pose uniform"),
-            size: 64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("cic-render pose layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: wgpu::BufferSize::new(64),
-                },
-                count: None,
-            }],
-        });
-        let pose_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("cic-render pose bind group"),
-            layout: &bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: pose_buffer.as_entire_binding(),
-            }],
-        });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("cic-render synthetic pipeline layout"),
-            bind_group_layouts: &[Some(&bind_group_layout)],
-            immediate_size: 0,
-        });
-        let synthetic_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("cic-render synthetic pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vertex_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fragment_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: CAPTURE_FORMAT,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-        let model_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("cic-render model shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("model.wgsl").into()),
-        });
-        let model_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("cic-render model pipeline"),
-            layout: None,
-            vertex: wgpu::VertexState {
-                module: &model_shader,
-                entry_point: Some("vertex_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: 28,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x3,
-                            offset: 0,
-                            shader_location: 0,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x4,
-                            offset: 12,
-                            shader_location: 1,
-                        },
-                    ],
-                })],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &model_shader,
-                entry_point: Some("fragment_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: CAPTURE_FORMAT,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-        let wnd_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("cic-render wnd pipeline"),
-            layout: None,
-            vertex: wgpu::VertexState {
-                module: &model_shader,
-                entry_point: Some("vertex_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: 28,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x3,
-                            offset: 0,
-                            shader_location: 0,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x4,
-                            offset: 12,
-                            shader_location: 1,
-                        },
-                    ],
-                })],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &model_shader,
-                entry_point: Some("fragment_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: CAPTURE_FORMAT,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-        let terrain_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("cic-render terrain shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("terrain.wgsl").into()),
-        });
-        let terrain_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("cic-render terrain texture layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
-        let terrain_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("cic-render terrain pipeline layout"),
-                bind_group_layouts: &[Some(&terrain_layout)],
-                immediate_size: 0,
-            });
-        let terrain_pipeline = create_headless_terrain_pipeline(
-            &device,
-            &terrain_shader,
-            &terrain_pipeline_layout,
-            "cic-render terrain pipeline",
-            None,
-            true,
-        );
-        let terrain_edge_pipeline = create_headless_terrain_pipeline(
-            &device,
-            &terrain_shader,
-            &terrain_pipeline_layout,
-            "cic-render terrain edge pipeline",
-            Some(wgpu::BlendState::ALPHA_BLENDING),
-            false,
-        );
-        let textured_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("cic-render textured model shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("viewer.wgsl").into()),
-        });
-        let material_layout = create_material_layout(&device);
-        let material_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("cic-render headless material pipeline layout"),
-                bind_group_layouts: &[Some(&material_layout)],
-                immediate_size: 0,
-            });
-        let material_pipelines = MaterialPipelines::new(
-            &device,
-            &textured_shader,
-            &material_pipeline_layout,
-            CAPTURE_FORMAT,
-            "headless",
-        );
-        let (ui_pipeline, ui_viewport_layout, ui_page_layout) =
-            create_ui_pipeline(&device, CAPTURE_FORMAT);
-        Ok(Self {
-            device,
-            queue,
-            synthetic_pipeline,
-            model_pipeline,
-            wnd_pipeline,
-            ui_pipeline,
-            ui_viewport_layout,
-            ui_page_layout,
-            terrain_pipeline,
-            terrain_edge_pipeline,
-            terrain_layout,
-            material_layout,
-            material_pipelines,
-            pose_buffer,
-            pose_bind_group,
-            adapter: adapter.get_info(),
-        })
-    }
-
-    #[must_use]
-    pub fn adapter_info(&self) -> &wgpu::AdapterInfo {
-        &self.adapter
-    }
-
-    /// Renders one explicitly posed synthetic frame and returns tightly packed RGBA8 pixels.
-    ///
-    /// # Errors
-    ///
-    /// Returns a structured error for empty or overflowing dimensions, GPU submission/readback
-    /// failures, or a readback callback that does not arrive within the bounded wait.
-    #[allow(clippy::too_many_lines)]
-    pub fn capture_triangle(
-        &self,
-        width: u32,
-        height: u32,
-        pose: Pose,
-    ) -> Result<Capture, RenderError> {
-        let (unpadded_row, padded_row, buffer_size) = capture_layout(width, height)?;
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("cic-render headless target"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: CAPTURE_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("cic-render readback"),
-            size: buffer_size,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        self.queue.write_buffer(&self.pose_buffer, 0, &pose.bytes());
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("cic-render headless encoder"),
-            });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("cic-render synthetic pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&self.synthetic_pipeline);
-            pass.set_bind_group(0, &self.pose_bind_group, &[]);
-            pass.draw(0..3, 0..1);
-        }
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &readback,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded_row),
-                    rows_per_image: Some(height),
-                },
-            },
-            texture.size(),
-        );
-        self.finish_capture(encoder, &readback, width, height, unpadded_row, padded_row)
-    }
-
-    /// Renders one composed W3D bind pose with deterministic geometry order, orthographic framing,
-    /// vertex-material color approximation, and a depth buffer.
-    ///
-    /// # Errors
-    ///
-    /// Returns a structured error for invalid capture dimensions, excessive GPU buffer sizes,
-    /// device submission/readback failures, or index counts outside the draw API limit.
-    #[allow(clippy::too_many_lines)]
-    pub fn capture_model(
-        &self,
-        width: u32,
-        height: u32,
-        model: &StagedModel,
-    ) -> Result<Capture, RenderError> {
-        let (unpadded_row, padded_row, buffer_size) = capture_layout(width, height)?;
-        let index_count =
-            u32::try_from(model.index_count()).map_err(|_| RenderError::GeometryTooLarge)?;
-        let (vertex_bytes, index_bytes) = model.gpu_bytes();
-        let vertex_size =
-            u64::try_from(vertex_bytes.len()).map_err(|_| RenderError::GeometryTooLarge)?;
-        let index_size =
-            u64::try_from(index_bytes.len()).map_err(|_| RenderError::GeometryTooLarge)?;
-        let vertex_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("cic-render model vertices"),
-            size: vertex_size,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let index_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("cic-render model indices"),
-            size: index_size,
-            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        self.queue.write_buffer(&vertex_buffer, 0, &vertex_bytes);
-        self.queue.write_buffer(&index_buffer, 0, &index_bytes);
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("cic-render model target"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: CAPTURE_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let depth = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("cic-render model depth"),
-            size: texture.size(),
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("cic-render model readback"),
-            size: buffer_size,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("cic-render model encoder"),
-            });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("cic-render model pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.015,
-                            g: 0.02,
-                            b: 0.03,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Discard,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&self.model_pipeline);
-            pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-            pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..index_count, 0, 0..1);
-        }
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &readback,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded_row),
-                    rows_per_image: Some(height),
-                },
-            },
-            texture.size(),
-        );
-        self.finish_capture(encoder, &readback, width, height, unpadded_row, padded_row)
-    }
-
-    /// Renders a staged WND scene's window rectangles as flat alpha-blended quads, in source
-    /// order, over an explicit background color. No depth test is used: painter's-order
-    /// (source order) determines overlap, matching a 2D UI's draw order rather than a 3D
-    /// scene's depth.
-    ///
-    /// # Errors
-    ///
-    /// Returns a structured error for an empty scene, overflowing dimensions/geometry, or
-    /// GPU submission/readback failures.
-    pub fn capture_wnd_scene(
-        &self,
-        scene: &StagedWndScene,
-        background: [f64; 4],
-    ) -> Result<Capture, RenderError> {
-        if scene.vertices().is_empty() {
-            return Err(RenderError::EmptyWndScene);
-        }
-        let [width, height] = scene.canvas();
-        let (unpadded_row, padded_row, buffer_size) = capture_layout(width, height)?;
-        let index_count =
-            u32::try_from(scene.indices().len()).map_err(|_| RenderError::GeometryTooLarge)?;
-        let vertex_bytes = scene.vertex_bytes();
-        let index_bytes = scene.index_bytes();
-        let vertex_size =
-            u64::try_from(vertex_bytes.len()).map_err(|_| RenderError::GeometryTooLarge)?;
-        let index_size =
-            u64::try_from(index_bytes.len()).map_err(|_| RenderError::GeometryTooLarge)?;
-        let vertex_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("cic-render wnd vertices"),
-            size: vertex_size,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let index_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("cic-render wnd indices"),
-            size: index_size,
-            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        self.queue.write_buffer(&vertex_buffer, 0, &vertex_bytes);
-        self.queue.write_buffer(&index_buffer, 0, &index_bytes);
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("cic-render wnd target"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: CAPTURE_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("cic-render wnd readback"),
-            size: buffer_size,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("cic-render wnd encoder"),
-            });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("cic-render wnd pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: background[0],
-                            g: background[1],
-                            b: background[2],
-                            a: background[3],
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&self.wnd_pipeline);
-            pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-            pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..index_count, 0, 0..1);
-        }
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &readback,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded_row),
-                    rows_per_image: Some(height),
-                },
-            },
-            texture.size(),
-        );
-        self.finish_capture(encoder, &readback, width, height, unpadded_row, padded_row)
-    }
-
-    /// Builds a font set for retained-UI text from explicit font file bytes.
-    ///
-    /// Callers never touch `wgpu` to do this: the renderer owns the device, so a font set is
-    /// requested from it. Nothing enumerates host fonts.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when no supplied byte slice parses as a font.
-    pub fn create_ui_font_set(&self, fonts: &[Vec<u8>]) -> Result<UiFontSet, RenderError> {
-        UiFontSet::new(&self.device, &self.queue, CAPTURE_FORMAT, fonts)
-            .map_err(|error| RenderError::UiText(error.to_string()))
-    }
-
-    /// Renders one staged retained-UI frame over an explicit background colour.
-    ///
-    /// Batches submit in the order `cic-ui` produced them, each with its scissor rectangle and page
-    /// applied, so the capture reflects the layout's own draw order. Shaped text draws after the
-    /// frame's quads, which is the order the retained model implies: a control's text sits over its
-    /// own background. No clock, host font, or display is consulted, so the same inputs produce the
-    /// same bytes.
-    ///
-    /// # Errors
-    ///
-    /// Returns a structured error for an empty frame, a batch naming an unuploaded page, oversized
-    /// geometry or dimensions, text preparation failure, or GPU submission/readback failure.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one straight-line pass: upload pages, upload geometry, submit batches, read back"
-    )]
-    pub fn capture_ui_frame(
-        &self,
-        staged: &StagedUiFrame,
-        pages: &[UiTexturePage],
-        fonts: Option<&mut UiFontSet>,
-        background: [f64; 4],
-    ) -> Result<Capture, RenderError> {
-        if staged.indices().is_empty() && staged.text().is_empty() {
-            return Err(RenderError::EmptyUiFrame);
-        }
-        let [width, height] = staged.canvas();
-        let (unpadded_row, padded_row, buffer_size) = capture_layout(width, height)?;
-
-        // A colour-only batch still binds a page, so one opaque white pixel stands in and keeps the
-        // pipeline layout uniform across batches.
-        let white = UiTexturePage::new(1, 1, vec![255, 255, 255, 255])
-            .map_err(|_| RenderError::InvalidTexture)?;
-        let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("cic-render ui sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
-            ..Default::default()
-        });
-        let mut bind_groups = Vec::with_capacity(pages.len() + 1);
-        for page in std::iter::once(&white).chain(pages) {
-            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("cic-render ui page"),
-                size: wgpu::Extent3d {
-                    width: page.width(),
-                    height: page.height(),
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                // Pages upload in the capture target's own space, so a sampled byte reaches the
-                // attachment unchanged. Declaring the page sRGB while the target is linear would
-                // linearize on read without re-encoding on write, darkening every image.
-                format: CAPTURE_FORMAT,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                view_formats: &[],
-            });
-            self.queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                page.rgba(),
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(
-                        page.width()
-                            .checked_mul(4)
-                            .ok_or(RenderError::TextureTooLarge)?,
-                    ),
-                    rows_per_image: Some(page.height()),
-                },
-                texture.size(),
-            );
-            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-            bind_groups.push(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("cic-render ui page bind group"),
-                layout: &self.ui_page_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&sampler),
-                    },
-                ],
-            }));
-        }
-
-        #[allow(clippy::cast_precision_loss)]
-        let viewport_uniform = [width as f32, height as f32, 0.0, 0.0];
-        let mut uniform_bytes = Vec::with_capacity(16);
-        for value in viewport_uniform {
-            uniform_bytes.extend_from_slice(&value.to_le_bytes());
-        }
-        let uniform = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("cic-render ui viewport uniform"),
-            size: 16,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        self.queue.write_buffer(&uniform, 0, &uniform_bytes);
-        let viewport_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("cic-render ui viewport bind group"),
-            layout: &self.ui_viewport_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform.as_entire_binding(),
-            }],
-        });
-
-        let vertex_bytes = staged.vertex_bytes();
-        let index_bytes = staged.index_bytes();
-        let geometry = if vertex_bytes.is_empty() {
-            None
-        } else {
-            let vertex_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("cic-render ui vertices"),
-                size: u64::try_from(vertex_bytes.len())
-                    .map_err(|_| RenderError::GeometryTooLarge)?,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            let index_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("cic-render ui indices"),
-                size: u64::try_from(index_bytes.len())
-                    .map_err(|_| RenderError::GeometryTooLarge)?,
-                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            self.queue.write_buffer(&vertex_buffer, 0, &vertex_bytes);
-            self.queue.write_buffer(&index_buffer, 0, &index_bytes);
-            Some((vertex_buffer, index_buffer))
-        };
-
-        let mut fonts = match fonts {
-            Some(fonts) if !staged.text().is_empty() => {
-                fonts
-                    .prepare(&self.device, &self.queue, staged.canvas(), staged.text())
-                    .map_err(|error| RenderError::UiText(error.to_string()))?;
-                Some(fonts)
-            }
-            _ => None,
-        };
-
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("cic-render ui target"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: CAPTURE_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("cic-render ui readback"),
-            size: buffer_size,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("cic-render ui encoder"),
-            });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("cic-render ui pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: background[0],
-                            g: background[1],
-                            b: background[2],
-                            a: background[3],
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            if let Some((vertex_buffer, index_buffer)) = geometry.as_ref() {
-                pass.set_pipeline(&self.ui_pipeline);
-                pass.set_bind_group(0, &viewport_bind_group, &[]);
-                pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-                pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                for batch in staged.batches() {
-                    let bound = match batch.page() {
-                        Some(page) => page
-                            .checked_add(1)
-                            .filter(|index| *index < bind_groups.len())
-                            .ok_or(RenderError::MissingUiPage { page })?,
-                        None => 0,
-                    };
-                    pass.set_bind_group(1, &bind_groups[bound], &[]);
-                    match batch.scissor() {
-                        Some(rect) => {
-                            let Some(scissor) = clamp_scissor(rect, width, height) else {
-                                continue;
-                            };
-                            pass.set_scissor_rect(scissor.0, scissor.1, scissor.2, scissor.3);
-                        }
-                        None => pass.set_scissor_rect(0, 0, width, height),
-                    }
-                    let first = batch.first_index();
-                    pass.draw_indexed(first..first + batch.index_count(), 0, 0..1);
-                }
-                pass.set_scissor_rect(0, 0, width, height);
-            }
-            if let Some(fonts) = fonts.as_ref() {
-                fonts
-                    .draw(&mut pass)
-                    .map_err(|error| RenderError::UiText(error.to_string()))?;
-            }
-        }
-        if let Some(fonts) = fonts.as_mut() {
-            fonts.trim();
-        }
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &readback,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded_row),
-                    rows_per_image: Some(height),
-                },
-            },
-            texture.size(),
-        );
-        self.finish_capture(encoder, &readback, width, height, unpadded_row, padded_row)
-    }
-
-    /// Renders one textured composed W3D at explicit animation-frame and mapper-time inputs.
-    ///
-    /// The selected clip is framed once from frame zero, matching the interactive viewer. Draws
-    /// are submitted in stable mesh/pass/stage/triangle order and do not read a clock.
-    ///
-    /// # Errors
-    ///
-    /// Returns a structured error for invalid explicit inputs, dimensions, animation/material
-    /// references, excessive GPU resources, or submission/readback failures.
-    #[allow(clippy::too_many_lines)]
-    pub fn capture_animated_model(
-        &self,
-        width: u32,
-        height: u32,
-        model: &AnimatedModel,
-        frame: ModelFrame,
-    ) -> Result<Capture, RenderError> {
-        let (unpadded_row, padded_row, buffer_size) = capture_layout(width, height)?;
-        #[allow(clippy::cast_precision_loss)]
-        let aspect = width as f32 / height as f32;
-        let framing = model.framing(frame.animation)?;
-        let vertex_bytes = model.frame_vertex_bytes(
-            frame.animation,
-            frame.frame,
-            frame.mapper_time_seconds,
-            frame.rotation,
-            aspect,
-            framing,
-        )?;
-        let index_bytes = model.index_bytes();
-        let vertex_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("cic-render animated model vertices"),
-            size: u64::try_from(vertex_bytes.len()).map_err(|_| RenderError::GeometryTooLarge)?,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let index_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("cic-render animated model indices"),
-            size: u64::try_from(index_bytes.len()).map_err(|_| RenderError::GeometryTooLarge)?,
-            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        self.queue.write_buffer(&vertex_buffer, 0, &vertex_bytes);
-        self.queue.write_buffer(&index_buffer, 0, &index_bytes);
-        let resources =
-            GpuResourceManager::new(&self.device, &self.queue, model, &self.material_layout)?;
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("cic-render animated model target"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: CAPTURE_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let depth = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("cic-render animated model depth"),
-            size: texture.size(),
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("cic-render animated model readback"),
-            size: buffer_size,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("cic-render animated model encoder"),
-            });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("cic-render animated model pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.015,
-                            g: 0.02,
-                            b: 0.03,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Discard,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-            pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            for draw in model.draws() {
-                let material = resources
-                    .materials
-                    .get(draw.material)
-                    .ok_or(RenderError::InvalidMaterial)?;
-                let end = draw
-                    .first_index
-                    .checked_add(draw.index_count)
-                    .ok_or(RenderError::GeometryTooLarge)?;
-                pass.set_pipeline(self.material_pipelines.get(
-                    material.blend,
-                    material.depth_write,
-                    material.two_sided,
-                ));
-                pass.set_bind_group(0, &material.bind_group, &[]);
-                pass.draw_indexed(draw.first_index..end, 0, 0..1);
-            }
-        }
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &readback,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded_row),
-                    rows_per_image: Some(height),
-                },
-            },
-            texture.size(),
-        );
-        self.finish_capture(encoder, &readback, width, height, unpadded_row, padded_row)
-    }
-
-    /// Renders source-scaled terrain geometry with its deterministically composited texture.
-    ///
-    /// # Errors
-    ///
-    /// Returns a structured error for invalid capture dimensions, excessive GPU resources,
-    /// submission/readback failures, or index counts outside the draw API limit.
-    #[allow(clippy::too_many_lines)]
-    pub fn capture_terrain(
-        &self,
-        width: u32,
-        height: u32,
-        terrain: &StagedTerrain,
-    ) -> Result<Capture, RenderError> {
-        let (unpadded_row, padded_row, buffer_size) = capture_layout(width, height)?;
-        #[allow(clippy::cast_precision_loss)]
-        let aspect = width as f32 / height as f32;
-        let vertex_bytes = terrain.projected_vertex_bytes(aspect);
-        let index_bytes = terrain.index_bytes();
-        let index_count =
-            u32::try_from(terrain.indices().len()).map_err(|_| RenderError::GeometryTooLarge)?;
-        let edge_index_count = u32::try_from(terrain.edge_indices().len())
-            .map_err(|_| RenderError::GeometryTooLarge)?;
-        let vertex_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("cic-render terrain vertices"),
-            size: u64::try_from(vertex_bytes.len()).map_err(|_| RenderError::GeometryTooLarge)?,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let index_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("cic-render terrain indices"),
-            size: u64::try_from(index_bytes.len()).map_err(|_| RenderError::GeometryTooLarge)?,
-            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        self.queue.write_buffer(&vertex_buffer, 0, &vertex_bytes);
-        self.queue.write_buffer(&index_buffer, 0, &index_bytes);
-        let edge_index_buffer = if edge_index_count == 0 {
-            None
-        } else {
-            let bytes = terrain.edge_index_bytes();
-            let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("cic-render terrain edge indices"),
-                size: u64::try_from(bytes.len()).map_err(|_| RenderError::GeometryTooLarge)?,
-                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            self.queue.write_buffer(&buffer, 0, &bytes);
-            Some(buffer)
-        };
-
-        let terrain_texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("cic-render baked terrain texture"),
-            size: wgpu::Extent3d {
-                width: terrain.texture_width(),
-                height: terrain.texture_height(),
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &terrain_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            terrain.texture_rgba(),
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(
-                    terrain
-                        .texture_width()
-                        .checked_mul(4)
-                        .ok_or(RenderError::TextureTooLarge)?,
-                ),
-                rows_per_image: Some(terrain.texture_height()),
-            },
-            terrain_texture.size(),
-        );
-        let terrain_view = terrain_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let terrain_sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("cic-render terrain sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
-            ..Default::default()
-        });
-        let terrain_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("cic-render terrain bind group"),
-            layout: &self.terrain_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&terrain_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&terrain_sampler),
-                },
-            ],
-        });
-        let edge_texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("cic-render baked terrain edge texture"),
-            size: terrain_texture.size(),
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &edge_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            terrain.edge_texture_rgba(),
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(
-                    terrain
-                        .texture_width()
-                        .checked_mul(4)
-                        .ok_or(RenderError::TextureTooLarge)?,
-                ),
-                rows_per_image: Some(terrain.texture_height()),
-            },
-            edge_texture.size(),
-        );
-        let edge_view = edge_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let edge_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("cic-render terrain edge bind group"),
-            layout: &self.terrain_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&edge_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&terrain_sampler),
-                },
-            ],
-        });
-
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("cic-render terrain target"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: CAPTURE_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let depth = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("cic-render terrain depth"),
-            size: texture.size(),
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("cic-render terrain readback"),
-            size: buffer_size,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("cic-render terrain encoder"),
-            });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("cic-render terrain pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.025,
-                            g: 0.04,
-                            b: 0.055,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Discard,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&self.terrain_pipeline);
-            pass.set_bind_group(0, &terrain_bind_group, &[]);
-            pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-            pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..index_count, 0, 0..1);
-            if let Some(edge_index_buffer) = &edge_index_buffer {
-                pass.set_pipeline(&self.terrain_edge_pipeline);
-                pass.set_bind_group(0, &edge_bind_group, &[]);
-                pass.set_index_buffer(edge_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..edge_index_count, 0, 0..1);
-            }
-        }
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &readback,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded_row),
-                    rows_per_image: Some(height),
-                },
-            },
-            texture.size(),
-        );
-        self.finish_capture(encoder, &readback, width, height, unpadded_row, padded_row)
-    }
-
-    /// Produces a deterministic headless scene-overview capture at explicit presentation time.
-    ///
-    /// The established terrain capture remains the base image. Source-ordered road and water
-    /// triangles plus static-instance markers are then projected with the same fixed isometric
-    /// transform. Tree markers sample their explicit sway input, so captures never consult a
-    /// renderer clock or simulation RNG.
-    ///
-    /// # Errors
-    ///
-    /// Returns a structured capture or geometry error from the bounded terrain render.
-    #[allow(clippy::too_many_arguments)]
-    pub fn capture_map_scene_overview(
-        &self,
-        width: u32,
-        height: u32,
-        terrain: &StagedTerrain,
-        roads: &StagedRoads,
-        overlays: &StagedMapOverlays,
-        scenery: &StagedStaticScenery,
-        water: &StagedWater,
-        frame: MapPresentationFrame,
-    ) -> Result<Capture, RenderError> {
-        let mut capture = self.capture_terrain(width, height, terrain)?;
-        let projection = SceneOverviewProjection::new(terrain, width, height);
-        for triangle in roads.indices().chunks_exact(3) {
-            let Some(points) = indexed_triangle(triangle, |index| {
-                roads.vertices().get(index).map(|vertex| vertex.position())
-            }) else {
-                return Err(RenderError::InvalidIndex);
-            };
-            rasterize_overview_triangle(
-                &mut capture,
-                points.map(|point| projection.project(point)),
-                [126, 116, 102, 176],
-            );
-        }
-        for triangle in water.indices().chunks_exact(3) {
-            let Some(points) =
-                indexed_triangle(triangle, |index| water.vertices().get(index).copied())
-            else {
-                return Err(RenderError::InvalidIndex);
-            };
-            rasterize_overview_triangle(
-                &mut capture,
-                points.map(|point| projection.project(point)),
-                [30, 112, 158, 154],
-            );
-        }
-        for triangle in overlays.indices().chunks_exact(3) {
-            let Some(points) = indexed_triangle(triangle, |index| {
-                overlays
-                    .vertices()
-                    .get(index)
-                    .map(|vertex| vertex.position())
-            }) else {
-                return Err(RenderError::InvalidIndex);
-            };
-            let color = usize::try_from(triangle[0])
-                .ok()
-                .and_then(|index| overlays.vertices().get(index))
-                .map_or([255, 0, 255, 255], |vertex| {
-                    overview_overlay_color(vertex.color())
-                });
-            rasterize_overview_triangle(
-                &mut capture,
-                points.map(|point| projection.project(point)),
-                color,
-            );
-        }
-        for model in scenery.models() {
-            let color = overview_model_color(model.name_bytes());
-            for instance in model.instances() {
-                let base = instance.position();
-                let mut tip = base;
-                let marker_height = 60.0 * instance.scale();
-                tip[2] += marker_height;
-                if let Some(sway) = instance.tree_sway() {
-                    let offset = sway.offset_at(frame.seconds(), marker_height);
-                    // The overview uses symbolic model markers rather than model geometry; amplify
-                    // the small legacy bend so distinct explicit-time samples remain inspectable
-                    // at bounded thumbnail resolutions. The interactive viewer uses exact scale.
-                    tip[0] += offset[0] * 8.0;
-                    tip[1] += offset[1] * 8.0;
-                    tip[2] += offset[2];
-                }
-                draw_overview_line(
-                    &mut capture,
-                    projection.project(base),
-                    projection.project(tip),
-                    [color[0], color[1], color[2], 230],
-                );
-            }
-        }
-        Ok(capture)
-    }
-
-    /// Renders one frame of a staged MAP scene through the same GPU path `run_map_view` presents:
-    /// the shadow cascade passes, the multisampled G-buffer, ambient occlusion, deferred lighting,
-    /// the composite, and the forward diagnostics and water passes over it.
-    ///
-    /// Every input is explicit — target size, camera placement, and presentation time — and nothing
-    /// in the path consults a clock or an RNG, so identical inputs produce an identical image on a
-    /// given adapter.
-    ///
-    /// # Errors
-    ///
-    /// Returns a structured capture-dimension, adapter-resource, submission, or readback failure.
-    pub fn capture_map_view(
-        &self,
-        size: [u32; 2],
-        scene: &MapScene,
-        camera: MapViewCamera,
-        frame: MapPresentationFrame,
-        passes: MapViewPasses,
-    ) -> Result<Capture, ViewerError> {
-        terrain_viewer::capture_map_view(
-            &self.device,
-            &self.queue,
-            size,
-            scene,
-            camera,
-            frame,
-            passes,
-        )
-    }
-
-    fn finish_capture(
-        &self,
-        encoder: wgpu::CommandEncoder,
-        readback: &wgpu::Buffer,
-        width: u32,
-        height: u32,
-        unpadded_row: u32,
-        padded_row: u32,
-    ) -> Result<Capture, RenderError> {
-        read_back_capture(
-            &self.device,
-            &self.queue,
-            encoder,
-            readback,
-            width,
-            height,
-            unpadded_row,
-            padded_row,
-        )
-    }
-}
-
-/// Submits a recorded capture encoder, waits for it, and unpads the readback into a `Capture`.
-#[allow(clippy::too_many_arguments)]
-fn read_back_capture(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    encoder: wgpu::CommandEncoder,
-    readback: &wgpu::Buffer,
-    width: u32,
-    height: u32,
-    unpadded_row: u32,
-    padded_row: u32,
-) -> Result<Capture, RenderError> {
-    let submission = queue.submit([encoder.finish()]);
-    let slice = readback.slice(..);
-    let (sender, receiver) = mpsc::channel();
-    slice.map_async(wgpu::MapMode::Read, move |result| {
-        let _ = sender.send(result);
-    });
-    device
-        .poll(wgpu::PollType::Wait {
-            submission_index: Some(submission),
-            timeout: Some(Duration::from_secs(10)),
-        })
-        .map_err(RenderError::Poll)?;
-    receiver
-        .recv_timeout(Duration::from_secs(1))
-        .map_err(|_| RenderError::MapCallbackTimeout)?
-        .map_err(RenderError::MapBuffer)?;
-    let mapped = slice.get_mapped_range().map_err(RenderError::MapRange)?;
-    let output_len = usize::try_from(u64::from(unpadded_row) * u64::from(height))
-        .map_err(|_| RenderError::CaptureTooLarge)?;
-    let mut rgba = Vec::with_capacity(output_len);
-    let padded_row = usize::try_from(padded_row).map_err(|_| RenderError::CaptureTooLarge)?;
-    let unpadded_row = usize::try_from(unpadded_row).map_err(|_| RenderError::CaptureTooLarge)?;
-    for row in mapped.chunks_exact(padded_row) {
-        rgba.extend_from_slice(&row[..unpadded_row]);
-    }
-    drop(mapped);
-    readback.unmap();
-    Ok(Capture {
-        width,
-        height,
-        rgba,
-    })
-}
-
-#[derive(Debug, Clone, Copy)]
-struct SceneOverviewProjection {
-    center: [f32; 2],
-    minimum_depth: f32,
-    scale: f32,
-    depth_scale: f32,
-    aspect: f32,
-    width: u32,
-    height: u32,
-}
-
-impl SceneOverviewProjection {
-    #[allow(clippy::cast_precision_loss)]
-    fn new(terrain: &StagedTerrain, width: u32, height: u32) -> Self {
-        let aspect = width as f32 / height as f32;
-        let mut minimum = [f32::INFINITY; 3];
-        let mut maximum = [f32::NEG_INFINITY; 3];
-        for vertex in terrain.vertices() {
-            let projected = isometric_project(vertex.position());
-            for axis in 0..3 {
-                minimum[axis] = minimum[axis].min(projected[axis]);
-                maximum[axis] = maximum[axis].max(projected[axis]);
-            }
-        }
-        let range_x = (maximum[0] - minimum[0]).max(f32::EPSILON);
-        let range_y = (maximum[1] - minimum[1]).max(f32::EPSILON);
-        Self {
-            center: [
-                (minimum[0] + maximum[0]) * 0.5,
-                (minimum[1] + maximum[1]) * 0.5,
-            ],
-            minimum_depth: minimum[2],
-            scale: 1.8 / range_y.max(range_x / aspect),
-            depth_scale: 0.9 / (maximum[2] - minimum[2]).max(f32::EPSILON),
-            aspect,
-            width,
-            height,
-        }
-    }
-
-    #[allow(clippy::cast_precision_loss)]
-    fn project(self, world: [f32; 3]) -> [f32; 3] {
-        let projected = isometric_project(world);
-        let clip_x = (projected[0] - self.center[0]) * self.scale / self.aspect;
-        let clip_y = (projected[1] - self.center[1]) * self.scale;
-        [
-            (clip_x * 0.5 + 0.5) * self.width.saturating_sub(1) as f32,
-            (0.5 - clip_y * 0.5) * self.height.saturating_sub(1) as f32,
-            0.05 + (projected[2] - self.minimum_depth) * self.depth_scale,
-        ]
-    }
-}
-
-fn isometric_project([x, y, z]: [f32; 3]) -> [f32; 3] {
-    [
-        (x - y) * std::f32::consts::FRAC_1_SQRT_2,
-        z * 0.816_496_6 - (x + y) * 0.408_248_3,
-        (x + y - z) * 0.577_350_26,
-    ]
-}
-
-fn indexed_triangle(
-    indices: &[u32],
-    mut lookup: impl FnMut(usize) -> Option<[f32; 3]>,
-) -> Option<[[f32; 3]; 3]> {
-    let [first, second, third] = indices else {
-        return None;
-    };
-    Some([
-        lookup(usize::try_from(*first).ok()?)?,
-        lookup(usize::try_from(*second).ok()?)?,
-        lookup(usize::try_from(*third).ok()?)?,
-    ])
-}
-
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_precision_loss,
-    clippy::cast_sign_loss
-)]
-fn rasterize_overview_triangle(capture: &mut Capture, points: [[f32; 3]; 3], color: [u8; 4]) {
-    let minimum_x = points
+/// Returns one shader's source by name.
+#[must_use]
+pub fn shader(name: &str) -> Option<&'static str> {
+    SHADERS
         .iter()
-        .map(|point| point[0])
-        .fold(f32::INFINITY, f32::min)
-        .floor()
-        .max(0.0) as u32;
-    let maximum_x = points
-        .iter()
-        .map(|point| point[0])
-        .fold(f32::NEG_INFINITY, f32::max)
-        .ceil()
-        .min(capture.width.saturating_sub(1) as f32) as u32;
-    let minimum_y = points
-        .iter()
-        .map(|point| point[1])
-        .fold(f32::INFINITY, f32::min)
-        .floor()
-        .max(0.0) as u32;
-    let maximum_y = points
-        .iter()
-        .map(|point| point[1])
-        .fold(f32::NEG_INFINITY, f32::max)
-        .ceil()
-        .min(capture.height.saturating_sub(1) as f32) as u32;
-    let area = edge(points[0], points[1], points[2]);
-    if !area.is_finite() || area.abs() <= f32::EPSILON {
-        return;
-    }
-    for y in minimum_y..=maximum_y {
-        for x in minimum_x..=maximum_x {
-            let point = [x as f32 + 0.5, y as f32 + 0.5, 0.0];
-            let first = edge(points[1], points[2], point) / area;
-            let second = edge(points[2], points[0], point) / area;
-            let third = 1.0 - first - second;
-            if first >= 0.0 && second >= 0.0 && third >= 0.0 {
-                blend_overview_pixel(capture, x, y, color);
-            }
-        }
-    }
+        .find_map(|(candidate, source)| (*candidate == name).then_some(*source))
 }
 
-fn edge(first: [f32; 3], second: [f32; 3], point: [f32; 3]) -> f32 {
-    (point[0] - first[0]) * (second[1] - first[1]) - (point[1] - first[1]) * (second[0] - first[0])
-}
-
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_precision_loss,
-    clippy::cast_sign_loss
-)]
-fn draw_overview_line(capture: &mut Capture, first: [f32; 3], second: [f32; 3], color: [u8; 4]) {
-    let steps = (second[0] - first[0])
-        .abs()
-        .max((second[1] - first[1]).abs())
-        .ceil()
-        .clamp(1.0, capture.width.max(capture.height) as f32) as u32;
-    for step in 0..=steps {
-        let factor = step as f32 / steps as f32;
-        let x = first[0] + (second[0] - first[0]) * factor;
-        let y = first[1] + (second[1] - first[1]) * factor;
-        if x >= 0.0 && y >= 0.0 && x < capture.width as f32 && y < capture.height as f32 {
-            blend_overview_pixel(capture, x.round() as u32, y.round() as u32, color);
-        }
-    }
-}
-
-fn blend_overview_pixel(capture: &mut Capture, x: u32, y: u32, color: [u8; 4]) {
-    let Some(pixel_index) = y
-        .checked_mul(capture.width)
-        .and_then(|row| row.checked_add(x))
-        .and_then(|pixel| pixel.checked_mul(4))
-        .and_then(|index| usize::try_from(index).ok())
-    else {
-        return;
-    };
-    let Some(pixel_end) = pixel_index.checked_add(4) else {
-        return;
-    };
-    let Some(pixel) = capture.rgba.get_mut(pixel_index..pixel_end) else {
-        return;
-    };
-    let alpha = u32::from(color[3]);
-    for channel in 0..3 {
-        let blended = u32::from(color[channel]) * alpha
-            + u32::from(pixel[channel]) * (u32::from(u8::MAX) - alpha);
-        pixel[channel] = u8::try_from((blended + 127) / 255).expect("blended channel fits u8");
-    }
-    pixel[3] = u8::MAX;
-}
-
-fn overview_model_color(name: &[u8]) -> [u8; 3] {
-    let hash = name.iter().fold(0x811c_9dc5_u32, |hash, byte| {
-        (hash ^ u32::from(*byte)).wrapping_mul(0x0100_0193)
-    });
-    [
-        80 + u8::try_from(hash & 0x7f).expect("masked red fits u8"),
-        80 + u8::try_from((hash >> 8) & 0x7f).expect("masked green fits u8"),
-        80 + u8::try_from((hash >> 16) & 0x7f).expect("masked blue fits u8"),
-    ]
-}
-
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn overview_overlay_color(color: [f32; 4]) -> [u8; 4] {
-    color.map(|channel| (channel.clamp(0.0, 1.0) * f32::from(u8::MAX)).round() as u8)
-}
-
-fn create_headless_terrain_pipeline(
-    device: &wgpu::Device,
-    shader: &wgpu::ShaderModule,
-    layout: &wgpu::PipelineLayout,
-    label: &str,
-    blend: Option<wgpu::BlendState>,
-    depth_write: bool,
-) -> wgpu::RenderPipeline {
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some(label),
-        layout: Some(layout),
-        vertex: wgpu::VertexState {
-            module: shader,
-            entry_point: Some("vertex_main"),
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-            buffers: &[Some(wgpu::VertexBufferLayout {
-                array_stride: 20,
-                step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &[
-                    wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x3,
-                        offset: 0,
-                        shader_location: 0,
-                    },
-                    wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x2,
-                        offset: 12,
-                        shader_location: 1,
-                    },
-                ],
-            })],
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: shader,
-            entry_point: Some("fragment_main"),
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: CAPTURE_FORMAT,
-                blend,
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-        }),
-        primitive: wgpu::PrimitiveState {
-            front_face: wgpu::FrontFace::Ccw,
-            cull_mode: Some(wgpu::Face::Back),
-            ..Default::default()
-        },
-        depth_stencil: Some(wgpu::DepthStencilState {
-            format: wgpu::TextureFormat::Depth32Float,
-            depth_write_enabled: Some(depth_write),
-            depth_compare: Some(wgpu::CompareFunction::LessEqual),
-            stencil: wgpu::StencilState::default(),
-            bias: wgpu::DepthBiasState::default(),
-        }),
-        multisample: wgpu::MultisampleState::default(),
-        multiview_mask: None,
-        cache: None,
-    })
-}
-
-fn capture_layout(width: u32, height: u32) -> Result<(u32, u32, u64), RenderError> {
-    if width == 0 || height == 0 {
-        return Err(RenderError::EmptyCapture);
-    }
-    if width > MAX_CAPTURE_DIMENSION || height > MAX_CAPTURE_DIMENSION {
-        return Err(RenderError::CaptureTooLarge);
-    }
-    let unpadded_row = width
-        .checked_mul(BYTES_PER_PIXEL)
-        .ok_or(RenderError::CaptureTooLarge)?;
-    let padded_row = unpadded_row
-        .checked_add(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT - 1)
-        .map(|value| value / wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
-        .and_then(|value| value.checked_mul(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT))
-        .ok_or(RenderError::CaptureTooLarge)?;
-    let buffer_size = u64::from(padded_row)
-        .checked_mul(u64::from(height))
-        .ok_or(RenderError::CaptureTooLarge)?;
-    if buffer_size > MAX_CAPTURE_BUFFER_BYTES {
-        return Err(RenderError::CaptureTooLarge);
-    }
-    Ok((unpadded_row, padded_row, buffer_size))
-}
-
-/// A bounded renderer initialization, pose, submission, or readback failure.
+/// A failure in a renderer operation.
 #[derive(Debug)]
 pub enum RenderError {
-    RequestAdapter(wgpu::RequestAdapterError),
-    RequestDevice(wgpu::RequestDeviceError),
-    Poll(wgpu::PollError),
-    MapBuffer(wgpu::BufferAsyncError),
-    MapRange(wgpu::MapRangeError),
-    MapCallbackTimeout,
-    NonFinitePose,
-    EmptyCapture,
-    CaptureTooLarge,
-    EmptyModel,
-    GeometryTooLarge,
-    InvalidIndex,
-    InvalidHierarchy,
-    GeometryOutsideLimits,
-    InvalidAnimation,
-    InvalidMaterial,
+    /// A texture's dimensions, byte length, or declared size were inconsistent or out of range.
     InvalidTexture,
+    /// A texture, or the texture set as a whole, exceeded its explicit byte budget.
     TextureTooLarge,
-    EmptyWndScene,
-    InvalidCameraPlacement,
-    /// A staged retained-UI frame produced neither geometry nor text.
-    EmptyUiFrame,
-    /// A staged batch referenced a texture page the caller did not upload.
-    MissingUiPage {
-        /// The requested page index.
-        page: usize,
+    /// No adapter, native or fallback, could be acquired.
+    RequestAdapter(wgpu::RequestAdapterError),
+    /// An adapter was found but no device could be created from it.
+    RequestDevice(wgpu::RequestDeviceError),
+    /// Waiting for submitted work to complete failed.
+    Poll(wgpu::PollError),
+    /// Mapping the readback buffer failed.
+    MapBuffer(wgpu::BufferAsyncError),
+    /// Taking a mapped range of the readback buffer failed.
+    MapRange(wgpu::MapRangeError),
+    /// The map callback did not fire within its timeout.
+    MapCallbackTimeout,
+    /// A capture was requested with a zero width or height.
+    EmptyCapture,
+    /// The camera's view-projection could not be inverted, so no world position could be
+    /// reconstructed from depth.
+    SingularCamera,
+    /// A window could not provide a presentable surface.
+    CreateSurface(String),
+    /// Acquiring the next surface frame failed for a reason a redraw will not fix.
+    SurfaceLost(String),
+    /// The surface reported no format this renderer can present to.
+    NoSurfaceFormat,
+    /// A model had no geometry to upload.
+    EmptyModel,
+    /// A model vertex, index, or instance count exceeded the addressable range.
+    ModelTooLarge,
+    /// A capture's dimensions or buffer size exceeded the renderer's explicit bounds.
+    CaptureTooLarge,
+    /// Encoding a capture as a PNG failed.
+    EncodePng(String),
+    /// A terrain declared more layers than the forward pass blends.
+    TooManyLayers {
+        /// Layers the terrain declared.
+        actual: usize,
+        /// Layers the pass supports.
+        maximum: usize,
     },
-    /// Shaping or drawing retained-UI text failed.
-    UiText(String),
+    /// A layer index was outside the terrain's layer set.
+    LayerOutOfRange {
+        /// The requested layer.
+        layer: u32,
+        /// Layers the terrain declares.
+        layers: u32,
+    },
+    /// A write region left the terrain, was empty, or disagreed with the supplied data length.
+    RegionOutOfRange {
+        /// Requested origin.
+        origin: [u32; 2],
+        /// Requested size.
+        size: [u32; 2],
+        /// The terrain's sample dimensions.
+        terrain: [u32; 2],
+    },
 }
 
 impl Display for RenderError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            Self::RequestAdapter(error) => {
-                write!(formatter, "requesting a graphics adapter: {error}")
-            }
-            Self::RequestDevice(error) => {
-                write!(formatter, "requesting a graphics device: {error}")
-            }
-            Self::Poll(error) => write!(formatter, "waiting for headless rendering: {error}"),
-            Self::MapBuffer(error) => write!(formatter, "mapping headless capture: {error}"),
-            Self::MapRange(error) => write!(formatter, "reading headless capture: {error}"),
-            Self::MapCallbackTimeout => formatter.write_str("headless capture callback timed out"),
-            Self::NonFinitePose => formatter
-                .write_str("pose, rotation, and mapper-time inputs must be finite and valid"),
-            Self::EmptyCapture => formatter.write_str("capture dimensions must be positive"),
-            Self::CaptureTooLarge => formatter.write_str("capture byte size exceeds limits"),
-            Self::EmptyModel => formatter.write_str("model contains no renderable triangles"),
-            Self::GeometryTooLarge => formatter.write_str("model geometry exceeds renderer limits"),
-            Self::InvalidIndex => formatter.write_str("staged scene contains an invalid index"),
-            Self::InvalidHierarchy => formatter.write_str("model hierarchy references are invalid"),
-            Self::GeometryOutsideLimits => {
-                formatter.write_str("transformed model geometry is non-finite or outside limits")
-            }
-            Self::InvalidAnimation => formatter.write_str("animation clip index is invalid"),
-            Self::InvalidMaterial => {
-                formatter.write_str("staged material or texture reference is invalid")
-            }
             Self::InvalidTexture => {
-                formatter.write_str("decoded texture dimensions or RGBA length are invalid")
+                formatter.write_str("texture dimensions or byte length are invalid")
             }
             Self::TextureTooLarge => {
-                formatter.write_str("decoded texture resources exceed renderer limits")
+                formatter.write_str("texture exceeds its explicit byte budget")
             }
-            Self::EmptyWndScene => formatter.write_str("staged WND scene contains no window quads"),
-            Self::InvalidCameraPlacement => {
-                formatter.write_str("camera focus, yaw, and height inputs must be finite")
+            Self::RequestAdapter(error) => write!(formatter, "no usable adapter: {error}"),
+            Self::RequestDevice(error) => write!(formatter, "no usable device: {error}"),
+            Self::Poll(error) => write!(formatter, "waiting for the queue failed: {error}"),
+            Self::MapBuffer(error) => write!(formatter, "mapping the readback failed: {error}"),
+            Self::MapRange(error) => {
+                write!(formatter, "taking the mapped range failed: {error}")
             }
-            Self::EmptyUiFrame => {
-                formatter.write_str("staged retained-UI frame contains no geometry or text")
+            Self::MapCallbackTimeout => {
+                formatter.write_str("the buffer map callback did not fire in time")
             }
-            Self::MissingUiPage { page } => {
-                write!(
-                    formatter,
-                    "staged UI batch references unuploaded page {page}"
-                )
+            Self::EmptyCapture => formatter.write_str("a capture cannot be zero-sized"),
+            Self::SingularCamera => {
+                formatter.write_str("the camera view-projection is singular and cannot be inverted")
             }
-            Self::UiText(message) => write!(formatter, "retained-UI text failed: {message}"),
+            Self::CreateSurface(message) => {
+                write!(formatter, "could not create a surface: {message}")
+            }
+            Self::SurfaceLost(message) => {
+                write!(formatter, "the surface was lost: {message}")
+            }
+            Self::NoSurfaceFormat => {
+                formatter.write_str("the surface offers no format this renderer can present to")
+            }
+            Self::EmptyModel => formatter.write_str("the model has no geometry"),
+            Self::ModelTooLarge => {
+                formatter.write_str("the model exceeds the addressable vertex range")
+            }
+            Self::CaptureTooLarge => {
+                formatter.write_str("capture size exceeds the renderer's explicit bounds")
+            }
+            Self::EncodePng(message) => write!(formatter, "encoding a PNG failed: {message}"),
+            Self::TooManyLayers { actual, maximum } => write!(
+                formatter,
+                "terrain declares {actual} layers, but the forward pass blends at most {maximum}"
+            ),
+            Self::LayerOutOfRange { layer, layers } => write!(
+                formatter,
+                "layer {layer} is outside the {layers} the terrain declares"
+            ),
+            Self::RegionOutOfRange {
+                origin,
+                size,
+                terrain,
+            } => write!(
+                formatter,
+                "region {size:?} at {origin:?} does not fit a {terrain:?} terrain, \
+                 or its data length disagrees"
+            ),
         }
     }
 }
@@ -2123,178 +227,53 @@ impl Error for RenderError {
     }
 }
 
-/// Clamps a scissor rectangle into the render target, returning `None` when nothing remains.
-///
-/// `wgpu` rejects a scissor that leaves the attachment, and a layout may legitimately clip against a
-/// region partly off screen, so the rectangle is intersected with the target rather than trusted.
-fn clamp_scissor(rect: cic_ui::UiRect, width: u32, height: u32) -> Option<(u32, u32, u32, u32)> {
-    let left = u32::try_from(rect.x.max(0)).ok()?.min(width);
-    let top = u32::try_from(rect.y.max(0)).ok()?.min(height);
-    let right = u32::try_from(rect.x.saturating_add(rect.width).max(0))
-        .ok()?
-        .min(width);
-    let bottom = u32::try_from(rect.y.saturating_add(rect.height).max(0))
-        .ok()?
-        .min(height);
-    if right <= left || bottom <= top {
-        return None;
-    }
-    Some((left, top, right - left, bottom - top))
-}
-
-/// Builds the retained-UI quad pipeline plus its viewport and page bind-group layouts.
-///
-/// Straight (non-premultiplied) alpha blending matches the source's stored channel bytes, and no
-/// depth buffer is used: painter's order from `cic-ui` decides overlap, as it does for any 2D UI.
-fn create_ui_pipeline(
-    device: &wgpu::Device,
-    format: wgpu::TextureFormat,
-) -> (
-    wgpu::RenderPipeline,
-    wgpu::BindGroupLayout,
-    wgpu::BindGroupLayout,
-) {
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("cic-render ui shader"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("ui.wgsl").into()),
-    });
-    let viewport_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("cic-render ui viewport layout"),
-        entries: &[wgpu::BindGroupLayoutEntry {
-            binding: 0,
-            visibility: wgpu::ShaderStages::VERTEX,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: wgpu::BufferSize::new(16),
-            },
-            count: None,
-        }],
-    });
-    let page_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("cic-render ui page layout"),
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                count: None,
-            },
-        ],
-    });
-    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("cic-render ui pipeline layout"),
-        bind_group_layouts: &[Some(&viewport_layout), Some(&page_layout)],
-        immediate_size: 0,
-    });
-    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("cic-render ui pipeline"),
-        layout: Some(&pipeline_layout),
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: Some("vertex_main"),
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-            buffers: &[Some(wgpu::VertexBufferLayout {
-                array_stride: UiVertex::STRIDE,
-                step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &[
-                    wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x2,
-                        offset: 0,
-                        shader_location: 0,
-                    },
-                    wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x2,
-                        offset: 8,
-                        shader_location: 1,
-                    },
-                    wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x4,
-                        offset: 16,
-                        shader_location: 2,
-                    },
-                    wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Uint32,
-                        offset: 32,
-                        shader_location: 3,
-                    },
-                ],
-            })],
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: Some("fragment_main"),
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-            targets: &[Some(wgpu::ColorTargetState {
-                format,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-        }),
-        primitive: wgpu::PrimitiveState {
-            cull_mode: None,
-            ..Default::default()
-        },
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState::default(),
-        multiview_mask: None,
-        cache: None,
-    });
-    (pipeline, viewport_layout, page_layout)
-}
-
 #[cfg(test)]
-mod tests {
-    use super::{ModelFrame, Pose, StagedMesh};
-    use cic_formats::{W3dLimits, W3dMeshLimits, decode_static_mesh, parse_w3d};
+mod shader_tests {
+    use super::{SHADERS, shader};
 
     #[test]
-    fn stages_validated_w3d_geometry_in_file_order() {
-        let hex = include_str!("../../cic-formats/tests/fixtures/static-mesh.w3d.hex");
-        let digits = hex
-            .bytes()
-            .filter(u8::is_ascii_hexdigit)
-            .collect::<Vec<_>>();
-        let bytes = digits
-            .chunks_exact(2)
-            .map(|pair| {
-                let pair = std::str::from_utf8(pair).expect("ASCII fixture");
-                u8::from_str_radix(pair, 16).expect("valid fixture")
-            })
-            .collect::<Vec<_>>();
-        let file =
-            parse_w3d(&bytes, "static-mesh.w3d", W3dLimits::default()).expect("valid W3D fixture");
-        let mesh = decode_static_mesh(&file.chunks()[0], W3dMeshLimits::default())
-            .expect("valid static mesh");
-
-        let staged = StagedMesh::from_w3d(&mesh);
-
-        assert_eq!(staged.positions().len(), 3);
-        assert_eq!(staged.normals().len(), 3);
-        assert_eq!(staged.indices(), &[0, 1, 2]);
+    fn every_shader_parses_and_validates() {
+        // The point of this test: the shader set is the most valuable thing carried across, and a
+        // silent copy error would otherwise surface as a blank frame much later. `naga` is the same
+        // WGSL front end `wgpu` uses, so passing here means the shader compiles for real.
+        let mut validator = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        );
+        for (name, source) in SHADERS {
+            let module = naga::front::wgsl::parse_str(source)
+                .unwrap_or_else(|error| panic!("{name}.wgsl failed to parse: {error:?}"));
+            validator
+                .validate(&module)
+                .unwrap_or_else(|error| panic!("{name}.wgsl failed to validate: {error:?}"));
+        }
     }
 
     #[test]
-    fn pose_rejects_non_finite_translation() {
-        assert!(Pose::translation(f32::NAN, 0.0).is_err());
-        assert!(Pose::translation(0.0, f32::INFINITY).is_err());
+    fn the_shader_set_is_complete_and_addressable() {
+        assert_eq!(
+            SHADERS.len(),
+            16,
+            "13 seeded shaders plus the forward, terrain G-buffer, and model passes"
+        );
+        for (name, source) in SHADERS {
+            assert!(!source.trim().is_empty(), "{name}.wgsl is empty");
+            assert_eq!(shader(name), Some(*source));
+        }
+        assert_eq!(shader("no_such_shader"), None);
     }
 
     #[test]
-    fn model_frame_rejects_implicit_or_invalid_time() {
-        assert!(ModelFrame::new(Some(0), 7, 0.5, 0.25).is_ok());
-        assert!(ModelFrame::new(None, 0, -0.1, 0.0).is_err());
-        assert!(ModelFrame::new(None, 0, f32::NAN, 0.0).is_err());
-        assert!(ModelFrame::new(None, 0, 0.0, f32::INFINITY).is_err());
+    fn no_shader_carries_an_inherited_licence_header() {
+        // The licence is an open decision, so no file may assert one. This guards against a
+        // header being reintroduced by a copy-paste before that decision is made.
+        for (name, source) in SHADERS {
+            for marker in ["SPDX", "GPL", "Copyright (C)", "License"] {
+                assert!(
+                    !source.contains(marker),
+                    "{name}.wgsl still mentions {marker}"
+                );
+            }
+        }
     }
 }

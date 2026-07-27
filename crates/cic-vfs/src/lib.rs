@@ -1,6 +1,23 @@
-//! Deterministic resource paths, mounts, overlays, and provenance.
+//! Deterministic resource paths, mounts, and overlays.
+//!
+//! Resolution is last-mounted-wins, and mount order is the caller's explicit decision. That single
+//! rule is what makes mod loading predictable: mounting base content, then an expansion, then a
+//! user's mod produces exactly the override order the list was written in, with no dependency on
+//! directory traversal order or filesystem case behaviour.
+//!
+//! Every path is normalized through [`VirtualPath`], which folds case and refuses parent traversal.
+//! An archive member named `../../etc/passwd` therefore cannot be mounted at all, rather than being
+//! caught later by whoever happens to write it out.
+//!
+//! Archive containers are pluggable. [`parse_zip_archive`] and [`parse_tar_archive`] both produce an
+//! [`ArchiveIndex`], and the mount methods here treat them identically -- so adding a container
+//! means writing one reader, not touching this module.
 
-mod big;
+mod archive;
+mod tar;
+#[cfg(test)]
+mod testing;
+mod zip;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
@@ -10,7 +27,9 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-pub use big::{BigArchiveIndex, BigEntry, BigError, BigLimits, BigVersion, parse_big_archive};
+pub use archive::{ArchiveEntry, ArchiveError, ArchiveIndex, ArchiveLimits, Compression};
+pub use tar::{parse_tar_archive, parse_tar_gz_archive};
+pub use zip::parse_zip_archive;
 
 /// A canonical, platform-independent resource path.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -48,6 +67,17 @@ impl VirtualPath {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// Returns the lowercase extension without its dot, if the final component has one.
+    #[must_use]
+    pub fn extension(&self) -> Option<&str> {
+        let name = self.0.rsplit('/').next()?;
+        let (stem, extension) = name.rsplit_once('.')?;
+        if stem.is_empty() {
+            return None;
+        }
+        Some(extension)
     }
 }
 
@@ -98,8 +128,21 @@ pub enum ProviderKind {
     LooseDirectory,
     /// Bytes supplied directly, primarily for tests and adapters.
     Memory,
-    /// An entry read from a BIG archive.
-    BigArchive,
+    /// A member of a zip container.
+    Zip,
+    /// A member of a tar container.
+    Tar,
+}
+
+impl Display for ProviderKind {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::LooseDirectory => "directory",
+            Self::Memory => "memory",
+            Self::Zip => "zip",
+            Self::Tar => "tar",
+        })
+    }
 }
 
 /// Explicit bounds for indexing one loose-directory provider.
@@ -120,16 +163,6 @@ impl Default for DirectoryLimits {
             maximum_depth: 256,
             maximum_virtual_path_bytes: 4096,
         }
-    }
-}
-
-impl Display for ProviderKind {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::LooseDirectory => "directory",
-            Self::Memory => "memory",
-            Self::BigArchive => "big",
-        })
     }
 }
 
@@ -175,7 +208,7 @@ impl ResourceEntry {
         &self.provider
     }
 
-    /// Returns the indexed resource length without reading its payload.
+    /// Returns the resource length after decompression, without reading its payload.
     #[must_use]
     pub fn len(&self) -> usize {
         self.source.len()
@@ -187,14 +220,26 @@ impl ResourceEntry {
         self.len() == 0
     }
 
+    /// Returns how this entry's payload is stored.
+    #[must_use]
+    pub const fn compression(&self) -> Compression {
+        self.source.compression()
+    }
+
     /// Reads exactly one resource payload under a caller-selected allocation bound.
     ///
-    /// Disk-backed directory and BIG entries are opened only when this method is called.
+    /// Disk-backed entries are opened only when this method is called, and compressed members are
+    /// inflated only here — so indexing a large archive stays cheap and a caller that never reads a
+    /// member never pays for it.
+    ///
+    /// The bound is checked against the *decompressed* size before any inflation runs, so a member
+    /// that lied about its size at index time cannot expand past what the caller allowed.
     ///
     /// # Errors
     ///
     /// Returns a structured error if the indexed size exceeds `maximum_bytes`, the backing file
-    /// changed after indexing, or an exact bounded read fails.
+    /// changed after indexing, an exact bounded read fails, or a compressed payload does not inflate
+    /// to its declared length.
     pub fn read(&self, maximum_bytes: usize) -> Result<Vec<u8>, ResourceReadError> {
         let size = self.len();
         if size > maximum_bytes {
@@ -205,25 +250,42 @@ impl ResourceEntry {
         }
         match &self.source {
             ResourceSource::Memory(bytes) => Ok(bytes.to_vec()),
-            ResourceSource::MemoryBig {
+            ResourceSource::MemoryArchive {
                 archive,
                 offset,
                 end,
-            } => archive
-                .get(*offset..*end)
-                .map(<[u8]>::to_vec)
-                .ok_or(ResourceReadError::MemoryRangeInvalid),
+                compression,
+                uncompressed_size,
+            } => {
+                let stored = archive
+                    .get(*offset..*end)
+                    .ok_or(ResourceReadError::ArchiveRange {
+                        offset: *offset,
+                        end: *end,
+                        archive_size: archive.len(),
+                    })?;
+                inflate(stored, *compression, *uncompressed_size)
+            }
             ResourceSource::LooseFile {
                 path,
                 indexed_file_size,
-                ..
-            } => read_file_range(path, *indexed_file_size, 0, size),
-            ResourceSource::BigFile {
+                size,
+            } => {
+                let mut file = open_unchanged(path, *indexed_file_size)?;
+                read_exact_at(&mut file, path, None, *size)
+            }
+            ResourceSource::ArchiveFile {
                 path,
                 indexed_file_size,
                 offset,
-                size,
-            } => read_file_range(path, *indexed_file_size, *offset, *size),
+                compressed_size,
+                compression,
+                uncompressed_size,
+            } => {
+                let mut file = open_unchanged(path, *indexed_file_size)?;
+                let stored = read_exact_at(&mut file, path, Some(*offset), *compressed_size)?;
+                inflate(&stored, *compression, *uncompressed_size)
+            }
         }
     }
 }
@@ -231,21 +293,27 @@ impl ResourceEntry {
 #[derive(Debug, Clone)]
 enum ResourceSource {
     Memory(Arc<[u8]>),
-    MemoryBig {
+    /// A member of an archive held in memory.
+    MemoryArchive {
         archive: Arc<[u8]>,
         offset: usize,
         end: usize,
+        compression: Compression,
+        uncompressed_size: usize,
     },
     LooseFile {
         path: PathBuf,
         indexed_file_size: u64,
         size: usize,
     },
-    BigFile {
+    /// A member of an archive on disk, opened only when read.
+    ArchiveFile {
         path: Arc<Path>,
         indexed_file_size: u64,
         offset: usize,
-        size: usize,
+        compressed_size: usize,
+        compression: Compression,
+        uncompressed_size: usize,
     },
 }
 
@@ -253,10 +321,100 @@ impl ResourceSource {
     fn len(&self) -> usize {
         match self {
             Self::Memory(bytes) => bytes.len(),
-            Self::MemoryBig { offset, end, .. } => end - offset,
-            Self::LooseFile { size, .. } | Self::BigFile { size, .. } => *size,
+            Self::MemoryArchive {
+                uncompressed_size, ..
+            }
+            | Self::ArchiveFile {
+                uncompressed_size, ..
+            } => *uncompressed_size,
+            Self::LooseFile { size, .. } => *size,
         }
     }
+
+    const fn compression(&self) -> Compression {
+        match self {
+            Self::Memory(_) | Self::LooseFile { .. } => Compression::Stored,
+            Self::MemoryArchive { compression, .. } | Self::ArchiveFile { compression, .. } => {
+                *compression
+            }
+        }
+    }
+}
+
+/// Expands a stored payload, verifying it reaches exactly its declared length.
+///
+/// A short or long inflation means the index and the payload disagree, which is a corrupt archive
+/// rather than something to paper over with a partial buffer.
+fn inflate(
+    stored: &[u8],
+    compression: Compression,
+    uncompressed_size: usize,
+) -> Result<Vec<u8>, ResourceReadError> {
+    match compression {
+        Compression::Stored => Ok(stored.to_vec()),
+        Compression::Deflate => {
+            let mut decoded = Vec::with_capacity(uncompressed_size);
+            // Bounded to one byte past the declaration, so an over-long stream is detected rather
+            // than allowed to allocate freely.
+            flate2::read::DeflateDecoder::new(stored)
+                .take(uncompressed_size as u64 + 1)
+                .read_to_end(&mut decoded)
+                .map_err(ResourceReadError::Inflate)?;
+            if decoded.len() != uncompressed_size {
+                return Err(ResourceReadError::InflatedSizeMismatch {
+                    actual: decoded.len(),
+                    declared: uncompressed_size,
+                });
+            }
+            Ok(decoded)
+        }
+    }
+}
+
+fn open_unchanged(path: &Path, indexed_file_size: u64) -> Result<File, ResourceReadError> {
+    let file = File::open(path).map_err(|error| ResourceReadError::Io {
+        path: path.to_path_buf(),
+        error,
+    })?;
+    let metadata = file.metadata().map_err(|error| ResourceReadError::Io {
+        path: path.to_path_buf(),
+        error,
+    })?;
+    if metadata.len() != indexed_file_size {
+        return Err(ResourceReadError::FileChanged {
+            path: path.to_path_buf(),
+            indexed: indexed_file_size,
+            actual: metadata.len(),
+        });
+    }
+    Ok(file)
+}
+
+fn read_exact_at(
+    file: &mut File,
+    path: &Path,
+    offset: Option<usize>,
+    length: usize,
+) -> Result<Vec<u8>, ResourceReadError> {
+    if let Some(offset) = offset {
+        let offset = u64::try_from(offset).map_err(|_| ResourceReadError::ArchiveRange {
+            offset,
+            end: offset,
+            archive_size: 0,
+        })?;
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|error| ResourceReadError::Io {
+                path: path.to_path_buf(),
+                error,
+            })?;
+    }
+    let mut bytes = vec![0u8; length];
+    file.read_exact(&mut bytes)
+        .map_err(|error| ResourceReadError::Io {
+            path: path.to_path_buf(),
+            error,
+        })?;
+    Ok(bytes)
 }
 
 /// A deterministic, last-mounted-wins virtual filesystem.
@@ -340,86 +498,82 @@ impl Vfs {
         )
     }
 
-    /// Mounts members from an in-memory BIG archive.
-    ///
-    /// Duplicate normalized names are preserved in file-table order and the last entry
-    /// wins, matching observed retail archive behavior.
+    /// Mounts members of an in-memory zip archive.
     ///
     /// # Errors
     ///
-    /// Returns [`MountError::Big`] when the archive index is invalid or exceeds limits,
-    /// or [`MountError::MountIdExhausted`] when no stable mount identifier remains.
-    pub fn mount_big_bytes(
+    /// Returns [`MountError::Archive`] when the container is invalid or exceeds limits, or
+    /// [`MountError::MountIdExhausted`] when no stable mount identifier remains.
+    pub fn mount_zip_bytes(
         &mut self,
         name: impl Into<String>,
         bytes: &[u8],
-        limits: BigLimits,
+        limits: ArchiveLimits,
     ) -> Result<MountId, MountError> {
-        let index = parse_big_archive(bytes, limits).map_err(MountError::Big)?;
-        let archive: Arc<[u8]> = Arc::from(bytes);
-        let mut entries = Vec::with_capacity(index.entries().len());
-        for entry in index.entries() {
-            let end = entry.offset().checked_add(entry.size()).ok_or_else(|| {
-                MountError::Big(BigError::EntryRangeOverflow {
-                    entry: entries.len(),
-                    offset: entry.offset(),
-                    size: entry.size(),
-                })
-            })?;
-            entries.push((
-                entry.path().clone(),
-                ResourceSource::MemoryBig {
-                    archive: archive.clone(),
-                    offset: entry.offset(),
-                    end,
-                },
-            ));
-        }
-        self.mount_entries(
-            name.into(),
-            ProviderKind::BigArchive,
-            entries,
-            DuplicatePolicy::Preserve,
-        )
+        let index = parse_zip_archive(bytes, limits).map_err(MountError::Archive)?;
+        self.mount_archive_bytes(name.into(), ProviderKind::Zip, bytes, &index)
     }
 
-    /// Reads, validates, and mounts a BIG archive from disk.
+    /// Mounts members of an in-memory tar archive.
     ///
     /// # Errors
     ///
-    /// Returns a structured [`MountError`] for metadata/read failures, archive-size limit
-    /// excess, invalid BIG data, or exhausted mount identifiers.
-    pub fn mount_big_file(
+    /// Returns the same errors as [`Self::mount_zip_bytes`].
+    pub fn mount_tar_bytes(
+        &mut self,
+        name: impl Into<String>,
+        bytes: &[u8],
+        limits: ArchiveLimits,
+    ) -> Result<MountId, MountError> {
+        let index = parse_tar_archive(bytes, limits).map_err(MountError::Archive)?;
+        self.mount_archive_bytes(name.into(), ProviderKind::Tar, bytes, &index)
+    }
+
+    /// Decompresses a gzip-framed tar and mounts its members.
+    ///
+    /// A gzip stream is not seekable, so the whole archive is decompressed and retained in memory.
+    /// That is the cost of the format, and it is why plain `.tar` or `.zip` is preferable for large
+    /// content that should stay on disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::mount_zip_bytes`].
+    pub fn mount_tar_gz_bytes(
+        &mut self,
+        name: impl Into<String>,
+        bytes: &[u8],
+        limits: ArchiveLimits,
+    ) -> Result<MountId, MountError> {
+        let (decoded, index) = parse_tar_gz_archive(bytes, limits).map_err(MountError::Archive)?;
+        self.mount_archive_bytes(name.into(), ProviderKind::Tar, &decoded, &index)
+    }
+
+    /// Indexes a zip archive on disk, leaving member payloads unread until required.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured [`MountError`] for I/O, an invalid container, or exhausted identifiers.
+    pub fn mount_zip_file(
         &mut self,
         name: impl Into<String>,
         path: impl AsRef<Path>,
-        limits: BigLimits,
+        limits: ArchiveLimits,
     ) -> Result<MountId, MountError> {
-        let path = path.as_ref();
-        let index = index_big_file(path, limits)?;
-        let archive_path: Arc<Path> = Arc::from(path);
-        let indexed_file_size =
-            u64::try_from(index.archive_size()).map_err(|_| MountError::FileTooLarge {
-                path: path.to_path_buf(),
-                size: u64::MAX,
-            })?;
-        let entries = index.entries().iter().map(|entry| {
-            (
-                entry.path().clone(),
-                ResourceSource::BigFile {
-                    path: archive_path.clone(),
-                    indexed_file_size,
-                    offset: entry.offset(),
-                    size: entry.size(),
-                },
-            )
-        });
-        self.mount_entries(
-            name.into(),
-            ProviderKind::BigArchive,
-            entries,
-            DuplicatePolicy::Preserve,
-        )
+        self.mount_archive_file(name.into(), ProviderKind::Zip, path.as_ref(), limits)
+    }
+
+    /// Indexes a tar archive on disk, leaving member payloads unread until required.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured [`MountError`] for I/O, an invalid container, or exhausted identifiers.
+    pub fn mount_tar_file(
+        &mut self,
+        name: impl Into<String>,
+        path: impl AsRef<Path>,
+        limits: ArchiveLimits,
+    ) -> Result<MountId, MountError> {
+        self.mount_archive_file(name.into(), ProviderKind::Tar, path.as_ref(), limits)
     }
 
     /// Resolves the winning entry for a normalized path.
@@ -442,6 +596,99 @@ impl Vfs {
         self.entries
             .iter()
             .filter_map(|(path, history)| history.last().map(|entry| (path, entry)))
+    }
+
+    /// Returns the number of distinct virtual paths with at least one entry.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Returns whether nothing is mounted.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    fn mount_archive_bytes(
+        &mut self,
+        name: String,
+        kind: ProviderKind,
+        bytes: &[u8],
+        index: &ArchiveIndex,
+    ) -> Result<MountId, MountError> {
+        let archive: Arc<[u8]> = Arc::from(bytes);
+        let entries = index
+            .entries()
+            .iter()
+            .map(|entry| {
+                (
+                    entry.path().clone(),
+                    ResourceSource::MemoryArchive {
+                        archive: archive.clone(),
+                        offset: entry.offset(),
+                        end: entry.end(),
+                        compression: entry.compression(),
+                        uncompressed_size: entry.uncompressed_size(),
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        // Duplicates are preserved rather than refused: a container may legitimately store one name
+        // twice, and last-wins matches how the overlay behaves between mounts.
+        self.mount_entries(name, kind, entries, DuplicatePolicy::Preserve)
+    }
+
+    fn mount_archive_file(
+        &mut self,
+        name: String,
+        kind: ProviderKind,
+        path: &Path,
+        limits: ArchiveLimits,
+    ) -> Result<MountId, MountError> {
+        // The container is read once to index it, then dropped; member payloads are re-read from
+        // disk on demand. That keeps a large archive out of memory at the cost of one full read at
+        // mount time, which is unavoidable for zip because its directory lives at the end.
+        let bytes = fs::read(path).map_err(|error| MountError::Io {
+            path: path.to_path_buf(),
+            error,
+        })?;
+        let indexed_file_size =
+            u64::try_from(bytes.len()).map_err(|_| MountError::FileTooLarge {
+                path: path.to_path_buf(),
+                size: u64::MAX,
+            })?;
+        let index = match kind {
+            ProviderKind::Zip => parse_zip_archive(&bytes, limits),
+            ProviderKind::Tar => parse_tar_archive(&bytes, limits),
+            ProviderKind::LooseDirectory | ProviderKind::Memory => {
+                return Err(MountError::Archive(ArchiveError::Signature {
+                    archive: "archive",
+                    expected: "a container kind that can be indexed from a file",
+                }));
+            }
+        }
+        .map_err(MountError::Archive)?;
+
+        let shared: Arc<Path> = Arc::from(path);
+        let entries = index
+            .entries()
+            .iter()
+            .map(|entry| {
+                (
+                    entry.path().clone(),
+                    ResourceSource::ArchiveFile {
+                        path: shared.clone(),
+                        indexed_file_size,
+                        offset: entry.offset(),
+                        compressed_size: entry.compressed_size(),
+                        compression: entry.compression(),
+                        uncompressed_size: entry.uncompressed_size(),
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        self.mount_entries(name, kind, entries, DuplicatePolicy::Preserve)
     }
 
     fn mount_entries<I>(
@@ -580,173 +827,48 @@ fn collect_directory(
     Ok(())
 }
 
-fn index_big_file(path: &Path, limits: BigLimits) -> Result<BigArchiveIndex, MountError> {
-    let mut file = File::open(path).map_err(|error| MountError::Io {
-        path: path.to_path_buf(),
-        error,
-    })?;
-    let metadata = file.metadata().map_err(|error| MountError::Io {
-        path: path.to_path_buf(),
-        error,
-    })?;
-    let archive_size = usize::try_from(metadata.len()).map_err(|_| MountError::FileTooLarge {
-        path: path.to_path_buf(),
-        size: metadata.len(),
-    })?;
-    let mut header = Vec::with_capacity(16);
-    file.by_ref()
-        .take(16)
-        .read_to_end(&mut header)
-        .map_err(|error| MountError::Io {
-            path: path.to_path_buf(),
-            error,
-        })?;
-    let prefix_length =
-        big::big_directory_prefix_length(&header, archive_size, limits).map_err(MountError::Big)?;
-    let mut prefix = vec![0; prefix_length];
-    file.seek(SeekFrom::Start(0))
-        .and_then(|_| file.read_exact(&mut prefix))
-        .map_err(|error| MountError::Io {
-            path: path.to_path_buf(),
-            error,
-        })?;
-    big::parse_big_archive_prefix(&prefix, archive_size, limits).map_err(MountError::Big)
-}
-
-fn read_file_range(
-    path: &Path,
-    indexed_file_size: u64,
-    offset: usize,
-    size: usize,
-) -> Result<Vec<u8>, ResourceReadError> {
-    let mut file = File::open(path).map_err(|error| ResourceReadError::Io {
-        path: path.to_path_buf(),
-        error,
-    })?;
-    let actual_size = file
-        .metadata()
-        .map_err(|error| ResourceReadError::Io {
-            path: path.to_path_buf(),
-            error,
-        })?
-        .len();
-    if actual_size != indexed_file_size {
-        return Err(ResourceReadError::BackingFileSizeChanged {
-            path: path.to_path_buf(),
-            indexed: indexed_file_size,
-            actual: actual_size,
-        });
-    }
-    let offset = u64::try_from(offset).map_err(|_| ResourceReadError::OffsetTooLarge { offset })?;
-    file.seek(SeekFrom::Start(offset))
-        .map_err(|error| ResourceReadError::Io {
-            path: path.to_path_buf(),
-            error,
-        })?;
-    let mut bytes = vec![0; size];
-    file.read_exact(&mut bytes)
-        .map_err(|error| ResourceReadError::Io {
-            path: path.to_path_buf(),
-            error,
-        })?;
-    Ok(bytes)
-}
-
-/// A failure while lazily reading one indexed resource.
-#[derive(Debug)]
-pub enum ResourceReadError {
-    /// The indexed payload exceeds the caller's explicit allocation bound.
-    LimitExceeded { actual: usize, maximum: usize },
-    /// A backing file could not be opened, inspected, sought, or read exactly.
-    Io { path: PathBuf, error: io::Error },
-    /// The physical file length changed after its provider was indexed.
-    BackingFileSizeChanged {
-        path: PathBuf,
-        indexed: u64,
-        actual: u64,
-    },
-    /// A host offset could not be represented by the filesystem seek API.
-    OffsetTooLarge { offset: usize },
-    /// An in-memory archive range violated an already validated index invariant.
-    MemoryRangeInvalid,
-}
-
-impl Display for ResourceReadError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::LimitExceeded { actual, maximum } => write!(
-                formatter,
-                "indexed resource size {actual} exceeds read limit {maximum}"
-            ),
-            Self::Io { path, error } => write!(formatter, "{}: {error}", path.display()),
-            Self::BackingFileSizeChanged {
-                path,
-                indexed,
-                actual,
-            } => write!(
-                formatter,
-                "backing file size changed after indexing: {} was {indexed} bytes and is now {actual} bytes",
-                path.display()
-            ),
-            Self::OffsetTooLarge { offset } => {
-                write!(
-                    formatter,
-                    "resource offset {offset} does not fit the seek API"
-                )
-            }
-            Self::MemoryRangeInvalid => {
-                formatter.write_str("in-memory BIG member range is invalid")
-            }
-        }
-    }
-}
-
-impl Error for ResourceReadError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Io { error, .. } => Some(error),
-            Self::LimitExceeded { .. }
-            | Self::BackingFileSizeChanged { .. }
-            | Self::OffsetTooLarge { .. }
-            | Self::MemoryRangeInvalid => None,
-        }
-    }
-}
-
-/// A failure while constructing a VFS mount.
+/// A failure while mounting a provider.
 #[derive(Debug)]
 pub enum MountError {
-    /// A physical filesystem operation failed.
+    /// A filesystem operation failed.
     Io {
-        /// Path associated with the failed operation.
+        /// Path being read when the failure occurred.
         path: PathBuf,
-        /// Original I/O failure.
+        /// The underlying I/O failure.
         error: io::Error,
     },
-    /// A physical entry unexpectedly escaped the mount root.
+    /// A stored name could not become a safe virtual path.
+    Path(PathError),
+    /// Two entries in one mount normalized to the same virtual path.
+    DuplicatePath(VirtualPath),
+    /// A symbolic link was found beneath a mounted directory.
+    SymbolicLink(PathBuf),
+    /// A discovered path was not beneath the mount root.
     OutsideRoot {
-        /// Requested mount root.
+        /// The mount root.
         root: PathBuf,
-        /// Escaping physical path.
+        /// The offending path.
         path: PathBuf,
     },
-    /// A virtual resource path was invalid.
-    Path(PathError),
-    /// A BIG archive was malformed or exceeded an explicit limit.
-    Big(BigError),
-    /// A file is too large to index on this host.
-    FileTooLarge { path: PathBuf, size: u64 },
-    /// A loose-directory metadata index exceeded an explicit resource limit.
+    /// A file's length exceeded the addressable range.
+    FileTooLarge {
+        /// The offending path.
+        path: PathBuf,
+        /// Length reported by the filesystem.
+        size: u64,
+    },
+    /// An explicit [`DirectoryLimits`] bound was exceeded.
     DirectoryLimitExceeded {
+        /// Which bound was crossed.
         what: &'static str,
+        /// Observed value.
         actual: usize,
+        /// Configured maximum.
         maximum: usize,
     },
-    /// Two entries in one provider normalized to the same path.
-    DuplicatePath(VirtualPath),
-    /// Symbolic links are outside the loose-directory mount contract.
-    SymbolicLink(PathBuf),
-    /// No additional stable mount identifier can be assigned.
+    /// An archive container was malformed or exceeded an explicit limit.
+    Archive(ArchiveError),
+    /// No stable mount identifier remained.
     MountIdExhausted,
 }
 
@@ -754,33 +876,33 @@ impl Display for MountError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io { path, error } => write!(formatter, "{}: {error}", path.display()),
+            Self::Path(error) => Display::fmt(error, formatter),
+            Self::DuplicatePath(path) => {
+                write!(formatter, "duplicate virtual path in one mount: {path}")
+            }
+            Self::SymbolicLink(path) => {
+                write!(
+                    formatter,
+                    "symbolic link is not mountable: {}",
+                    path.display()
+                )
+            }
             Self::OutsideRoot { root, path } => write!(
                 formatter,
-                "{} is outside mount root {}",
+                "{} is not beneath mount root {}",
                 path.display(),
                 root.display()
             ),
-            Self::Path(error) => Display::fmt(error, formatter),
-            Self::Big(error) => Display::fmt(error, formatter),
-            Self::FileTooLarge { path, size } => write!(
-                formatter,
-                "file is too large to index on this host: {} has {size} bytes",
-                path.display()
-            ),
+            Self::FileTooLarge { path, size } => {
+                write!(formatter, "{} is too large: {size} bytes", path.display())
+            }
             Self::DirectoryLimitExceeded {
                 what,
                 actual,
                 maximum,
-            } => write!(formatter, "{what} value {actual} exceeds limit {maximum}"),
-            Self::DuplicatePath(path) => {
-                write!(formatter, "provider contains duplicate virtual path {path}")
-            }
-            Self::SymbolicLink(path) => write!(
-                formatter,
-                "symbolic links are not supported in directory mounts: {}",
-                path.display()
-            ),
-            Self::MountIdExhausted => formatter.write_str("VFS mount identifier exhausted"),
+            } => write!(formatter, "{what} {actual} exceeds maximum {maximum}"),
+            Self::Archive(error) => Display::fmt(error, formatter),
+            Self::MountIdExhausted => formatter.write_str("mount identifiers are exhausted"),
         }
     }
 }
@@ -790,252 +912,373 @@ impl Error for MountError {
         match self {
             Self::Io { error, .. } => Some(error),
             Self::Path(error) => Some(error),
-            Self::Big(error) => Some(error),
-            Self::OutsideRoot { .. }
-            | Self::FileTooLarge { .. }
-            | Self::DirectoryLimitExceeded { .. }
-            | Self::DuplicatePath(_)
-            | Self::SymbolicLink(_)
-            | Self::MountIdExhausted => None,
+            Self::Archive(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+/// A failure while reading one resource payload.
+#[derive(Debug)]
+pub enum ResourceReadError {
+    /// The indexed size exceeded the caller's allocation bound.
+    LimitExceeded {
+        /// Indexed decompressed size.
+        actual: usize,
+        /// Bound the caller supplied.
+        maximum: usize,
+    },
+    /// A filesystem operation failed.
+    Io {
+        /// Path being read.
+        path: PathBuf,
+        /// The underlying I/O failure.
+        error: io::Error,
+    },
+    /// A backing file's length changed between indexing and reading.
+    FileChanged {
+        /// The offending path.
+        path: PathBuf,
+        /// Length observed at index time.
+        indexed: u64,
+        /// Length observed at read time.
+        actual: u64,
+    },
+    /// An in-memory archive member's range was outside the archive.
+    ArchiveRange {
+        /// Member payload offset.
+        offset: usize,
+        /// Member payload exclusive end.
+        end: usize,
+        /// Total archive length.
+        archive_size: usize,
+    },
+    /// A compressed payload failed to inflate.
+    Inflate(io::Error),
+    /// A compressed payload inflated to a length other than the one indexed.
+    InflatedSizeMismatch {
+        /// Bytes actually produced.
+        actual: usize,
+        /// Length the container declared.
+        declared: usize,
+    },
+}
+
+impl Display for ResourceReadError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::LimitExceeded { actual, maximum } => write!(
+                formatter,
+                "resource is {actual} bytes, exceeding maximum {maximum}"
+            ),
+            Self::Io { path, error } => write!(formatter, "{}: {error}", path.display()),
+            Self::FileChanged {
+                path,
+                indexed,
+                actual,
+            } => write!(
+                formatter,
+                "{} changed after indexing: was {indexed} bytes, now {actual}",
+                path.display()
+            ),
+            Self::ArchiveRange {
+                offset,
+                end,
+                archive_size,
+            } => write!(
+                formatter,
+                "archive member range {offset}..{end} is outside a {archive_size}-byte archive"
+            ),
+            Self::Inflate(error) => write!(formatter, "payload failed to inflate: {error}"),
+            Self::InflatedSizeMismatch { actual, declared } => write!(
+                formatter,
+                "payload inflated to {actual} bytes, but the container declared {declared}"
+            ),
+        }
+    }
+}
+
+impl Error for ResourceReadError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Io { error, .. } | Self::Inflate(error) => Some(error),
+            _ => None,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-    use std::path::{Path, PathBuf};
+    use super::{ArchiveLimits, Compression, ProviderKind, Vfs, VirtualPath};
+    use crate::testing::{TarBuilder, ZipBuilder, deflate, gzip};
 
-    use super::{MountError, Vfs, VirtualPath};
-
-    fn path(value: &str) -> VirtualPath {
-        VirtualPath::new(value).expect("valid test path")
-    }
-
-    fn test_root(name: &str) -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/vfs-tests")
-            .join(name)
+    fn path(text: &str) -> VirtualPath {
+        VirtualPath::new(text).expect("valid virtual path")
     }
 
     #[test]
-    fn normalizes_resource_paths() {
+    fn normalizes_separators_case_and_dot_components() {
         assert_eq!(
-            VirtualPath::new(r"Data\\English//./GENERALS.CSF")
-                .expect("valid path")
-                .as_str(),
-            "data/english/generals.csf"
+            path("Art\\Textures/./Sand.DDS").as_str(),
+            "art/textures/sand.dds"
         );
+        assert_eq!(path("//a///b//").as_str(), "a/b");
+    }
+
+    #[test]
+    fn refuses_parent_traversal_and_empty_paths() {
         assert!(VirtualPath::new("../secret").is_err());
-        assert!(VirtualPath::new("./").is_err());
+        assert!(VirtualPath::new("a/../b").is_err());
+        assert!(VirtualPath::new("///").is_err());
     }
 
     #[test]
-    fn later_mount_wins_and_history_is_preserved() {
-        let mut vfs = Vfs::new();
-        vfs.mount_memory("base", [(path("Data/A.txt"), b"base".to_vec())])
-            .expect("base mount");
-        vfs.mount_memory("mod", [(path("data/a.TXT"), b"override".to_vec())])
-            .expect("mod mount");
-
-        let resource = vfs.resolve(&path("DATA/a.txt")).expect("resolved entry");
-        assert_eq!(resource.read(8).expect("read override"), b"override");
-        assert_eq!(resource.provider().name(), "mod");
-
-        let history = vfs.history(&path("data/a.txt")).expect("entry history");
-        assert_eq!(history.len(), 2);
-        assert_eq!(history[0].provider().name(), "base");
-        assert_eq!(history[1].provider().mount_id().get(), 1);
+    fn reports_the_extension_of_the_final_component() {
+        assert_eq!(path("maps/alpine.zip").extension(), Some("zip"));
+        assert_eq!(path("models/tank.GLB").extension(), Some("glb"));
+        assert_eq!(path("readme").extension(), None);
+        assert_eq!(path("archive.tar/inner").extension(), None);
     }
 
     #[test]
-    fn resolved_iteration_is_sorted() {
+    fn later_mounts_win_and_history_preserves_every_version() {
         let mut vfs = Vfs::new();
-        vfs.mount_memory(
-            "base",
-            [
-                (path("z/file"), vec![1]),
-                (path("a/file"), vec![2]),
-                (path("m/file"), vec![3]),
-            ],
-        )
-        .expect("mount");
+        vfs.mount_memory("base", [(path("rules.json"), b"base".to_vec())])
+            .expect("mount base");
+        vfs.mount_memory("expansion", [(path("rules.json"), b"expansion".to_vec())])
+            .expect("mount expansion");
+        vfs.mount_memory("mod", [(path("rules.json"), b"mod".to_vec())])
+            .expect("mount mod");
 
-        let paths = vfs
-            .iter_resolved()
-            .map(|(resource_path, _)| resource_path.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(paths, ["a/file", "m/file", "z/file"]);
+        let winner = vfs.resolve(&path("rules.json")).expect("resolved");
+        assert_eq!(winner.read(64).expect("read"), b"mod");
+        assert_eq!(winner.provider().name(), "mod");
+
+        let history = vfs.history(&path("rules.json")).expect("history");
+        assert_eq!(history.len(), 3);
+        let names: Vec<&str> = history.iter().map(|e| e.provider().name()).collect();
+        assert_eq!(names, ["base", "expansion", "mod"], "earliest to latest");
     }
 
     #[test]
-    fn duplicate_path_rejects_the_entire_mount() {
+    fn mount_ids_increase_in_explicit_mount_order() {
         let mut vfs = Vfs::new();
-        let result = vfs.mount_memory(
-            "broken",
-            [(path("Data/A.txt"), vec![1]), (path("data/a.TXT"), vec![2])],
-        );
-
-        assert!(matches!(result, Err(MountError::DuplicatePath(_))));
-        assert!(vfs.resolve(&path("data/a.txt")).is_none());
+        let first = vfs.mount_memory("a", []).expect("mount");
+        let second = vfs.mount_memory("b", []).expect("mount");
+        assert_eq!(first.get(), 0);
+        assert_eq!(second.get(), 1);
     }
 
     #[test]
-    fn duplicate_big_names_preserve_history_and_last_entry_wins() {
-        let archive = synthetic_big(&[(r"Data\A.txt", b"old"), ("data/a.TXT", b"new")]);
+    fn refuses_two_entries_normalizing_to_one_path_in_a_single_mount() {
         let mut vfs = Vfs::new();
-        vfs.mount_big_bytes("duplicate.big", &archive, super::BigLimits::default())
-            .expect("BIG mount");
-
-        let resource = vfs.resolve(&path("data/a.txt")).expect("resolved entry");
-        assert_eq!(resource.read(8).expect("read winner"), b"new");
-        let history = vfs.history(&path("data/a.txt")).expect("entry history");
-        assert_eq!(history.len(), 2);
-        assert_eq!(history[0].read(8).expect("read history"), b"old");
-        assert_eq!(history[1].provider().mount_id().get(), 0);
-    }
-
-    #[test]
-    fn disk_providers_index_without_retaining_payloads() {
-        let root = test_root("lazy-providers");
-        if root.exists() {
-            fs::remove_dir_all(&root).expect("remove stale lazy-provider test");
-        }
-        let loose_root = root.join("loose");
-        fs::create_dir_all(loose_root.join("data")).expect("create loose tree");
-        let loose_path = loose_root.join("data/value.bin");
-        fs::write(&loose_path, b"loose").expect("write loose fixture");
-        let archive_path = root.join("custom.assets");
-        fs::write(
-            &archive_path,
-            synthetic_big(&[("data/archive.bin", b"archive")]),
-        )
-        .expect("write BIG fixture");
-
-        let mut vfs = Vfs::new();
-        vfs.mount_directory("loose", &loose_root)
-            .expect("index loose directory");
-        vfs.mount_big_file("archive", &archive_path, super::BigLimits::default())
-            .expect("index BIG file");
-        assert_eq!(
-            vfs.resolve(&path("data/value.bin"))
-                .expect("loose entry")
-                .len(),
-            5
-        );
-        assert_eq!(
-            vfs.resolve(&path("data/archive.bin"))
-                .expect("archive entry")
-                .len(),
-            7
-        );
-
-        fs::remove_file(loose_path).expect("remove indexed loose payload");
-        fs::remove_file(archive_path).expect("remove indexed archive payload");
-        assert!(
-            vfs.resolve(&path("data/value.bin"))
-                .expect("indexed loose entry")
-                .read(16)
-                .is_err()
-        );
-        assert!(
-            vfs.resolve(&path("data/archive.bin"))
-                .expect("indexed archive entry")
-                .read(16)
-                .is_err()
-        );
-        fs::remove_dir_all(root).expect("remove lazy-provider test");
-    }
-
-    #[test]
-    fn lazy_reads_enforce_the_callers_allocation_limit() {
-        let mut vfs = Vfs::new();
-        vfs.mount_memory("memory", [(path("data/value.bin"), vec![0; 17])])
-            .expect("memory mount");
         let error = vfs
-            .resolve(&path("data/value.bin"))
-            .expect("memory entry")
-            .read(16)
-            .expect_err("limit must reject read");
+            .mount_memory(
+                "clash",
+                [
+                    (path("Art/Sand.dds"), b"a".to_vec()),
+                    (path("art/SAND.DDS"), b"b".to_vec()),
+                ],
+            )
+            .expect_err("case folding makes these one path");
+        assert!(matches!(error, super::MountError::DuplicatePath(_)));
+    }
+
+    #[test]
+    fn mounts_a_zip_and_reads_a_stored_member() {
+        let archive = ZipBuilder::new()
+            .stored("terrain/height.bin", b"elevation")
+            .finish();
+        let mut vfs = Vfs::new();
+        let mount = vfs
+            .mount_zip_bytes("alpine.zip", &archive, ArchiveLimits::default())
+            .expect("mount zip");
+        let entry = vfs.resolve(&path("terrain/height.bin")).expect("resolved");
+        assert_eq!(entry.provider().mount_id(), mount);
+        assert_eq!(entry.provider().kind(), ProviderKind::Zip);
+        assert_eq!(entry.compression(), Compression::Stored);
+        assert_eq!(entry.read(64).expect("read"), b"elevation");
+    }
+
+    #[test]
+    fn mounts_a_zip_and_inflates_a_deflated_member() {
+        let payload = b"{\"players\":4}".repeat(200);
+        let archive = ZipBuilder::new()
+            .deflated("map.json", &deflate(&payload), payload.len())
+            .finish();
+        let mut vfs = Vfs::new();
+        vfs.mount_zip_bytes("alpine.zip", &archive, ArchiveLimits::default())
+            .expect("mount zip");
+        let entry = vfs.resolve(&path("map.json")).expect("resolved");
+        assert_eq!(entry.compression(), Compression::Deflate);
+        assert_eq!(entry.len(), payload.len(), "len reports decompressed size");
+        assert_eq!(entry.read(payload.len()).expect("read"), payload);
+    }
+
+    #[test]
+    fn a_read_bound_is_checked_against_the_decompressed_size_before_inflating() {
+        let payload = vec![0u8; 100_000];
+        let compressed = deflate(&payload);
+        assert!(compressed.len() < 1_000, "fixture must compress hard");
+        let archive = ZipBuilder::new()
+            .deflated("bomb", &compressed, payload.len())
+            .finish();
+        let mut vfs = Vfs::new();
+        vfs.mount_zip_bytes("bomb.zip", &archive, ArchiveLimits::default())
+            .expect("mount zip");
+        let entry = vfs.resolve(&path("bomb")).expect("resolved");
+        let error = entry.read(1_024).expect_err("must refuse before inflating");
         assert!(matches!(
             error,
             super::ResourceReadError::LimitExceeded {
-                actual: 17,
-                maximum: 16
+                actual: 100_000,
+                maximum: 1_024
             }
         ));
     }
 
     #[test]
-    fn directory_indices_enforce_metadata_limits() {
-        let root = test_root("directory-limits");
-        if root.exists() {
-            fs::remove_dir_all(&root).expect("remove stale directory-limit test");
-        }
-        fs::create_dir_all(&root).expect("create directory-limit test");
-        fs::write(root.join("a.bin"), []).expect("write first indexed file");
-        fs::write(root.join("b.bin"), []).expect("write second indexed file");
-        let limits = super::DirectoryLimits {
-            maximum_files: 1,
-            ..super::DirectoryLimits::default()
-        };
+    fn mounts_a_tar_and_reads_its_members() {
+        let archive = TarBuilder::new()
+            .file("map.json", b"{}")
+            .file("terrain/height.bin", &[9u8; 600])
+            .finish();
         let mut vfs = Vfs::new();
-        assert!(matches!(
-            vfs.mount_directory_with_limits("limited", &root, limits),
-            Err(MountError::DirectoryLimitExceeded {
-                what: "directory file count",
-                actual: 2,
-                maximum: 1
-            })
-        ));
-        assert!(vfs.iter_resolved().next().is_none());
-        fs::remove_dir_all(root).expect("remove directory-limit test");
+        vfs.mount_tar_bytes("alpine.tar", &archive, ArchiveLimits::default())
+            .expect("mount tar");
+        assert_eq!(vfs.len(), 2);
+        let entry = vfs.resolve(&path("terrain/height.bin")).expect("resolved");
+        assert_eq!(entry.provider().kind(), ProviderKind::Tar);
+        assert_eq!(entry.read(1_024).expect("read"), vec![9u8; 600]);
     }
 
-    fn synthetic_big(entries: &[(&str, &[u8])]) -> Vec<u8> {
-        let table_size = entries
-            .iter()
-            .map(|(name, _)| 8 + name.len() + 1)
-            .sum::<usize>();
-        let data_start = 16 + table_size;
-        let archive_size = data_start + entries.iter().map(|(_, bytes)| bytes.len()).sum::<usize>();
-        let mut archive = Vec::with_capacity(archive_size);
-        archive.extend_from_slice(b"BIGF");
-        archive.extend_from_slice(
-            &u32::try_from(archive_size)
-                .expect("synthetic archive size fits u32")
-                .to_le_bytes(),
-        );
-        archive.extend_from_slice(
-            &u32::try_from(entries.len())
-                .expect("synthetic entry count fits u32")
-                .to_be_bytes(),
-        );
-        archive.extend_from_slice(
-            &u32::try_from(data_start)
-                .expect("synthetic data offset fits u32")
-                .to_be_bytes(),
-        );
+    #[test]
+    fn mounts_a_gzip_framed_tar() {
+        let archive = TarBuilder::new().file("map.json", b"{\"v\":1}").finish();
+        let mut vfs = Vfs::new();
+        vfs.mount_tar_gz_bytes("alpine.tar.gz", &gzip(&archive), ArchiveLimits::default())
+            .expect("mount tar.gz");
+        let entry = vfs.resolve(&path("map.json")).expect("resolved");
+        assert_eq!(entry.read(64).expect("read"), b"{\"v\":1}");
+    }
 
-        let mut offset = data_start;
-        for (name, bytes) in entries {
-            archive.extend_from_slice(
-                &u32::try_from(offset)
-                    .expect("synthetic member offset fits u32")
-                    .to_be_bytes(),
-            );
-            archive.extend_from_slice(
-                &u32::try_from(bytes.len())
-                    .expect("synthetic member size fits u32")
-                    .to_be_bytes(),
-            );
-            archive.extend_from_slice(name.as_bytes());
-            archive.push(0);
-            offset += bytes.len();
-        }
-        for (_, bytes) in entries {
-            archive.extend_from_slice(bytes);
-        }
-        archive
+    #[test]
+    fn a_zip_mount_overrides_a_directory_mount_beneath_it() {
+        // The mod-loading case: loose base content, then a packaged override.
+        let directory = tempdir("vfs-overlay");
+        std::fs::create_dir_all(directory.join("terrain")).expect("create dir");
+        std::fs::write(directory.join("terrain/height.bin"), b"base").expect("write");
+        std::fs::write(directory.join("readme.txt"), b"untouched").expect("write");
+
+        let archive = ZipBuilder::new()
+            .stored("terrain/height.bin", b"override")
+            .finish();
+
+        let mut vfs = Vfs::new();
+        vfs.mount_directory("base", &directory).expect("mount dir");
+        vfs.mount_zip_bytes("patch.zip", &archive, ArchiveLimits::default())
+            .expect("mount zip");
+
+        assert_eq!(
+            vfs.resolve(&path("terrain/height.bin"))
+                .expect("resolved")
+                .read(64)
+                .expect("read"),
+            b"override"
+        );
+        assert_eq!(
+            vfs.resolve(&path("readme.txt"))
+                .expect("resolved")
+                .read(64)
+                .expect("read"),
+            b"untouched",
+            "an unrelated base file must survive the overlay"
+        );
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn indexes_an_archive_on_disk_and_reads_members_lazily() {
+        let directory = tempdir("vfs-lazy");
+        std::fs::create_dir_all(&directory).expect("create dir");
+        let archive_path = directory.join("alpine.zip");
+        let payload = b"a".repeat(5_000);
+        let archive = ZipBuilder::new()
+            .stored("terrain/height.bin", &payload)
+            .deflated("map.json", &deflate(b"{\"v\":1}"), 7)
+            .finish();
+        std::fs::write(&archive_path, &archive).expect("write archive");
+
+        let mut vfs = Vfs::new();
+        vfs.mount_zip_file("alpine.zip", &archive_path, ArchiveLimits::default())
+            .expect("mount zip file");
+        assert_eq!(
+            vfs.resolve(&path("terrain/height.bin"))
+                .expect("resolved")
+                .read(8_192)
+                .expect("read"),
+            payload
+        );
+        assert_eq!(
+            vfs.resolve(&path("map.json"))
+                .expect("resolved")
+                .read(64)
+                .expect("read"),
+            b"{\"v\":1}"
+        );
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn detects_a_backing_archive_that_changed_after_indexing() {
+        let directory = tempdir("vfs-changed");
+        std::fs::create_dir_all(&directory).expect("create dir");
+        let archive_path = directory.join("alpine.zip");
+        let archive = ZipBuilder::new().stored("a.bin", b"original").finish();
+        std::fs::write(&archive_path, &archive).expect("write archive");
+
+        let mut vfs = Vfs::new();
+        vfs.mount_zip_file("alpine.zip", &archive_path, ArchiveLimits::default())
+            .expect("mount");
+        // Truncating changes the length, which is what indexing recorded.
+        std::fs::write(&archive_path, b"gone").expect("truncate");
+        let error = vfs
+            .resolve(&path("a.bin"))
+            .expect("resolved")
+            .read(64)
+            .expect_err("must detect the change");
+        assert!(matches!(
+            error,
+            super::ResourceReadError::FileChanged { .. }
+        ));
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn iterates_resolved_entries_in_path_order() {
+        let mut vfs = Vfs::new();
+        vfs.mount_memory(
+            "content",
+            [
+                (path("z.bin"), b"z".to_vec()),
+                (path("a.bin"), b"a".to_vec()),
+                (path("m/n.bin"), b"n".to_vec()),
+            ],
+        )
+        .expect("mount");
+        let order: Vec<&str> = vfs.iter_resolved().map(|(path, _)| path.as_str()).collect();
+        assert_eq!(order, ["a.bin", "m/n.bin", "z.bin"]);
+    }
+
+    /// Returns a unique scratch directory path derived from the test name and process id.
+    ///
+    /// Deliberately not `std::env::temp_dir()` alone: two tests running concurrently in the same
+    /// process must not collide, and the suffix keeps them apart without a dependency.
+    fn tempdir(label: &str) -> std::path::PathBuf {
+        let unique = std::process::id();
+        let directory = std::env::temp_dir().join(format!("cic-{label}-{unique}"));
+        std::fs::remove_dir_all(&directory).ok();
+        std::fs::create_dir_all(&directory).expect("create scratch directory");
+        directory
     }
 }

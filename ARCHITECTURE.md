@@ -2,156 +2,67 @@
 
 ## Dependency direction
 
-```text
-retail files / mods
-        |
-        v
-  cic-vfs <--- archive and directory providers
-        |
-        v
-bounded parsing / immutable format IR
-        |                         |
-        v                         v
-definition database          asset database
-        |             |           |
-        |             v           |
-        |     immutable MAP scene |
-        |       description       |
-        |             |           |
-        +-------------+-----------+
-                      |
-          +-----------+-------------------+
-          |                               |
-          v                               v
- presentation resolver          R4 retained UI shell
-          |                    (WND, menus, controls,
-          |                     map/spawn previews)
-          |                               |
-          +------------+------------------+
-                       v
-              renderer / viewers
-                       ^
-                       |
-              immutable render snapshot
-                       |
-              deterministic simulation
-              (R5 runtime activation,
-               scripts, commands)
+```
+cic-core          (no dependencies)
+   └── cic-vfs    (+ flate2)
+          └── cic-assets   (+ gltf, serde, serde_json)
+
+cic-camera        (no dependencies)
+cic-render        (+ sha2; naga for shader validation in tests)
 ```
 
-The current workspace has six deliberately narrow crates:
+Two crates deliberately depend on nothing: `cic-core`, because bounded reading is a primitive, and
+`cic-camera`, because the same camera must drive the game, the editor, and any debug viewer without
+dragging a window system into each of them.
 
-- `cic-core`: dependency-free invariants and bounded binary input.
-- `cic-formats`: bounded decoders and immutable, renderer-neutral format values.
-- `cic-vfs`: normalized paths, providers, overlay order, and asset provenance.
-- `cic-ui`: retained UI state instantiated from immutable WND definitions — layout, hit testing,
-  focus, control invariants, typed events, and renderer-neutral frames. Depends only on
-  `cic-formats`.
-- `cic-render`: stable model staging, bounded texture resources, deterministic
-  diagnostic capture, and interactive `wgpu` presentation.
-- `cic-tools`: diagnostic applications that compose the public VFS, format, UI, and
-  renderer APIs.
+`cic-render` does not yet depend on `cic-assets`. It will, once the M3 pipelines are rebuilt against the
+native formats — and that direction is the one to keep. The renderer consumes assets; assets never know
+about rendering.
 
-`cic-ui` keeps WND parsing in `cic-formats` and GPU presentation in `cic-render`: it consumes
-immutable definitions and produces frames, so it links to no rendering API and holds no simulation
-state. Simulation, AI, networking, and script execution remain excluded until R5. R3 does include bounded
-MAP script decoding because scripts are part of the persisted map format; the resulting immutable
-tree has no evaluator, callbacks, timers, or access to live engine state.
+## Layering rules
 
-## Boundaries
+**Nothing above the resource layer opens a file.** Every asset arrives as bytes through `cic-vfs`, which
+is what makes mods, packages, and loose development files interchangeable. A decoder that took a path
+would work for exactly one of those three.
 
-- VFS providers expose bytes plus provenance; parsers do not inspect physical paths.
-- Disk VFS providers index paths, lengths, and archive ranges only. Callers lazily read one winning
-  resource under an explicit allocation bound; the VFS retains no implicit payload cache.
-- Built-in retail mount profiles are compatibility presets. Declarative custom profiles and ordered
-  mod providers use the same VFS and do not require retail archive names.
-- Parsers return immutable semantic values or structured errors.
-- Rendering owns GPU/window resources but never parsing, VFS, or simulation state.
-- Texture images are bounded and content-addressed; aliases and effective materials reuse
-  existing resources without changing stable draw order.
-- Tools may format diagnostics but must not contain parsing rules.
-- Deterministic behavior is an API property and must be tested at each boundary.
+**Decoders take limits, they do not choose them.** The caller decides how much memory a load may use,
+so the editor can be generous and a multiplayer client strict, running identical code.
 
-## R3 MAP scene boundary
+**Presentation may read simulation state; it may never advance or mutate it.** This is not stylistic.
+Frame rate varies per machine, so anything a frame can change is something that desyncs.
 
-R3 separates persisted scenario facts from both presentation resolution and runtime behavior:
+**Semantic input, not device input.** The camera takes intents, not key codes; UI callbacks are typed
+events from a fixed set, not handlers named by data. Layout files and mods are data, and data must not
+be able to name an action the engine did not define.
 
-| Layer | Owns | Must not own |
-|---|---|---|
-| MAP/INI format layer | Versioned chunks, typed dictionaries, placements, road endpoints, waypoints, sides/teams, build lists, polygon areas, lighting, water inputs, and the nested script tree | VFS lookup, GPU values, live objects, script dispatch, compatibility guesses |
-| Presentation resolver | Stable definition lookup, initial draw-state selection, W3D/texture references, terrain-relative transforms, missing-resource diagnostics, and immutable renderer inputs | Authoritative IDs, team activation, gameplay modules, script execution |
-| Renderer | GPU terrain/water/road/object resources, culling, batching, shadows/reflections, and explicit-time ambient visual animation | MAP or INI parsing, VFS ownership, simulation mutation, wall-clock diagnostic state |
-| R4 UI shell | Retained menu/control state, focus/input, safe callback routing, transitions, layout stack, map/spawn preview bindings, and render-neutral UI frames | MAP-script execution, gameplay objects, networking, arbitrary native callbacks |
-| R5 simulation | Runtime IDs, players/teams, spawn assignment, live objects, fixed ticks, script evaluation/actions, commands, RNG, and state hashes | Parser mutation, renderer/window/filesystem ownership |
+## Why the split between authored and bulk data
 
-`ObjectsList` is therefore decoded before any object exists. A placed-object value retains source
-order, transform, flags, template name, waypoint fields, and typed property data. Road and bridge
-records are a specialized presentation view over those same immutable placements plus bounded
-TerrainRoad/TerrainBridge definitions; they are not terrain blend tiles and do not imply collision,
-damage, or repair state in R3.
+The asset formats look inconsistent until you notice what the line is. A scenario is small, edited by
+hand, reviewed in diffs, and merged between people — so it is JSON. A heightfield is large, generated by
+tools, read only by machines, and needs to reach the GPU without conversion — so it is tight binary with
+`u16` samples that upload as a baseline `R16Uint` texture. Geometry is a solved problem with an ecosystem — so
+it is glTF.
 
-The presentation resolver may select an object's initial drawable state and source-authored ambient
-visual animation, including vegetation sway, W3D clips, texture mappers, and animated textures.
-Time is an explicit input. This is presentation only: no update module is constructed and no
-authoritative state advances when a tree waves or a texture scrolls.
+Choosing one format for all three would optimise for uniformity, which is not a property anyone
+benefits from, at the cost of diffability, size, or tooling — all of which someone does.
 
-Waypoints named by the established one-based `Player_n_Start` convention become spawn candidates in
-the immutable scenario description. `SidesList` side/team/build-list records and player-script
-lists are decoded and cross-referenced without assigning controllers or spawning anything. R4 may
-display these values in skirmish setup and map selection. R5 may consume them to activate players,
-teams, initial objects, and scripts under fixed-tick rules.
+## Where determinism is enforced
 
-## MAP script safety boundary
+The resource layer, because path resolution and mount ordering feed everything downstream: ordered maps
+not hash maps, explicit mount order, no dependence on directory enumeration order.
 
-The script decoder preserves versioned nesting, source order, flags, delays, integer opcode values,
-typed parameters, comments, and unknown values. It applies explicit limits to nesting depth,
-records, parameters, and strings, and returns structured errors on malformed input. It may emit
-stable unresolved-reference diagnostics, but it does not normalize by consulting runtime opcode
-tables and does not apply source-era compatibility rewrites implicitly.
+The simulation kernel, once it exists, for the reasons in
+[docs/invariants/determinism.md](docs/invariants/determinism.md).
 
-Only R5 may map decoded opcodes to executable conditions or actions. That mapping is versioned,
-deterministically scheduled, and tested through state hashes and replay. Unsupported opcodes remain
-reported or deterministically inert rather than invoking guessed behavior.
+Everything between the two is presentation and is free to be as machine-dependent as it likes.
 
-## R4 WND and UI boundary
+## Testing posture
 
-WND is a persisted retained hierarchy, not application code. `cic-formats` decodes file/layout
-versions, rectangles and creation resolution, child order, status/style flags, draw/text data,
-gadget-specific records, and callback names into immutable values. It does not resolve callback
-strings to function pointers, load images/fonts, inspect physical paths, or create live controls.
+Unit tests live beside the code they cover. Fixtures are **built**, not committed as blobs: the zip, tar,
+and glTF tests construct real containers at test time. That costs a fixture builder per format and buys
+tests that state the structural case they care about — a straddled block boundary, a trailing archive
+comment, a declared expansion that would exhaust memory — legibly enough to review.
 
-Modern layout augmentation is also data. A bounded patch is applied as a pure transformation from
-one immutable WND definition to another after parse and before UI instantiation. Patches target exact
-decorated names, carry preconditions and provenance, and layer in explicit profile/VFS/file order.
-They may replace known fields or insert bounded subtrees, but never edit source bytes, execute code,
-or make the renderer/menu router search for hardcoded retail window names.
-
-The `cic-ui` layer instantiates those definitions into non-authoritative presentation state:
-visibility, enablement, focus, text editing, list/slider/combo selection, menu push/pop, transitions,
-and typed demo actions. Callback names are resolved only through an explicit allowlist supplied by
-the application. Unknown names remain inert diagnostics. Main-menu and skirmish UI state can bind
-R3's map catalog, preview, boundaries, and spawn candidates, but pressing Start produces at most a
-validated launch description until R5 exists.
-
-Display enumeration and mutation stay outside `cic-ui`. The platform adapter supplies an immutable
-monitor/video-mode catalog and accepts a typed requested display preference; the UI owns only the
-pending selection and confirmation presentation. The `winit` host and `cic-render` surface backend
-apply or roll back window/surface changes and return a result. Deterministic tests inject catalog,
-result, and time values instead of enumerating host monitors or reading a clock. Confirmed
-window-mode, resolution, refresh-millihertz, and UI-scale preferences are presentation configuration,
-not simulation state.
-
-The UI renderer is custom `wgpu` presentation over stable colored/image quads, scissors, borders,
-cursors, and Unicode text. This preserves WND's exact retained layout and state-image semantics and
-composes naturally over R3 scenes. Where the original composes a control's nine draw-data entries
-into pieces, so does this renderer, per family and from that family's own indices; the retained model
-supplies every slot and the live state a composition branches on, because the original's draw
-procedures do not always read the slot the control's state selected. A full Rust GUI toolkit is not
-used as the compatibility model.
-Focused text technology is encouraged: `cosmic-text` for shaping/layout and `glyphon` for a `wgpu`
-atlas after dependency compatibility is verified. Host font discovery is excluded from
-deterministic captures; fonts come from explicit synthetic or user-owned VFS resources.
-
-UI input and menu transitions are deterministic presentation events. Tests supply viewport, scale
-policy, locale, font set, time, pointer/focus state, and ordered input events explicitly. The UI may
-later emit typed R5 commands, but neither the UI model nor renderer may own simulation state.
+Rendering is the exception to "tests are enough". A green suite coexists comfortably with a visibly
+broken frame, which is why M3 treats capture-based visual regression as a deliverable rather than as
+follow-up work.

@@ -32,11 +32,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.93.0
         with:
           components: clippy,rustfmt
-      # Nothing was cached before this, so every run rebuilt every dependency from source.
-      # That is the whole of the job's cost: the workspace's own crates compile in seconds,
-      # and the dev profile builds dependencies at `opt-level = 3` (see the profile comment
-      # in `Cargo.toml`), which the runner paid for on every push.
-      #
       # The cache key covers the toolchain, the lockfile, and the profile settings, so a
       # dependency bump or a profile change invalidates it rather than restoring artifacts
       # built under different settings. GitHub scopes a cache written on a branch to that
@@ -51,3 +46,10 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      # A dependency bump changes the licences the project must give notice for, and a stale NOTICES.md
+      # is an unmet obligation rather than untidy docs. Regenerating and diffing turns that into a
+      # failing check instead of something noticed at release.
+      - name: notices are in step with the lockfile
+        run: |
+          python3 tools/generate-notices.py
+          git diff --exit-code -- NOTICES.md

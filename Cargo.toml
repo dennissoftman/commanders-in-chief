@@ -1,20 +1,22 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = [
+    "crates/cic-assets",
     "crates/cic-camera",
     "crates/cic-core",
-    "crates/cic-formats",
     "crates/cic-render",
     "crates/cic-vfs",
-    "crates/cic-tools",
-    "crates/cic-ui",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-license = "GPL-3.0-only"
 rust-version = "1.93"
+publish = false
+# Dual-licensed, which is the Rust ecosystem's convention: MIT for maximum compatibility, Apache-2.0
+# for its explicit patent grant. A permissive licence was only available here because a derivation was
+# removed file by file -- see LICENSING.md, which records that work so nobody undoes it by accident.
+license = "MIT OR Apache-2.0"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -23,21 +25,29 @@ unsafe_code = "forbid"
 all = "warn"
 pedantic = "warn"
 
-# Dependencies are optimized even in the dev profile, because an unoptimized `map-view` is not slow
-# from any one hot spot: the per-frame cost is spread across `wgpu`'s validation and command-encoding
-# path, where every small function is a real call. That lands the frame over the vsync budget, and a
-# missed vblank does not degrade smoothly -- the presented rate snaps to the next divisor of the
-# refresh rate, which is why the debug build reads as a hard 30 Hz rather than as gradual
-# sluggishness. Dependencies are the right place to spend the compile time: they build once and are
-# never stepped through.
+[workspace.dependencies]
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+gltf = { version = "1", default-features = false, features = ["import", "names", "utils", "KHR_materials_emissive_strength"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+cic-assets = { path = "crates/cic-assets" }
+cic-camera = { path = "crates/cic-camera" }
+cic-core = { path = "crates/cic-core" }
+cic-vfs = { path = "crates/cic-vfs" }
+
+# Dependencies are optimized even in the dev profile, because an unoptimized renderer is not slow
+# from any one hot spot: the per-frame cost is spread across `wgpu`'s validation and
+# command-encoding path, where every small function is a real call. That lands the frame over the
+# vsync budget, and a missed vblank does not degrade smoothly -- the presented rate snaps to the
+# next divisor of the refresh rate, which is why a debug build reads as a hard 30 Hz rather than as
+# gradual sluggishness. Dependencies are the right place to spend the compile time: they build once
+# and are never stepped through.
 #
-# The workspace's own crates stay unoptimized, so a one-file change still rebuilds in about four
-# seconds rather than the forty-six `opt-level = 1` costs on `cic-render`. That is affordable because
-# our own per-frame CPU work was measured at 0.42 ms unoptimized against 0.07 ms at `--release`
-# -- real, but a small fraction of a frame either way, and not what the debug build is losing.
+# The workspace's own crates stay unoptimized, so a one-file change still rebuilds quickly.
 #
-# Debug assertions and overflow checks are untouched in both, so this changes how fast the debug build
-# runs and not what it verifies.
+# Debug assertions and overflow checks are untouched in both, so this changes how fast the debug
+# build runs and not what it verifies.
 [profile.dev]
 opt-level = 0
 

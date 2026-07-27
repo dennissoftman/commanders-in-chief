@@ -1,31 +1,39 @@
 # Roadmap
 
-Progress is measured by compatibility gates, not elapsed time.
+Milestones are named for the **engine capability** they deliver, not for a file format or a
+compatibility target. Each one is defined by what becomes possible when it lands, and each states its
+own exit condition so "done" is a fact rather than an opinion.
 
-Each milestone's full charter — scope, exclusions, inputs, outputs, owning crates, acceptance
-tests, determinism constraints, documentation, progress, and completion evidence — lives in its
-own file under `docs/milestones/`. This file is a status index only; progress prose belongs in
-the milestone file, and user-visible changes belong in `CHANGELOG.md`.
+Milestones are ordered by dependency, not by priority. M5 cannot be built on a renderer that does not
+exist, but nothing here forbids work starting early on a later milestone's design.
 
-| Milestone | Status | Charter |
-| --- | --- | --- |
-| R0: Repository and resource-probe foundation | Complete | [r0-foundation.md](docs/milestones/r0-foundation.md) |
-| R1: BIG and CSF resource probe | In progress (`BIG4` retail verification open) | [r1-big-csf.md](docs/milestones/r1-big-csf.md) |
-| R2: W3D inspection and viewer | Complete | [r2-w3d-viewer.md](docs/milestones/r2-w3d-viewer.md) |
-| R3: Complete MAP ingestion and terrain-scene presentation | Complete (2026-07-23) | [r3-map-scene.md](docs/milestones/r3-map-scene.md) |
-| R4: WND user interface and navigable shell | Active | [r4-wnd-shell.md](docs/milestones/r4-wnd-shell.md) |
-| R5: Deterministic simulation kernel | Planned | [r5-simulation.md](docs/milestones/r5-simulation.md) |
-| R6: Navigation analysis and gameplay slice | Planned | [r6-gameplay-slice.md](docs/milestones/r6-gameplay-slice.md) |
+| Milestone | Capability | Status |
+|---|---|---|
+| [M0](docs/milestones/m0-foundation.md) | Foundation: workspace, invariants, gate | Complete |
+| [M1](docs/milestones/m1-resources.md) | Resource layer: mounts, overlays, containers | Complete |
+| [M2](docs/milestones/m2-assets.md) | Asset formats: models, terrain, scenarios | Complete (read path) |
+| [M3](docs/milestones/m3-renderer.md) | Renderer: terrain, models, lighting, presentation | In progress — textured terrain and models render, water remains |
+| [M4](docs/milestones/m4-interface.md) | Interface: layout, widgets, shell | Planned |
+| [M5](docs/milestones/m5-simulation.md) | Simulation: deterministic fixed-tick kernel | Planned |
+| [M6](docs/milestones/m6-gameplay.md) | Gameplay: units, orders, combat, economy | Planned |
+| [M7](docs/milestones/m7-network.md) | Network: lockstep, replay, desync diagnosis | Planned |
+| [M8](docs/milestones/m8-tooling.md) | Tooling: map editor, asset pipeline | Planned |
 
-- **R0** established the GPL/provenance policy, Rust workspace, bounded reader, normalized VFS
-  paths, lazy providers, declarative mount profiles, deterministic manifest CLI, tests, and CI.
-- **R1** covers evidence-backed BIG archive mounting and complete CSF decoding with resource
-  provenance; only `BIG4` retail verification remains open.
-- **R2** delivered bounded W3D decoding through an animated `wgpu` viewer and glTF export.
-- **R3** delivered complete bounded MAP ingestion and the non-simulating terrain, water, road,
-  bridge, and static-scenery scene with deterministic overview capture.
-- **R4** boundedly decodes the WND grammar and UI resources and presents a navigable
-  main-menu/skirmish shell demo without simulation.
-- **R5** introduces the deterministic simulation kernel that consumes R3's immutable scenario
-  description.
-- **R6** derives navigation analysis and completes one build-harvest-combat gameplay slice.
+## What this engine is
+
+A real-time strategy engine in the classic base-building tradition: a player commands a faction on a
+heightfield map, gathers resources, constructs a base, produces units, and fights other players or
+the AI in real time.
+
+That description is deliberately mechanical. This project implements those mechanics from scratch, in
+its own formats, and is not a reimplementation of or a compatibility layer for any existing game.
+Nothing here reads another game's data or derives from another game's code.
+
+## What "complete" means for a milestone
+
+Three things, all of them checkable:
+
+1. Every capability the milestone claims is exercised by a test in CI.
+2. The full gate passes: formatting, strict lints, and the whole test suite.
+3. The milestone document records what was *not* done and why, so a later reader does not mistake a
+   deliberate omission for an oversight.

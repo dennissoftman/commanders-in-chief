@@ -2,15 +2,17 @@
 //
 // This is the cosine-weighted arc integral from Jimenez et al., "Practical Realtime Strategies for
 // Accurate Indirect Occlusion" (2016), evaluated in world space because the G-buffer already stores
-// a world position per pixel and needs no depth unprojection. Occlusion drives the ambient share of
-// deferred lighting, which is the dominant term in a MAP scene: three source terrain lights each
-// contribute their own ambient, so an unoccluded ambient sum leaves interiors, alleys, and the
-// ground under scenery visually ungrounded.
+// a depth per pixel that unprojects to one. Occlusion drives the ambient share of
+// deferred lighting, which is the dominant term in a daylit outdoor scene: every fill light
+// contributes its own ambient, so an unoccluded sum leaves creases, hollows, and the ground under
+// scenery visually ungrounded.
 //
 // Sampling is purely spatial. This renderer has no temporal antialiasing, so a temporally
 // accumulated estimate would shimmer under free-flight camera motion; the noise is a per-pixel
 // interleaved gradient offset resolved by the blur below instead.
 
+// Must match `SceneCamera` in `terrain_deferred.wgsl` byte for byte: both passes bind the same
+// uniform buffer.
 struct DirectionalLight {
     ambient: vec4<f32>,
     diffuse: vec4<f32>,
@@ -19,15 +21,11 @@ struct DirectionalLight {
 
 struct Camera {
     view_projection: mat4x4<f32>,
-    camera_position_time: vec4<f32>,
-    viewport: vec4<f32>,
-    detail_fade_caustics: vec4<f32>,
-    water_material: vec4<f32>,
-    water_surface: vec4<f32>,
-    water_motion: vec4<f32>,
-    terrain_lights: array<DirectionalLight, 3>,
     // Inverse of `view_projection`, for reconstructing world position from scene depth.
     inverse_view_projection: mat4x4<f32>,
+    camera_position: vec4<f32>,
+    viewport: vec4<f32>,
+    lights: array<DirectionalLight, 3>,
 }
 
 struct FullscreenOutput {
@@ -48,7 +46,8 @@ fn fullscreen_vertex(@builtin(vertex_index) vertex_index: u32) -> FullscreenOutp
 // `terrain_deferred.wgsl`.
 @group(0) @binding(1) var g_coverage: texture_2d<f32>;
 @group(0) @binding(2) var<uniform> camera: Camera;
-@group(0) @binding(3) var scene_depth: texture_2d<f32>;
+// Read directly as a depth texture; nothing here is multisampled, so there is no resolve step.
+@group(0) @binding(3) var scene_depth: texture_depth_2d;
 
 // World position of a G-buffer pixel, reconstructed from its depth.
 //
@@ -65,7 +64,7 @@ fn world_from_depth(pixel: vec2<i32>, depth: f32) -> vec3<f32> {
 
 // Position in `xyz` and geometry coverage in `w`, so a tap that landed on sky can be skipped.
 fn load_geometry(pixel: vec2<i32>) -> vec4<f32> {
-    let depth = textureLoad(scene_depth, pixel, 0).r;
+    let depth = textureLoad(scene_depth, pixel, 0);
     let coverage = textureLoad(g_coverage, pixel, 0).r;
     return vec4<f32>(world_from_depth(pixel, depth), coverage);
 }
@@ -77,8 +76,8 @@ const HALF_PI: f32 = 1.57079632679490;
 // both sides of each slice are counted.
 const AO_SLICES: i32 = 2;
 const AO_STEPS: i32 = 8;
-// World units. Terrain cells are 10 units across, so this reaches a few cells and the height of a
-// typical structure — far enough to ground scenery without darkening whole valleys.
+// World units. At the project's default 8-unit terrain spacing this reaches a few cells and the
+// height of a typical structure -- far enough to ground scenery without darkening whole valleys.
 const AO_RADIUS_WORLD: f32 = 28.0;
 // Screen-space clamp, so a surface directly under the camera cannot turn the search into a
 // full-screen gather. Kept low relative to the step count on purpose: the clamp is only reached
@@ -159,7 +158,7 @@ fn ao_fragment(input: FullscreenOutput) -> @location(0) vec4<f32> {
     }
     let position = world.xyz;
     let normal = normalize(textureLoad(g_normal, vec2<i32>(input.position.xy), 0).xyz);
-    let view_direction = normalize(camera.camera_position_time.xyz - position);
+    let view_direction = normalize(camera.camera_position.xyz - position);
 
     // A camera-facing basis for the slice directions. The reference axis swaps when the view is
     // near-vertical, which a top-down RTS camera reaches routinely.
@@ -236,7 +235,15 @@ fn ao_fragment(input: FullscreenOutput) -> @location(0) vec4<f32> {
 // across a silhouette or over a terrain crease, and the per-pixel slice rotation above averages
 // out instead of appearing as directional streaking.
 const AO_BLUR_RADIUS: i32 = 2;
+// Base tolerance in world units, plus a share of the view distance.
+//
+// A fixed tolerance cannot work: one pixel covers a couple of world units near the camera and tens of
+// units at a grazing angle in the middle distance, so a constant that smooths correctly up close
+// rejects almost every neighbouring tap further out -- leaving the raw per-pixel noise unblurred
+// exactly where the sampling is sparsest. Scaling with distance keeps the range weight comparable to
+// the actual spacing between neighbouring samples.
 const AO_BLUR_WORLD_TOLERANCE: f32 = 6.0;
+const AO_BLUR_DISTANCE_SHARE: f32 = 0.05;
 
 @fragment
 fn ao_blur_fragment(input: FullscreenOutput) -> @location(0) vec4<f32> {
@@ -246,6 +253,8 @@ fn ao_blur_fragment(input: FullscreenOutput) -> @location(0) vec4<f32> {
         return vec4<f32>(1.0);
     }
     let limit = vec2<i32>(camera.viewport.xy) - vec2<i32>(1);
+    let view_distance = length(center.xyz - camera.camera_position.xyz);
+    let tolerance = AO_BLUR_WORLD_TOLERANCE + view_distance * AO_BLUR_DISTANCE_SHARE;
     var total = 0.0;
     var weight_sum = 0.0;
     for (var y = -AO_BLUR_RADIUS; y <= AO_BLUR_RADIUS; y += 1) {
@@ -256,7 +265,7 @@ fn ao_blur_fragment(input: FullscreenOutput) -> @location(0) vec4<f32> {
                 continue;
             }
             let separation = length(neighbor.xyz - center.xyz);
-            let weight = saturate_scalar(1.0 - separation / AO_BLUR_WORLD_TOLERANCE);
+            let weight = saturate_scalar(1.0 - separation / tolerance);
             if weight <= 0.0 {
                 continue;
             }

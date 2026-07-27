@@ -1,9 +1,5 @@
-// Commanders in Chief
-// Copyright (C) 2026 Commanders in Chief contributors
-// SPDX-License-Identifier: GPL-3.0-only
-//
 // Renders retained-UI quads. Positions arrive in viewport pixels with the origin at the top left,
-// matching WND coordinates, and are converted to clip space here so no CPU-side transform is
+// and are converted to clip space here so no CPU-side transform is
 // needed. Colour is straight (non-premultiplied) RGBA to match the source's stored channel bytes.
 
 struct Viewport {

@@ -1,13 +1,12 @@
-// Copyright (C) 2026 Commanders in Chief contributors
-// SPDX-License-Identifier: GPL-3.0-only
-
 use std::collections::BTreeMap;
 
 use sha2::{Digest, Sha256};
 
 use crate::RenderError;
+// The one CPU-side image type in the renderer: what this manager caches is exactly what
+// [`crate::texture::TextureArray`] uploads, so a cached image reaches the GPU without a conversion.
+pub use crate::texture::TextureImage;
 
-const MAX_TEXTURE_DIMENSION: u32 = 8_192;
 const MAX_TEXTURE_BYTES: usize = 256 * 1_024 * 1_024;
 const MAX_TEXTURE_RESOURCE_BYTES: usize = 512 * 1_024 * 1_024;
 
@@ -18,31 +17,6 @@ pub struct TextureId(usize);
 impl TextureId {
     pub(crate) const fn index(self) -> usize {
         self.0
-    }
-}
-
-/// One bounded straight-alpha RGBA8 image retained once by the renderer resource manager.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TextureImage {
-    width: u32,
-    height: u32,
-    rgba: Vec<u8>,
-}
-
-impl TextureImage {
-    #[must_use]
-    pub const fn width(&self) -> u32 {
-        self.width
-    }
-
-    #[must_use]
-    pub const fn height(&self) -> u32 {
-        self.height
-    }
-
-    #[must_use]
-    pub fn rgba(&self) -> &[u8] {
-        &self.rgba
     }
 }
 
@@ -89,22 +63,7 @@ impl TextureResourceManager {
         if let Some(existing) = self.aliases.get(&alias) {
             return Ok(*existing);
         }
-        let expected = usize::try_from(width)
-            .ok()
-            .and_then(|width| {
-                usize::try_from(height)
-                    .ok()
-                    .and_then(|height| width.checked_mul(height))
-            })
-            .and_then(|pixels| pixels.checked_mul(4))
-            .ok_or(RenderError::TextureTooLarge)?;
-        if width == 0
-            || height == 0
-            || width > MAX_TEXTURE_DIMENSION
-            || height > MAX_TEXTURE_DIMENSION
-            || expected > MAX_TEXTURE_BYTES
-            || rgba.len() != expected
-        {
+        if rgba.len() > MAX_TEXTURE_BYTES {
             return Err(RenderError::InvalidTexture);
         }
         let mut hasher = Sha256::new();
@@ -112,22 +71,21 @@ impl TextureResourceManager {
         hasher.update(height.to_le_bytes());
         hasher.update(&rgba);
         let fingerprint: [u8; 32] = hasher.finalize().into();
+        // Dimensions and byte length are checked by the image itself, which is also what bounds them
+        // against what the GPU will accept.
+        let image = TextureImage::new(width, height, rgba)?;
         let id = if let Some(existing) = self.fingerprints.get(&fingerprint) {
             *existing
         } else {
             let total_bytes = self
                 .total_bytes
-                .checked_add(rgba.len())
+                .checked_add(image.rgba().len())
                 .ok_or(RenderError::TextureTooLarge)?;
             if total_bytes > MAX_TEXTURE_RESOURCE_BYTES {
                 return Err(RenderError::TextureTooLarge);
             }
             let id = TextureId(self.images.len());
-            self.images.push(TextureImage {
-                width,
-                height,
-                rgba,
-            });
+            self.images.push(image);
             self.fingerprints.insert(fingerprint, id);
             self.total_bytes = total_bytes;
             id
@@ -136,8 +94,8 @@ impl TextureResourceManager {
         Ok(id)
     }
 
-    /// Maps another W3D name to an already registered texture without decoding or allocating it
-    /// again.
+    /// Maps another asset name onto an already registered texture, without decoding or allocating
+    /// it again.
     ///
     /// # Errors
     ///
@@ -182,7 +140,8 @@ impl TextureResourceManager {
         self.aliases.len().saturating_sub(1)
     }
 
-    pub(crate) fn images(&self) -> &[TextureImage] {
+    #[must_use]
+    pub fn images(&self) -> &[TextureImage] {
         &self.images
     }
 }

@@ -1,6 +1,3 @@
-// Copyright (C) 2026 Commanders in Chief contributors
-// SPDX-License-Identifier: GPL-3.0-only
-
 //! Reusable real-time-strategy camera model.
 //!
 //! Deliberately free of any window, input, or GPU dependency so the same camera drives the
@@ -8,12 +5,9 @@
 //! into a [`CameraIntent`] of semantic actions and supply ground heights through [`GroundHeight`];
 //! nothing here knows about key codes, `winit`, or `wgpu`.
 //!
-//! Provenance: the limits and rates in [`RtsCameraProfile::GENERALS_DEFAULT`] are the source
-//! `GameData` camera fields (`CameraPitch`, `CameraYaw`, `CameraHeight`, `MinCameraHeight`,
-//! `MaxCameraHeight`, `CameraAdjustSpeed`, `ScrollAmountCutoff`, `EnforceMaxCameraHeight`). The
-//! frame-rate-independent reading of `CameraAdjustSpeed`, the absolute height ceiling, and the
-//! ground-sample clamp are project-authored: the first because the source rate is per fixed logic
-//! frame, and the last two because source data cannot bound a malformed map's heightfield.
+//! Every limit and rate in [`RtsCameraProfile::BASELINE`] is project-authored and expected to be
+//! tuned by feel against real terrain. They are round numbers on purpose: nothing here is
+//! reverse-engineered, so there is no external table to match and no reason to pretend otherwise.
 
 /// Ground elevation lookup, so the camera can hold a height above the terrain beneath it without
 /// depending on any particular terrain representation.
@@ -44,14 +38,14 @@ impl GroundHeight for FlatGround {
     }
 }
 
-/// The source rate `CameraAdjustSpeed` is applied once per logic frame, and the source logic frame
-/// is 30 Hz. Converting through this keeps the same feel at any present rate instead of making the
-/// smoothing faster on faster hardware.
-const SOURCE_LOGIC_HZ: f32 = 30.0;
+/// [`RtsCameraProfile::adjust_speed`] is expressed as a fraction closed per logic tick, and the
+/// simulation tick is 30 Hz. Converting through this keeps the same feel at any present rate
+/// instead of making the smoothing faster on faster hardware.
+const SIMULATION_LOGIC_HZ: f32 = 30.0;
 
 /// Camera limits and rates.
 ///
-/// Every field is public so a caller can load them from source data, an editor can expose them, and
+/// Every field is public so a caller can load them from a data file, an editor can expose them, and
 /// tests can construct degenerate cases directly.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RtsCameraProfile {
@@ -65,16 +59,15 @@ pub struct RtsCameraProfile {
     pub minimum_height: f32,
     /// Furthest the camera may zoom out, when `enforce_maximum_height` is set.
     pub maximum_height: f32,
-    /// Whether `maximum_height` binds while scrolling. The source default is not to enforce it,
-    /// which is why a separate absolute ceiling exists.
+    /// Whether `maximum_height` binds while scrolling.
     pub enforce_maximum_height: bool,
-    /// Fraction of the remaining height difference closed per source logic frame, in `0..=1`.
+    /// Fraction of the remaining height difference closed per logic tick, in `0..=1`.
     pub adjust_speed: f32,
     /// Pan distance per second above which ground-following height updates pause, so crossing a
     /// ridge at speed does not yank the camera.
     pub scroll_amount_cutoff: f32,
-    /// Hard ceiling that binds even when `enforce_maximum_height` is false. Project-authored: with
-    /// the source maximum unenforced, nothing else stops a zoom-out from leaving the world.
+    /// Hard ceiling that binds even when `enforce_maximum_height` is false, so a profile that
+    /// deliberately leaves the soft maximum unenforced still cannot zoom out of the world.
     pub absolute_maximum_height: f32,
     /// Fastest the tracked ground elevation may chase its samples, in world units per second.
     ///
@@ -82,17 +75,16 @@ pub struct RtsCameraProfile {
     /// and low enough that cresting a ridge eases rather than snaps. Also the reason a malformed
     /// heightfield cannot fling the camera: a spike costs a bounded, brief drift.
     pub ground_units_per_second: f32,
-    /// Base scroll rate in world units per second at the source default height, before the factors
-    /// below. The source expresses its scroll speeds as factors applied to a maximum scroll rate;
-    /// this is that maximum, and is the one camera number here with no value in the source data
-    /// supplied, so it is project-authored and expected to be tuned.
+    /// Base scroll rate in world units per second at the profile's default height, before the
+    /// per-input factors below scale it.
     pub scroll_units_per_second: f32,
-    /// `KeyboardScrollSpeedFactor`, applied to keyboard-style panning on both axes.
+    /// Applied to keyboard-style panning on both axes.
     pub keyboard_scroll_factor: f32,
-    /// `HorizontalScrollSpeedFactor`, applied to pointer-drag panning across the screen.
+    /// Applied to pointer-drag panning across the screen.
     pub horizontal_scroll_factor: f32,
-    /// `VerticalScrollSpeedFactor`, applied to pointer-drag panning up the screen. Split from the
-    /// horizontal factor in the source to offset the speed limit the aspect ratio imposes.
+    /// Applied to pointer-drag panning up the screen. Kept separate from the horizontal factor
+    /// because a 16:9 viewport gives vertical drags less pixel distance to work with, so matching
+    /// the two factors makes vertical panning feel slower than horizontal at the same input.
     pub vertical_scroll_factor: f32,
     /// Height change applied per unit of zoom input.
     pub zoom_units_per_step: f32,
@@ -101,39 +93,26 @@ pub struct RtsCameraProfile {
 }
 
 impl RtsCameraProfile {
-    /// Source `GameData` camera defaults, with project-authored safety bounds.
+    /// Project-authored starting point for a 1 world unit ~= 1 metre scale.
     ///
-    /// `MaxCameraHeight` is 310 with `EnforceMaxCameraHeight = No`, so the source maximum does not
-    /// bind while scrolling and the practical ceiling is higher than 310; `absolute_maximum_height`
-    /// supplies the bound the source data declines to.
-    pub const GENERALS_DEFAULT: Self = Self {
-        // CameraPitch = 37.5 degrees.
-        pitch: 37.5 * core::f32::consts::PI / 180.0,
-        // CameraYaw = 0.0
+    /// This profile enforces `maximum_height`, so the soft and hard ceilings agree by default and
+    /// `absolute_maximum_height` is pure belt-and-braces against a profile that deliberately unsets
+    /// enforcement. Expect to tune every number here by feel.
+    pub const BASELINE: Self = Self {
+        pitch: 40.0 * core::f32::consts::PI / 180.0,
         yaw: 0.0,
-        // CameraHeight = 232.0
-        height: 232.0,
-        // MinCameraHeight = 120.0
-        minimum_height: 120.0,
-        // MaxCameraHeight = 310.0
-        maximum_height: 310.0,
-        // EnforceMaxCameraHeight = No
-        enforce_maximum_height: false,
-        // CameraAdjustSpeed = 0.3
-        adjust_speed: 0.3,
-        // ScrollAmountCutoff = 50.0
-        scroll_amount_cutoff: 50.0,
-        absolute_maximum_height: 550.0,
+        height: 240.0,
+        minimum_height: 100.0,
+        maximum_height: 400.0,
+        enforce_maximum_height: true,
+        adjust_speed: 0.25,
+        scroll_amount_cutoff: 60.0,
+        absolute_maximum_height: 600.0,
         ground_units_per_second: 45.0,
-        // Project-authored and tuned by feel: at 210 a screen width took over a second to cross,
-        // which read as sluggish next to the original.
         scroll_units_per_second: 320.0,
-        // KeyboardScrollSpeedFactor = 2.0
-        keyboard_scroll_factor: 2.0,
-        // HorizontalScrollSpeedFactor = 1.6
-        horizontal_scroll_factor: 1.6,
-        // VerticalScrollSpeedFactor = 2.0
-        vertical_scroll_factor: 2.0,
+        keyboard_scroll_factor: 1.0,
+        horizontal_scroll_factor: 1.0,
+        vertical_scroll_factor: 1.25,
         zoom_units_per_step: 24.0,
         yaw_radians_per_unit: 0.0075,
     };
@@ -141,7 +120,7 @@ impl RtsCameraProfile {
 
 impl Default for RtsCameraProfile {
     fn default() -> Self {
-        Self::GENERALS_DEFAULT
+        Self::BASELINE
     }
 }
 
@@ -154,7 +133,7 @@ pub struct CameraIntent {
     /// Keyboard-style pan request in the camera's own ground plane, `x` right and `y` forward, each
     /// in `-1..=1`. Scaled by the keyboard factor.
     pub pan: [f32; 2],
-    /// Pointer-drag pan request in the same space. Kept separate from `pan` because the source
+    /// Pointer-drag pan request in the same space. Kept separate from `pan` because the profile
     /// scales dragging and key-holding by different factors, and splits dragging per axis.
     pub drag: [f32; 2],
     /// Zoom request for this frame. Positive moves the camera closer to the ground.
@@ -164,7 +143,7 @@ pub struct CameraIntent {
     /// Whether to return to the starting height and yaw.
     pub reset: bool,
     /// Whether to return rotation alone to its starting yaw, leaving height and focus untouched.
-    /// The original game does this on a rotate click that did not drag.
+    /// Conventional in the genre: a rotate click that did not drag snaps back to north.
     pub reset_rotation: bool,
 }
 
@@ -260,7 +239,7 @@ impl RtsCamera {
 
     /// Advances the camera by one frame.
     ///
-    /// `delta_seconds` is real elapsed time; the source per-logic-frame adjust rate is converted so
+    /// `delta_seconds` is real elapsed time; the per-tick adjust rate is converted so
     /// smoothing feels identical regardless of present rate.
     pub fn update(&mut self, intent: CameraIntent, delta_seconds: f32, ground: &impl GroundHeight) {
         let delta = if delta_seconds.is_finite() {
@@ -295,7 +274,7 @@ impl RtsCamera {
             1.0
         };
         let rate = self.profile.scroll_units_per_second * height_scale.clamp(0.25, 4.0);
-        // Keyboard and pointer-drag panning carry different source factors, and dragging is split
+        // Keyboard and pointer-drag panning carry different factors, and dragging is split
         // per screen axis, so the two requests are scaled separately before being combined.
         let requested = [
             intent.pan[0] * self.profile.keyboard_scroll_factor
@@ -314,19 +293,19 @@ impl RtsCamera {
         self.focus_xy[0] += travel[0];
         self.focus_xy[1] += travel[1];
 
-        // `ScrollAmountCutoff` is a per-logic-frame scroll amount in the source, compared squared
-        // against the squared per-frame scroll vector, so it converts to a rate through the source
+        // `scroll_amount_cutoff` is a per-tick scroll amount, compared squared
+        // against the squared per-frame scroll vector, so it converts to a rate through the
         // logic rate rather than being a speed already. Comparing a per-second rate against the raw
         // value would trip the cutoff during essentially all panning.
         //
-        // The source also does not pause unconditionally: scrolling too fast still adjusts while the
+        // Pausing is not unconditional: scrolling too fast still adjusts while the
         // camera sits outside its height constraints, so a fast pan cannot strand it out of bounds.
         let travel_rate = if delta > f32::EPSILON {
             (travel[0] * travel[0] + travel[1] * travel[1]).sqrt() / delta
         } else {
             0.0
         };
-        let cutoff_rate = self.profile.scroll_amount_cutoff.max(0.0) * SOURCE_LOGIC_HZ;
+        let cutoff_rate = self.profile.scroll_amount_cutoff.max(0.0) * SIMULATION_LOGIC_HZ;
         let scrolling_too_fast = travel_rate > cutoff_rate;
         if (!scrolling_too_fast || !self.height_within_limits())
             && let Some(sampled) = ground
@@ -337,13 +316,13 @@ impl RtsCamera {
             self.sampled_ground = sampled;
         }
 
-        // Source `CameraAdjustSpeed` is a fraction closed per logic frame; hold that feel at any
+        // `adjust_speed` is a fraction closed per logic tick; hold that feel at any
         // present rate rather than closing the same fraction per rendered frame.
         let rate = self.profile.adjust_speed.clamp(0.0, 1.0);
         let blend = if rate >= 1.0 {
             1.0
         } else {
-            1.0 - (1.0 - rate).powf(delta * SOURCE_LOGIC_HZ)
+            1.0 - (1.0 - rate).powf(delta * SIMULATION_LOGIC_HZ)
         };
         self.height += (self.target_height - self.height) * blend;
         self.height = clamp_height(&self.profile, self.height);
@@ -356,7 +335,7 @@ impl RtsCamera {
         self.ground += eased.clamp(-limit, limit);
     }
 
-    /// Whether the held height is strictly inside its limits, matching the source's height
+    /// Whether the held height is strictly inside its limits, matching the profile's height
     /// constraint check.
     fn height_within_limits(&self) -> bool {
         let minimum = clamp_height(&self.profile, f32::MIN);
@@ -398,9 +377,9 @@ impl RtsCamera {
 
 /// Clamps a height into the profile's limits.
 ///
-/// The lower bound always binds. The upper bound is the source maximum only when the source says to
+/// The lower bound always binds. The upper bound is the soft maximum only when the profile says to
 /// enforce it, but the absolute ceiling always binds, because with enforcement off nothing in the
-/// source data stops a zoom-out from leaving the world.
+/// the hard ceiling stops a zoom-out from leaving the world.
 fn clamp_height(profile: &RtsCameraProfile, height: f32) -> f32 {
     let minimum = profile.minimum_height.max(0.0);
     let mut maximum = profile.absolute_maximum_height;
@@ -446,47 +425,53 @@ mod tests {
     }
 
     #[test]
-    fn source_defaults_match_the_documented_game_data_fields() {
-        let profile = RtsCameraProfile::GENERALS_DEFAULT;
-        let exact = |value: f32, expected: f32, field: &str| {
-            assert!(
-                (value - expected).abs() < 1.0e-4,
-                "{field} was {value}, expected {expected}"
-            );
-        };
-        exact(profile.pitch.to_degrees(), 37.5, "CameraPitch");
-        exact(profile.yaw, 0.0, "CameraYaw");
-        exact(profile.height, 232.0, "CameraHeight");
-        exact(profile.minimum_height, 120.0, "MinCameraHeight");
-        exact(profile.maximum_height, 310.0, "MaxCameraHeight");
-        exact(profile.adjust_speed, 0.3, "CameraAdjustSpeed");
-        exact(profile.scroll_amount_cutoff, 50.0, "ScrollAmountCutoff");
-        exact(
-            profile.keyboard_scroll_factor,
-            2.0,
-            "KeyboardScrollSpeedFactor",
-        );
-        exact(
-            profile.horizontal_scroll_factor,
-            1.6,
-            "HorizontalScrollSpeedFactor",
-        );
-        exact(
-            profile.vertical_scroll_factor,
-            2.0,
-            "VerticalScrollSpeedFactor",
+    fn the_baseline_profile_is_internally_consistent() {
+        // There is no external table to conform to, so what is worth asserting is that the
+        // profile cannot describe an impossible camera: the height bounds must be ordered, the
+        // starting height must sit inside them, the smoothing fraction must stay a fraction, and
+        // every rate must be positive. A typo in the constant table trips one of these.
+        let profile = RtsCameraProfile::BASELINE;
+        assert!(
+            profile.minimum_height > 0.0,
+            "minimum height must be above ground"
         );
         assert!(
-            !profile.enforce_maximum_height,
-            "EnforceMaxCameraHeight = No"
+            profile.minimum_height < profile.maximum_height,
+            "height bounds must be ordered"
         );
+        assert!(
+            profile.maximum_height <= profile.absolute_maximum_height,
+            "the soft maximum must not exceed the hard ceiling"
+        );
+        assert!(
+            (profile.minimum_height..=profile.maximum_height).contains(&profile.height),
+            "the starting height must sit inside its own bounds"
+        );
+        assert!(
+            (0.0..=1.0).contains(&profile.adjust_speed),
+            "adjust_speed is a fraction closed per tick"
+        );
+        assert!(profile.pitch > 0.0 && profile.pitch < core::f32::consts::FRAC_PI_2);
+        for (rate, name) in [
+            (profile.ground_units_per_second, "ground_units_per_second"),
+            (profile.scroll_units_per_second, "scroll_units_per_second"),
+            (profile.scroll_amount_cutoff, "scroll_amount_cutoff"),
+            (profile.zoom_units_per_step, "zoom_units_per_step"),
+            (profile.yaw_radians_per_unit, "yaw_radians_per_unit"),
+        ] {
+            assert!(rate > 0.0, "{name} must be positive, was {rate}");
+        }
     }
 
     #[test]
-    fn starting_pose_sits_behind_and_above_the_focus_at_the_source_tilt() {
-        let camera = RtsCamera::new(RtsCameraProfile::default(), [100.0, 200.0], &flat());
+    fn starting_pose_sits_behind_and_above_the_focus_at_the_profile_tilt() {
+        let profile = RtsCameraProfile::default();
+        let camera = RtsCamera::new(profile, [100.0, 200.0], &flat());
         let pose = camera.pose();
-        assert!((pose.eye[2] - 232.0).abs() < 0.001, "height above ground");
+        assert!(
+            (pose.eye[2] - profile.height).abs() < 0.001,
+            "height above ground"
+        );
         for (value, expected) in pose.focus.into_iter().zip([100.0, 200.0, 0.0]) {
             assert!((value - expected).abs() < 1.0e-4, "focus was {pose:?}");
         }
@@ -497,14 +482,21 @@ mod tests {
         let horizontal =
             (pose.forward[0] * pose.forward[0] + pose.forward[1] * pose.forward[1]).sqrt();
         let tilt = (-pose.forward[2]).atan2(horizontal).to_degrees();
-        assert!((tilt - 37.5).abs() < 0.01, "tilt was {tilt}");
+        assert!(
+            (tilt - profile.pitch.to_degrees()).abs() < 0.01,
+            "tilt was {tilt}"
+        );
     }
 
     #[test]
-    fn zoom_is_bounded_below_by_the_source_minimum_and_above_by_the_absolute_ceiling() {
+    fn zoom_is_bounded_below_by_the_minimum_and_above_by_the_enforced_maximum() {
+        // The baseline enforces its maximum, so that is the bound a zoom-out must hit.
         let profile = RtsCameraProfile::default();
+        assert!(
+            profile.enforce_maximum_height,
+            "this test covers the baseline's enforcing behaviour"
+        );
         let mut camera = RtsCamera::new(profile, [0.0, 0.0], &flat());
-        // The source maximum is not enforced, so zooming out must pass it and still stop.
         for _ in 0..400 {
             camera.update(
                 CameraIntent {
@@ -516,13 +508,8 @@ mod tests {
             );
         }
         assert!(
-            camera.height() > profile.maximum_height,
-            "unenforced source maximum should not bind: {}",
-            camera.height()
-        );
-        assert!(
-            camera.height() <= profile.absolute_maximum_height + 0.001,
-            "absolute ceiling must bind: {}",
+            camera.height() <= profile.maximum_height + 0.001,
+            "enforced maximum must bind: {}",
             camera.height()
         );
 
@@ -544,9 +531,11 @@ mod tests {
     }
 
     #[test]
-    fn enforced_maximum_binds_when_the_profile_asks_for_it() {
+    fn the_absolute_ceiling_still_binds_when_a_profile_unsets_enforcement() {
+        // A profile is free to leave the soft maximum unenforced. Nothing then stops a zoom-out
+        // except the hard ceiling, which is the reason that field exists.
         let profile = RtsCameraProfile {
-            enforce_maximum_height: true,
+            enforce_maximum_height: false,
             ..RtsCameraProfile::default()
         };
         let mut camera = RtsCamera::new(profile, [0.0, 0.0], &flat());
@@ -561,8 +550,13 @@ mod tests {
             );
         }
         assert!(
-            camera.height() <= profile.maximum_height + 0.001,
-            "enforced maximum must bind: {}",
+            camera.height() > profile.maximum_height,
+            "an unenforced maximum should not bind: {}",
+            camera.height()
+        );
+        assert!(
+            camera.height() <= profile.absolute_maximum_height + 0.001,
+            "absolute ceiling must bind: {}",
             camera.height()
         );
     }
@@ -570,7 +564,7 @@ mod tests {
     #[test]
     fn height_smoothing_is_frame_rate_independent() {
         // The same elapsed time at different present rates must reach the same height, or the
-        // source per-logic-frame rate would make smoothing faster on faster hardware.
+        // per-tick rate would make smoothing faster on faster hardware.
         let settle = |steps: u32, delta: f32| {
             let mut camera = RtsCamera::new(RtsCameraProfile::default(), [0.0, 0.0], &flat());
             camera.update(
@@ -614,7 +608,7 @@ mod tests {
 
     #[test]
     fn rotation_reset_leaves_height_and_focus_alone() {
-        // The original resets rotation on a rotate click that did not drag, which must not also
+        // A rotate click that did not drag resets rotation, which must not also
         // undo the player's zoom or scroll position.
         let profile = RtsCameraProfile::default();
         let mut camera = RtsCamera::new(profile, [0.0, 0.0], &flat());
@@ -664,7 +658,7 @@ mod tests {
 
     #[test]
     fn ordinary_panning_keeps_tracking_ground_and_only_extreme_scrolling_pauses_it() {
-        // `ScrollAmountCutoff` is a per-logic-frame amount in the source, so as a rate it is the
+        // `scroll_amount_cutoff` is a per-tick amount, so as a rate it is the
         // value times the logic rate. Treating the raw value as a speed would trip the cutoff
         // during all normal panning and stop the camera following terrain at all.
         let profile = RtsCameraProfile::default();
@@ -709,10 +703,16 @@ mod tests {
     }
 
     #[test]
-    fn keyboard_and_drag_panning_use_their_own_source_factors() {
-        // The source scales key-held scrolling and pointer dragging differently, and splits
-        // dragging per screen axis. Equal requests must therefore travel unequal distances.
-        let profile = RtsCameraProfile::default();
+    fn keyboard_and_drag_panning_each_apply_their_own_factor() {
+        // Asserted against an explicit profile rather than the baseline, so retuning the baseline's
+        // feel cannot break this. What is under test is that each factor reaches the axis it names
+        // and scales distance proportionally -- not what any particular factor is set to.
+        let profile = RtsCameraProfile {
+            keyboard_scroll_factor: 1.0,
+            horizontal_scroll_factor: 2.0,
+            vertical_scroll_factor: 3.0,
+            ..RtsCameraProfile::default()
+        };
         let travel = |intent: CameraIntent| {
             let mut camera = RtsCamera::new(profile, [0.0, 0.0], &flat());
             camera.update(intent, 0.1, &flat());
@@ -731,20 +731,26 @@ mod tests {
             drag: [0.0, 1.0],
             ..CameraIntent::default()
         });
-        // KeyboardScrollSpeedFactor 2.0 against HorizontalScrollSpeedFactor 1.6.
+        let ratio = |a: f32, b: f32| a / b;
         assert!(
-            keyboard > drag_horizontal,
-            "keyboard factor exceeds the horizontal drag factor: {keyboard} vs {drag_horizontal}"
+            (ratio(drag_horizontal, keyboard) - 2.0).abs() < 0.01,
+            "horizontal drag should be twice keyboard: {drag_horizontal} vs {keyboard}"
         );
-        // VerticalScrollSpeedFactor 2.0 exceeds HorizontalScrollSpeedFactor 1.6.
         assert!(
-            drag_vertical > drag_horizontal,
-            "vertical drag outruns horizontal: {drag_vertical} vs {drag_horizontal}"
+            (ratio(drag_vertical, keyboard) - 3.0).abs() < 0.01,
+            "vertical drag should be three times keyboard: {drag_vertical} vs {keyboard}"
         );
-        let ratio = drag_vertical / drag_horizontal;
+    }
+
+    #[test]
+    fn the_baseline_pans_vertically_faster_than_horizontally() {
+        // A 16:9 viewport gives a vertical drag less pixel distance, so the baseline deliberately
+        // splits the two factors. This is a statement about the baseline's feel, kept separate
+        // from the mechanical test above.
+        let profile = RtsCameraProfile::default();
         assert!(
-            (ratio - 2.0 / 1.6).abs() < 0.01,
-            "drag axis ratio should follow the source factors, got {ratio}"
+            profile.vertical_scroll_factor > profile.horizontal_scroll_factor,
+            "vertical drag should outrun horizontal at equal input"
         );
     }
 

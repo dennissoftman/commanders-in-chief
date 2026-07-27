@@ -1,20 +1,17 @@
-// Copyright (C) 2026 Commanders in Chief contributors
-// SPDX-License-Identifier: GPL-3.0-only
-
 //! Deterministic CPU residency bookkeeping for GPU-composed terrain pages.
 
 use std::collections::BTreeSet;
 
-use crate::terrain::TerrainDetailRequest;
+use crate::detail::TerrainDetailRequest;
 
-pub(crate) const VIRTUAL_PAGE_INTERIOR: u32 = 256;
-pub(crate) const VIRTUAL_PAGE_BORDER: u32 = 4;
-pub(crate) const VIRTUAL_PAGE_EXTENT: u32 = VIRTUAL_PAGE_INTERIOR + 2 * VIRTUAL_PAGE_BORDER;
-pub(crate) const VIRTUAL_PAGE_LAYERS: usize = 256;
-pub(crate) const VIRTUAL_PAGE_MIPS: u32 = 9;
+pub const VIRTUAL_PAGE_INTERIOR: u32 = 256;
+pub const VIRTUAL_PAGE_BORDER: u32 = 4;
+pub const VIRTUAL_PAGE_EXTENT: u32 = VIRTUAL_PAGE_INTERIOR + 2 * VIRTUAL_PAGE_BORDER;
+pub const VIRTUAL_PAGE_LAYERS: usize = 256;
+pub const VIRTUAL_PAGE_MIPS: u32 = 9;
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct VirtualPageView {
+pub struct VirtualPageView {
     position: [f32; 3],
     forward: [f32; 3],
     right: [f32; 3],
@@ -28,7 +25,8 @@ pub(crate) struct VirtualPageView {
 
 impl VirtualPageView {
     #[allow(clippy::too_many_arguments)]
-    pub(crate) const fn new(
+    #[must_use]
+    pub const fn new(
         position: [f32; 3],
         forward: [f32; 3],
         right: [f32; 3],
@@ -175,15 +173,15 @@ struct PhysicalPage {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct VirtualPageJob {
-    pub(crate) origin: [u32; 2],
-    pub(crate) cells_per_page: u32,
-    pub(crate) physical_layer: u32,
-    pub(crate) pixels_per_cell: u32,
+pub struct VirtualPageJob {
+    pub origin: [u32; 2],
+    pub cells_per_page: u32,
+    pub physical_layer: u32,
+    pub pixels_per_cell: u32,
 }
 
 impl VirtualPageJob {
-    pub(crate) fn write_bytes(self, bytes: &mut Vec<u8>) {
+    pub fn write_bytes(self, bytes: &mut Vec<u8>) {
         for value in [
             self.origin[0],
             self.origin[1],
@@ -199,12 +197,12 @@ impl VirtualPageJob {
     }
 }
 
-pub(crate) struct VirtualPageUpdate {
-    pub(crate) jobs: Vec<VirtualPageJob>,
-    pub(crate) tables_changed: bool,
+pub struct VirtualPageUpdate {
+    pub jobs: Vec<VirtualPageJob>,
+    pub tables_changed: bool,
 }
 
-pub(crate) struct VirtualPageCache {
+pub struct VirtualPageCache {
     table_sizes: [[u32; 2]; 2],
     tables: [Vec<u32>; 2],
     physical: Vec<Option<PhysicalPage>>,
@@ -212,7 +210,8 @@ pub(crate) struct VirtualPageCache {
 }
 
 impl VirtualPageCache {
-    pub(crate) fn new(cell_size: [u32; 2]) -> Self {
+    #[must_use]
+    pub fn new(cell_size: [u32; 2]) -> Self {
         let table_sizes = [
             [cell_size[0].div_ceil(8), cell_size[1].div_ceil(8)],
             [cell_size[0].div_ceil(16), cell_size[1].div_ceil(16)],
@@ -226,15 +225,17 @@ impl VirtualPageCache {
         }
     }
 
-    pub(crate) const fn table_size(&self, level: usize) -> [u32; 2] {
+    #[must_use]
+    pub const fn table_size(&self, level: usize) -> [u32; 2] {
         self.table_sizes[level]
     }
 
-    pub(crate) fn table(&self, level: usize) -> &[u32] {
+    #[must_use]
+    pub fn table(&self, level: usize) -> &[u32] {
         &self.tables[level]
     }
 
-    pub(crate) fn update(
+    pub fn update(
         &mut self,
         requests: &[TerrainDetailRequest],
         view: VirtualPageView,
@@ -358,10 +359,10 @@ impl VirtualPageCache {
 #[cfg(test)]
 mod tests {
     use super::{VirtualPageCache, VirtualPageKey, VirtualPageView};
-    use crate::terrain::TerrainDetailRequest;
+    use crate::detail::TerrainDetailRequest;
 
     fn request(min: [u32; 2], max: [u32; 2], density: u32) -> TerrainDetailRequest {
-        TerrainDetailRequest::for_test(min, max, density)
+        TerrainDetailRequest::uniform(min, max, density)
     }
 
     fn test_view(position: [f32; 3], forward: [f32; 3]) -> VirtualPageView {

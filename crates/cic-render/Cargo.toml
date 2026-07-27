@@ -1,26 +1,32 @@
 [package]
 name = "cic-render"
-description = "Deterministic renderer boundary for Commanders in Chief"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
 rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
 
 [dependencies]
-cic-camera = { path = "../cic-camera" }
-cic-formats = { path = "../cic-formats" }
-cic-ui = { path = "../cic-ui" }
-cosmic-text = "0.19"
-glyphon = "0.12"
+cic-assets.workspace = true
+cic-camera.workspace = true
 png = "0.18"
-pollster = "0.4"
 sha2 = "0.10"
-wgpu = { version = "30", default-features = false, features = ["std", "dx12", "metal", "vulkan", "wgsl"] }
-winit = "0.30.13"
+wgpu = { version = "30", default-features = false, features = [
+    "std",
+    "dx12",
+    "metal",
+    "vulkan",
+    "wgsl",
+] }
 
 [dev-dependencies]
-cic-formats = { path = "../cic-formats" }
-naga = { version = "30", features = ["wgsl-in"] }
+# The same WGSL front end `wgpu` uses, so validating with it means the shaders really compile.
+naga = { version = "27", features = ["wgsl-in"] }
+pollster = "0.4"
+# Only the viewer example opens a window, so the windowing library stays out of the library itself.
+winit = "0.30"
+# The capture tests construct encoders directly, so they need the graphics API in scope.
+wgpu = { version = "30", default-features = false, features = ["std", "dx12", "metal", "vulkan", "wgsl"] }
 
 [lints]
 workspace = true

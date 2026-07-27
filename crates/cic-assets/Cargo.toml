@@ -1,0 +1,22 @@
+[package]
+name = "cic-assets"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+cic-core.workspace = true
+cic-vfs.workspace = true
+gltf.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+# Only the image fixtures need an encoder: glTF embeds textures as PNG or JPEG, so a test that claims
+# to exercise image import has to hand the importer a real encoded image rather than raw bytes.
+png = "0.18"
+
+[lints]
+workspace = true
