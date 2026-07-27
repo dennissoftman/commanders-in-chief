@@ -3,33 +3,40 @@
 ## Where the project is
 
 M0 through M2 are complete: the workspace and its invariants, the resource layer, and the native asset
-formats. M3 is active, and its first vertical slice has landed — a terrain package now renders.
+formats. M3 is active and now draws a lit, shadowed, occluded terrain both headlessly and in a window.
 
-What works: a `cic-assets` terrain uploads to the GPU and draws, headlessly, with directional lighting
-and blended texture layers. Heights and layer weights live in *writable* textures with displacement and
-normals computed in the vertex shader, so terrain deformation and route grading are texture writes
-rather than a remesh. Captures resolve to PNG and are asserted on luminance spread and layer presence,
-not just on being non-empty.
+What works:
 
-Windowed presentation works: `cargo run -p cic-render --example terrain_viewer --release` opens a
-window and flies the camera over generated terrain, or over a `.cicmap` given as an argument.
+- A `cic-assets` terrain uploads to the GPU and renders through a six-pass deferred chain: four shadow
+  cascades, a G-buffer, ambient occlusion with a bilateral blur, deferred lighting that reconstructs
+  world position from depth, and a tone-mapping composite.
+- Heights and layer weights live in *writable* textures with displacement and normals computed in the
+  vertex shader, so terrain deformation and route grading are texture writes rather than a remesh.
+- Windowed presentation, driven by the reusable camera:
+
+```bash
+cargo run -p cic-render --example terrain_viewer --release
+```
+
+Pass a `.cicmap` path to view a real map; with no argument it generates terrain, so the viewer runs
+before any content exists.
 
 ## Next verified step
 
-Wire the deferred chain: G-buffer, cascaded shadows, and ambient occlusion. The shaders for all three
-are already present and validated; what they need is the pipeline scaffolding and the bind group
-layouts to match. Shadows and AO are also what the current forward pass most visibly lacks — the
-terrain reads as correctly shaped but flatly lit, because nothing occludes anything yet.
+The model pipeline: render imported glTF geometry with its PBR materials through the existing G-buffer,
+instanced, with the shadow pass extended to cover models as well as terrain. That is what turns a
+landscape into a scene, and it is the last piece M4's interface work needs underneath it.
 
-After that: the model pipeline against imported glTF, then water, then windowed presentation.
+After that, in rough order: albedo textures per terrain layer (currently flat palette colours), water,
+multisampling, and the committed reference captures that close the milestone.
 
 ## Gate status
 
 Formatting, strict lints (`clippy::all` and `clippy::pedantic` as errors), and the full test suite all
-pass on the pinned toolchain. **154 tests across five crates**, including twelve that render on a real device.
+pass on the pinned toolchain. **154 tests across five crates**, twelve of which render on a real device.
 
-The render tests skip rather than fail when no adapter is available, so a machine or CI runner without
-a GPU or software rasteriser reports honestly instead of red.
+The render tests skip rather than fail when no adapter is available, so a machine or CI runner without a
+GPU or software rasteriser reports honestly instead of red.
 
 ## Standing constraints
 
@@ -38,8 +45,11 @@ a GPU or software rasteriser reports honestly instead of red.
 - Every decoder is bounded and total — see [binary parsing](docs/invariants/binary-parsing.md).
 - Anything that will reach simulation state follows [determinism](docs/invariants/determinism.md) from
   the start, because it cannot be retrofitted.
-- **A rendering change is not verified by a green test suite. Look at the capture.** The terrain work
-  produced three bugs that all passed their assertions before the PNG was opened: reversed layer ramps
-  that made one layer invisible, a tone-map curve that crushed all shading contrast, and a test terrain
-  so flat that its "many distinct colours" assertion was measuring the fixture rather than the
-  renderer.
+- **A rendering change is not verified by a green test suite. Look at the capture.** Every rendering bug
+  so far passed its own assertions and was caught by opening the PNG: reversed layer ramps, two separate
+  tone-mapping mistakes, a shadow camera on the wrong side of the scene, an occlusion blur whose
+  tolerance rejected every neighbour at distance, and twice a test fixture measuring itself rather than
+  the renderer.
+- **Presentation needs running, not just testing.** The one bug the headless suite structurally could not
+  catch — surface capabilities queried through an adapter from the wrong instance — appeared the first
+  time the window opened.
