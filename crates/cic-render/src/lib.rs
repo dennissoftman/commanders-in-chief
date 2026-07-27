@@ -27,6 +27,7 @@
 pub mod deferred;
 pub mod detail;
 pub mod gpu;
+pub mod presentation;
 pub mod resource;
 pub mod scene;
 pub mod shadow;
@@ -39,6 +40,7 @@ use std::fmt::{self, Display, Formatter};
 
 pub use deferred::{DeferredFrame, DeferredRenderer, DeferredTargets};
 pub use gpu::{Capture, CaptureTarget, GpuContext};
+pub use presentation::{Action, InputState, SurfaceRenderer, TerrainGround};
 pub use resource::{TextureId, TextureResourceManager};
 pub use scene::{TerrainFrame, capture_terrain, render_terrain_into};
 pub use shadow::{CASCADE_COUNT, Cascade, fit_cascades};
@@ -99,6 +101,12 @@ pub enum RenderError {
     /// The camera's view-projection could not be inverted, so no world position could be
     /// reconstructed from depth.
     SingularCamera,
+    /// A window could not provide a presentable surface.
+    CreateSurface(String),
+    /// Acquiring the next surface frame failed for a reason a redraw will not fix.
+    SurfaceLost(String),
+    /// The surface reported no format this renderer can present to.
+    NoSurfaceFormat,
     /// A capture's dimensions or buffer size exceeded the renderer's explicit bounds.
     CaptureTooLarge,
     /// Encoding a capture as a PNG failed.
@@ -150,6 +158,15 @@ impl Display for RenderError {
             Self::EmptyCapture => formatter.write_str("a capture cannot be zero-sized"),
             Self::SingularCamera => {
                 formatter.write_str("the camera view-projection is singular and cannot be inverted")
+            }
+            Self::CreateSurface(message) => {
+                write!(formatter, "could not create a surface: {message}")
+            }
+            Self::SurfaceLost(message) => {
+                write!(formatter, "the surface was lost: {message}")
+            }
+            Self::NoSurfaceFormat => {
+                formatter.write_str("the surface offers no format this renderer can present to")
             }
             Self::CaptureTooLarge => {
                 formatter.write_str("capture size exceeds the renderer's explicit bounds")

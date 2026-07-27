@@ -157,8 +157,13 @@ fn harness(context: &GpuContext) -> Harness {
     let renderer =
         TerrainRenderer::new(context, &terrain, &palette()).expect("build terrain renderer");
     let targets = DeferredTargets::new(context, WIDTH, HEIGHT).expect("allocate targets");
-    let deferred =
-        DeferredRenderer::new(context, &renderer, &targets).expect("build deferred renderer");
+    let deferred = DeferredRenderer::new(
+        context,
+        &renderer,
+        &targets,
+        cic_render::gpu::CAPTURE_FORMAT,
+    )
+    .expect("build deferred renderer");
     let output = CaptureTarget::new(context, WIDTH, HEIGHT).expect("output target");
     Harness {
         terrain,
@@ -370,8 +375,13 @@ fn ambient_occlusion_is_computed_and_varies() {
     .expect("valid flat terrain");
     let flat_renderer = TerrainRenderer::new(context, &flat, &[]).expect("flat renderer");
     let flat_targets = DeferredTargets::new(context, WIDTH, HEIGHT).expect("flat targets");
-    let flat_deferred =
-        DeferredRenderer::new(context, &flat_renderer, &flat_targets).expect("flat deferred");
+    let flat_deferred = DeferredRenderer::new(
+        context,
+        &flat_renderer,
+        &flat_targets,
+        cic_render::gpu::CAPTURE_FORMAT,
+    )
+    .expect("flat deferred");
     let flat_output = CaptureTarget::new(context, WIDTH, HEIGHT).expect("flat output");
     let flat_frame = DeferredFrame::new(pose(&harness.terrain), WIDTH, HEIGHT);
     flat_deferred
@@ -417,6 +427,53 @@ fn a_singular_camera_is_reported_rather_than_rendered() {
         matches!(error, cic_render::RenderError::SingularCamera),
         "got {error:?}"
     );
+}
+
+#[test]
+fn the_chain_renders_into_a_bgra_target() {
+    // What presentation actually hands the composite. Surfaces commonly offer `Bgra8UnormSrgb` rather
+    // than the RGBA the capture path uses, and a pipeline built for the wrong one fails at creation.
+    // This is the cheapest way to verify the output-format plumbing without opening a window.
+    let Some(context) = context() else { return };
+    let terrain = shadowing_terrain();
+    let renderer =
+        TerrainRenderer::new(context, &terrain, &palette()).expect("build terrain renderer");
+    let targets = DeferredTargets::new(context, WIDTH, HEIGHT).expect("allocate targets");
+
+    let format = wgpu::TextureFormat::Bgra8UnormSrgb;
+    let deferred = DeferredRenderer::new(context, &renderer, &targets, format)
+        .expect("a BGRA composite pipeline must build");
+
+    let output = context.device().create_texture(&wgpu::TextureDescriptor {
+        label: Some("bgra output"),
+        size: wgpu::Extent3d {
+            width: WIDTH,
+            height: HEIGHT,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = output.create_view(&wgpu::TextureViewDescriptor::default());
+
+    let frame = DeferredFrame::new(pose(&terrain), WIDTH, HEIGHT);
+    deferred
+        .set_frame(context, &renderer, frame, WIDTH, HEIGHT)
+        .expect("upload frame uniforms");
+    deferred.render(context, &renderer, &targets, &view);
+
+    // Validation errors surface asynchronously, so drain the queue before declaring success.
+    context
+        .device()
+        .poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: Some(std::time::Duration::from_secs(10)),
+        })
+        .expect("the BGRA chain must submit and complete cleanly");
 }
 
 #[test]

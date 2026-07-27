@@ -24,11 +24,16 @@ pub const CAPTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormS
 /// Depth format every pass uses.
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
-/// A device and queue with no surface attached.
+/// A device, its queue, and the adapter they came from.
+///
+/// The adapter is retained deliberately. Surface capabilities are queried *through* an adapter, and
+/// that adapter must be the one whose instance owns the surface — querying with an adapter from a
+/// different instance is not a wrong answer but a hard failure inside the graphics layer.
 #[derive(Debug)]
 pub struct GpuContext {
     device: wgpu::Device,
     queue: wgpu::Queue,
+    adapter: wgpu::Adapter,
     adapter_info: wgpu::AdapterInfo,
 }
 
@@ -65,8 +70,59 @@ impl GpuContext {
         Ok(Self {
             device,
             queue,
+            adapter,
             adapter_info,
         })
+    }
+
+    /// Requests a device for a window, returning the surface alongside it.
+    ///
+    /// The surface is created *before* the adapter, and passed as `compatible_surface`, because an
+    /// adapter chosen without one is not guaranteed to be able to present to it. On a machine with
+    /// both an integrated and a discrete GPU that is not hypothetical: the surface may belong to one
+    /// and the chosen adapter to the other.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RenderError::CreateSurface`] when the window cannot provide a surface, or the same
+    /// adapter and device errors as [`Self::new`].
+    pub async fn for_window(
+        target: impl Into<wgpu::SurfaceTarget<'static>>,
+    ) -> Result<(Self, wgpu::Surface<'static>), RenderError> {
+        let instance = wgpu::Instance::default();
+        let surface = instance
+            .create_surface(target)
+            .map_err(|error| RenderError::CreateSurface(error.to_string()))?;
+        let mut options = wgpu::RequestAdapterOptions {
+            compatible_surface: Some(&surface),
+            ..Default::default()
+        };
+        let adapter = if let Ok(adapter) = instance.request_adapter(&options).await {
+            adapter
+        } else {
+            options.force_fallback_adapter = true;
+            instance
+                .request_adapter(&options)
+                .await
+                .map_err(RenderError::RequestAdapter)?
+        };
+        let adapter_info = adapter.get_info();
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("cic-render presentation device"),
+                ..Default::default()
+            })
+            .await
+            .map_err(RenderError::RequestDevice)?;
+        Ok((
+            Self {
+                device,
+                queue,
+                adapter,
+                adapter_info,
+            },
+            surface,
+        ))
     }
 
     /// Returns the device.
@@ -79,6 +135,15 @@ impl GpuContext {
     #[must_use]
     pub const fn queue(&self) -> &wgpu::Queue {
         &self.queue
+    }
+
+    /// Returns the adapter, for querying surface capabilities.
+    ///
+    /// It must be this one: a surface's capabilities can only be queried through an adapter belonging
+    /// to the same instance that created the surface.
+    #[must_use]
+    pub const fn adapter(&self) -> &wgpu::Adapter {
+        &self.adapter
     }
 
     /// Returns which adapter answered, for diagnostics and for capture comparisons that may differ

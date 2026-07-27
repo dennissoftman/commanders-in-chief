@@ -179,6 +179,49 @@ impl Terrain {
         Some(f32::from(self.elevations[index]) * self.vertical_scale)
     }
 
+    /// Returns the interpolated world-space elevation at a world XY position.
+    ///
+    /// Returns `None` outside the terrain, which callers should treat as "no ground known here"
+    /// rather than as zero — a camera that reads absent ground as sea level dives through the map at
+    /// its edges.
+    ///
+    /// Bilinear rather than nearest. The camera holds a height above the ground beneath it, and
+    /// nearest sampling makes that height jump by a whole quantisation step every time the focus
+    /// crosses a sample boundary, which reads as the camera ticking rather than gliding.
+    #[must_use]
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    pub fn elevation_at_world(&self, x: f32, y: f32) -> Option<f32> {
+        if !x.is_finite() || !y.is_finite() || self.horizontal_scale <= 0.0 {
+            return None;
+        }
+        let [extent_x, extent_y] = self.world_extent();
+        if x < 0.0 || y < 0.0 || x > extent_x || y > extent_y {
+            return None;
+        }
+        // Sample-space coordinates. Both are inside the grid by the bounds check above, and the
+        // dimension limit keeps them far inside exact f32 integer range.
+        let sample_x = x / self.horizontal_scale;
+        let sample_y = y / self.horizontal_scale;
+        let x0 = (sample_x.floor() as u32).min(self.width - 1);
+        let y0 = (sample_y.floor() as u32).min(self.height - 1);
+        let x1 = (x0 + 1).min(self.width - 1);
+        let y1 = (y0 + 1).min(self.height - 1);
+        let fx = sample_x - x0 as f32;
+        let fy = sample_y - y0 as f32;
+
+        let at = |x: u32, y: u32| {
+            let index = y as usize * self.width as usize + x as usize;
+            f32::from(self.elevations[index])
+        };
+        let top = at(x0, y0) * (1.0 - fx) + at(x1, y0) * fx;
+        let bottom = at(x0, y1) * (1.0 - fx) + at(x1, y1) * fx;
+        Some((top * (1.0 - fy) + bottom * fy) * self.vertical_scale)
+    }
+
     /// Returns the world-space extent as `[x, y]`.
     ///
     /// One fewer than the sample count per axis: `n` samples span `n - 1` intervals.
@@ -593,8 +636,9 @@ mod tests {
     // (0.0, 1.0, 10.0, 0.9, ...), so exact comparison is the correct assertion -- an epsilon would
     // weaken these tests rather than make them robust.
     #![allow(clippy::float_cmp)]
-    // Fixture sizes are small, known constants, so the width casts below cannot truncate.
-    #![allow(clippy::cast_possible_truncation)]
+    // Fixture sizes are small, known constants, so the width casts below cannot truncate, and sample
+    // indices are bounded by the dimension limit at 8,192, far inside exact f32 range.
+    #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
     use super::{
         MAGIC, Terrain, TerrainError, TerrainLayer, TerrainLimits, VERSION, decode_terrain,
     };
@@ -654,6 +698,52 @@ mod tests {
         assert_eq!(terrain.elevation_at(0, 3), None, "y is out of range");
         // 4 samples span 3 intervals of 10, 3 samples span 2.
         assert_eq!(terrain.world_extent(), [30.0, 20.0]);
+    }
+
+    #[test]
+    fn interpolates_world_elevation_between_samples() {
+        // Spacing 10, vertical 0.5, elevations 0..11 row-major over a 4x3 grid.
+        let terrain = sample_terrain();
+        // Exactly on sample (1, 0): elevation 1, world 0.5.
+        assert!((terrain.elevation_at_world(10.0, 0.0).expect("in range") - 0.5).abs() < 1.0e-4);
+        // Halfway between samples (0, 0) and (1, 0): elevations 0 and 1, so 0.5 steps -> 0.25 world.
+        assert!((terrain.elevation_at_world(5.0, 0.0).expect("in range") - 0.25).abs() < 1.0e-4);
+        // Halfway along Y between rows 0 and 1 at x = 0: elevations 0 and 4 -> 2 steps -> 1.0 world.
+        assert!((terrain.elevation_at_world(0.0, 5.0).expect("in range") - 1.0).abs() < 1.0e-4);
+    }
+
+    #[test]
+    fn world_elevation_is_absent_outside_the_terrain() {
+        // Absent rather than zero: a camera that reads missing ground as sea level dives through the
+        // map at its edges.
+        let terrain = sample_terrain();
+        let [extent_x, extent_y] = terrain.world_extent();
+        assert!(terrain.elevation_at_world(-0.1, 0.0).is_none());
+        assert!(terrain.elevation_at_world(0.0, -0.1).is_none());
+        assert!(terrain.elevation_at_world(extent_x + 0.1, 0.0).is_none());
+        assert!(terrain.elevation_at_world(0.0, extent_y + 0.1).is_none());
+        assert!(terrain.elevation_at_world(f32::NAN, 0.0).is_none());
+        // The far corner is inclusive.
+        assert!(terrain.elevation_at_world(extent_x, extent_y).is_some());
+    }
+
+    #[test]
+    fn world_elevation_agrees_with_sample_elevation_on_the_grid() {
+        let terrain = sample_terrain();
+        for y in 0..terrain.height() {
+            for x in 0..terrain.width() {
+                let by_sample = terrain.elevation_at(x, y).expect("in range");
+                let world_x = x as f32 * terrain.horizontal_scale();
+                let world_y = y as f32 * terrain.horizontal_scale();
+                let by_world = terrain
+                    .elevation_at_world(world_x, world_y)
+                    .expect("in range");
+                assert!(
+                    (by_sample - by_world).abs() < 1.0e-3,
+                    "sample ({x}, {y}): {by_sample} against {by_world}"
+                );
+            }
+        }
     }
 
     #[test]

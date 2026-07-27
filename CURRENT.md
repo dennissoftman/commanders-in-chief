@@ -11,6 +11,9 @@ normals computed in the vertex shader, so terrain deformation and route grading 
 rather than a remesh. Captures resolve to PNG and are asserted on luminance spread and layer presence,
 not just on being non-empty.
 
+Windowed presentation works: `cargo run -p cic-render --example terrain_viewer --release` opens a
+window and flies the camera over generated terrain, or over a `.cicmap` given as an argument.
+
 ## Next verified step
 
 Wire the deferred chain: G-buffer, cascaded shadows, and ambient occlusion. The shaders for all three
@@ -23,8 +26,7 @@ After that: the model pipeline against imported glTF, then water, then windowed 
 ## Gate status
 
 Formatting, strict lints (`clippy::all` and `clippy::pedantic` as errors), and the full test suite all
-pass on the pinned toolchain. **121 tests across five crates**, including five that render on a real
-device.
+pass on the pinned toolchain. **154 tests across five crates**, including twelve that render on a real device.
 
 The render tests skip rather than fail when no adapter is available, so a machine or CI runner without
 a GPU or software rasteriser reports honestly instead of red.

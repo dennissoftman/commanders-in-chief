@@ -42,6 +42,10 @@ Draw a map: terrain, water, models, lighting, and shadows, in a window and headl
   invariance, texel-grid snapping against shimmer, and a light-axis reach sized from the scene's
   height and the sun's elevation.
 
+- **Windowed presentation**: a surface-aware device, sRGB format selection, resize that rebuilds
+  everything sized to the surface, and an input-to-intent mapping that is testable without a window.
+  The `terrain_viewer` example ties it together.
+
 ## Remaining
 
 - Model pipeline against imported glTF geometry and PBR materials.
@@ -85,6 +89,16 @@ on one adapter crashed the driver outright — an access violation rather than a
 overhead one is not one: moving the sun changes every surface's incidence, so the two frames differ even
 with the shadow pass deleted. Collapsing `shadow_distance` instead holds the light, camera, geometry, and
 occlusion identical and puts every receiver outside all four cascades.
+
+**Surface capabilities must be queried through the adapter that owns the surface.** Reconstructing an
+adapter from a second `wgpu::Instance` to ask about a surface belonging to the first is not a wrong
+answer but a hard failure inside the graphics layer. `GpuContext` retains its adapter for this reason.
+No headless test could have caught it, because none of them create a surface — it took running the app.
+
+**Presentation is the same chain pointed at a swapchain.** The only differences are the output format,
+which a surface commonly reports as BGRA rather than RGBA, and that a resize reallocates every
+intermediate target — which invalidates every bind group holding a view of one, so the chain is rebuilt
+rather than just the surface reconfigured.
 
 **A shadow fixture has to be shaped for the sun it is lit by.** Two separate versions of the test
 measured nothing: one placed the sun so every shadow fell behind its own caster and out of frame; the

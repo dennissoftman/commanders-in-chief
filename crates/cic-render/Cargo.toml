@@ -22,6 +22,8 @@ wgpu = { version = "30", default-features = false, features = [
 # The same WGSL front end `wgpu` uses, so validating with it means the shaders really compile.
 naga = { version = "27", features = ["wgsl-in"] }
 pollster = "0.4"
+# Only the viewer example opens a window, so the windowing library stays out of the library itself.
+winit = "0.30"
 # The capture tests construct encoders directly, so they need the graphics API in scope.
 wgpu = { version = "30", default-features = false, features = ["std", "dx12", "metal", "vulkan", "wgsl"] }
 

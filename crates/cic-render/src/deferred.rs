@@ -25,7 +25,7 @@
 use cic_camera::CameraPose;
 
 use crate::RenderError;
-use crate::gpu::{CAPTURE_FORMAT, DEPTH_FORMAT, GpuContext};
+use crate::gpu::{DEPTH_FORMAT, GpuContext};
 use crate::shadow::{CASCADE_COUNT, CASCADE_RESOLUTION, Cascade, fit_cascades};
 use crate::terrain::{DirectionalLight, TerrainRenderer};
 use crate::view::{Projection, invert, look_at, multiply, perspective};
@@ -212,6 +212,11 @@ pub struct DeferredRenderer {
 impl DeferredRenderer {
     /// Builds every pipeline and bind group for one terrain and target set.
     ///
+    /// `output_format` is the format of whatever the composite writes into — a capture target, or a
+    /// surface's own format, which is commonly BGRA rather than RGBA. A pipeline built for the wrong
+    /// one fails at creation rather than rendering something subtly wrong, which is why it is a
+    /// parameter and not a constant.
+    ///
     /// # Errors
     ///
     /// Currently infallible, but returns `Result` so adding a fallible resource later is not a
@@ -220,6 +225,7 @@ impl DeferredRenderer {
         context: &GpuContext,
         terrain: &TerrainRenderer,
         targets: &DeferredTargets,
+        output_format: wgpu::TextureFormat,
     ) -> Result<Self, RenderError> {
         let device = context.device();
         let scene_uniform = uniform_buffer(device, "cic-render scene camera", SCENE_UNIFORM_BYTES);
@@ -252,6 +258,7 @@ impl DeferredRenderer {
                 &scene_uniform,
                 &shadow_uniform,
                 &deferred_shader,
+                output_format,
             ),
             scene_uniform,
             shadow_uniform,
@@ -659,6 +666,7 @@ fn build_lighting(
     scene_uniform: &wgpu::Buffer,
     shadow_uniform: &wgpu::Buffer,
     deferred_shader: &wgpu::ShaderModule,
+    output_format: wgpu::TextureFormat,
 ) -> LightingStage {
     let comparison_sampler = build_shadow_sampler(device);
     let scene_sampler = build_scene_sampler(device);
@@ -749,7 +757,7 @@ fn build_lighting(
             deferred_shader,
             "composite_fragment",
             &[&layout, &composite_layout],
-            CAPTURE_FORMAT,
+            output_format,
         ),
         group,
         composite_group,
