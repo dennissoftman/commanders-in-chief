@@ -1,0 +1,11 @@
+target/
+fuzz/artifacts/
+fuzz/corpus/
+*.profraw
+*.tmp
+# Renderer captures written into the working directory when no output path is given.
+*.png
+*.ppm
+!docs/**/*.png
+.idea/
+.vscode/

@@ -1,0 +1,17 @@
+[package]
+name = "cic-render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+sha2 = "0.10"
+
+[dev-dependencies]
+# The same WGSL front end `wgpu` uses, so validating with it means the shaders really compile.
+# A dev-dependency because nothing at runtime needs to parse WGSL -- `wgpu` does that itself.
+naga = { version = "27", features = ["wgsl-in"] }
+
+[lints]
+workspace = true

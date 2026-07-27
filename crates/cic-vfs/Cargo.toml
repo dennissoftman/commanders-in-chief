@@ -1,0 +1,13 @@
+[package]
+name = "cic-vfs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+cic-core.workspace = true
+flate2.workspace = true
+
+[lints]
+workspace = true

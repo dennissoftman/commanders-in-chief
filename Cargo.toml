@@ -1,0 +1,54 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/cic-assets",
+    "crates/cic-camera",
+    "crates/cic-core",
+    "crates/cic-render",
+    "crates/cic-vfs",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+publish = false
+
+# No `license` field yet. This is a deliberate open decision, not an oversight -- nothing in
+# this tree constrains the choice. See LICENSING.md before settling it.
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"
+
+[workspace.dependencies]
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+gltf = { version = "1", default-features = false, features = ["import", "names", "utils", "KHR_materials_emissive_strength"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+cic-assets = { path = "crates/cic-assets" }
+cic-camera = { path = "crates/cic-camera" }
+cic-core = { path = "crates/cic-core" }
+cic-vfs = { path = "crates/cic-vfs" }
+
+# Dependencies are optimized even in the dev profile, because an unoptimized renderer is not slow
+# from any one hot spot: the per-frame cost is spread across `wgpu`'s validation and
+# command-encoding path, where every small function is a real call. That lands the frame over the
+# vsync budget, and a missed vblank does not degrade smoothly -- the presented rate snaps to the
+# next divisor of the refresh rate, which is why a debug build reads as a hard 30 Hz rather than as
+# gradual sluggishness. Dependencies are the right place to spend the compile time: they build once
+# and are never stepped through.
+#
+# The workspace's own crates stay unoptimized, so a one-file change still rebuilds quickly.
+#
+# Debug assertions and overflow checks are untouched in both, so this changes how fast the debug
+# build runs and not what it verifies.
+[profile.dev]
+opt-level = 0
+
+[profile.dev.package."*"]
+opt-level = 3
