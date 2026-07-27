@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generates NOTICES.md from the workspace's resolved dependency graph.
 
-    python tools/generate-notices.py
+    python3 tools/generate-notices.py
 
 Permissive licences require their notices to accompany a distributed binary, so this file is an
 obligation rather than documentation. Generated rather than maintained by hand: a dependency bump
@@ -29,7 +29,7 @@ listing exists because those licences require their notices to accompany a binar
 **Generated — do not edit by hand.** Regenerate with:
 
 ```bash
-python tools/generate-notices.py
+python3 tools/generate-notices.py
 ```
 
 Every entry is permissive. If a regeneration ever introduces a copyleft licence, that is a decision to

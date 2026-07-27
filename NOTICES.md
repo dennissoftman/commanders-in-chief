@@ -6,7 +6,7 @@ listing exists because those licences require their notices to accompany a binar
 **Generated — do not edit by hand.** Regenerate with:
 
 ```bash
-python tools/generate-notices.py
+python3 tools/generate-notices.py
 ```
 
 Every entry is permissive. If a regeneration ever introduces a copyleft licence, that is a decision to

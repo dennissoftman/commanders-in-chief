@@ -51,5 +51,5 @@ jobs:
       # failing check instead of something noticed at release.
       - name: notices are in step with the lockfile
         run: |
-          python tools/generate-notices.py
+          python3 tools/generate-notices.py
           git diff --exit-code -- NOTICES.md
