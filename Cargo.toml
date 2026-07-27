@@ -13,9 +13,10 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.93"
 publish = false
-
-# No `license` field yet. This is a deliberate open decision, not an oversight -- nothing in
-# this tree constrains the choice. See LICENSING.md before settling it.
+# Dual-licensed, which is the Rust ecosystem's convention: MIT for maximum compatibility, Apache-2.0
+# for its explicit patent grant. A permissive licence was only available here because a derivation was
+# removed file by file -- see LICENSING.md, which records that work so nobody undoes it by accident.
+license = "MIT OR Apache-2.0"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

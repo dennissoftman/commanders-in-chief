@@ -62,7 +62,18 @@ Two documents that later work is measured against, both of them load-bearing rat
 
 `unsafe_code` is forbidden at workspace scope. Strict lints are errors in CI.
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Commits need a DCO `Signed-off-by` line (`git commit -s`), and
+there is one rule that matters more than the rest: **do not port code, data, or constants from another
+game.** The permissive licence below exists only because such a derivation was removed, and a single
+ported constant table would undo it.
+
 ## Licence
 
-Not yet chosen. See [LICENSING.md](LICENSING.md) — this is a deliberate open decision, not an
-oversight, and it needs settling before the first public release.
+Dual-licensed **MIT OR Apache-2.0**, at your option — see [LICENSE-MIT](LICENSE-MIT) and
+[LICENSE-APACHE](LICENSE-APACHE).
+
+Third-party dependency notices are in [NOTICES.md](NOTICES.md); all 281 are permissive.
+[LICENSING.md](LICENSING.md) records the provenance audit that made a permissive licence possible, and
+the two files still to be written from scratch because of it.
