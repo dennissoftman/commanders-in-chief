@@ -21,8 +21,8 @@ pub mod terrain;
 mod testing;
 
 pub use model::{
-    Model, ModelError, ModelImage, ModelLimits, ModelMaterial, ModelPrimitive, ModelVertex,
-    import_model,
+    AlphaMode, DEFAULT_ALPHA_CUTOFF, Model, ModelError, ModelImage, ModelLimits, ModelMaterial,
+    ModelPrimitive, ModelVertex, import_model,
 };
 pub use package::{MapPackage, PackageError, PackageLimits};
 pub use scenario::{
@@ -36,8 +36,11 @@ mod model_tests {
     // (0.0, 1.0, 10.0, 0.9, ...), so exact comparison is the correct assertion -- an epsilon would
     // weaken these tests rather than make them robust.
     #![allow(clippy::float_cmp)]
-    use crate::model::{ModelError, ModelLimits, import_model};
-    use crate::testing::{TEXEL_COLOURS, TriangleOptions, textured_triangle_glb, triangle_glb};
+    use crate::model::{AlphaMode, ModelError, ModelLimits, import_model};
+    use crate::testing::{
+        TEXEL_COLOURS, TriangleOptions, foliage_triangle_glb, normal_mapped_triangle_glb,
+        textured_triangle_glb, triangle_glb,
+    };
 
     #[test]
     fn imports_a_triangle_with_its_attributes_and_material() {
@@ -63,12 +66,97 @@ mod model_tests {
         assert_eq!(material.base_color, [0.8, 0.7, 0.6, 1.0]);
         assert_eq!(material.metallic, 0.0);
         assert_eq!(material.roughness, 0.9);
-        assert!(!material.blended);
+        assert_eq!(material.alpha_mode, AlphaMode::Opaque);
         assert_eq!(material.base_color_texture, None);
+        assert_eq!(material.normal_texture, None);
+        assert_eq!(material.metallic_roughness_texture, None);
+        // Absent means one, not zero: the extension multiplies the emissive factor, so a document
+        // without it has to read exactly as it did before the extension existed.
+        assert_eq!(material.emissive_strength, 1.0);
+        assert_eq!(material.emissive, [0.0, 0.0, 0.0]);
+        assert!(!material.double_sided);
         assert!(
             model.images.is_empty(),
             "a fixture with no texture must carry no image"
         );
+    }
+
+    #[test]
+    fn reads_the_pbr_map_set_and_its_scales() {
+        // Every slot at once, because the failure this guards against is a slot resolved to the wrong
+        // image: they are all indices into one list, and a shift by one puts a roughness map where a
+        // normal map belongs and nothing reports it.
+        let glb = normal_mapped_triangle_glb();
+        let model = import_model(&glb, ModelLimits::default()).expect("import");
+        let material = &model.materials[0];
+        assert_eq!(material.base_color_texture, Some(0));
+        assert_eq!(material.normal_texture, Some(1));
+        assert_eq!(material.metallic_roughness_texture, Some(2));
+        assert_eq!(
+            material.occlusion_texture,
+            Some(2),
+            "shared with the MR map"
+        );
+        assert_eq!(material.normal_scale, 0.75);
+        assert_eq!(material.occlusion_strength, 0.5);
+        assert_eq!(model.images.len(), 3);
+    }
+
+    #[test]
+    fn derives_a_tangent_frame_when_a_normal_mapped_primitive_omits_one() {
+        // glTF asks for TANGENT on a normal-mapped primitive and exporters routinely omit it, so this
+        // is the ordinary path rather than an edge case. The fixture's UVs increase with +X, so the
+        // derived tangent must point along +X -- if the 2x2 solve were transposed it would come out
+        // along +Y and every normal map would be rotated a quarter turn.
+        let glb = normal_mapped_triangle_glb();
+        let model = import_model(&glb, ModelLimits::default()).expect("import");
+        for vertex in &model.primitives[0].vertices {
+            assert!(
+                (vertex.tangent[0] - 1.0).abs() < 1.0e-5,
+                "expected +X, got {:?}",
+                vertex.tangent
+            );
+            assert_eq!(vertex.tangent[3], 1.0, "the fixture's UVs are right-handed");
+            // Orthogonal to the normal, which is what Gram-Schmidt is for.
+            let along = vertex.tangent[0] * vertex.normal[0]
+                + vertex.tangent[1] * vertex.normal[1]
+                + vertex.tangent[2] * vertex.normal[2];
+            assert!(
+                along.abs() < 1.0e-5,
+                "tangent must lie in the tangent plane"
+            );
+        }
+    }
+
+    #[test]
+    fn a_primitive_with_no_normal_map_is_not_charged_for_a_tangent_frame() {
+        // The derivation is the most expensive thing in the import, and nothing reads a tangent
+        // without a normal map. The default is still a unit vector rather than a zero, so a renderer
+        // that builds a basis from it unconditionally gets a valid one.
+        let glb = triangle_glb(TriangleOptions::default());
+        let model = import_model(&glb, ModelLimits::default()).expect("import");
+        for vertex in &model.primitives[0].vertices {
+            assert_eq!(vertex.tangent, [0.0, 0.0, 0.0, 1.0]);
+        }
+    }
+
+    #[test]
+    fn reads_a_masked_material_with_its_cutoff() {
+        // The distinction a boolean could not carry. Masked geometry can be drawn in a G-buffer and in
+        // every shadow cascade by discarding fragments; blended geometry cannot, because a G-buffer
+        // pixel holds one material.
+        let glb = foliage_triangle_glb();
+        let model = import_model(&glb, ModelLimits::default()).expect("import");
+        let material = &model.materials[0];
+        assert_eq!(material.alpha_mode, AlphaMode::Masked { cutoff: 0.4 });
+        assert_eq!(material.alpha_mode.cutoff(), Some(0.4));
+        assert!(material.double_sided, "a leaf card is seen from both faces");
+    }
+
+    #[test]
+    fn an_opaque_material_has_no_cutoff_and_a_blended_one_reports_the_default() {
+        assert_eq!(AlphaMode::Opaque.cutoff(), None);
+        assert_eq!(AlphaMode::Blended.cutoff(), Some(0.5));
     }
 
     #[test]

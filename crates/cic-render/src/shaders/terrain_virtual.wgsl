@@ -1,183 +1,179 @@
-struct Material {
-    parameters: vec4<u32>,
-    u: vec4<f32>,
-    v: vec4<f32>,
+// Composes one terrain page: the blended surface for a rectangle of cells, baked into a physical page of
+// the virtual-texture cache.
+//
+// # Why this file was rewritten rather than wired up
+//
+// It previously composed pages from a *tile atlas* terrain model — per-cell material slots, blend masks
+// with orientation and diagonal codes, a 32-pixel edge-tile sheet, a macro lattice. This project's terrain
+// is a heightfield plus per-layer weight textures and has none of those things, so there was nothing to
+// connect it to: every input it declared was a resource the engine does not build. The audit in
+// LICENSING.md clears the old file of derivation and it was still written for a terrain this engine does
+// not have. See that file's note on `terrain_virtual.wgsl`.
+//
+// # What a composed page is for
+//
+// The G-buffer's `surface()` blends up to eight layers per fragment, every fragment, every frame: eight
+// weight samples and eight world-space albedo samples, of which all but two or three are usually multiplied
+// by a zero weight. That work is *the same every frame* for a given piece of ground, because it depends only
+// on the terrain data. Baking it into a page moves the cost from per-fragment-per-frame to per-page-once,
+// and the residency bookkeeping in `terrain_virtual.rs` decides which pages are worth holding.
+//
+// The blend below therefore has to agree with `surface()` in `terrain_gbuffer.wgsl`. Tests read a composed
+// page back and check the properties that decide whether the cache is usable — that a page over known ground
+// holds that ground's surface, and that a page's border matches the interior of the page beside it — because
+// those are the two things a comment cannot hold and a rendered comparison cannot isolate.
+//
+// # Why the page has a border
+//
+// A page is sampled with filtering, and a bilinear tap at a page's edge needs texels from beyond it. Without
+// a margin those taps clamp, which puts a visible seam along every page boundary — and page boundaries move
+// as the camera does, so the seams would crawl. The border is composed from the neighbouring cells' real
+// data, so a tap across the edge reads what it would have read from the adjacent page.
+
+// Must match `VIRTUAL_PAGE_BORDER` in `terrain_virtual.rs`; a test pins the pair.
+const PAGE_BORDER: u32 = 4u;
+
+const MAX_LAYERS: u32 = 8u;
+
+// A prefix of the terrain uniform block. This pass binds the terrain's own buffer, so the fields it reads
+// cannot disagree with what the G-buffer reads — the same trick `terrain_forward.wgsl` uses, and sound for
+// the same reason: everything not declared here is appended after it. See `UNIFORM_BYTES` in `terrain.rs`.
+struct Uniforms {
+    view_projection: mat4x4<f32>,
+    camera_position: vec4<f32>,
+    light_direction: vec4<f32>,
+    light_ambient: vec4<f32>,
+    light_diffuse: vec4<f32>,
+    // x horizontal scale, y world units per elevation step, z width, w height (in samples).
+    terrain: vec4<f32>,
+    // x layer count, yzw the chunk decomposition.
+    layers: vec4<u32>,
+    // Per layer: rgb colour multiplier, w roughness.
+    palette: array<vec4<f32>, 8>,
+    // Per layer: x world units per albedo repeat, yzw unused.
+    detail: array<vec4<f32>, 8>,
 }
 
-struct Cell {
-    base: Material,
-    primary: Material,
-    extra: Material,
-    flags: vec4<u32>,
-}
-
+/// One page to compose: `page` holds the cell origin in `xy`, the cells the page spans in `z`, and the
+/// physical layer to write in `w`. `detail` holds the page's texels per cell in `x`.
 struct PageJob {
     page: vec4<u32>,
     detail: vec4<u32>,
 }
 
-struct VirtualConfig {
-    cell_source: vec4<u32>,
-    cache: vec4<u32>,
+@group(0) @binding(0) var<uniform> uniforms: Uniforms;
+@group(0) @binding(1) var weight_texture: texture_2d_array<f32>;
+@group(0) @binding(2) var weight_sampler: sampler;
+@group(0) @binding(3) var albedo_texture: texture_2d_array<f32>;
+@group(0) @binding(4) var albedo_sampler: sampler;
+@group(0) @binding(5) var<storage, read> jobs: array<PageJob>;
+// `rgba8unorm` because WebGPU has no sRGB *storage* format. That is not merely a format substitution: the
+// blend below is in linear light, and eight bits of linear is visibly banded in the darks — which is the
+// entire reason sRGB storage exists. So the pass encodes on write and whoever reads a page decodes, moving
+// the transfer function from the sampler into the two shaders rather than dropping it.
+@group(0) @binding(6) var composed: texture_storage_2d_array<rgba8unorm, write>;
+
+fn sample_count() -> vec2<f32> {
+    return vec2<f32>(uniforms.terrain.z, uniforms.terrain.w);
 }
 
-@group(0) @binding(0) var source_tiles: texture_2d<f32>;
-@group(0) @binding(1) var edge_tiles: texture_2d<f32>;
-@group(0) @binding(2) var macro_lattice: texture_2d<u32>;
-@group(0) @binding(3) var<storage, read> cells: array<Cell>;
-@group(0) @binding(4) var<storage, read> compose_jobs: array<PageJob>;
-@group(0) @binding(5) var composed_color: texture_storage_2d_array<rgba8unorm, write>;
-@group(0) @binding(6) var composed_edge: texture_storage_2d_array<rgba8unorm, write>;
-@group(0) @binding(7) var<uniform> config: VirtualConfig;
-
-fn material_sample(material: Material, local_top: vec2<f32>) -> vec4<f32> {
-    let top = vec2<f32>(
-        mix(material.u.w, material.u.z, local_top.x),
-        mix(material.v.w, material.v.z, local_top.x),
-    );
-    let bottom = vec2<f32>(
-        mix(material.u.x, material.u.y, local_top.x),
-        mix(material.v.x, material.v.y, local_top.x),
-    );
-    let uv = clamp(mix(top, bottom, local_top.y), vec2<f32>(0.0), vec2<f32>(1.0));
-    let class_width = material.parameters.y;
-    let class_extent = class_width * 64u;
-    let pixel = vec2<u32>(round(uv * f32(class_extent - 1u)));
-    let tile_from_top = pixel / 64u;
-    let tile_from_bottom = vec2<u32>(tile_from_top.x, class_width - 1u - tile_from_top.y);
-    let slot = material.parameters.x + tile_from_bottom.y * class_width + tile_from_bottom.x;
-    let atlas_tile = vec2<u32>(slot % config.cell_source.z, slot / config.cell_source.z);
-    let atlas_pixel = atlas_tile * 64u + pixel % 64u;
-    return textureLoad(source_tiles, vec2<i32>(atlas_pixel), 0);
+/// The mip level to read a layer's albedo at, for a page of the given texel density.
+///
+/// A compute shader has no screen-space derivatives, so the level a fragment shader gets for free has to be
+/// derived here — and deriving it is not a workaround but the more correct answer, because a page's density
+/// is a property of the page rather than of whoever looks at it. One page texel covers
+/// `horizontal_scale / pixels_per_cell` world units; one albedo texel covers `detail_scale / albedo_width`.
+/// The base-two logarithm of the ratio is the level at which one albedo texel matches one page texel, which
+/// is exactly the point past which sampling level zero would alias.
+///
+/// Floored at zero: a page denser than its albedo wants magnification, and there is no level above the base
+/// to magnify from.
+fn albedo_level(index: u32, pixels_per_cell: f32) -> f32 {
+    let albedo_width = f32(max(textureDimensions(albedo_texture).x, 1u));
+    let page_texel_world = uniforms.terrain.x / pixels_per_cell;
+    let albedo_texel_world = max(uniforms.detail[index].x, 0.0001) / albedo_width;
+    return max(log2(page_texel_world / albedo_texel_world), 0.0);
 }
 
-fn mask_alpha(code: u32, local_top: vec2<f32>) -> f32 {
-    if ((code & 1u) == 0u) { return 0.0; }
-    let orientation = (code >> 1u) & 3u;
-    let inverted = ((code >> 3u) & 1u) != 0u;
-    let long_diagonal = ((code >> 4u) & 1u) != 0u;
-    var h = local_top.x * 63.0;
-    var v = (1.0 - local_top.y) * 63.0;
-    var alpha = 255.0;
-    if (orientation == 0u) {
-        if (!inverted) { h = 63.0 - h; }
-        alpha = alpha * h / 63.0;
-    } else if (orientation == 1u) {
-        if (!inverted) { v = 63.0 - v; }
-        alpha = alpha * v / 63.0;
-    } else if (orientation == 2u) {
-        h = 63.0 - h;
-        if (!inverted) { v = 63.0 - v; }
-        v += h;
-        if (long_diagonal) { v -= 64.0; }
-        alpha = alpha * v / 63.0;
-    } else {
-        if (!inverted) { v = 63.0 - v; }
-        v += h;
-        if (long_diagonal) { v -= 64.0; }
-        alpha = alpha * v / 63.0;
+/// The blended layer surface at a normalized terrain coordinate: albedo in `xyz`, roughness in `w`.
+///
+/// The same blend as `surface()` in `terrain_gbuffer.wgsl`, including the fallback for a coordinate where
+/// every weight is zero. Every layer is sampled regardless of its weight for the reason stated there, and
+/// the albedo coordinate is world-space rather than `uv` so a repeat is a real size.
+///
+/// The one difference is the mip level, and it is a difference in kind rather than a discrepancy: see
+/// `albedo_level`.
+fn surface(uv: vec2<f32>, pixels_per_cell: f32) -> vec4<f32> {
+    let count = min(uniforms.layers.x, MAX_LAYERS);
+    let cells = max(sample_count() - vec2<f32>(1.0), vec2<f32>(1.0));
+    let world = uv * cells * uniforms.terrain.x;
+    var accumulated = vec3<f32>(0.0);
+    var roughness = 0.0;
+    var total = 0.0;
+    for (var index = 0u; index < count; index = index + 1u) {
+        let weight = textureSampleLevel(weight_texture, weight_sampler, uv, i32(index), 0.0).r;
+        let tile = world / uniforms.detail[index].x;
+        let level = albedo_level(index, pixels_per_cell);
+        let detail = textureSampleLevel(albedo_texture, albedo_sampler, tile, i32(index), level).rgb;
+        accumulated = accumulated + uniforms.palette[index].rgb * detail * weight;
+        roughness = roughness + uniforms.palette[index].w * weight;
+        total = total + weight;
     }
-    return (255.0 - clamp(alpha, 0.0, 255.0)) / 255.0;
+    if (total <= 0.0001) {
+        return vec4<f32>(0.32, 0.30, 0.27, 0.88);
+    }
+    return vec4<f32>(accumulated / total, roughness / total);
 }
 
-fn edge_sample(slot: u32, local_top: vec2<f32>) -> vec4<f32> {
-    let atlas_tile = vec2<u32>(slot % config.cell_source.w, slot / config.cell_source.w);
-    let pixel = vec2<u32>(round(clamp(local_top, vec2<f32>(0.0), vec2<f32>(1.0)) * 31.0));
-    return textureLoad(edge_tiles, vec2<i32>(atlas_tile * 32u + pixel), 0);
-}
-
-fn srgb_to_linear(value: vec3<f32>) -> vec3<f32> {
-    let low = value / 12.92;
-    let high = pow((value + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
-    return select(high, low, value <= vec3<f32>(0.04045));
-}
-
-fn macro_factor(source_position: vec2<f32>) -> f32 {
-    if (config.cache.x == 0u) { return 1.0; }
-    let lattice_position = max(source_position, vec2<f32>(0.0)) / 8.0;
-    let lattice = vec2<u32>(floor(lattice_position));
-    let fraction = fract(lattice_position);
-    let smoothed = fraction * fraction * (vec2<f32>(3.0) - 2.0 * fraction);
-    let top = mix(
-        f32(textureLoad(macro_lattice, vec2<i32>(lattice), 0).x),
-        f32(textureLoad(macro_lattice, vec2<i32>(lattice + vec2<u32>(1u, 0u)), 0).x),
-        smoothed.x,
+/// sRGB encoding of a linear value, for the storage write.
+///
+/// The direction is worth stating because getting it backwards is invisible in a unit test and obvious in a
+/// frame: the layer albedo is sampled through an sRGB texture, so `surface` returns *linear* light, and this
+/// is the encode on the way into an eight-bit store rather than a decode of something already encoded.
+fn srgb_from_linear(value: vec3<f32>) -> vec3<f32> {
+    let low = value * 12.92;
+    let high = 1.055 * pow(max(value, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.4)) - 0.055;
+    return clamp(
+        select(high, low, value <= vec3<f32>(0.0031308)),
+        vec3<f32>(0.0),
+        vec3<f32>(1.0),
     );
-    let bottom = mix(
-        f32(textureLoad(macro_lattice, vec2<i32>(lattice + vec2<u32>(0u, 1u)), 0).x),
-        f32(textureLoad(macro_lattice, vec2<i32>(lattice + vec2<u32>(1u, 1u)), 0).x),
-        smoothed.x,
-    );
-    return (242.0 + mix(top, bottom, smoothed.y) * 28.0 / 255.0) / 256.0;
 }
 
+// One workgroup per 8x8 block of page texels, and one dispatch depth per job. `z` indexes the job rather
+// than the physical layer, because the jobs are the compacted list of pages that actually need composing —
+// dispatching over the whole cache would be up to 256 layers of no work.
 @compute @workgroup_size(8, 8, 1)
 fn compose_page(@builtin(global_invocation_id) invocation: vec3<u32>) {
-    if (invocation.x >= config.cache.y || invocation.y >= config.cache.y) { return; }
-    let job = compose_jobs[invocation.z];
-    let pixels_per_cell = f32(job.detail.x);
-    let page_from_top = (vec2<f32>(invocation.xy) - f32(config.cache.z) + vec2<f32>(0.5)) / pixels_per_cell;
-    let source_position = vec2<f32>(
-        f32(job.page.x) + page_from_top.x,
-        f32(job.page.y + job.page.z) - page_from_top.y,
-    );
-    let bounded = clamp(
-        source_position,
-        vec2<f32>(0.0001),
-        vec2<f32>(config.cell_source.xy) - vec2<f32>(0.0001),
-    );
-    let cell_position = vec2<u32>(floor(bounded));
-    let local_top = vec2<f32>(fract(bounded.x), 1.0 - fract(bounded.y));
-    let cell = cells[cell_position.y * config.cell_source.x + cell_position.x];
-    var color = material_sample(cell.base, local_top);
-    if (cell.primary.parameters.z != 0u) {
-        let layer = material_sample(cell.primary, local_top);
-        color = mix(color, layer, mask_alpha(cell.flags.x, local_top));
+    let extent = textureDimensions(composed);
+    if (invocation.x >= extent.x || invocation.y >= extent.y) {
+        return;
     }
-    if (cell.extra.parameters.z != 0u) {
-        let layer = material_sample(cell.extra, local_top);
-        color = mix(color, layer, mask_alpha(cell.flags.y, local_top));
-    }
-    color = vec4<f32>(color.rgb * macro_factor(bounded), color.a);
-    color = vec4<f32>(srgb_to_linear(clamp(color.rgb, vec3<f32>(0.0), vec3<f32>(1.0))), 1.0);
-    var edge = edge_sample(cell.flags.z, local_top);
-    edge = vec4<f32>(srgb_to_linear(edge.rgb), edge.a);
-    textureStore(composed_color, vec2<i32>(invocation.xy), i32(job.page.w), color);
-    textureStore(composed_edge, vec2<i32>(invocation.xy), i32(job.page.w), edge);
-}
+    let job = jobs[invocation.z];
+    let origin = vec2<f32>(f32(job.page.x), f32(job.page.y));
+    let pixels_per_cell = f32(max(job.detail.x, 1u));
 
-@group(1) @binding(0) var previous_color: texture_2d_array<f32>;
-@group(1) @binding(1) var previous_edge: texture_2d_array<f32>;
-@group(1) @binding(2) var mip_color: texture_storage_2d_array<rgba8unorm, write>;
-@group(1) @binding(3) var mip_edge: texture_storage_2d_array<rgba8unorm, write>;
-@group(1) @binding(4) var<storage, read> mip_jobs: array<PageJob>;
+    // Page texel to terrain cell. The border is *negative* in page-local cell space and past
+    // `cells_per_page` on the far side, which is exactly what makes a filtered tap across the page edge read
+    // the neighbouring ground rather than a clamped copy of this page's own last row.
+    let local = (vec2<f32>(invocation.xy) - f32(PAGE_BORDER) + vec2<f32>(0.5)) / pixels_per_cell;
+    let cell = origin + local;
 
-@compute @workgroup_size(8, 8, 1)
-fn downsample_page(@builtin(global_invocation_id) invocation: vec3<u32>) {
-    let size = textureDimensions(mip_color);
-    if (invocation.x >= size.x || invocation.y >= size.y) { return; }
-    let layer = i32(mip_jobs[invocation.z].page.w);
-    let source_size = textureDimensions(previous_color);
-    let origin = invocation.xy * 2u;
-    var color = vec4<f32>(0.0);
-    var edge_rgb = vec3<f32>(0.0);
-    var edge_alpha = 0.0;
-    for (var y = 0u; y < 2u; y++) {
-        for (var x = 0u; x < 2u; x++) {
-            let coordinate = min(origin + vec2<u32>(x, y), source_size - vec2<u32>(1u));
-            color += textureLoad(previous_color, vec2<i32>(coordinate), layer, 0);
-            let edge = textureLoad(previous_edge, vec2<i32>(coordinate), layer, 0);
-            edge_rgb += edge.rgb * edge.a;
-            edge_alpha += edge.a;
-        }
-    }
-    color *= 0.25;
-    let output_alpha = edge_alpha * 0.25;
-    let output_rgb = select(
-        vec3<f32>(0.0),
-        edge_rgb / max(edge_alpha, 0.0001),
-        edge_alpha > 0.0001,
+    // Clamped to the terrain, because a page at the map's edge has a border that leaves it. Clamping there
+    // is correct rather than a compromise: there is no ground beyond the edge, and the alternative — leaving
+    // it undefined — would put whatever the allocation held into a filtered tap.
+    let uv = clamp(
+        cell / max(sample_count() - vec2<f32>(1.0), vec2<f32>(1.0)),
+        vec2<f32>(0.0),
+        vec2<f32>(1.0),
     );
-    textureStore(mip_color, vec2<i32>(invocation.xy), layer, color);
-    textureStore(mip_edge, vec2<i32>(invocation.xy), layer, vec4<f32>(output_rgb, output_alpha));
+    let blended = surface(uv, pixels_per_cell);
+    // Roughness rides in alpha. The G-buffer needs both and a page has four channels, so splitting them
+    // across two textures would double the cache's memory to carry one byte.
+    textureStore(
+        composed,
+        vec2<i32>(invocation.xy),
+        i32(job.page.w),
+        vec4<f32>(srgb_from_linear(blended.rgb), blended.w),
+    );
 }

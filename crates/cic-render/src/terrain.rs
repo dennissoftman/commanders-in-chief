@@ -54,9 +54,78 @@ pub const DEFAULT_DETAIL_SCALE: f32 = 32.0;
 
 /// Byte size of the uniform block, which must match the shader's `Uniforms` exactly.
 ///
-/// A mat4x4 (64), five vec4<f32> (80), one vec4<u32> (16), eight vec4<f32> of palette (128), and
-/// eight vec4<f32> of per-layer detail parameters (128).
-const UNIFORM_BYTES: usize = 64 + 80 + 16 + 128 + 128;
+/// A mat4x4 (64), five vec4<f32> (80), one vec4<u32> (16), eight vec4<f32> of palette (128), eight
+/// vec4<f32> of per-layer detail parameters (128), one vec4<f32> of wind and the two scene times (16),
+/// one vec4<f32> of the projection jitter (16), and the previous frame's view-projection (64).
+///
+/// Everything a geometry pass needs to write a motion vector is in the last three entries, and they are
+/// **last** because `model_gbuffer.wgsl` and `terrain_forward.wgsl` bind this same buffer through structs
+/// declaring only a prefix of it — which holds exactly as long as anything they do not read is appended
+/// rather than inserted. The same rule already governs the scene block in [`crate::deferred`], for the
+/// same reason.
+const UNIFORM_BYTES: usize = 64 + 80 + 16 + 128 + 128 + 16 + 16 + 64;
+
+/// Wind, scene time, and the previous frame's, as a geometry pass needs them.
+///
+/// Separate from [`crate::environment::Weather`] because a vertex shader wants the numbers a displacement
+/// is computed from and nothing else, and because this has to reach a pass that binds the *terrain*
+/// uniform rather than the scene one. See [`crate::scenery`] for what reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Animation {
+    /// World-space wind vector, in world units per second.
+    pub wind: [f32; 2],
+    /// Scene time in seconds.
+    ///
+    /// A frame parameter, never a clock reading — the same constraint [`crate::DeferredFrame::time`]
+    /// carries, and for the same reason: a capture of a moving surface is only a usable regression
+    /// reference if the same inputs produce the same image.
+    pub time: f32,
+    /// The previous frame's scene time.
+    ///
+    /// What makes a motion vector correct for swaying geometry, and it costs nothing to provide: the
+    /// displacement is a pure function of time, so evaluating it at the previous time returns exactly
+    /// where the vertex was. No per-vertex history buffer, and no way for the motion vector to disagree
+    /// with what the geometry did.
+    ///
+    /// Equal to [`Self::time`] for the first frame of a sequence, which reports no motion — correct,
+    /// since there is no previous frame to have moved from.
+    pub previous_time: f32,
+}
+
+/// What a geometry pass needs to say where each fragment was last frame.
+///
+/// # Why the jitter travels with it
+///
+/// A motion vector has to be the *unjittered* screen displacement. The rasterized position is jittered by
+/// construction — that is the whole mechanism — so the vector has to have the jitter removed from it, or
+/// the temporal resolve would sample its history at a position offset by the very sub-pixel shake it is
+/// there to average out, and the accumulation would never converge.
+///
+/// Removing it needs no second matrix, though. A sub-pixel jitter is a translation in clip space
+/// proportional to `w`, so `clip.xy - jitter * clip.w` recovers the unjittered position exactly. That is
+/// why this carries two floats rather than a second view-projection.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Motion {
+    /// The previous frame's *unjittered* view-projection, column-major.
+    pub previous_view_projection: [[f32; 4]; 4],
+    /// This frame's sub-pixel jitter as a clip-space offset — pixels converted to normalized units.
+    pub jitter: [f32; 2],
+}
+
+impl Motion {
+    /// No jitter and no movement: the previous view is this one.
+    ///
+    /// What every pass that does not resolve temporally uses, and what makes the motion target read as
+    /// exactly zero — which is the honest answer for a frame with no predecessor, rather than a small
+    /// wrong one.
+    #[must_use]
+    pub const fn still(view_projection: &[[f32; 4]; 4]) -> Self {
+        Self {
+            previous_view_projection: *view_projection,
+            jitter: [0.0, 0.0],
+        }
+    }
+}
 
 /// A directional light, in the terms the forward pass consumes.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -173,6 +242,11 @@ pub struct TerrainRenderer {
     pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
     bind_group_layout: wgpu::BindGroupLayout,
+    /// Retained so the page-compose pass can bind the same view and samplers this group does. See
+    /// [`TerrainBindings`].
+    weight_view: wgpu::TextureView,
+    weight_sampler: wgpu::Sampler,
+    albedo_sampler: wgpu::Sampler,
     uniform_buffer: wgpu::Buffer,
     height_texture: wgpu::Texture,
     weight_texture: wgpu::Texture,
@@ -266,14 +340,14 @@ impl TerrainRenderer {
             mapped_at_creation: false,
         });
 
-        let (layout, bind_group) = build_bindings(
+        let bindings = build_bindings(
             device,
             &uniform_buffer,
             &height_texture,
             &weight_texture,
             &albedo,
         );
-        let pipeline = build_render_pipeline(device, &layout);
+        let pipeline = build_render_pipeline(device, &bindings.layout);
 
         let mut palette = [[0.5f32, 0.5, 0.5, DEFAULT_LAYER_ROUGHNESS]; MAX_LAYERS];
         let mut detail_scale = [DEFAULT_DETAIL_SCALE; MAX_LAYERS];
@@ -296,8 +370,11 @@ impl TerrainRenderer {
 
         Ok(Self {
             pipeline,
-            bind_group,
-            bind_group_layout: layout,
+            bind_group: bindings.bind_group,
+            bind_group_layout: bindings.layout,
+            weight_view: bindings.weight_view,
+            weight_sampler: bindings.weight_sampler,
+            albedo_sampler: bindings.albedo_sampler,
             uniform_buffer,
             height_texture,
             weight_texture,
@@ -354,6 +431,48 @@ impl TerrainRenderer {
         for run in runs {
             pass.draw(0..vertices, run.clone());
         }
+    }
+
+    /// Returns the terrain's sample dimensions minus one: the number of *cells* along each axis.
+    ///
+    /// What a page cache is decomposed in. Cells rather than samples because a page covers ground rather
+    /// than grid points, and the two differ by one along each axis — which is exactly the off-by-one a
+    /// virtual texture would express as a seam along the far edge of the map.
+    #[must_use]
+    pub const fn cell_size(&self) -> (u32, u32) {
+        (
+            if self.width > 1 { self.width - 1 } else { 1 },
+            if self.height > 1 { self.height - 1 } else { 1 },
+        )
+    }
+
+    /// Returns the per-frame uniform buffer.
+    ///
+    /// Exposed so a pass outside this module can bind the *same* buffer rather than build a second one from
+    /// the same figures. The compose pass in [`crate::terrain_page`] does, which is what stops it
+    /// disagreeing with the G-buffer about the terrain it is composing.
+    #[must_use]
+    pub const fn uniform_buffer(&self) -> &wgpu::Buffer {
+        &self.uniform_buffer
+    }
+
+    /// Returns the layer weight array's view.
+    #[must_use]
+    pub const fn weight_view(&self) -> &wgpu::TextureView {
+        &self.weight_view
+    }
+
+    /// Returns the sampler the layer weights are read through: clamped, because they are a per-map field in
+    /// normalized coordinates.
+    #[must_use]
+    pub const fn weight_sampler(&self) -> &wgpu::Sampler {
+        &self.weight_sampler
+    }
+
+    /// Returns the sampler the layer albedo is read through: repeating, because it tiles in world space.
+    #[must_use]
+    pub const fn albedo_sampler(&self) -> &wgpu::Sampler {
+        &self.albedo_sampler
     }
 
     /// Returns the layer albedo array, for reporting what was actually uploaded.
@@ -511,13 +630,38 @@ impl TerrainRenderer {
         Ok(())
     }
 
-    /// Uploads the per-frame uniform block.
+    /// Uploads the per-frame uniform block, with no wind and at time zero.
+    ///
+    /// What the forward path uses: it draws terrain alone, and terrain does not move. The animated form
+    /// is [`Self::set_frame_animated`], and keeping the unanimated one as its own call is what lets every
+    /// forward capture stay byte-identical to what it was before anything swayed.
     pub fn set_frame(
         &self,
         context: &GpuContext,
         view_projection: &[[f32; 4]; 4],
         camera_position: [f32; 3],
         light: DirectionalLight,
+    ) {
+        self.set_frame_animated(
+            context,
+            view_projection,
+            camera_position,
+            light,
+            Animation::default(),
+            Motion::still(view_projection),
+        );
+    }
+
+    /// Uploads the per-frame uniform block, including everything an animated or reprojected pass reads.
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_frame_animated(
+        &self,
+        context: &GpuContext,
+        view_projection: &[[f32; 4]; 4],
+        camera_position: [f32; 3],
+        light: DirectionalLight,
+        animation: Animation,
+        motion: Motion,
     ) {
         let mut bytes = Vec::with_capacity(UNIFORM_BYTES);
         for column in view_projection {
@@ -561,6 +705,22 @@ impl TerrainRenderer {
         }
         for scale in self.detail_scale {
             push_vec4([scale, 0.0, 0.0, 0.0], &mut bytes);
+        }
+        // Last in the block, and these three must stay last. See UNIFORM_BYTES.
+        push_vec4(
+            [
+                animation.wind[0],
+                animation.wind[1],
+                animation.time,
+                animation.previous_time,
+            ],
+            &mut bytes,
+        );
+        push_vec4([motion.jitter[0], motion.jitter[1], 0.0, 0.0], &mut bytes);
+        for column in &motion.previous_view_projection {
+            for value in column {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
         }
         debug_assert_eq!(bytes.len(), UNIFORM_BYTES, "uniform block size drifted");
         context
@@ -650,7 +810,7 @@ fn build_bindings(
     height_texture: &wgpu::Texture,
     weight_texture: &wgpu::Texture,
     albedo: &TextureArray,
-) -> (wgpu::BindGroupLayout, wgpu::BindGroup) {
+) -> TerrainBindings {
     // Two samplers, because the two arrays want opposite behaviour. Weights are a per-map field
     // addressed in normalized coordinates and must clamp at the edge; albedo is a detail texture
     // addressed in world units and must repeat, with the mip chain filtered between levels.
@@ -665,6 +825,14 @@ fn build_bindings(
     });
     let albedo_sampler = array_sampler(device, "cic-render terrain albedo sampler");
     let layout = build_bind_group_layout(device);
+    // Named rather than created inline in the entries below, because the compose pass in
+    // [`crate::terrain_page`] binds these *same* views and samplers. A second set built from the same
+    // descriptors would work and would also be a second thing to keep in step.
+    let height_view = height_texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let weight_view = weight_texture.create_view(&wgpu::TextureViewDescriptor {
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        ..Default::default()
+    });
 
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("cic-render terrain bindings"),
@@ -676,18 +844,11 @@ fn build_bindings(
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: wgpu::BindingResource::TextureView(
-                    &height_texture.create_view(&wgpu::TextureViewDescriptor::default()),
-                ),
+                resource: wgpu::BindingResource::TextureView(&height_view),
             },
             wgpu::BindGroupEntry {
                 binding: 2,
-                resource: wgpu::BindingResource::TextureView(&weight_texture.create_view(
-                    &wgpu::TextureViewDescriptor {
-                        dimension: Some(wgpu::TextureViewDimension::D2Array),
-                        ..Default::default()
-                    },
-                )),
+                resource: wgpu::BindingResource::TextureView(&weight_view),
             },
             wgpu::BindGroupEntry {
                 binding: 3,
@@ -703,7 +864,22 @@ fn build_bindings(
             },
         ],
     });
-    (layout, bind_group)
+    TerrainBindings {
+        layout,
+        bind_group,
+        weight_view,
+        weight_sampler: sampler,
+        albedo_sampler,
+    }
+}
+
+/// What [`build_bindings`] produces: the group, its layout, and the resources a second pass may rebind.
+struct TerrainBindings {
+    layout: wgpu::BindGroupLayout,
+    bind_group: wgpu::BindGroup,
+    weight_view: wgpu::TextureView,
+    weight_sampler: wgpu::Sampler,
+    albedo_sampler: wgpu::Sampler,
 }
 
 /// Builds the forward render pipeline against a bind group layout.

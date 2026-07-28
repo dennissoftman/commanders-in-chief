@@ -210,8 +210,24 @@ pub struct VirtualPageCache {
 }
 
 impl VirtualPageCache {
+    /// A cache holding the full [`VIRTUAL_PAGE_LAYERS`] budget.
     #[must_use]
     pub fn new(cell_size: [u32; 2]) -> Self {
+        Self::with_layers(cell_size, VIRTUAL_PAGE_LAYERS)
+    }
+
+    /// A cache holding at most `layers` pages.
+    ///
+    /// The budget is a parameter because a cache size is a memory decision rather than a property of the
+    /// algorithm — the full set is 71 MB of physical pages, which is reasonable for a shipping cache and
+    /// unreasonable for a test that reads a page back. Running out of slots is already a normal condition
+    /// here rather than an error, so a smaller budget changes how much the cache holds and nothing about
+    /// what it does.
+    ///
+    /// Floored at one, because a cache with no slots would evict every page it staged and stage it again on
+    /// the next frame for ever.
+    #[must_use]
+    pub fn with_layers(cell_size: [u32; 2], layers: usize) -> Self {
         let table_sizes = [
             [cell_size[0].div_ceil(8), cell_size[1].div_ceil(8)],
             [cell_size[0].div_ceil(16), cell_size[1].div_ceil(16)],
@@ -220,7 +236,7 @@ impl VirtualPageCache {
         Self {
             table_sizes,
             tables: [table(table_sizes[0]), table(table_sizes[1])],
-            physical: vec![None; VIRTUAL_PAGE_LAYERS],
+            physical: vec![None; layers.clamp(1, VIRTUAL_PAGE_LAYERS)],
             clock: 0,
         }
     }
@@ -289,7 +305,11 @@ impl VirtualPageCache {
         }
         ranked.sort_unstable();
         ranked.dedup_by_key(|entry| entry.3);
-        ranked.truncate(VIRTUAL_PAGE_LAYERS);
+        // Truncated to what this cache actually holds rather than to the constant. Ranking more pages than
+        // there are slots is not harmful — the slot search below simply runs out — but it means the eviction
+        // loop walks a list that cannot fit, and the truncation says the budget once instead of discovering
+        // it repeatedly.
+        ranked.truncate(self.physical.len());
         let desired = ranked.iter().map(|entry| entry.3).collect::<BTreeSet<_>>();
 
         for page in self.physical.iter_mut().flatten() {

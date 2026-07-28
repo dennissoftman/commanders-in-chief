@@ -15,6 +15,15 @@ until it was checked.
 [layout format](docs/formats/ui-layout.md), a two-pass solver, a string table, and the closed action set.
 No widget behaves yet and nothing draws it.
 
+**All five of M3's outstanding renderer items have since been worked** — temporal antialiasing, the
+physically-based map set, alpha-tested foliage, scenery sway (which was the last provenance case in
+[LICENSING.md](LICENSING.md)), and the virtual-texture cache. The cache is wired to the GPU and composes
+pages correctly; what is left of it is the *fragment* path, which is the next verified step below. Terrain
+level of detail is still the open charter line, and still a decision rather than a queue position.
+
+Landing them turned up a defect every committed reference had been rendered through, so **ten of the
+twenty-two references changed** — see the antialiasing entry below.
+
 What works:
 
 - A `cic-assets` terrain uploads to the GPU and renders through a seven-pass deferred chain: four shadow
@@ -63,6 +72,67 @@ What works:
     And no single statistic separates aliasing from detail: the obvious one reports supersampling as a
     regression, and what works is measuring *where* a setting acts rather than how much. Both are written up
     in the ADR.
+- **A virtual-texture page cache** ([`terrain_page`](crates/cic-render/src/terrain_page.rs)), which is the
+  consumer the residency bookkeeping never had: physical pages, a page table per level, and a compute pass
+  that bakes the layer blend once per page instead of once per fragment per frame. The blend depends only on
+  the terrain data, so recomputing it every frame for unchanged ground was the waste; and a page composed at
+  a density chosen for how close it is, is what lets detail scale past one map-wide texture.
+  - The compose shader was **rewritten, not wired up**: the staged one read a tile atlas with blend masks and
+    edge tiles, and this terrain is a heightfield plus layer weights, so every input it declared was a
+    resource the engine does not build.
+  - A page carries a four-texel border of the neighbouring ground, because a filtered tap at a page edge
+    reads across it — and a clamped border would put a seam on every boundary, crawling as the camera moves.
+    Verified by reading a page back: a page straddling a colour boundary shows border red 144 against
+    interior red 89, where a clamp would read 89.
+  - Three fixtures in a row could not show what they measured before one did, which is the standing warning
+    below earning its place a third time: `surface()` divides by the summed weight, so a single ramped layer
+    normalizes to a constant.
+- **A physically-based map set for models**: normal, roughness and metallic maps beside the base colour,
+  with the tangent frame the first of them needs — read from glTF's `TANGENT` where a model supplies one and
+  derived from the texture coordinates where it does not, which is the ordinary case rather than the
+  exception. Three texture arrays per model rather than one, because base colour is sRGB-encoded and the
+  other two are linear measurements and one array has one format: decoding a normal map as a colour turns a
+  flat 128 into 0.216 instead of 0.502, which tilts the whole surface and reads as a lighting bug.
+  - **Metallic cost no G-buffer bandwidth.** The albedo target's alpha was writing a constant 1.0 and nothing
+    read it. Every expression the lighting pass gained reduces to its predecessor at zero metalness by
+    construction, which is what kept the references byte-identical when the channel arrived.
+  - Read from glTF and deliberately *not* applied: the occlusion map. Occlusion is an ambient-only
+    multiplier and there is no channel left for one — folding it into albedo would darken the direct term,
+    which is precisely what it must not do.
+- **Alpha-tested materials**, which is how foliage is authored. A material that cuts its own silhouette gets
+  its own index range and its own pipelines, so opaque geometry keeps its early depth rejection and its
+  fragment-free shadow pass. The cut reaches **every shadow cascade**: a leaf card casting the rectangle its
+  geometry occupies is worse than one casting nothing, because a hard quadrilateral on the ground reads as a
+  solid object.
+- **Scenery sway** ([`scenery`](crates/cic-render/src/scenery.rs)), written from scratch — three parts on
+  three time scales, four profiles rather than a longer table, and every constant derived in the file from a
+  stated physical argument. **This closes the last outstanding provenance case.**
+  - The phase is derived from each instance's world position with integer arithmetic, so a stand of plants is
+    never in unison and a capture is still reproducible. It also carries a term along the wind direction, so
+    a gust visibly crosses the map — one dot product, and the single largest contributor to the effect
+    reading as weather rather than as animation.
+  - The flutter is at 5.37 times the sway rather than 5, because this renderer has already been caught by
+    near-harmonic ratios once: five water waves at related wavelengths interfered into a visible lattice.
+- **Temporal antialiasing** — the last tier of [ADR 0005](docs/adr/0005-antialiasing-strategy.md), and the
+  last item on its list: a jittered projection on an eight-phase Halton sequence, a motion-vector target, a
+  ping-ponged float history, and a neighbourhood clamp in YCoCg. **0.053 ms** at 1920x1200, twice the post
+  pass and a nineteenth of the frame.
+  - The jitter phase is a frame parameter like scene time, which is what makes a temporal capture
+    reproducible: the harness renders a full cycle and compares the last frame. It also needed an API the
+    design lacked — `reset_history`, for a frame that does not continue the last one, which is the real-game
+    case of a jump cut.
+  - Motion vectors are **exact for swaying geometry** rather than approximate, and it cost nothing: the
+    displacement is a pure function of scene time, so the same vertex function at the previous time returns
+    exactly where the vertex was.
+  - **It found a defect the whole reference set had been rendered through.** Three resolve passes were adding
+    half a pixel to a framebuffer coordinate that already carries it, so each sampled half a pixel away from
+    the fragment it was shading — a translation of every frame, plus a two-texel average where the downsample
+    should return one exact texel. Nothing caught it because every reference had been rendered through the
+    same offset. What caught it was that accumulating a *static* frame never reached a fixed point: successive
+    frames differed by 48, 33, 19, 9, 6 — convergent, and so passing any tolerance stated as "settles".
+    Measured on the deferred fixture at 1.5% of pixels differing by more than two, peak 154. A textual test
+    now pins the convention, because this is the one class of error a reference comparison structurally
+    cannot catch.
 - **Time of day drives the light by default.** `DeferredFrame::new` derives its sun from the environment,
   and `in_environment` re-derives it, so changing the hour moves the sun rather than leaving a light that
   silently disagrees with it. The derivation is calibrated against the hand-tuned preset it replaced and a
@@ -145,27 +215,34 @@ that already exists, plus skirts or stitching so neighbouring densities do not c
 amended to record that culling delivered what LOD was for, with the measurement as the reason. What is not
 acceptable is leaving the line reading as though it were done, which is what it did before.
 
-Also outstanding from M3, in rough order:
-
-1. **TAA**, the quality tier ADR 0005 plans and the last antialiasing item: a jittered projection, a
-   motion-vector target, a history buffer, and neighbourhood clamping. It needs the regression harness
-   accounted for, since a temporal accumulator makes one captured frame depend on the frames before it.
-2. **Normal and roughness maps** to go with the base-colour textures. Note what the runner measured:
-   these will *diverge across adapters*, because sampling a texture is the one thing that does.
+**The virtual-texture cache needs its fragment path.** The GPU side is in — physical pages, a page table
+per level, and a compute pass that composes this project's own layer blend, with the composition verified by
+reading pages back. The terrain G-buffer still blends eight layers per fragment. Finishing it needs two
+bindings on the terrain group, a page-table lookup, a fallback to the direct blend for a cell whose page is
+not resident, and a second compute pass to give each page a mip chain — without which a page sampled at a
+shallow angle would alias where the direct blend does not, making the terrain look *worse* on exactly the
+ground the cache is for.
 
 ## Gate status
 
 Formatting, strict lints (`clippy::all` and `clippy::pedantic` as errors, plus `-D warnings` as CI runs
-it), and the full test suite all pass on the pinned toolchain — **and now on the CI runner too**, where the
-same **316 tests across six crates** pass against Mesa's lavapipe. The rendering ones take about eleven
+it), and the full test suite all pass on the pinned toolchain: **358 tests across six crates**, up from 316.
+The CI runner runs the same suite against Mesa's lavapipe.
+
+**The lavapipe reference set has to be regenerated on the runner before CI can pass.** The half-pixel fix
+above changed ten of the eleven scenes, and those images can only be rendered where lavapipe is — so this
+branch fails CI once, with the captures and difference images uploaded as an artifact for review, which is
+the flow the harness is built around for a deliberate rendering change. The NVIDIA set is regenerated and
+each image was opened and checked. The rendering ones take about eleven
 seconds there, which is what makes this affordable on every pull request. Captures go to `target/tmp/` and
 upload as an artifact on every outcome, so a harness failure's capture and amplified difference image can
 be looked at rather than being stranded on the runner.
 
-Eleven references per adapter cover terrain layers, instanced models, the deferred chain, water, water
-under a glancing sun, cloud shadows, fog, wet ground, snow, an antialiased frame, and a supersampled one —
-**twenty-two committed in total**, one set for an NVIDIA RTX 4080 SUPER and one for lavapipe, each
-generated on its own machine and looked at before being committed.
+Sixteen references per adapter cover terrain layers, instanced models, the deferred chain, water, water
+under a glancing sun, cloud shadows, fog, wet ground, snow, an antialiased frame, a supersampled one, a
+temporally accumulated one, a normal-mapped model, a metallic one, alpha-tested foliage, and a swaying
+canopy — one set for an NVIDIA RTX 4080 SUPER and one for lavapipe, each generated on its own machine and
+looked at before being committed.
 
 The render tests still skip rather than fail when no adapter is available, so a developer machine with no
 GPU reports honestly instead of red. **CI sets `CIC_REQUIRE_ADAPTER`, which makes the same situation a
@@ -178,7 +255,9 @@ present.
 
 - Nothing in this tree derives from another game's code or reads another game's data. See
   [LICENSING.md](LICENSING.md). Water was written from scratch and the removed shader was not consulted;
-  **scenery sway is now the only outstanding provenance case.**
+  **scenery sway has since been written the same way, which closes the last outstanding case.** The rule
+  that nothing may be copied backward across `5e824cf` still stands, and still has nothing left that wants
+  to break it.
 - Every decoder is bounded and total — see [binary parsing](docs/invariants/binary-parsing.md).
 - Anything that will reach simulation state follows [determinism](docs/invariants/determinism.md) from
   the start, because it cannot be retrofitted.
@@ -189,7 +268,13 @@ present.
   renderer, a quad UV mapping that walked the unit square in the wrong order, a wave sum that interfered
   into a diamond lattice, a specular exponent so tight the highlight reached no pixel at all, water
   painted as a slab past the edge of the map, a cloud hash correlated along one axis, and a derived sun
-  that matched its preset's colour exactly while sitting 27 degrees away in azimuth. The regression
+  that matched its preset's colour exactly while sitting 27 degrees away in azimuth.
+  - **And one the harness could not have caught, which is worth its own line.** Three resolve passes offset
+    their texture coordinate by half a pixel, and every reference was rendered through the offset — so the
+    images agreed with each other and with the code. A reference comparison cannot catch an error applied
+    uniformly to both sides of it. What caught it was a *property*: a temporal accumulation of a static
+    frame must reach a fixed point, and it did not. The lesson is not that the harness is weak but that it
+    has a blind spot with a shape, and the things that see into it are invariants rather than images. The regression
   harness now catches this class automatically, and in CI rather than only locally — but only for the
   eleven scenes it has references for, and only once someone has looked at those references and confirmed
   they are right.

@@ -24,6 +24,13 @@ struct Uniforms {
     palette: array<vec4<f32>, 8>,
     // Per layer: x world units per albedo repeat, yzw unused.
     detail: array<vec4<f32>, 8>,
+    // xy the world wind vector, z scene time, w the previous frame's scene time. Terrain does not move, so
+    // this pass reads none of it -- it is declared to reach the two entries after it.
+    animation: vec4<f32>,
+    // xy this frame's sub-pixel jitter as a clip-space offset, zw unused.
+    jitter: vec4<f32>,
+    // The previous frame's unjittered view-projection, for the motion target.
+    previous_view_projection: mat4x4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -45,15 +52,24 @@ struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) normal: vec3<f32>,
+    // The clip positions this frame and last, carried undivided. See `motion_vector`.
+    @location(2) current_clip: vec4<f32>,
+    @location(3) previous_clip: vec4<f32>,
 }
 
 struct GBufferOutput {
+    // Albedo in `rgb`, the metallic factor in `a`. Terrain is a dielectric everywhere -- soil, gravel,
+    // asphalt and snow are all insulators -- so it writes zero, and the lighting pass's metallic path
+    // reduces to exactly what it computed before that channel carried anything.
     @location(0) albedo: vec4<f32>,
     // World normal in `xyz`, roughness in `w`.
     @location(1) normal_roughness: vec4<f32>,
     // Geometry coverage: below 0.5 nothing drew, 1.0 is opaque geometry, and anything above 1.0
     // carries that much emissive strength. Terrain never emits, so it writes exactly 1.0.
     @location(2) coverage: f32,
+    // Texture-coordinate motion since the previous frame. Written unconditionally, and read only by the
+    // temporal resolve -- so with that resolve off this costs the write and nothing else.
+    @location(3) motion: vec2<f32>,
 }
 
 fn sample_count() -> vec2<i32> {
@@ -144,11 +160,18 @@ fn gbuffer_vertex(
     let sample = grid_sample(vertex_index, instance_index);
     let coordinate = sample.coordinate;
     let samples = sample_count();
+    let world = world_position(coordinate);
     var output: VertexOutput;
-    output.clip_position = uniforms.view_projection * vec4<f32>(world_position(coordinate), 1.0);
+    output.clip_position = uniforms.view_projection * vec4<f32>(world, 1.0);
     if !sample.inside {
         output.clip_position = discarded_vertex();
     }
+    output.current_clip = output.clip_position;
+    // Terrain geometry does not move, so its motion is the camera's alone -- the same world position under
+    // the previous view. A heightfield edit between frames is the one exception, and it is a texture write
+    // rather than a transform, so nothing here could know about it; the resolve's neighbourhood clamp is
+    // what keeps that from ghosting.
+    output.previous_clip = uniforms.previous_view_projection * vec4<f32>(world, 1.0);
     output.uv = vec2<f32>(coordinate) / max(vec2<f32>(samples - vec2<i32>(1)), vec2<f32>(1.0));
     output.normal = surface_normal(coordinate);
     return output;
@@ -197,11 +220,16 @@ fn gbuffer_fragment(input: VertexOutput) -> GBufferOutput {
     }
     let surface_value = surface(input.uv);
     var output: GBufferOutput;
-    output.albedo = vec4<f32>(surface_value.rgb, 1.0);
+    output.albedo = vec4<f32>(surface_value.rgb, 0.0);
     // Roughness is per layer and blended by the same weights as the colour, so a gravel layer and a
     // wet-asphalt layer can meet on one fragment and each contribute its own specular response.
     output.normal_roughness = vec4<f32>(normal, surface_value.w);
     output.coverage = 1.0;
+    output.motion = motion_vector(
+        input.current_clip,
+        input.previous_clip,
+        uniforms.jitter.xy,
+    );
     return output;
 }
 
