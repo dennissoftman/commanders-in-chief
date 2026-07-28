@@ -10,11 +10,15 @@ cic-core          (no dependencies)
                                     naga for shader validation in tests)
 
 cic-camera        (no dependencies)
+cic-ui            (+ serde, serde_json)
 ```
 
-Two crates deliberately depend on nothing: `cic-core`, because bounded reading is a primitive, and
-`cic-camera`, because the same camera must drive the game, the editor, and any debug viewer without
-dragging a window system into each of them.
+Three crates deliberately depend on nothing of this project's: `cic-core`, because bounded reading is a
+primitive; `cic-camera`, because the same camera must drive the game, the editor, and any debug viewer
+without dragging a window system into each of them; and `cic-ui`, for the same reason one step further
+out. A layout solver that pulled in a graphics stack would make every tool that wants to position a box
+depend on one, so the two facts it cannot derive — how large a piece of text is, and what the display
+scale is — arrive from the caller instead.
 
 `cic-render` depends on `cic-assets`, and that direction is the one to keep: the renderer consumes
 assets, and assets never know about rendering. Nothing in `cic-assets` mentions a GPU, a texture format,

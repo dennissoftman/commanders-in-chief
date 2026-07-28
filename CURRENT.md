@@ -11,6 +11,10 @@ level of detail**: chunks are now frustum-culled per pass, but a chunk that is d
 density whatever its size on screen. This document and the milestone both claimed the whole item was done
 until it was checked.
 
+**M4 has started.** Its layout foundation is in: a `cic-ui` crate holding the
+[layout format](docs/formats/ui-layout.md), a two-pass solver, a string table, and the closed action set.
+No widget behaves yet and nothing draws it.
+
 What works:
 
 - A `cic-assets` terrain uploads to the GPU and renders through a seven-pass deferred chain: four shadow
@@ -112,12 +116,25 @@ per-pass breakdown once a second, which is where the figures above came from.
 
 ## Next verified step
 
-**M4's interface layer.** M3's exit condition is met, so the next milestone is the shell the engine is
-navigated through: a layout model in the project's own text format, the widget set an RTS shell needs,
-retained state across frames, input routing with focus and keyboard navigation, a screen stack, and DPI
-independence. Its settings screen has real content waiting for it now that a display setting exists with
-more than one option, and `ui.wgsl` already sits in the shader set marked `staged` for exactly this. See
-[M4](docs/milestones/m4-interface.md).
+**M4's interface layer, continued.** Its foundation has landed — see
+[M4](docs/milestones/m4-interface.md) — as a `cic-ui` crate depending on nothing but `serde`: the
+[layout format](docs/formats/ui-layout.md), a two-pass solver producing pixel-snapped rectangles, a
+string table, and the closed action set. What is next, in order:
+
+1. **Widget behaviour and retained state.** The kinds position correctly and none of them does anything
+   yet. Retained state keys off the node ids the format already validates as unique, which is why they
+   are validated now rather than when something needs them.
+2. **Input routing** — focus, hover, and keyboard navigation as semantic events, the separation the
+   camera already uses. Hit testing is done, including resolving a click to the topmost *activatable*
+   node rather than to the panel beneath it.
+3. **The screen stack**, and the transactional settings apply the milestone's design notes require: a
+   display change has to survive a revert timer rather than depend on the user being able to see well
+   enough to click undo.
+4. **Drawing it.** `ui.wgsl` is already in the shader set marked `staged` for this, and the capture
+   harness that will cover the result now runs in CI — which is what makes it worth covering.
+
+The settings screen has real content waiting for it, since a display setting exists with more than one
+option.
 
 **Terrain level of detail is the one M3 charter item still open**, and it is a decision rather than a
 queue position. Per-pass timing refuted its original premise: at 1920x1200 the four cascades are 7% of
@@ -140,7 +157,7 @@ Also outstanding from M3, in rough order:
 
 Formatting, strict lints (`clippy::all` and `clippy::pedantic` as errors, plus `-D warnings` as CI runs
 it), and the full test suite all pass on the pinned toolchain — **and now on the CI runner too**, where the
-same **271 tests across five crates** pass against Mesa's lavapipe. The rendering ones take about eleven
+same **316 tests across six crates** pass against Mesa's lavapipe. The rendering ones take about eleven
 seconds there, which is what makes this affordable on every pull request. Captures go to `target/tmp/` and
 upload as an artifact on every outcome, so a harness failure's capture and amplified difference image can
 be looked at rather than being stranded on the runner.

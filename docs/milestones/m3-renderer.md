@@ -242,10 +242,11 @@ the exposure constant and watching all five references fail.
 
 "In CI" is now met too. The runner installs Mesa's lavapipe, the rendering tests execute there rather
 than skipping, and eleven references are committed under
-`references/vulkan-llvmpipe-llvm-20-1-2-256-bits/` alongside the NVIDIA set. The same **271 tests** pass
-on the runner as on a developer machine, the three rendering binaries taking about eleven seconds between
-them — software rasterisation turned out to be far cheaper here than expected, which is what makes this
-viable on every pull request rather than nightly.
+`references/vulkan-llvmpipe-llvm-20-1-2-256-bits/` alongside the NVIDIA set. The whole suite passes on the
+runner exactly as on a developer machine — the count lives in
+[CURRENT.md](../../CURRENT.md#gate-status), so it has one home — with the three rendering binaries taking
+about eleven seconds between them. Software rasterisation turned out far cheaper here than expected, which
+is what makes this viable on every pull request rather than nightly.
 
 The reference set was generated on the runner and each image was opened and checked before being
 committed, which is the step the mechanism is built around: the harness deliberately *fails* when a
