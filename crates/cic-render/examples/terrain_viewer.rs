@@ -36,7 +36,7 @@ use cic_assets::{MapPackage, PackageLimits, Terrain, TerrainLayer};
 use cic_camera::{RtsCamera, RtsCameraProfile};
 use cic_render::{
     Action, DeferredFrame, GpuContext, InputState, LayerMaterial, ModelBatch, ModelInstance,
-    SurfaceRenderer, TerrainGround, TerrainRenderer, TextureImage,
+    SurfaceRenderer, TerrainGround, TerrainRenderer, TextureImage, WaterBody, WaterSurface,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -440,6 +440,28 @@ fn building_placements(terrain: &Terrain) -> Vec<ModelInstance> {
     placed
 }
 
+/// A water table just above the terrain's low point, spanning the whole map.
+///
+/// Derived from the heightfield rather than authored, so the viewer floods a loaded `.cicmap` and the
+/// generated terrain alike. The shoreline needs no outline: the water pass clips the surface wherever
+/// the bed rises through it, so one rectangle at one elevation fills every basin the terrain has.
+fn water_table(terrain: &Terrain) -> WaterSurface {
+    let [extent_x, extent_y] = terrain.world_extent();
+    let (low, high) = terrain
+        .elevations()
+        .iter()
+        .fold((u16::MAX, u16::MIN), |(low, high), sample| {
+            (low.min(*sample), high.max(*sample))
+        });
+    let scale = terrain.vertical_scale();
+    let floor = f32::from(low) * scale;
+    let ceiling = f32::from(high) * scale;
+    // An eighth of the way up the terrain's range: high enough to be a lake rather than a puddle, low
+    // enough to stay in the basins instead of drowning the map.
+    let elevation = floor + (ceiling - floor) * 0.12;
+    WaterSurface::new([0.0, 0.0, extent_x, extent_y], elevation)
+}
+
 /// Everything created once a window exists.
 struct Active {
     window: Arc<Window>,
@@ -447,6 +469,7 @@ struct Active {
     terrain_renderer: TerrainRenderer,
     surface: SurfaceRenderer,
     models: Vec<ModelBatch>,
+    water: Vec<WaterBody>,
 }
 
 struct Viewer {
@@ -455,6 +478,8 @@ struct Viewer {
     input: InputState,
     active: Option<Active>,
     last_frame: Option<Instant>,
+    /// Seconds since the first frame, which is what animates the water.
+    elapsed: f32,
     failure: Option<String>,
 }
 
@@ -472,6 +497,7 @@ impl Viewer {
             input: InputState::default(),
             active: None,
             last_frame: None,
+            elapsed: 0.0,
             failure: None,
         }
     }
@@ -548,12 +574,29 @@ impl ApplicationHandler for Viewer {
             Err(error) => return self.fail(event_loop, error.to_string()),
         };
 
+        // One water table across the whole map. The shader clips it wherever the bed rises through
+        // it, so a single rectangle fills every depression the heightfield happens to have — which is
+        // what makes this work for a loaded map as well as for the generated one.
+        let table = water_table(&self.terrain);
+        let water = match WaterBody::new(&context, table, surface.water_layout()) {
+            Ok(body) => {
+                eprintln!(
+                    "water: surface at {:.1}, {} vertices",
+                    table.elevation,
+                    body.vertex_count()
+                );
+                vec![body]
+            }
+            Err(error) => return self.fail(event_loop, error.to_string()),
+        };
+
         self.active = Some(Active {
             window,
             context,
             terrain_renderer,
             surface,
             models,
+            water,
         });
     }
 
@@ -644,14 +687,19 @@ impl Viewer {
         self.camera
             .update(intent, delta, &TerrainGround(&self.terrain));
 
+        // Accumulated here rather than read from a clock inside the renderer, which is what lets a
+        // headless capture of the same scene pin the wave phase and stay reproducible.
+        self.elapsed += delta;
+
         let (width, height) = active.surface.size();
-        let frame = DeferredFrame::new(self.camera.pose(), width, height);
+        let frame = DeferredFrame::new(self.camera.pose(), width, height).at_time(self.elapsed);
         active
             .surface
             .render(
                 &active.context,
                 &active.terrain_renderer,
                 &active.models,
+                &active.water,
                 frame,
             )
             .map_err(|error| error.to_string())

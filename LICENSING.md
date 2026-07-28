@@ -105,6 +105,9 @@ this file records — silently, because nothing in the build would fail.
 The risk is highest for whoever implements water and scenery, since the removed code is precisely the
 code they would most like to consult. Do not consult it.
 
+Water has since been written, from scratch and without consulting it — see below. Scenery sway remains,
+and is now the only outstanding case.
+
 ## Audit result
 
 Every file in this tree is project-authored and carries no `GeneralsGameCode` derivation. Verified by
@@ -140,15 +143,29 @@ which were written afterwards against the native formats and have no predecessor
 
 **Deliberately not seeded — must be written from scratch**
 
-These two paths do not exist in the tree. They are listed by the name their replacement should take.
+These paths do not exist in the tree. They are listed by the name their replacement should take.
 
-| File | Why |
-|---|---|
-| `cic-render/src/scenery.rs` | Its sway defaults and ten sway families derive from `ScriptEngine.cpp` and `W3DTreeBuffer.cpp`. The instancing structure was original and is worth redoing; the constants must be re-authored. |
-| `cic-render/src/water_viewer.wgsl` | Standing-water texture scale, tint and alpha, and depth-feather policy derive from `W3DWater.cpp`. The bounded screen and sky reflection in the same file *was* original work and can be salvaged into a re-authored shader. |
+| File | Why | State |
+|---|---|---|
+| `cic-render/src/scenery.rs` | Its sway defaults and ten sway families derive from `ScriptEngine.cpp` and `W3DTreeBuffer.cpp`. The instancing structure was original and is worth redoing; the constants must be re-authored. | **Outstanding.** |
+| `cic-render/src/water_viewer.wgsl` | Standing-water texture scale, tint and alpha, and depth-feather policy derive from `W3DWater.cpp`. The bounded screen and sky reflection in the same file *was* original work. | **Resolved** — replaced, not salvaged. See below. |
 
-**Water rendering is on M3's remaining list.** Whoever writes it must not consult the original. This is
-the single easiest way to silently reintroduce the obligation this document exists to record.
+**Water was re-authored rather than recovered.** It landed as `cic-render/src/water.rs` plus a water
+section in `terrain_deferred.wgsl`, and the removed file was not consulted. Nothing was salvaged from it,
+including the reflection that would have been permissible: the sky reflection here evaluates the same two
+sky constants the lighting pass already used, so it shares that pass's gradient rather than reproducing an
+earlier one.
+
+Every figure the surface uses is authored in the new code with its reasoning stated beside it: the tints,
+the depth ramp, the shoreline feather, the wave spectrum, the Fresnel reflectance at normal incidence, and
+the specular exponent. Two of them were arrived at by looking at captures rather than by reasoning ahead —
+the wavelength ratios, because near-harmonic ones interfered into a visible lattice, and the specular
+exponent, because a mirror-like value produced no highlight at all. That history is recorded in
+[the M3 milestone](docs/milestones/m3-renderer.md) as evidence of independent derivation: the values are
+where they are because of what this renderer's own frames showed.
+
+**Scenery sway is now the only outstanding case.** Whoever writes it must not consult the original. This
+is the single easiest way to silently reintroduce the obligation this document exists to record.
 
 ## Dependencies
 

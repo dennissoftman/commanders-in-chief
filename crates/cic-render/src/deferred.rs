@@ -14,8 +14,13 @@
 //! 3. ao             occlusion from depth and normals
 //! 4. ao blur        bilateral, so occlusion does not bleed across creases
 //! 5. lighting       reconstruct world position from depth, apply light with shadow and AO -> HDR
-//! 6. composite      tone map and sharpen -> the caller's target
+//! 6. water          procedural waves, blended into the HDR target
+//! 7. composite      tone map and sharpen -> the caller's target
 //! ```
+//!
+//! Water sits *inside* the HDR target rather than being composited over the finished image, so its
+//! glitter tone maps with everything else. Over the composite it would clip to white instead of
+//! rolling off, which is the whole reason the accumulation target has range above one.
 //!
 //! The G-buffer stores no world position. It is reconstructed from depth in step 5, for the reason
 //! documented at `world_from_depth` in `terrain_deferred.wgsl`: a half-float position target
@@ -30,6 +35,7 @@ use crate::model::{ModelBatch, buffer_layouts};
 use crate::shadow::{CASCADE_COUNT, CASCADE_RESOLUTION, Cascade, fit_cascades};
 use crate::terrain::{DirectionalLight, TerrainRenderer};
 use crate::view::{Projection, invert, look_at, multiply, perspective};
+use crate::water::WaterBody;
 
 /// Albedo target format. sRGB because albedo is authored in sRGB and the conversion is free.
 pub const ALBEDO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -77,10 +83,27 @@ pub struct DeferredFrame {
     pub light: DirectionalLight,
     /// How far shadows are cast.
     pub shadow_distance: f32,
+    /// Viewport size in pixels.
+    ///
+    /// Carried on the frame rather than passed separately to [`DeferredRenderer::set_frame`], because
+    /// it was previously supplied twice — once to build the projection and once to fill the shaders'
+    /// viewport uniform — and nothing checked that the two agreed. They must: the lighting pass
+    /// reconstructs a world position using the viewport's reciprocal, so a disagreement moves every
+    /// receiver and reads as a shadowing fault rather than as a wrong number.
+    pub viewport: [u32; 2],
+    /// Scene time in seconds, which drives every animated surface.
+    ///
+    /// A frame *parameter* rather than a clock reading taken inside the renderer, and that is a
+    /// deliberate constraint rather than a convenience. A capture of an animated scene is only a
+    /// usable regression reference if the same inputs produce the same image, so the one thing that
+    /// would make it irreproducible — the wall clock — is kept out of the renderer entirely. The
+    /// caller running a window advances this; a test pins it.
+    pub time: f32,
 }
 
 impl DeferredFrame {
-    /// Builds a frame from a pose and viewport, with the default light and shadow distance.
+    /// Builds a frame from a pose and viewport, with the default light and shadow distance, at time
+    /// zero.
     #[must_use]
     pub fn new(pose: CameraPose, width: u32, height: u32) -> Self {
         Self {
@@ -90,7 +113,16 @@ impl DeferredFrame {
             // realistic skylight ambient affordable. See `daylight_with_occlusion`.
             light: DirectionalLight::daylight_with_occlusion(),
             shadow_distance: DEFAULT_SHADOW_DISTANCE,
+            viewport: [width, height],
+            time: 0.0,
         }
+    }
+
+    /// Returns the frame with its scene time replaced.
+    #[must_use]
+    pub const fn at_time(mut self, time: f32) -> Self {
+        self.time = time;
+        self
     }
 }
 
@@ -205,6 +237,8 @@ pub struct DeferredRenderer {
     model_shadow_pipeline: wgpu::RenderPipeline,
     model_gbuffer_pipeline: wgpu::RenderPipeline,
     material_layout: wgpu::BindGroupLayout,
+    water_pipeline: wgpu::RenderPipeline,
+    water_layout: wgpu::BindGroupLayout,
     ao: AoStage,
     lighting: LightingStage,
     scene_uniform: wgpu::Buffer,
@@ -244,6 +278,19 @@ impl DeferredRenderer {
 
         let (cascade_layout, cascade_uniforms, cascade_groups) = build_cascade_bindings(device);
         let material_layout = ModelBatch::material_layout(device);
+        let water_layout = WaterBody::layout(device);
+        // The lighting layout comes back out rather than staying inside the stage, because the water
+        // pass binds that very group: it needs the camera, the fitted cascades, the shadow array, and
+        // the scene depth, all of which are already declared there. Building a second identical layout
+        // for it would be two declarations to keep in step by hand.
+        let (lighting, lighting_layout) = build_lighting(
+            device,
+            targets,
+            &scene_uniform,
+            &shadow_uniform,
+            &deferred_shader,
+            output_format,
+        );
 
         Ok(Self {
             shadow_pipeline: build_shadow_pipeline(
@@ -270,15 +317,15 @@ impl DeferredRenderer {
                 &model_shader,
             ),
             material_layout,
-            ao: build_ao(device, targets, &scene_uniform, &ao_shader),
-            lighting: build_lighting(
+            water_pipeline: build_water_pipeline(
                 device,
-                targets,
-                &scene_uniform,
-                &shadow_uniform,
+                &lighting_layout,
+                &water_layout,
                 &deferred_shader,
-                output_format,
             ),
+            water_layout,
+            ao: build_ao(device, targets, &scene_uniform, &ao_shader),
+            lighting,
             scene_uniform,
             shadow_uniform,
             cascade_uniforms,
@@ -295,6 +342,14 @@ impl DeferredRenderer {
         &self.material_layout
     }
 
+    /// Returns the layout a [`WaterBody`] binds its uniform through.
+    ///
+    /// Shared for the same reason the material layout is.
+    #[must_use]
+    pub const fn water_layout(&self) -> &wgpu::BindGroupLayout {
+        &self.water_layout
+    }
+
     /// Uploads every per-frame uniform: the scene camera, the fitted cascades, and each cascade view.
     ///
     /// # Errors
@@ -306,9 +361,8 @@ impl DeferredRenderer {
         context: &GpuContext,
         terrain: &TerrainRenderer,
         models: &[ModelBatch],
+        water: &[WaterBody],
         frame: DeferredFrame,
-        width: u32,
-        height: u32,
     ) -> Result<[Cascade; CASCADE_COUNT], RenderError> {
         let view = look_at(frame.pose.eye, frame.pose.focus, [0.0, 0.0, 1.0]);
         let view_projection = multiply(perspective(frame.projection), view);
@@ -337,7 +391,7 @@ impl DeferredRenderer {
         queue.write_buffer(
             &self.scene_uniform,
             0,
-            &scene_bytes(&view_projection, &inverse, frame, width, height),
+            &scene_bytes(&view_projection, &inverse, frame),
         );
 
         let mut shadow = Vec::with_capacity(SHADOW_UNIFORM_BYTES);
@@ -357,6 +411,13 @@ impl DeferredRenderer {
             queue.write_buffer(buffer, 0, &bytes);
         }
 
+        // Animated surfaces take their phase from the frame rather than from a clock, so this is the
+        // one place scene time enters the GPU. Setting it here rather than leaving it to the caller is
+        // what stops a body being drawn a frame out of step with the rest of the scene.
+        for body in water {
+            body.set_time(context, frame.time);
+        }
+
         Ok(cascades)
     }
 
@@ -370,6 +431,7 @@ impl DeferredRenderer {
         context: &GpuContext,
         terrain: &TerrainRenderer,
         models: &[ModelBatch],
+        water: &[WaterBody],
         targets: &DeferredTargets,
         output: &wgpu::TextureView,
     ) {
@@ -450,7 +512,7 @@ impl DeferredRenderer {
             &[&self.ao.group, &self.ao.source_group],
         );
 
-        // 5. Lighting into HDR, then 6. tone map and sharpen into the output.
+        // 5. Lighting into HDR.
         fullscreen_pass(
             &mut encoder,
             "cic-render lighting",
@@ -458,6 +520,30 @@ impl DeferredRenderer {
             &self.lighting.pipeline,
             &[&self.lighting.group],
         );
+
+        // 6. Water, blended over the lit scene inside the HDR target.
+        //
+        // The target loads rather than clears, since the lighting result is what the water is
+        // transparent *against*. No depth attachment: the lighting group bound here already samples
+        // the scene depth, and one pass cannot both attach and sample the same texture — so
+        // `water_fragment` runs the depth comparison itself against the value it loads.
+        if !water.is_empty() {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("cic-render water"),
+                color_attachments: &[Some(load_attachment(&targets.hdr))],
+                depth_stencil_attachment: None,
+                multiview_mask: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.water_pipeline);
+            pass.set_bind_group(0, &self.lighting.group, &[]);
+            for body in water {
+                body.draw(&mut pass);
+            }
+        }
+
+        // 7. Tone map and sharpen into the output.
         fullscreen_pass(
             &mut encoder,
             "cic-render composite",
@@ -475,9 +561,8 @@ fn scene_bytes(
     view_projection: &[[f32; 4]; 4],
     inverse: &[[f32; 4]; 4],
     frame: DeferredFrame,
-    width: u32,
-    height: u32,
 ) -> Vec<u8> {
+    let [width, height] = frame.viewport;
     let mut scene = Vec::with_capacity(SCENE_UNIFORM_BYTES);
     push_matrix(&mut scene, view_projection);
     push_matrix(&mut scene, inverse);
@@ -822,6 +907,10 @@ struct LightingStage {
     composite_group: wgpu::BindGroup,
 }
 
+/// Builds the lighting and composite stage, returning its bind group layout as well.
+///
+/// The layout is returned because the water pass binds this same group and would otherwise need an
+/// identical second declaration.
 fn build_lighting(
     device: &wgpu::Device,
     targets: &DeferredTargets,
@@ -829,7 +918,7 @@ fn build_lighting(
     shadow_uniform: &wgpu::Buffer,
     deferred_shader: &wgpu::ShaderModule,
     output_format: wgpu::TextureFormat,
-) -> LightingStage {
+) -> (LightingStage, wgpu::BindGroupLayout) {
     let comparison_sampler = build_shadow_sampler(device);
     let scene_sampler = build_scene_sampler(device);
 
@@ -839,7 +928,10 @@ fn build_lighting(
             texture_entry(0, wgpu::TextureSampleType::Float { filterable: false }),
             texture_entry(1, wgpu::TextureSampleType::Float { filterable: false }),
             texture_entry(2, wgpu::TextureSampleType::Float { filterable: false }),
-            uniform_entry(3, wgpu::ShaderStages::FRAGMENT),
+            // Visible to the vertex stage as well, for the water pass: its vertex shader transforms by
+            // this block's view-projection. The two fullscreen entry points using the same group do
+            // not read it there, and extra visibility costs them nothing.
+            uniform_entry(3, wgpu::ShaderStages::VERTEX_FRAGMENT),
             wgpu::BindGroupLayoutEntry {
                 binding: 4,
                 visibility: wgpu::ShaderStages::FRAGMENT,
@@ -904,7 +996,7 @@ fn build_lighting(
         ],
     });
 
-    LightingStage {
+    let stage = LightingStage {
         pipeline: fullscreen_pipeline(
             device,
             "cic-render lighting pipeline",
@@ -923,7 +1015,68 @@ fn build_lighting(
         ),
         group,
         composite_group,
-    }
+    };
+    (stage, layout)
+}
+
+/// Builds the water pipeline.
+///
+/// Not a [`fullscreen_pipeline`]: water has its own procedural grid rather than one covering triangle,
+/// and it blends rather than overwriting.
+fn build_water_pipeline(
+    device: &wgpu::Device,
+    lighting_layout: &wgpu::BindGroupLayout,
+    water_layout: &wgpu::BindGroupLayout,
+    deferred_shader: &wgpu::ShaderModule,
+) -> wgpu::RenderPipeline {
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("cic-render water pipeline layout"),
+        // Group 1 is left empty, the same way the model G-buffer pipeline leaves it: in this module
+        // group 1 belongs to the composite's scene colour, so the water uniform takes group 2.
+        bind_group_layouts: &[Some(lighting_layout), None, Some(water_layout)],
+        immediate_size: 0,
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("cic-render water pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: deferred_shader,
+            entry_point: Some("water_vertex"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[],
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            // Unculled. The surface is a single sheet rather than a solid, so it has no interior, and
+            // a camera that dips below the waterline should still see it from underneath.
+            cull_mode: None,
+            ..Default::default()
+        },
+        // No depth state, because there is no depth attachment. See the water pass in `render`.
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: deferred_shader,
+            entry_point: Some("water_fragment"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: HDR_FORMAT,
+                blend: Some(wgpu::BlendState {
+                    color: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::SrcAlpha,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                    // Replaced rather than accumulated: nothing downstream reads the HDR target's
+                    // alpha, so there is no coverage to keep track of across bodies.
+                    alpha: wgpu::BlendComponent::REPLACE,
+                }),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
 }
 
 /// A depth-comparison sampler, which is what makes shadow filtering cheap.
@@ -983,6 +1136,22 @@ fn shader_module(device: &wgpu::Device, name: &str, source: &str) -> wgpu::Shade
         label: Some(name),
         source: wgpu::ShaderSource::Wgsl(source.into()),
     })
+}
+
+/// A colour attachment that keeps what the target already holds.
+///
+/// The water pass needs this: it blends against the lighting result, so clearing first would leave it
+/// transparent over nothing.
+const fn load_attachment(view: &wgpu::TextureView) -> wgpu::RenderPassColorAttachment<'_> {
+    wgpu::RenderPassColorAttachment {
+        view,
+        depth_slice: None,
+        resolve_target: None,
+        ops: wgpu::Operations {
+            load: wgpu::LoadOp::Load,
+            store: wgpu::StoreOp::Store,
+        },
+    }
 }
 
 fn clear_attachment(view: &wgpu::TextureView) -> wgpu::RenderPassColorAttachment<'_> {
@@ -1054,7 +1223,10 @@ const fn colour_target(format: wgpu::TextureFormat) -> wgpu::ColorTargetState {
     }
 }
 
-fn uniform_buffer(device: &wgpu::Device, label: &str, size: usize) -> wgpu::Buffer {
+/// Allocates a uniform buffer.
+///
+/// Shared with [`crate::water`], which builds its own block against the same conventions.
+pub(crate) fn uniform_buffer(device: &wgpu::Device, label: &str, size: usize) -> wgpu::Buffer {
     device.create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
         size: size as u64,
@@ -1063,7 +1235,10 @@ fn uniform_buffer(device: &wgpu::Device, label: &str, size: usize) -> wgpu::Buff
     })
 }
 
-const fn uniform_entry(binding: u32, visibility: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
+pub(crate) const fn uniform_entry(
+    binding: u32,
+    visibility: wgpu::ShaderStages,
+) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
         visibility,
@@ -1099,7 +1274,7 @@ const fn view_entry(binding: u32, view: &wgpu::TextureView) -> wgpu::BindGroupEn
     }
 }
 
-fn buffer_entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
+pub(crate) fn buffer_entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
     wgpu::BindGroupEntry {
         binding,
         resource: buffer.as_entire_binding(),
@@ -1114,7 +1289,7 @@ fn push_matrix(bytes: &mut Vec<u8>, matrix: &[[f32; 4]; 4]) {
     }
 }
 
-fn push_vec4(bytes: &mut Vec<u8>, values: [f32; 4]) {
+pub(crate) fn push_vec4(bytes: &mut Vec<u8>, values: [f32; 4]) {
     for value in values {
         bytes.extend_from_slice(&value.to_le_bytes());
     }

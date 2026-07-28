@@ -16,6 +16,8 @@
     clippy::cast_sign_loss
 )]
 
+mod support;
+
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
@@ -274,6 +276,9 @@ fn layer_albedo_reaches_the_frame_and_tiles_in_world_space() {
     let textured = capture_with(context, &terrain, &textured_layers());
     write_capture("terrain-flat-layers.png", &flat);
     write_capture("terrain-textured-layers.png", &textured);
+    // Pins world-space layer tiling and the linear-light mip chain. A reversed layer ramp and a mip
+    // chain averaged in the wrong space both leave the statistics below entirely healthy.
+    support::check_reference(context, "terrain-textured-layers.png", &textured);
 
     let mut changed = 0usize;
     for (bare, patterned) in flat

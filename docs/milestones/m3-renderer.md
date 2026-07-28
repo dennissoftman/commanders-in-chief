@@ -2,7 +2,9 @@
 
 Draw a map: terrain, water, models, lighting, and shadows, in a window and headlessly.
 
-**Status:** In progress. Terrain renders.
+**Status:** Charter complete. Every item below is landed and tested; the one qualification is that CI
+has no GPU, so the regression harness runs on a developer machine and not yet on a runner. See
+[Exit condition](#exit-condition).
 
 ## Charter
 
@@ -13,7 +15,7 @@ Draw a map: terrain, water, models, lighting, and shadows, in a window and headl
 - Water surfaces.
 - Windowed presentation driven by the reusable camera, plus a headless capture path.
 - Visual regression tests: a capture compared against a committed reference, so a rendering change
-  either is intended or fails CI.
+  either is intended or fails CI. (Built and verified; "fails CI" awaits a runner with an adapter.)
 
 ## Landed
 
@@ -56,22 +58,63 @@ Draw a map: terrain, water, models, lighting, and shadows, in a window and headl
   colour; model materials get a base colour from the images their glTF carried. Mip chains are generated
   on the CPU in linear light. See [ADR 0004](../adr/0004-texture-arrays-and-world-space-tiling.md).
 
+- **Water surfaces**, written from scratch: a bounded plane with five summed directional waves, drawn
+  between lighting and the composite and blended *inside* the HDR target so its glitter tone maps with
+  the scene rather than clipping over it. The shoreline is not authored — the pass discards wherever the
+  reconstructed bed rises through the displaced surface, so a rectangle plus a heightfield already give
+  an irregular shore that moves with the swell. Depth drives a shallow-to-deep tint and the edge
+  opacity, Schlick Fresnel mixes in a reflection of the same sky the lighting pass paints, and the
+  primary shadow term applies with water's own shade floors. Every constant was authored here; the
+  predecessor's water shader was removed rather than carried across and was not consulted. See
+  [LICENSING.md](../../LICENSING.md).
+
+- **Scene time as a frame parameter.** `DeferredFrame::time` drives every animated surface, and nothing
+  in the renderer reads a clock. That is what makes a capture of moving water reproducible, so it is a
+  precondition for the harness below rather than a convenience.
+
+- **The visual regression harness.** A capture is compared against a committed reference and fails on a
+  regression, writing the capture and an amplified difference image beside the other test output.
+  References are committed per adapter, because two GPUs do not agree to the byte and a tolerance loose
+  enough to span them is loose enough to accept a real fault. Five references cover terrain layers,
+  instanced models, the whole deferred chain, water, and water under a glancing sun. The comparison
+  itself is a pure function over bytes with its own unit tests, so it is verified even on a machine with
+  no GPU.
+
 ## Remaining
 
-- Water surfaces, including re-authoring the shader whose constants were left behind.
+- Antialiasing. Terrain silhouettes stair-step and water glitter sparkles, and
+  [ADR 0005](../adr/0005-antialiasing-strategy.md) settles what to do about it: a resolution scale, FXAA,
+  and TAA — and explicitly *not* MSAA.
 - Normal, roughness, and metallic *maps*. Only base colour is textured; the other channels are still
   per-material or per-layer factors.
 - Alpha-tested materials. Everything is opaque, so the shadow passes have no fragment stage — foliage
   will need one.
 - Wiring the residency bookkeeping to a real virtual-texture cache, so terrain detail scales past what
   one texture can hold.
-- Multisampling. Terrain silhouettes against the sky show stair-stepping.
-- Committed reference captures and the comparison harness.
+- **A GPU-capable CI runner, and a reference set generated on it.** This is the one part of the exit
+  condition not met, and it is infrastructure rather than renderer work — see below.
 
 ## Exit condition
 
 A map package loads and renders, in a window and headlessly, at a stable frame rate; the visual
 regression harness runs in CI with committed references.
+
+**Met, except in CI.** The renderer half is done and the harness works: it catches a change of four
+8-bit steps in one channel — a difference invisible to the eye — across 90% of a frame, verified by
+perturbing the exposure constant and watching all five references fail.
+
+What is not met is "in CI". The runner is `ubuntu-latest` with no GPU and no software rasteriser, so
+`GpuContext::new` finds no adapter and **every rendering test skips there** — which has been true since
+the first render test landed and is not something water or the harness changed. Closing it needs two
+steps, in order:
+
+1. Install Mesa's `lavapipe` on the runner, so an adapter exists and the rendering tests execute.
+2. Generate the reference set on that runner — `CIC_UPDATE_REFERENCES=1` — then review those images and
+   commit them under their own adapter directory.
+
+The second step has to happen on Linux, which is why it is not in the change that built the harness. Note
+that the references cannot simply be copied from a developer machine: a software rasteriser and an NVIDIA
+card differ far beyond the tolerance, which is the whole reason the sets are keyed by adapter.
 
 ## Design notes
 
@@ -93,6 +136,25 @@ ambient-occlusion pass, not a constant.
 **Captures are asserted on luminance spread, not colour count.** A distinct-colour count mostly reports
 how varied the fixture's palette was; luminance range and deviation report whether light actually
 differentiates slopes from flats.
+
+**A statistical assertion cannot replace a reference image, and the two fail differently.** Every
+rendering fault in this project's history produced a frame with a perfectly healthy luminance spread —
+that is *why* the spread assertions passed while the images were wrong. A committed reference catches the
+class of fault the statistics structurally cannot. It also fails in the opposite way: a spread threshold
+is too permissive, while a reference is so sensitive that a driver update will trip it, and the answer to
+that is to review the difference images and regenerate deliberately, never to loosen the tolerance until
+it stops complaining.
+
+**A water fixture has to be shaped for water, exactly as a shadow fixture has to be shaped for its sun.**
+The shadowing terrain was reused first and was useless for this: its spire puts the elevation range in the
+hundreds, so any level high enough to fill its bowl also drowned the plain. The next attempt used a basin
+too narrow, giving a lake covering 1.6% of the frame — which leaves no room between "drew nothing" and
+"failed to clip" for a bound to sit in, and made the animation assertion vacuous rather than failing.
+
+**The difference between a dry frame and a flooded one is a mask of the water.** That is what makes any
+assertion about the *surface* possible: a measurement over the whole frame mostly reports the terrain's
+range. Comparing two renders and measuring only where they disagree is how "the water is a flat sheet"
+became a falsifiable claim.
 
 **One GPU device per test binary, not per test.** Creating and destroying several devices concurrently
 on one adapter crashed the driver outright — an access violation rather than a test failure.
@@ -141,6 +203,33 @@ adapter from a second `wgpu::Instance` to ask about a surface belonging to the f
 answer but a hard failure inside the graphics layer. `GpuContext` retains its adapter for this reason.
 No headless test could have caught it, because none of them create a surface — it took running the app.
 
+**A water surface cannot attach the depth buffer it needs to read.** The pass shares the lighting bind
+group — deliberately, so it reuses the cascade selection rather than keeping a second copy of it — and
+that group already binds the scene depth for sampling. One pass cannot both attach and sample the same
+texture, so `water_fragment` performs the depth comparison itself against the value it loads. That is the
+same `Less` test the rasterizer would have run, on a value the shader was reading anyway.
+
+**Summed sine waves read as a tiled texture unless two things are deliberately irrational.** The first
+attempt used wavelength ratios of 1, ½, ⅓, ⅙ and four directions a little over 90° apart, and produced an
+unmistakable diamond lattice. Near-harmonic wavelengths reinforce at regular intervals, and any rational
+fraction of a turn eventually puts two waves on a shared axis — a shared axis being what a lattice is
+made of. Steps of about 0.61 in wavelength and the golden angle in direction both fixed it, and neither
+was predicted; the grid was visible in the first capture and in none of the assertions.
+
+**A specular term can be present in the shader and absent from the frame.** Water is smooth, so the
+obvious gloss exponent is mirror-like — and at two thousand the lobe is under two degrees wide, against
+wave normals that stray about fifteen. The highlight then lands on almost no pixel at all and the surface
+renders matte. Lowering the exponent to 720 was not a tuning preference but the difference between
+glitter and dead code, and there is now a test that puts the sun in the mirror direction and asserts the
+peak brightens, because nothing else would have noticed.
+
+**Water clips to the terrain's footprint, not to its own rectangle.** An earlier version treated "no bed
+behind this fragment" as infinitely deep water, which sounds right and is wrong: coverage is zero only
+*outside* the heightfield, so the rule never fired inside a map and did nothing but paint a slab hanging
+past the map edge — clearly visible under the terrain boundary, because terrain is an open sheet rather
+than a solid. It took 10% of the frame and was found by opening the capture for a test asserting that
+water below all terrain draws nothing.
+
 **Presentation is the same chain pointed at a swapchain.** The only differences are the output format,
 which a surface commonly reports as BGRA rather than RGBA, and that a resize reallocates every
 intermediate target — which invalidates every bind group holding a view of one, so the chain is rebuilt
@@ -157,8 +246,21 @@ unlit back slope. Neither was a renderer fault, and neither was visible from the
 - No particle system; it belongs with the gameplay that spawns effects.
 - No level-of-detail generation for models. Terrain has it because a heightfield's regularity makes it
   cheap; model LOD wants measurement first.
-- No multisampling. Terrain silhouettes against the sky currently show stair-stepping, which is the
-  expected cost and a known, deliberate gap.
+- **MSAA is declined outright**, rather than pending. Multisampling a deferred G-buffer means four times
+  the memory on every target *and* per-sample lighting behind a stencil pass, because averaging normals
+  or depths across a silhouette yields values describing no surface that exists — and having paid for all
+  that it still fixes only geometric edges, not the texture and specular aliasing that are now the more
+  visible cases. This entry previously appeared under both "remaining" and "not done", which read as an
+  omission nobody had decided about. [ADR 0005](../adr/0005-antialiasing-strategy.md) decides it.
+- No reflections of scene geometry in water. The surface reflects the sky gradient and nothing else, so a
+  cliff at the water's edge does not appear in it. A planar reflection pass means drawing the scene twice
+  and a screen-space one means a ray march over the depth buffer; both are worth more than they cost only
+  once there is something on the shore worth seeing reflected.
+- No refraction offset. What is beneath the surface is read at the fragment's own pixel rather than along
+  a bent ray, so a submerged object does not displace as the waves pass over it. Doing it properly needs
+  the lit scene as a *texture* the water pass can sample at an offset, which is a fourth read of the
+  colour target for an effect visible only in the shallows.
+- No flow, foam, or shoreline wave breaking. The shore is a depth-driven fade, not a simulation.
 - No anisotropic filtering. It is an optional device capability, and a sampler that fails to create on a
   software adapter would take the headless suite with it. Trilinear until there is a measured reason and
   a capability check.
