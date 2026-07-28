@@ -12,9 +12,10 @@ document and the milestone both claimed otherwise until it was checked.
 What works:
 
 - A `cic-assets` terrain uploads to the GPU and renders through a seven-pass deferred chain: four shadow
-  cascades, a G-buffer, ambient occlusion with a bilateral blur, deferred lighting that reconstructs
-  world position from depth, a blended water pass, and a composite that tone maps and resolves the render
-  resolution to the caller's. An eighth pass antialiases, when the display settings ask for it.
+  cascades, a G-buffer, a half-resolution ambient-occlusion estimate with a bilateral upsample, deferred
+  lighting that reconstructs world position from depth, a blended water pass, and a composite that tone maps
+  and resolves the render resolution to the caller's. An eighth pass antialiases, when the display settings
+  ask for it. The whole chain sums to **0.68 ms** at 1920x1200 on an RTX 4080 SUPER.
 - Heights and layer weights live in *writable* textures with displacement and normals computed in the
   vertex shader, so terrain deformation and route grading are texture writes rather than a remesh.
 - Instanced models share the terrain G-buffer and every shadow cascade, one draw call per model
@@ -68,9 +69,20 @@ What works:
   tick-to-duration arithmetic is a pure function with its own tests. Optional, since `TIMESTAMP_QUERY` is —
   a device without it renders identically and reports nothing.
   - It refuted its own premise immediately. The terrain's two million unculled vertices a frame were the
-    reason to build it, and at 1920x1200 the four cascades are 7% of the frame while ambient occlusion is
+    reason to build it, and at 1920x1200 the four cascades were 7% of the frame while ambient occlusion was
     58%. Measured at 720x480 the same code said the cascades were 36%, because the cascades cost the same at
     every window size and a small target leaves nothing to compare them against.
+- **A half-resolution occlusion estimate**, which is what that measurement led to. One estimate per 2x2
+  block of render pixels, resolved back to full resolution by the bilateral pass that already existed — now
+  the upsample as well as the blur, weighting each tap by the world distance to the render pixel its
+  estimate was actually *taken* at. What halves is the number of estimates, not the resolution of anything
+  they read.
+  - At 1920x1200 the estimate went from **0.668 ms to 0.303 ms** and its resolve from **0.161 ms to
+    0.075 ms**: the summed frame is **1.160 ms down to 0.677 ms, 42% off**. Occlusion is still the largest
+    single cost, at 56% of the frame rather than 72%.
+  - Its blur radius came *down* rather than up, against expectation — a wider kernel over coarser noise was
+    the guess, and the captures said 3x3 half-resolution taps show no more noise than the old 5x5 while
+    landing closer to the frame they replace.
 - Windowed presentation, driven by the reusable camera:
 
 ```bash
@@ -98,14 +110,10 @@ beyond the tolerance, which is why the sets are keyed by adapter in the first pl
 
 After that, in rough order:
 
-1. **A cheaper ambient-occlusion pass.** Per-pass GPU timing
-   ([`timing`](crates/cic-render/src/timing.rs)) says this is where the frame goes: at 1920x1200, 58% in the
-   occlusion estimate and 14% more in its blur, against 7% for all four shadow cascades and 6% for the
-   G-buffer. Nothing is urgent — the whole chain is 1.2 ms on an RTX 4080 SUPER — but that is the ranking,
-   and it is not the one that was expected. See the milestone's design note.
-2. **Terrain level of detail and frustum culling**, the outstanding charter item. Two million unculled
+1. **Terrain level of detail and frustum culling**, the outstanding charter item. Two million unculled
    vertices a frame is not worth leaving standing, and it matters more on a larger map and a weaker GPU —
-   but it is not the biggest win, and the measurement is what said so.
+   but it is not the biggest win, and the measurement is what said so: all four cascades are 5% of the
+   frame and the G-buffer 11%.
 2. **TAA**, the quality tier ADR 0005 plans and the last antialiasing item: a jittered projection, a
    motion-vector target, a history buffer, and neighbourhood clamping. It needs the regression harness
    accounted for, since a temporal accumulator makes one captured frame depend on the frames before it.

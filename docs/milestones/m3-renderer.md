@@ -135,6 +135,30 @@ density with no culling, which this document claimed for some time that it did n
   - Both are togglable in the viewer, on `T` and the bracket keys, because what an edge does *as the camera
     moves* is the whole subject and no still capture reports it.
 
+- **Per-pass GPU timing** ([`timing`](../../crates/cic-render/src/timing.rs)). Each pass owns a fixed pair
+  of timestamp queries; the resolve buffer is cleared before only the passes that ran are resolved, so a
+  skipped pass reads back *absent* rather than as a duration of zero. The tick arithmetic is a pure
+  function with its own tests, and `TIMESTAMP_QUERY` is requested only where the adapter offers it, so a
+  device without it renders identically and reports nothing. `P` in the viewer prints a breakdown once a
+  second — reading blocks on the GPU, which is why it is not per frame.
+
+- **A half-resolution occlusion estimate**, which is what the timing was built to find and immediately
+  paid for itself. One estimate per 2x2 block of render pixels, resolved back to full resolution by the
+  bilateral pass that was already there — so that pass is now the upsample as well as the blur, weighting
+  each tap by the world distance to the render pixel the estimate was actually *taken* at. What halves is
+  the number of estimates, not the resolution of anything they read: each one still loads full-resolution
+  depth and normals and still walks its slices at full-resolution spacing.
+  - At 1920x1200 the estimate went from **0.668 ms to 0.303 ms** and its resolve from **0.161 ms to
+    0.075 ms**, taking the summed frame from **1.160 ms to 0.677 ms — 42% off**. Occlusion is still the
+    largest single cost at 56% of the frame, down from 72%.
+  - The blur radius is 1 in half-resolution taps, not 2. Two was tried first on the reasoning that coarser
+    noise needs a wider kernel; the captures said the opposite, and said it twice — 3x3 shows no more noise
+    than the old 5x5 *and* lands closer to the full-resolution frame it replaces, because 5x5 in
+    half-resolution space was simply over-blurring.
+  - Every committed reference except the forward-pass one moved, by 0.1% to 0.6% of pixels at a peak
+    channel difference of 6 — sub-perceptual, and confirmed by magnifying the spire's contact shadow, the
+    concave bowl, and a building base against the pre-change captures before regenerating.
+
 ## Remaining
 
 - **Terrain level of detail, and any culling at all.** This is the outstanding charter item, though *not*
@@ -146,11 +170,6 @@ density with no culling, which this document claimed for some time that it did n
   - Note what this is *not*. [`terrain_virtual`](../../crates/cic-render/src/terrain_virtual.rs) and
     [`detail`](../../crates/cic-render/src/detail.rs) are residency bookkeeping for terrain *texture*
     pages, decided in texels per cell. They are unwired, and wiring them would not remove a triangle.
-- **A cheaper ambient-occlusion pass**, which the measurement says is where the frame actually goes: 58% in
-  the occlusion estimate and another 14% in its bilateral blur, at 1920x1200. It scales with pixels rather
-  than with geometry, so it is the pass a resolution scale multiplies hardest. Nothing here is urgent — the
-  whole chain is 1.2 ms — but this is the pass to look at first when it stops being comfortable, and a
-  half-resolution estimate with a full-resolution blur is the standard answer.
 - **Temporal antialiasing**, the quality tier of [ADR 0005](../adr/0005-antialiasing-strategy.md). The two
   cheaper tiers below have landed; this one needs jittered projection, a motion-vector target, a history
   buffer, and neighbourhood clamping — and it constrains the regression harness, since a temporal

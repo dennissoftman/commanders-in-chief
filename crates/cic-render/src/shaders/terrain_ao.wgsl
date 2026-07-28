@@ -10,6 +10,25 @@
 // Sampling is purely spatial. This renderer has no temporal antialiasing, so a temporally
 // accumulated estimate would shimmer under free-flight camera motion; the noise is a per-pixel
 // interleaved gradient offset resolved by the blur below instead.
+//
+// # The estimate is half resolution, and the blur is the upsample
+//
+// One estimate per 2x2 block of render pixels, resolved back to full resolution by the bilateral pass
+// below. This is measured rather than assumed: per-pass timing put the estimate at 58% of a 1920x1200
+// frame and its blur at another 14%, making it far and away the most expensive thing the renderer does
+// and the one a resolution scale multiplies hardest.
+//
+// What halves is the number of *estimates*, not the resolution of anything they read. Each estimate still
+// loads full-resolution depth and normals, still walks its slices at full-resolution tap spacing, and
+// still clamps its search to a full-resolution radius — so an individual estimate is bit-for-bit the work
+// it was before. Occlusion is a low-frequency signal over a surface, which is what makes this a fair
+// trade: what is lost is spatial precision at silhouettes, and that is exactly what the bilateral
+// upsample's range weight is there to recover.
+//
+// The alternative — a half-resolution *blur* upsampled bilinearly in the lighting pass — was rejected.
+// A bilinear read bleeds occlusion across a silhouette, which is the one artifact the bilateral weight
+// exists to prevent, and it would have moved the decision into a pass that has no business knowing about
+// it.
 
 // Must be a *prefix* of `SceneCamera` in `scene.wgsl`, byte for byte: both passes bind the same uniform
 // buffer, and this one declares only the fields it reads.
@@ -100,6 +119,25 @@ fn saturate_scalar(value: f32) -> f32 {
     return clamp(value, 0.0, 1.0);
 }
 
+// The render pixel one half-resolution estimate is taken at.
+//
+// The top-left of each 2x2 block rather than a rotating sub-position. A rotating one would cover all four
+// sub-pixels across the frame, but it makes the estimate's own position a function of parity — so the
+// upsample below, which weights a tap by the world distance to where it was *taken*, would have to
+// reproduce the same parity rule to stay correct. One fixed corner keeps that rule in one place, and the
+// half-pixel bias it introduces is invisible in a signal this smooth.
+fn estimate_pixel(half_pixel: vec2<i32>) -> vec2<i32> {
+    return half_pixel * 2;
+}
+
+// The largest addressable half-resolution pixel.
+//
+// Derived rather than uploaded, and it must agree with `DeferredTargets`: `(size + 1) / 2` rounds up, so
+// an odd render size keeps its last column and row instead of dropping them. A test pins the pair.
+fn occlusion_limit() -> vec2<i32> {
+    return (vec2<i32>(camera.viewport.xy) + vec2<i32>(1)) / vec2<i32>(2) - vec2<i32>(1);
+}
+
 fn project_to_pixel(world: vec3<f32>) -> vec2<f32> {
     let clip = camera.view_projection * vec4<f32>(world, 1.0);
     let ndc = clip.xy / max(clip.w, 0.0001);
@@ -158,13 +196,17 @@ fn horizon_cosine(
 
 @fragment
 fn ao_fragment(input: FullscreenOutput) -> @location(0) vec4<f32> {
-    let center_pixel = floor(input.position.xy) + vec2<f32>(0.5);
-    let world = load_geometry(vec2<i32>(input.position.xy));
+    // This pass draws into a half-resolution target, so the fragment position is in half-resolution
+    // pixels while everything it reads and every radius it uses is in render pixels.
+    let half_pixel = vec2<i32>(input.position.xy);
+    let render_pixel = estimate_pixel(half_pixel);
+    let center_pixel = vec2<f32>(render_pixel) + vec2<f32>(0.5);
+    let world = load_geometry(render_pixel);
     if world.w < 0.5 {
         return vec4<f32>(1.0);
     }
     let position = world.xyz;
-    let normal = normalize(textureLoad(g_normal, vec2<i32>(input.position.xy), 0).xyz);
+    let normal = normalize(textureLoad(g_normal, render_pixel, 0).xyz);
     let view_direction = normalize(camera.camera_position.xyz - position);
 
     // A camera-facing basis for the slice directions. The reference axis swaps when the view is
@@ -179,8 +221,13 @@ fn ao_fragment(input: FullscreenOutput) -> @location(0) vec4<f32> {
     let radius_edge = project_to_pixel(position + axis_right * AO_RADIUS_WORLD);
     let screen_radius = clamp(length(radius_edge - center_pixel), 2.0, AO_MAX_SCREEN_RADIUS);
 
-    let noise = spatial_noise(center_pixel);
-    let jitter = step_jitter(vec2<i32>(input.position.xy));
+    // Both noises take the *half-resolution* coordinate, because what has to decorrelate is one estimate
+    // from the next and the estimates now live on that grid. Feeding them the render pixel would step both
+    // by two, which for interleaved gradient noise means sampling its pattern at half its design
+    // frequency — reintroducing exactly the correlation between neighbouring rotations that the second
+    // hash below was added to remove.
+    let noise = spatial_noise(vec2<f32>(half_pixel) + vec2<f32>(0.5));
+    let jitter = step_jitter(half_pixel);
     var visibility = 0.0;
     for (var slice = 0; slice < AO_SLICES; slice += 1) {
         let angle = (f32(slice) + noise) * PI / f32(AO_SLICES);
@@ -238,10 +285,24 @@ fn ao_fragment(input: FullscreenOutput) -> @location(0) vec4<f32> {
 
 @group(1) @binding(0) var ao_source: texture_2d<f32>;
 
-// Bilateral cross blur. World-position distance is the range weight, so occlusion never bleeds
-// across a silhouette or over a terrain crease, and the per-pixel slice rotation above averages
-// out instead of appearing as directional streaking.
-const AO_BLUR_RADIUS: i32 = 2;
+// Bilateral cross blur, which is also the upsample from the half-resolution estimate. World-position
+// distance is the range weight, so occlusion never bleeds across a silhouette or over a terrain crease,
+// and the per-estimate slice rotation above averages out instead of appearing as directional streaking.
+//
+// Doing both jobs in one pass is not a shortcut. A separate upsample would need the same range weight
+// against the same reconstructed positions, so it would be this pass with a different tap grid — and
+// running the two in sequence would blur an already-blurred signal, widening the footprint for nothing.
+//
+// The radius is in *half-resolution* taps, so 1 spans a 3x3 neighbourhood of estimates and a 6x6 footprint
+// of render pixels — close to the 5x5 of render pixels it replaces.
+//
+// A radius of 2 was tried first, on the reasoning that a quarter as many estimates leaves coarser noise
+// needing a wider kernel. The captures said otherwise, in both directions at once: 3x3 shows no more noise
+// than 5x5 did, and it lands *closer* to the full-resolution frame it replaced — 0.19% of pixels differing
+// by a peak of 6, against 0.32% by a peak of 13 for the wider kernel, which was simply over-blurring. It
+// is also nine taps instead of twenty-five, and each tap costs a depth fetch, a coverage fetch and a
+// matrix multiply to reconstruct a world position.
+const AO_BLUR_RADIUS: i32 = 1;
 // Base tolerance in world units, plus a share of the view distance.
 //
 // A fixed tolerance cannot work: one pixel covers a couple of world units near the camera and tens of
@@ -254,20 +315,26 @@ const AO_BLUR_DISTANCE_SHARE: f32 = 0.05;
 
 @fragment
 fn ao_blur_fragment(input: FullscreenOutput) -> @location(0) vec4<f32> {
+    // Full resolution here: this pass writes the target the lighting pass loads per render pixel.
     let pixel = vec2<i32>(input.position.xy);
     let center = load_geometry(pixel);
     if center.w < 0.5 {
         return vec4<f32>(1.0);
     }
-    let limit = vec2<i32>(camera.viewport.xy) - vec2<i32>(1);
+    let half_limit = occlusion_limit();
+    let half_center = clamp(pixel / 2, vec2<i32>(0), half_limit);
     let view_distance = length(center.xyz - camera.camera_position.xyz);
     let tolerance = AO_BLUR_WORLD_TOLERANCE + view_distance * AO_BLUR_DISTANCE_SHARE;
     var total = 0.0;
     var weight_sum = 0.0;
     for (var y = -AO_BLUR_RADIUS; y <= AO_BLUR_RADIUS; y += 1) {
         for (var x = -AO_BLUR_RADIUS; x <= AO_BLUR_RADIUS; x += 1) {
-            let tap = clamp(pixel + vec2<i32>(x, y), vec2<i32>(0), limit);
-            let neighbor = load_geometry(tap);
+            let tap = clamp(half_center + vec2<i32>(x, y), vec2<i32>(0), half_limit);
+            // The geometry is compared at the render pixel the estimate was *taken* at, not at the tap's
+            // own half-resolution coordinate. Getting this wrong is the whole hazard of an upsample: the
+            // range weight would then be measuring the distance to somewhere no estimate was made, and it
+            // would keep taps it should reject at exactly the silhouettes it exists to protect.
+            let neighbor = load_geometry(estimate_pixel(tap));
             if neighbor.w < 0.5 {
                 continue;
             }
@@ -280,8 +347,11 @@ fn ao_blur_fragment(input: FullscreenOutput) -> @location(0) vec4<f32> {
             weight_sum += weight;
         }
     }
+    // Every tap rejected, which happens on a pixel whose surface is isolated from all four of its
+    // neighbouring estimates -- a thin silhouette. Taking the co-located estimate unfiltered is the honest
+    // fallback: it is the only one that measured anything near this surface.
     if weight_sum <= 0.0 {
-        return vec4<f32>(textureLoad(ao_source, pixel, 0).r);
+        return vec4<f32>(textureLoad(ao_source, half_center, 0).r);
     }
     return vec4<f32>(total / weight_sum);
 }

@@ -364,6 +364,12 @@ fn ambient_occlusion_is_computed_and_varies() {
     // Read the AO target directly, so a broken occlusion pass cannot hide behind the lighting.
     let Some(context) = context() else { return };
     let harness = harness(context);
+
+    // The estimate is half resolution and its resolve is full. Pinned structurally as well as by the
+    // reference image, because reverting it costs 42% of the frame and would otherwise show up only as a
+    // handful of pixels differing on a capture — a change nobody would read as a performance regression.
+    assert_eq!(harness.targets.render_size(), (WIDTH, HEIGHT));
+    assert_eq!(harness.targets.occlusion_size(), (WIDTH / 2, HEIGHT / 2));
     let frame = DeferredFrame::new(pose(&harness.terrain), WIDTH, HEIGHT);
     harness
         .deferred

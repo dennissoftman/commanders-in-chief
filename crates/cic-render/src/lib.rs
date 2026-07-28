@@ -68,7 +68,7 @@ pub mod water;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
-pub use deferred::{DeferredFrame, DeferredRenderer, DeferredTargets};
+pub use deferred::{DeferredFrame, DeferredRenderer, DeferredTargets, occlusion_size};
 pub use display::{Antialiasing, DisplaySettings};
 pub use environment::{Clouds, Environment, Fog, Weather};
 pub use gpu::{Capture, CaptureTarget, GpuContext};

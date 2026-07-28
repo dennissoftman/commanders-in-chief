@@ -70,6 +70,28 @@ pub const COVERAGE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R16Float;
 /// Ambient occlusion, a single unsigned channel.
 pub const AO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
 
+/// The size the occlusion *estimate* is computed at, for a given render size.
+///
+/// Half of it on each axis, rounding **up** so an odd render size keeps its last column and row rather
+/// than dropping them. `terrain_ao.wgsl` derives the same figure with the same rounding to clamp its
+/// upsample taps, and a test pins the pair — the two cannot be reconciled through the uniform, because
+/// that shader reads the scene block through a deliberately truncated prefix of it.
+///
+/// Half rather than full because measurement said so: the estimate was 58% of a 1920x1200 frame and its
+/// blur another 14%, which made it both the most expensive pass by a wide margin and the one a resolution
+/// scale multiplies hardest. Occlusion is a low-frequency signal over a surface, so the estimate is what
+/// is cheap to halve; the bilateral pass that resolves it back to full resolution is what keeps the
+/// silhouettes.
+#[must_use]
+pub const fn occlusion_size(render_width: u32, render_height: u32) -> (u32, u32) {
+    // `Ord::max` is not const on the pinned toolchain, hence the explicit floor of one.
+    const fn halve(size: u32) -> u32 {
+        let halved = size.div_ceil(2);
+        if halved == 0 { 1 } else { halved }
+    }
+    (halve(render_width), halve(render_height))
+}
+
 /// Lighting accumulates before tone mapping, so it needs range above one.
 pub const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
@@ -229,6 +251,7 @@ impl DeferredTargets {
             return Err(RenderError::EmptyCapture);
         }
         let (render_width, render_height) = display.render_size(width, height);
+        let (occlusion_width, occlusion_height) = occlusion_size(render_width, render_height);
         let device = context.device();
         let sized = |label: &str, format: wgpu::TextureFormat, width: u32, height: u32| {
             device
@@ -294,7 +317,14 @@ impl DeferredTargets {
             depth: screen("cic-render scene depth", DEPTH_FORMAT),
             shadow_array,
             shadow_layers,
-            ao_raw: screen("cic-render ao raw", AO_FORMAT),
+            // The estimate is half resolution and its resolve is full, which is the whole optimisation.
+            // See `occlusion_size`.
+            ao_raw: sized(
+                "cic-render ao raw",
+                AO_FORMAT,
+                occlusion_width,
+                occlusion_height,
+            ),
             ao_blurred: screen("cic-render ao blurred", AO_FORMAT),
             hdr: screen("cic-render hdr scene", HDR_FORMAT),
             // At output size, not render size: the composite has already downsampled by the time this
@@ -313,6 +343,12 @@ impl DeferredTargets {
     #[must_use]
     pub const fn render_size(&self) -> (u32, u32) {
         (self.render[0], self.render[1])
+    }
+
+    /// Returns the size the occlusion estimate is computed at. See [`occlusion_size`].
+    #[must_use]
+    pub const fn occlusion_size(&self) -> (u32, u32) {
+        occlusion_size(self.render[0], self.render[1])
     }
 
     /// Returns the size of the caller's target, which the composite resolves to.
@@ -1693,7 +1729,35 @@ fn normalize(vector: [f32; 3]) -> [f32; 3] {
 
 #[cfg(test)]
 mod tests {
-    use super::{CASCADE_COUNT, SCENE_UNIFORM_BYTES, SHADOW_UNIFORM_BYTES, SKY_HORIZON};
+    use super::{
+        CASCADE_COUNT, SCENE_UNIFORM_BYTES, SHADOW_UNIFORM_BYTES, SKY_HORIZON, occlusion_size,
+    };
+
+    #[test]
+    fn the_occlusion_estimate_is_half_resolution_rounded_up() {
+        assert_eq!(occlusion_size(1920, 1200), (960, 600));
+        // Rounded up, so an odd size keeps its last column and row. Rounding down instead leaves the far
+        // edge of the frame with no estimate to upsample from, and the fallback there is the co-located
+        // tap -- which is the unblurred noise, in a one-pixel stripe along two borders.
+        assert_eq!(occlusion_size(721, 481), (361, 241));
+        // Never zero, whatever it is handed. Target allocation refuses a zero dimension as an error, and
+        // this must not be what turns that into a panic on the way there.
+        assert_eq!(occlusion_size(1, 1), (1, 1));
+        assert_eq!(occlusion_size(0, 0), (1, 1));
+    }
+
+    #[test]
+    fn the_occlusion_shader_rounds_the_same_way_this_does() {
+        // The figure exists on both sides of the language boundary and cannot be reconciled through the
+        // uniform: `terrain_ao.wgsl` reads the scene block through a deliberately truncated prefix, so a
+        // field appended for this would be unreachable there. Rounding down in the shader while rounding
+        // up here would clamp every upsample tap one row short of the frame.
+        let declared = crate::shader::chunk("terrain_ao").expect("terrain_ao chunk");
+        assert!(
+            declared.contains("(vec2<i32>(camera.viewport.xy) + vec2<i32>(1)) / vec2<i32>(2)"),
+            "terrain_ao.wgsl no longer derives the half-resolution size by rounding up"
+        );
+    }
 
     #[test]
     fn uniform_block_sizes_match_the_shader_declarations() {
