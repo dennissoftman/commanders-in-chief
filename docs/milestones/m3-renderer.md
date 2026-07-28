@@ -2,7 +2,7 @@
 
 Draw a map: terrain, water, models, lighting, and shadows, in a window and headlessly.
 
-**Status:** Charter complete. Every item below is landed and tested; the one qualification is that CI
+**Status:** Charter complete, plus the atmosphere and weather that were not in it. Every item below is landed and tested; the one qualification is that CI
 has no GPU, so the regression harness runs on a developer machine and not yet on a runner. See
 [Exit condition](#exit-condition).
 
@@ -35,9 +35,9 @@ has no GPU, so the regression harness runs on a developer machine and not yet on
 - **Texture resources**, deduplicated by content hash under explicit byte budgets.
 - **The camera**, as a standalone model with no window, input, or GPU dependency.
 
-- **The deferred chain**, in six passes: four depth-only shadow cascades, a G-buffer, ground-truth
+- **The deferred chain**, now in seven passes: four depth-only shadow cascades, a G-buffer, ground-truth
   ambient occlusion with a bilateral blur, deferred lighting that reconstructs world position from
-  depth, and a tone-mapping composite. The lighting and occlusion shaders were adapted rather than
+  depth, a blended water pass, and a tone-mapping composite. The lighting and occlusion shaders were adapted rather than
   rewritten, keeping their technique and their reasoning; only their legacy camera layout and
   three-light model were replaced.
 - **Cascade fitting**, as pure arithmetic with no GPU involvement: bounding-sphere fits for rotation
@@ -75,14 +75,48 @@ has no GPU, so the regression harness runs on a developer machine and not yet on
 - **The visual regression harness.** A capture is compared against a committed reference and fails on a
   regression, writing the capture and an amplified difference image beside the other test output.
   References are committed per adapter, because two GPUs do not agree to the byte and a tolerance loose
-  enough to span them is loose enough to accept a real fault. Five references cover terrain layers,
-  instanced models, the whole deferred chain, water, and water under a glancing sun. The comparison
+  enough to span them is loose enough to accept a real fault. Nine references cover terrain layers,
+  instanced models, the whole deferred chain, water, water under a glancing sun, cloud shadows, fog, wet
+  ground, and snow. The comparison
   itself is a pure function over bytes with its own unit tests, so it is verified even on a machine with
   no GPU.
 
+- **Composed shaders.** WGSL has no include mechanism, and that one gap had shaped the set badly: any pass
+  needing `shadow_visibility`, `world_from_depth`, or the sky had to live in the *same file* as them, so
+  deferred lighting, the composite, and the whole water surface had accumulated into one 620-line file with
+  nothing else in common. Named chunks are now concatenated in Rust — no preprocessor, no dependency, no
+  directives inside the WGSL — and every composed program is validated by `naga` at test time. Five of the
+  sixteen shaders present before this were bound to a pipeline; six of the remainder were superseded dead
+  code and were deleted, two of them carrying comments describing a uniform layout that no longer existed.
+  The five still unwired are marked `staged`, and a test fails if any chunk is named by no program.
+
+- **An atmosphere**, derived from an hour of the day and a weather state rather than configured field by
+  field. Sun direction and colour, ambient, sky, fog, and cloud coverage all follow from those two, because
+  they are not independent: an overcast sky is dimmer in the beam *and* brighter in the ambient *and* greyer
+  *and* foggier, all being one cloud deck seen from different angles. Weather is blendable scalars rather
+  than an enum, because weather transitions. See [ADR 0006](../adr/0006-atmosphere.md).
+
+- **Cloud shadows**, as procedural gradient noise sampled in *world* space, domain-warped so its contours are
+  wisps rather than blobs, attenuating the sun's direct term only — a cloud occludes the sun's disc, not the
+  sky — with a depth that rises with cloud thickness rather than saturating into one uniform shade.
+
+- **Height and distance fog**, marched along the view ray in six taps with an exponential height falloff per
+  tap, so a valley pools while a ridge stands clear of it. Applied inside the lighting and water shaders
+  rather than as a depth-based post pass, because water writes no depth and a post pass would fog it at the
+  depth of the terrain behind it.
+
+- **A weather surface response**: wetness darkening albedo and dropping roughness, and snow settling by
+  *slope* so it lies on flats and slides off cliffs. Both act on the G-buffer in the lighting pass rather
+  than in the shaders that wrote it — terrain and models arrive there as albedo, normal and roughness, which
+  is exactly what the two modify, so one implementation covers both.
+
+- **Time of day drives the light.** `DeferredFrame` derives its sun from its environment, so changing the
+  hour moves the sun instead of leaving a light that silently disagrees with it. The derivation is calibrated
+  against the hand-tuned preset it replaced, in direction as well as colour, and a test pins it there.
+
 ## Remaining
 
-- Antialiasing. Terrain silhouettes stair-step and water glitter sparkles, and
+- Antialiasing. Terrain silhouettes stair-step, water glitter sparkles, and cloud-shadow edges alias, and
   [ADR 0005](../adr/0005-antialiasing-strategy.md) settles what to do about it: a resolution scale, FXAA,
   and TAA — and explicitly *not* MSAA.
 - Normal, roughness, and metallic *maps*. Only base colour is textured; the other channels are still
@@ -229,6 +263,49 @@ behind this fragment" as infinitely deep water, which sounds right and is wrong:
 past the map edge — clearly visible under the terrain boundary, because terrain is an open sheet rather
 than a solid. It took 10% of the frame and was found by opening the capture for a test asserting that
 water below all terrain draws nothing.
+
+**A composition step was the prerequisite for the atmosphere, not a tidying exercise.** Cloud shadows, fog
+and the weather response all need `shadow_visibility` or `world_from_depth`, and all three would have landed
+in the same file as them — pushing one shader past 900 lines — for want of an `#include`. Concatenating named
+chunks in Rust costs about eighty lines and removes the constraint entirely.
+
+**A refactor is provable when captures are committed.** Splitting the deferred shader into six chunks, moving
+fifteen files, deleting six, and rewiring three pipelines produced *byte-identical* output on every reference.
+That is the difference between a restructure and a change that happens to still pass its assertions.
+
+**A noise lattice is usually the hash, not the interpolation.** `fract(sin(dot(cell, k)) * c)` is the form
+every snippet reaches for, and it is a function of a *linear combination* of the coordinates — so every cell
+on a line perpendicular to `k` receives a correlated value, and the field is streaked before any interpolation
+happens. Two fixes were shipped against the symptom first: rotating the octaves removed axis-aligned steps but
+left angular facets, and moving from value noise to gradient noise softened those without removing them.
+Integer bit mixing has no preferred direction and removed the lattice outright.
+
+**Coverage must move a threshold, not scale a density.** Scaling darkens every pixel by the same factor, which
+is a brightness slider wearing a cloud's name — and it satisfies any assertion that merely asks whether the
+frame got darker. The test therefore measures the *variance* of the per-pixel drop, since dappling and dimming
+differ in exactly that.
+
+**A shadow term that saturates gives every patch one depth.** A `smoothstep` up to the coverage onset reads as
+a stencil laid over the ground. Real cloud shade varies with how much cloud is overhead, so the depth has to
+keep rising with density past the onset.
+
+**Fog is an integral, which makes it structurally harder to vary than a shadow.** A cloud shadow is evaluated
+at the surface, so spatial variation in the noise is spatial variation on screen. Fog accumulates along the
+ray, and an integral smooths its own input: patchiness needs the density to differ *along* the ray, which one
+sample at the midpoint cannot express however it is tuned. It also inverts the scale intuition — a patch scale
+far smaller than the ray length averages several banks per ray and returns the uniform wash it was meant to
+remove.
+
+**A fog layer is thick or thin relative to the *camera*, not to the terrain.** With the camera 614 units up
+and a 52-unit layer, `exp(-(614 - 30) / 52)` is about 1e-5, so the rays passed through effectively no fog at
+all and the frame was unchanged. The figure that looked reasonable against the terrain's height was five
+orders of magnitude off against the camera's.
+
+**Calibrate a derived value against the tuned one it replaces.** The environment's sun was first derived from
+physical reasoning alone and produced an ambient about three times darker than the preset it was to replace —
+which would have dimmed every scene. Worse, a second version matched diffuse and ambient *exactly* while
+sitting 27 degrees away in azimuth: that rotated every shadow and flattened a ridge fixture shaped to run
+across the old light. Colour agreement is not direction agreement, and only the capture said so.
 
 **Presentation is the same chain pointed at a swapchain.** The only differences are the output format,
 which a surface commonly reports as BGRA rather than RGBA, and that a resize reallocates every

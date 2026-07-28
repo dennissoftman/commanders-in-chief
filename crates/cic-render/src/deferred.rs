@@ -30,6 +30,7 @@
 use cic_camera::CameraPose;
 
 use crate::RenderError;
+use crate::environment::Environment;
 use crate::gpu::{DEPTH_FORMAT, GpuContext};
 use crate::model::{ModelBatch, buffer_layouts};
 use crate::shadow::{CASCADE_COUNT, CASCADE_RESOLUTION, Cascade, fit_cascades};
@@ -56,8 +57,10 @@ pub const AO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
 /// Lighting accumulates before tone mapping, so it needs range above one.
 pub const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
-/// Byte size of the `SceneCamera` uniform block: two matrices, two vectors, three lights.
-const SCENE_UNIFORM_BYTES: usize = 64 + 64 + 16 + 16 + 3 * 48;
+/// Byte size of the `SceneCamera` uniform block: two matrices, two vectors, three lights, and the five
+/// atmosphere vectors — fog colour and density, fog falloff, cloud parameters, cloud drift, and the
+/// surface weather the lighting pass applies to the G-buffer.
+const SCENE_UNIFORM_BYTES: usize = 64 + 64 + 16 + 16 + 3 * 48 + 5 * 16;
 
 /// Byte size of the `ShadowCamera` uniform block: a matrix and a parameter vector per cascade.
 const SHADOW_UNIFORM_BYTES: usize = CASCADE_COUNT * (64 + 16);
@@ -91,6 +94,13 @@ pub struct DeferredFrame {
     /// reconstructs a world position using the viewport's reciprocal, so a disagreement moves every
     /// receiver and reads as a shadowing fault rather than as a wrong number.
     pub viewport: [u32; 2],
+    /// The air and the weather: fog, cloud shadows, and what the time of day implies.
+    ///
+    /// Defaults to a clear, fogless, cloudless environment, which is exactly the frame this renderer
+    /// produced before one existed — that is what let every committed reference capture stay
+    /// byte-identical when the atmosphere was added, and so what proved the plumbing had not quietly
+    /// altered the lighting passing through it.
+    pub environment: Environment,
     /// Scene time in seconds, which drives every animated surface.
     ///
     /// A frame *parameter* rather than a clock reading taken inside the renderer, and that is a
@@ -106,16 +116,34 @@ impl DeferredFrame {
     /// zero.
     #[must_use]
     pub fn new(pose: CameraPose, width: u32, height: u32) -> Self {
+        let environment = Environment::default();
         Self {
             pose,
             projection: Projection::for_viewport(width, height),
-            // Not `DirectionalLight::default()`: this chain computes occlusion, which is what makes a
-            // realistic skylight ambient affordable. See `daylight_with_occlusion`.
-            light: DirectionalLight::daylight_with_occlusion(),
+            // Derived from the environment's hour rather than taken from a preset, so a caller who changes
+            // the time of day gets a sun that moves with it instead of one that silently disagrees.
+            // `Environment::sun_light` is calibrated against `daylight_with_occlusion`, which this replaces
+            // as the default and which a test still pins it to.
+            light: environment.sun_light(),
             shadow_distance: DEFAULT_SHADOW_DISTANCE,
+            environment,
             viewport: [width, height],
             time: 0.0,
         }
+    }
+
+    /// Returns the frame with its environment replaced, and its light re-derived to match.
+    ///
+    /// The light comes along deliberately. An environment carrying a 6 a.m. hour beside a light still pointing
+    /// where it did at noon is not a configuration anyone wants, and leaving the two independent means every
+    /// caller changing the time of day has to remember to update both. A caller wanting them to disagree —
+    /// a test pinning a sun angle while varying the weather, say — assigns [`Self::light`] afterwards, which
+    /// reads as the deliberate override it is.
+    #[must_use]
+    pub fn in_environment(mut self, environment: Environment) -> Self {
+        self.light = environment.sun_light();
+        self.environment = environment;
+        self
     }
 
     /// Returns the frame with its scene time replaced.
@@ -270,11 +298,15 @@ impl DeferredRenderer {
         let shadow_uniform =
             uniform_buffer(device, "cic-render shadow camera", SHADOW_UNIFORM_BYTES);
 
-        let gbuffer_shader = shader_module(device, "gbuffer", include_str!("terrain_gbuffer.wgsl"));
-        let model_shader = shader_module(device, "model", include_str!("model_gbuffer.wgsl"));
-        let deferred_shader =
-            shader_module(device, "deferred", include_str!("terrain_deferred.wgsl"));
-        let ao_shader = shader_module(device, "ao", include_str!("terrain_ao.wgsl"));
+        // Composed rather than read from one file each. `lighting`, `composite` and `water` all need the
+        // scene bindings and the cascade selection, and before composition they had to share a file to
+        // reach them. See `crate::shader`.
+        let gbuffer_shader = shader_module(device, "terrain_gbuffer");
+        let model_shader = shader_module(device, "model_gbuffer");
+        let lighting_shader = shader_module(device, "lighting");
+        let composite_shader = shader_module(device, "composite");
+        let water_shader = shader_module(device, "water");
+        let ao_shader = shader_module(device, "terrain_ao");
 
         let (cascade_layout, cascade_uniforms, cascade_groups) = build_cascade_bindings(device);
         let material_layout = ModelBatch::material_layout(device);
@@ -288,7 +320,8 @@ impl DeferredRenderer {
             targets,
             &scene_uniform,
             &shadow_uniform,
-            &deferred_shader,
+            &lighting_shader,
+            &composite_shader,
             output_format,
         );
 
@@ -321,7 +354,7 @@ impl DeferredRenderer {
                 device,
                 &lighting_layout,
                 &water_layout,
-                &deferred_shader,
+                &water_shader,
             ),
             water_layout,
             ao: build_ao(device, targets, &scene_uniform, &ao_shader),
@@ -595,8 +628,73 @@ fn scene_bytes(
     for _ in 0..6 {
         push_vec4(&mut scene, [0.0; 4]);
     }
+
+    let environment = frame.environment;
+    let weather = environment.weather.sanitised();
+    // The fog colour is the sky's horizon colour, not a separately authored one. Fog fades distance
+    // toward whatever is behind it, and behind it is the sky — a fog colour that disagrees puts a band
+    // along the horizon precisely where the terrain silhouette meets it. Overcast desaturates both
+    // together, which is why this is computed rather than configured.
+    let [fog_r, fog_g, fog_b] = mix_colour(SKY_HORIZON, OVERCAST_HORIZON, weather.overcast);
+    push_vec4(
+        &mut scene,
+        [fog_r, fog_g, fog_b, environment.fog.density.max(0.0)],
+    );
+    push_vec4(
+        &mut scene,
+        [
+            environment.fog.height_falloff.max(0.001),
+            environment.fog.base,
+            environment.fog.patchiness.clamp(0.0, 1.0),
+            environment.fog.patch_scale.max(1.0),
+        ],
+    );
+    let clouds = environment.clouds;
+    push_vec4(
+        &mut scene,
+        [
+            clouds.coverage.clamp(0.0, 1.0),
+            clouds.scale.max(1.0),
+            clouds.strength.clamp(0.0, 1.0),
+            clouds.softness.clamp(0.0, 1.0),
+        ],
+    );
+    // Drift is the wind integrated over scene time, computed here rather than in the shader so the two
+    // callers of `cloud_shadow` cannot disagree about where the deck has got to.
+    push_vec4(
+        &mut scene,
+        [
+            weather.wind[0] * frame.time,
+            weather.wind[1] * frame.time,
+            0.0,
+            0.0,
+        ],
+    );
+    push_vec4(&mut scene, [weather.wetness, weather.snow, 0.0, 0.0]);
+
     debug_assert_eq!(scene.len(), SCENE_UNIFORM_BYTES, "scene uniform drifted");
     scene
+}
+
+/// The clear sky's horizon colour, matching `SKY_HORIZON` in `atmosphere.wgsl`.
+///
+/// Duplicated across the language boundary because the shader needs it as a constant and the fog colour
+/// is derived from it on the CPU. A test pins the pair rather than trusting the comment.
+const SKY_HORIZON: [f32; 3] = [0.12, 0.20, 0.30];
+
+/// The horizon under a full cloud deck: brighter, and desaturated toward grey.
+///
+/// Brighter *and* flatter, which is the part that is easy to get backwards. An overcast sky scatters the
+/// sun across the whole dome, so the horizon gains light even as the ground loses it.
+const OVERCAST_HORIZON: [f32; 3] = [0.34, 0.36, 0.39];
+
+fn mix_colour(from: [f32; 3], to: [f32; 3], amount: f32) -> [f32; 3] {
+    let amount = amount.clamp(0.0, 1.0);
+    [
+        from[0] + (to[0] - from[0]) * amount,
+        from[1] + (to[1] - from[1]) * amount,
+        from[2] + (to[2] - from[2]) * amount,
+    ]
 }
 
 /// Builds one uniform buffer and bind group per shadow cascade.
@@ -916,7 +1014,8 @@ fn build_lighting(
     targets: &DeferredTargets,
     scene_uniform: &wgpu::Buffer,
     shadow_uniform: &wgpu::Buffer,
-    deferred_shader: &wgpu::ShaderModule,
+    lighting_shader: &wgpu::ShaderModule,
+    composite_shader: &wgpu::ShaderModule,
     output_format: wgpu::TextureFormat,
 ) -> (LightingStage, wgpu::BindGroupLayout) {
     let comparison_sampler = build_shadow_sampler(device);
@@ -1000,7 +1099,7 @@ fn build_lighting(
         pipeline: fullscreen_pipeline(
             device,
             "cic-render lighting pipeline",
-            deferred_shader,
+            lighting_shader,
             "lighting_fragment",
             &[&layout],
             HDR_FORMAT,
@@ -1008,7 +1107,7 @@ fn build_lighting(
         composite_pipeline: fullscreen_pipeline(
             device,
             "cic-render composite pipeline",
-            deferred_shader,
+            composite_shader,
             "composite_fragment",
             &[&layout, &composite_layout],
             output_format,
@@ -1027,20 +1126,22 @@ fn build_water_pipeline(
     device: &wgpu::Device,
     lighting_layout: &wgpu::BindGroupLayout,
     water_layout: &wgpu::BindGroupLayout,
-    deferred_shader: &wgpu::ShaderModule,
+    water_shader: &wgpu::ShaderModule,
 ) -> wgpu::RenderPipeline {
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("cic-render water pipeline layout"),
-        // Group 1 is left empty, the same way the model G-buffer pipeline leaves it: in this module
-        // group 1 belongs to the composite's scene colour, so the water uniform takes group 2.
-        bind_group_layouts: &[Some(lighting_layout), None, Some(water_layout)],
+        // Contiguous, with no empty slot. Water reuses the lighting group because it needs the camera,
+        // the cascades and the scene depth that are already declared there; its own uniform follows in
+        // group 1. It declares only the group-0 bindings it reads, and a layout carrying more than a
+        // shader uses is allowed.
+        bind_group_layouts: &[Some(lighting_layout), Some(water_layout)],
         immediate_size: 0,
     });
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("cic-render water pipeline"),
         layout: Some(&layout),
         vertex: wgpu::VertexState {
-            module: deferred_shader,
+            module: water_shader,
             entry_point: Some("water_vertex"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             buffers: &[],
@@ -1056,7 +1157,7 @@ fn build_water_pipeline(
         depth_stencil: None,
         multisample: wgpu::MultisampleState::default(),
         fragment: Some(wgpu::FragmentState {
-            module: deferred_shader,
+            module: water_shader,
             entry_point: Some("water_fragment"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             targets: &[Some(wgpu::ColorTargetState {
@@ -1131,7 +1232,16 @@ fn fullscreen_pass(
     pass.draw(0..3, 0..1);
 }
 
-fn shader_module(device: &wgpu::Device, name: &str, source: &str) -> wgpu::ShaderModule {
+/// Builds a shader module from a composed program.
+///
+/// # Panics
+///
+/// Panics when `name` is not a declared program. Every call site passes a literal that the shader tests
+/// also compose and validate, so a wrong name is a build-time mistake caught by `cargo test` rather than
+/// a condition a caller can hit at runtime.
+fn shader_module(device: &wgpu::Device, name: &str) -> wgpu::ShaderModule {
+    let source = crate::shader::compose(name)
+        .unwrap_or_else(|| panic!("{name} is not a declared shader program"));
     device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some(name),
         source: wgpu::ShaderSource::Wgsl(source.into()),
@@ -1306,14 +1416,31 @@ fn normalize(vector: [f32; 3]) -> [f32; 3] {
 
 #[cfg(test)]
 mod tests {
-    use super::{CASCADE_COUNT, SCENE_UNIFORM_BYTES, SHADOW_UNIFORM_BYTES};
+    use super::{CASCADE_COUNT, SCENE_UNIFORM_BYTES, SHADOW_UNIFORM_BYTES, SKY_HORIZON};
 
     #[test]
     fn uniform_block_sizes_match_the_shader_declarations() {
         // These are the sizes `SceneCamera` and `ShadowCamera` occupy in the WGSL. A mismatch does not
         // fail validation -- it silently misaligns every field past the drift -- so it is asserted here
         // as well as debug-asserted at upload.
-        assert_eq!(SCENE_UNIFORM_BYTES, 304);
+        assert_eq!(SCENE_UNIFORM_BYTES, 384);
         assert_eq!(SHADOW_UNIFORM_BYTES, CASCADE_COUNT * 80);
+    }
+
+    #[test]
+    fn the_clear_horizon_colour_matches_the_shader_constant() {
+        // `SKY_HORIZON` exists on both sides of the language boundary: the sky gradient needs it as a
+        // WGSL constant, and the fog colour is derived from it here. Nothing but this test stops the two
+        // drifting, and the symptom would be a fog bank a different colour from the sky it fades into --
+        // a band along the horizon, exactly where it is most visible.
+        let declared = crate::shader::chunk("atmosphere").expect("atmosphere chunk");
+        let expected = format!(
+            "vec3<f32>({:.2}, {:.2}, {:.2})",
+            SKY_HORIZON[0], SKY_HORIZON[1], SKY_HORIZON[2]
+        );
+        assert!(
+            declared.contains(&expected),
+            "atmosphere.wgsl does not declare SKY_HORIZON as {expected}"
+        );
     }
 }

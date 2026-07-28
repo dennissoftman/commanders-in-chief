@@ -667,7 +667,7 @@ fn build_render_pipeline(
 ) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("cic-render terrain forward shader"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("terrain_forward.wgsl").into()),
+        source: wgpu::ShaderSource::Wgsl(include_str!("shaders/terrain_forward.wgsl").into()),
     });
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("cic-render terrain pipeline layout"),
