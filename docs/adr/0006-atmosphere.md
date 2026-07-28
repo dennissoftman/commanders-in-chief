@@ -24,8 +24,11 @@ asking for "storm" is asking for one thing.
    sampled per step - are declined.
 4. **Cloud shadows are procedural gradient noise sampled in world space**, attenuating the sun's direct
    term only.
-5. **The environment's sun is opt-in.** `DeferredFrame::light` stays authoritative.
-6. **Airborne precipitation is out of scope.** It is a particle system, which M3 defers.
+5. **Weather's surface response is applied to the G-buffer in the lighting pass**, not in the terrain
+   and model shaders that wrote it. Wetness darkens albedo and drops roughness; snow blends toward a
+   snow surface by *slope*.
+6. **The environment's sun is opt-in.** `DeferredFrame::light` stays authoritative.
+7. **Airborne precipitation is out of scope.** It is a particle system, which M3 defers.
 
 ## Rationale
 
@@ -68,6 +71,24 @@ cells without changing the field inside them. Gradient noise is zero at every la
 random direction instead, so there is no stored value to leak into the contours. Each attempt looked
 plausible in code and was rejected by looking at the capture.
 
+**The surface response acts on the G-buffer, which is why it costs one implementation instead of two.**
+Terrain and models write albedo, normal and roughness into the same targets, and those three are exactly
+what wetness and snow modify. Applying it at the source would mean the same logic in two shaders reading
+two different uniform blocks, with nothing keeping them in step.
+
+**Wet ground is darker and smoother, not bluer.** Water fills the pores, so less light scatters back out
+and what does reflect leaves more coherently. Darkening is the larger half of the cue: a wetness that
+only dropped roughness reads as a polished floor, which is why the test asserts the *mean* drop.
+
+**Snow settles by slope, not by altitude.** `normal.z` is the cosine of the surface against vertical,
+which is the physical criterion. An altitude threshold puts snow on a sheer cliff face high up and none
+on the valley floor beside it — precisely backwards. The test measures the *spread* of the per-pixel
+change rather than its mean, because snow covering everything uniformly would brighten the frame just as
+much and satisfy any assertion about the average.
+
+**Emission takes its hue from the material, not the weathered surface.** A lamp under snow is still a
+lamp; snow on its housing should not recolour the light coming out of it.
+
 **Lightning lifts ambient, never the beam.** A discharge across the whole sky has no position, so adding
 it to the directional term would cast a hard shadow from a source that does not exist.
 
@@ -79,10 +100,13 @@ beam and into the sky rather than removing it. Dimming both is what makes an ove
 - Every default is the state that changes nothing — clear, fogless, cloudless. That is what let all five
   committed reference captures stay **byte-identical** through this change, which is the only evidence
   that the new plumbing did not quietly alter the lighting passing through it.
-- `SceneCamera` grows four vectors, from 304 to 368 bytes. One uniform and one bind group still serve
-  every pass.
-- `Weather::wetness` and `Weather::snow` are carried and clamped but **not yet read by any shader**. The
-  surface response is the next piece of work, not a claim this change already makes.
+- `SceneCamera` grows five vectors, from 304 to 384 bytes — fog colour and density, fog falloff and
+  patchiness, cloud parameters, cloud drift, and the surface weather. One uniform and one bind group still
+  serve every pass, and a test pins the size because a mismatch does not fail validation: it silently
+  misaligns every field past the drift.
+- `Weather::wetness` and `Weather::snow` are read by the lighting pass and verified by capture: snow is
+  visibly held off the spire's flanks and the ridge's steep face while covering the plain, and wet ground
+  darkens across the frame.
 - Time of day derives a sun that nothing uses by default. That is deliberate, but it does mean a caller
   wanting a day cycle must assign `Environment::sun_light()` to the frame themselves.
 - No latitude, date, or north reference: the sun is a half-sine over a fixed civil day, because no map
@@ -97,9 +121,12 @@ beam and into the sky rather than removing it. Dimming both is what makes an ove
   moving to gradient noise both improved the interpolation and could only ever soften it. Integer bit mixing
   has no preferred direction and removed it outright. Worth recording because the wrong diagnosis was
   plausible twice.
-- **Fog banks are not visually verified.** The marched implementation is better founded than the closed form
-  it replaced, and fog demonstrably fills a basin while the rim reads through it. But the basin fixture is a
-  broad, gentle, near-planar surface seen from a distant camera, so every ray has much the same length and
-  direction and the integral smooths out whatever the density does. Showing banks needs a scene with real
-  depth structure — a ridge standing out of the fog, objects at differing distances — which is a fixture
-  this milestone does not have. Treat patchiness as implemented and unproven.
+- **Height fog is verified; banks are still marginal.** The first fixture was a broad, gentle,
+  near-planar basin seen from a distant camera, and it could not show height fog however it was tuned:
+  every ray had much the same length and crossed much the same air, and an integral along the ray smooths
+  away whatever the density does. Four rounds of tuning failed against a fixture fault. Moved onto the
+  spire-and-ridge terrain it works immediately — the plain pools while the spire and the ridge stand out
+  of it. A second arithmetic trap sat behind the first: with the camera 614 units up and a 52-unit fog
+  layer, `exp(-(614-30)/52)` is about 1e-5, so the rays passed through almost no fog at all. The layer has
+  to be thick and dense *relative to the camera height*, not to the terrain. Patchiness contributes
+  visible variation but not crisp banks; crisp banks want a lower camera or a denser march.

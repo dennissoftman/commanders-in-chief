@@ -37,6 +37,13 @@ struct SceneCamera {
     clouds: vec4<f32>,
     // xy the cloud pattern's drift in world units, zw reserved.
     cloud_drift: vec4<f32>,
+    // x surface wetness, y lying snow, zw reserved.
+    //
+    // Both act on the G-buffer in the lighting pass rather than in the shaders that wrote it. Terrain and
+    // models arrive there as albedo, normal and roughness, which is precisely what wetness and snow modify,
+    // so one implementation covers both — where doing it at the source would mean the same logic in two
+    // shaders reading two different uniform blocks.
+    weather: vec4<f32>,
 }
 
 // `params` packs the world units spanned by the full normalized depth range in `y` and the world

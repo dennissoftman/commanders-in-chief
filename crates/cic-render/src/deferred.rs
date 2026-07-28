@@ -57,9 +57,10 @@ pub const AO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
 /// Lighting accumulates before tone mapping, so it needs range above one.
 pub const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
-/// Byte size of the `SceneCamera` uniform block: two matrices, two vectors, three lights, and the four
-/// atmosphere vectors — fog colour and density, fog falloff, cloud parameters, and cloud drift.
-const SCENE_UNIFORM_BYTES: usize = 64 + 64 + 16 + 16 + 3 * 48 + 4 * 16;
+/// Byte size of the `SceneCamera` uniform block: two matrices, two vectors, three lights, and the five
+/// atmosphere vectors — fog colour and density, fog falloff, cloud parameters, cloud drift, and the
+/// surface weather the lighting pass applies to the G-buffer.
+const SCENE_UNIFORM_BYTES: usize = 64 + 64 + 16 + 16 + 3 * 48 + 5 * 16;
 
 /// Byte size of the `ShadowCamera` uniform block: a matrix and a parameter vector per cascade.
 const SHADOW_UNIFORM_BYTES: usize = CASCADE_COUNT * (64 + 16);
@@ -659,6 +660,7 @@ fn scene_bytes(
             0.0,
         ],
     );
+    push_vec4(&mut scene, [weather.wetness, weather.snow, 0.0, 0.0]);
 
     debug_assert_eq!(scene.len(), SCENE_UNIFORM_BYTES, "scene uniform drifted");
     scene
@@ -1411,7 +1413,7 @@ mod tests {
         // These are the sizes `SceneCamera` and `ShadowCamera` occupy in the WGSL. A mismatch does not
         // fail validation -- it silently misaligns every field past the drift -- so it is asserted here
         // as well as debug-asserted at upload.
-        assert_eq!(SCENE_UNIFORM_BYTES, 368);
+        assert_eq!(SCENE_UNIFORM_BYTES, 384);
         assert_eq!(SHADOW_UNIFORM_BYTES, CASCADE_COUNT * 80);
     }
 

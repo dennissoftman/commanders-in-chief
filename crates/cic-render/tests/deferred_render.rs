@@ -22,7 +22,7 @@ use cic_camera::CameraPose;
 use cic_render::terrain::LayerColour;
 use cic_render::{
     Capture, CaptureTarget, Clouds, DeferredFrame, DeferredRenderer, DeferredTargets, Environment,
-    Fog, GpuContext, TerrainRenderer, WaterBody, WaterMaterial, WaterSurface,
+    Fog, GpuContext, TerrainRenderer, WaterBody, WaterMaterial, WaterSurface, Weather,
 };
 
 const WIDTH: u32 = 720;
@@ -889,55 +889,156 @@ fn cloud_shadows_dapple_the_ground_rather_than_dimming_it() {
 }
 
 #[test]
-fn fog_fills_the_basin_more_deeply_than_it_veils_the_rim() {
-    // The property that separates height fog from a distance haze, and the reason the density is
-    // integrated along the view ray rather than sampled at the fragment: a low basin seen from above must
-    // fog *more* than the high ground beside it, even where the two are the same distance away.
+fn fog_pools_in_the_low_ground_and_leaves_the_high_ground_standing() {
+    // On the *shadowing* terrain, not the basin, and that choice is the whole test.
+    //
+    // The basin fixture cannot show height fog however it is tuned. It is a broad, gentle, near-planar
+    // surface seen from a distant camera, so every ray has much the same length and crosses much the same
+    // air — and fog is an integral along the ray, which smooths away whatever the density does. The result
+    // was a uniform wash that four rounds of tuning could not shift, and the fault was the fixture.
+    //
+    // This terrain has a 900-unit spire and a steep ridge above a low plain. Rays to the spire top and to
+    // the ground beside it differ enormously in both length and height, which is exactly the difference
+    // height fog exists to express.
     let Some(context) = context() else { return };
-    let scene = water_scene(context);
-    let (floor, rim) = world_elevation_range(&scene.harness.terrain);
-    let foggy = scene.frame.in_environment(Environment {
-        fog: Fog {
-            // Deliberately modest. Fog opacity is `1 - exp(-optical)`, which saturates: at a density
-            // thick enough to veil the frame, the exponential is already near its ceiling and a large
-            // swing in density barely moves the result — so the banks below become invisible for a
-            // reason that has nothing to do with the banks. A density leaving the factor mid-range is
-            // what makes any variation in it legible.
-            density: 0.0022,
-            // A falloff well under the basin's depth, so the rim stands clear of what fills the floor.
-            height_falloff: (rim - floor) * 0.35,
-            base: floor,
-            // Banked rather than uniform. The scale has to be small: the patchiness is sampled at each
-            // ray's midpoint, and this camera's midpoints span only about 770 world units, so anything
-            // near the map's own extent gives under one cell of variation across the frame.
-            patchiness: 0.85,
-            // *Large*, not small, and this inverts what a midpoint tap wanted. Marching integrates the
-            // density along the ray, so a scale much smaller than the ray is long makes every ray cross
-            // several banks and average them into the same value -- adjacent pixels then agree and the
-            // result is the uniform wash the patchiness was added to avoid. A scale comparable to the ray
-            // keeps each ray largely inside one bank, so neighbouring rays genuinely differ.
-            patch_scale: 900.0,
-        },
-        ..Environment::default()
-    });
-    let veiled = render_water(context, &scene.harness, &[], foggy);
+    let harness = harness(context);
+    let clear = render(
+        context,
+        &harness,
+        DeferredFrame::new(pose(&harness.terrain), WIDTH, HEIGHT),
+    );
+    let (floor, rim) = world_elevation_range(&harness.terrain);
+
+    let foggy =
+        DeferredFrame::new(pose(&harness.terrain), WIDTH, HEIGHT).in_environment(Environment {
+            fog: Fog {
+                // Modest, because fog opacity is `1 - exp(-optical)` and saturates: at a density thick enough
+                // to veil the frame the exponential is already near its ceiling, and any variation in density
+                // stops being legible for a reason unrelated to the fog.
+                density: 0.011,
+                // Well under the spire's height, so the plain fills while the spire stands clear of it.
+                height_falloff: (rim - floor) * 0.22,
+                base: floor,
+                patchiness: 0.8,
+                // Large, comparable to the ray length: an integrated density averages several banks per ray, so
+                // a small scale makes neighbouring pixels agree and returns the uniform wash.
+                patch_scale: 950.0,
+            },
+            ..Environment::default()
+        });
+    let veiled = render(context, &harness, foggy);
+
     write_capture("atmosphere-fog.png", &veiled);
     support::check_reference(context, "atmosphere-fog.png", &veiled);
 
-    let changed = fraction_differing(&scene.dry, &veiled);
+    let changed = fraction_differing(&clear, &veiled);
     assert!(
         changed > 0.30,
         "fog changed only {:.1}% of the frame",
         changed * 100.0
     );
-    // Fog flattens: it pulls everything toward one colour, so the spread has to shrink.
-    let (low_before, high_before) = scene.dry.luminance_range();
+
+    // The property that separates height fog from a distance haze: it must veil the frame *unevenly*. A
+    // fog that took the same amount from every pixel would be a colour wash, and would pass a test that
+    // only asked whether the spread shrank.
+    let (smallest, largest, mean) = luminance_drop(&clear, &veiled);
+    assert!(mean.abs() > 0.0, "fog changed nothing on the whole");
+    assert!(
+        largest - smallest > 0.12,
+        "every pixel was veiled by about the same amount ({smallest:.4} to {largest:.4}), \
+         so this is a colour wash rather than fog with height to it"
+    );
+
+    // And fog flattens: it pulls everything toward one colour, so the spread has to shrink.
+    let (low_before, high_before) = clear.luminance_range();
     let (low_after, high_after) = veiled.luminance_range();
     assert!(
         (high_after - low_after) < (high_before - low_before),
         "fog did not reduce the luminance spread: {:.3} against {:.3}",
         high_after - low_after,
         high_before - low_before
+    );
+}
+
+#[test]
+fn wet_ground_is_darker_everywhere_rather_than_only_shinier() {
+    // Wetness has to darken. A version that only dropped roughness would read as a polished floor, and the
+    // mean drop below is what distinguishes the two.
+    let Some(context) = context() else { return };
+    let harness = harness(context);
+    let dry = render(
+        context,
+        &harness,
+        DeferredFrame::new(pose(&harness.terrain), WIDTH, HEIGHT),
+    );
+    let soaked = render(
+        context,
+        &harness,
+        DeferredFrame::new(pose(&harness.terrain), WIDTH, HEIGHT).in_environment(
+            Environment::default().with_weather(Weather {
+                // Wetness alone, with no overcast, so the change measured is the *surface* and not the
+                // dimmer sky that real rain would also bring.
+                wetness: 1.0,
+                ..Weather::default()
+            }),
+        ),
+    );
+    write_capture("weather-wet.png", &soaked);
+    support::check_reference(context, "weather-wet.png", &soaked);
+
+    let (_, _, mean) = luminance_drop(&dry, &soaked);
+    assert!(
+        mean > 0.05,
+        "wet ground only lost {mean:.4} luminance on average, so it is shinier rather than wetter"
+    );
+    // Ground only: the sky is not wet, so a large part of the frame must be untouched.
+    let changed = fraction_differing(&dry, &soaked);
+    assert!(
+        changed < 0.90,
+        "wetness changed {:.1}% of the frame, which is more than the ground covers",
+        changed * 100.0
+    );
+}
+
+#[test]
+fn snow_settles_on_flat_ground_and_not_on_the_steep() {
+    // The claim worth testing is *selectivity*. Snow that covered everything uniformly would brighten the
+    // frame just as much and would pass any assertion about the mean, so this measures the spread of the
+    // per-pixel change: flats must gain far more than slopes.
+    let Some(context) = context() else { return };
+    let harness = harness(context);
+    let bare = render(
+        context,
+        &harness,
+        DeferredFrame::new(pose(&harness.terrain), WIDTH, HEIGHT),
+    );
+    let covered = render(
+        context,
+        &harness,
+        DeferredFrame::new(pose(&harness.terrain), WIDTH, HEIGHT).in_environment(
+            Environment::default().with_weather(Weather {
+                snow: 1.0,
+                ..Weather::default()
+            }),
+        ),
+    );
+    write_capture("weather-snow.png", &covered);
+    support::check_reference(context, "weather-snow.png", &covered);
+
+    // Snow brightens, so the drop is negative on the whole.
+    let (smallest, largest, mean) = luminance_drop(&bare, &covered);
+    assert!(mean < 0.0, "snow darkened the scene: mean drop {mean:.4}");
+    assert!(
+        largest - smallest > 0.15,
+        "every changed pixel gained about the same amount ({smallest:.4} to {largest:.4}), \
+         so the snow is a white wash rather than something settling by slope"
+    );
+    // The spire and the ridge flanks are steep enough to stay bare, so some ground must be untouched.
+    let changed = fraction_differing(&bare, &covered);
+    assert!(
+        changed < 0.92,
+        "snow reached {:.1}% of the frame, so it is not being held off the steep ground",
+        changed * 100.0
     );
 }
 

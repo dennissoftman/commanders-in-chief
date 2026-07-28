@@ -8,6 +8,20 @@
 // Peak highlight strength, reached only by a fully smooth material.
 const SPECULAR_STRENGTH: f32 = 0.06;
 
+// What full saturation does to a surface. Both are multipliers on what the G-buffer already held, so a pale
+// road and dark soil each darken by the same *proportion* rather than toward a common colour.
+const WET_ALBEDO_SCALE: f32 = 0.55;
+const WET_ROUGHNESS_SCALE: f32 = 0.35;
+
+// Snow's own surface. Slightly blue rather than white: snow is a poor absorber across the visible band but
+// scatters short wavelengths marginally better, and a pure white reads as blown-out paper next to terrain.
+const SNOW_ALBEDO: vec3<f32> = vec3<f32>(0.90, 0.92, 0.96);
+// Not very smooth. Fresh snow is a mass of scattering crystals, so it is closer to chalk than to ice; a low
+// roughness here gives a sheen that reads as wet plastic.
+const SNOW_ROUGHNESS: f32 = 0.62;
+// The cosine against vertical below which snow stops holding. About 63 degrees of slope.
+const SNOW_SLOPE_LIMIT: f32 = 0.45;
+
 @fragment
 fn lighting_fragment(input: FullscreenOutput) -> @location(0) vec4<f32> {
     let pixel = vec2<i32>(input.position.xy);
@@ -19,9 +33,28 @@ fn lighting_fragment(input: FullscreenOutput) -> @location(0) vec4<f32> {
         return vec4<f32>(mix(SKY_ZENITH, SKY_HORIZON, horizon), 1.0);
     }
     let world = world_at(pixel);
-    let albedo = textureLoad(g_albedo, pixel, 0).rgb;
     let normal_roughness = textureLoad(g_normal, pixel, 0);
     let normal = normalize(normal_roughness.xyz);
+
+    // The material, as written by whichever surface shader drew this pixel, then weathered.
+    let material = textureLoad(g_albedo, pixel, 0).rgb;
+    var albedo = material;
+    var roughness = normal_roughness.w;
+
+    // Wet ground is *darker and smoother*, not bluer. Water fills the pores, so less light scatters back
+    // out of the surface and what does reflect leaves more coherently. Darkening is the larger half of the
+    // cue by some margin — a wetness that only dropped roughness reads as a polished floor.
+    let wetness = clamp(camera.weather.x, 0.0, 1.0);
+    albedo *= mix(1.0, WET_ALBEDO_SCALE, wetness);
+    roughness *= mix(1.0, WET_ROUGHNESS_SCALE, wetness);
+
+    // Snow settles by *slope*, not by altitude. `normal.z` is the cosine of the surface against vertical,
+    // which is the physical criterion: an altitude threshold instead puts snow on a sheer cliff face high up
+    // and none on the valley floor beside it, which is precisely backwards.
+    let snow = clamp(camera.weather.y, 0.0, 1.0);
+    let settled = smoothstep(SNOW_SLOPE_LIMIT, 1.0, normal.z) * snow;
+    albedo = mix(albedo, SNOW_ALBEDO, settled);
+    roughness = mix(roughness, SNOW_ROUGHNESS, settled);
     let view_direction = normalize(camera.camera_position.xyz - world);
     var primary_visibility = shadow_visibility(world, normal);
     // Fade toward fully lit at grazing incidence to the primary light. See SHADOW_INCIDENCE_FADE.
@@ -72,16 +105,18 @@ fn lighting_fragment(input: FullscreenOutput) -> @location(0) vec4<f32> {
             let half_vector = normalize(light_direction + view_direction);
             let specular = pow(
                 max(dot(normal, half_vector), 0.0),
-                mix(64.0, 8.0, normal_roughness.w)
+                mix(64.0, 8.0, roughness)
             );
-            let specular_strength = SPECULAR_STRENGTH * (1.0 - normal_roughness.w);
+            let specular_strength = SPECULAR_STRENGTH * (1.0 - roughness);
             color += light.diffuse.rgb * specular * specular_strength * visibility;
         }
     }
     // Self-illumination, decoded from the G-buffer coverage channel. Added after the light loop so
     // it survives full shade, which is the whole point of a lamp: the emitted term takes its hue
     // from the material's own albedo, and the intensity is the material's emissive strength.
-    color += albedo * max(coverage - 1.0, 0.0);
+    // Emission takes its hue from the *material*, not from the weathered surface. A lamp under snow is
+    // still a lamp: snow lying on its housing should not change the colour of the light coming out of it.
+    color += material * max(coverage - 1.0, 0.0);
     // Fog last, and inside this pass rather than as a later screen-space one. A depth-based fog pass
     // could not fog the water surface: water writes no depth, so it would be fogged at the depth of the
     // terrain *behind* it and would sit in front of its own fog.
