@@ -17,7 +17,16 @@
 //! | `Q` `E` | Rotate |
 //! | `R` | Reset height and rotation |
 //! | `F` | Reset rotation only |
+//! | `T` | Toggle antialiasing |
+//! | `[` `]` | Step the resolution scale |
+//! | `P` | Toggle the per-pass GPU timing printout |
 //! | `Esc` | Quit |
+//!
+//! The last two are here because antialiasing is the one rendering change a still capture reports
+//! badly. Its whole subject is what an edge does *as the camera moves*, and a resolution scale trades
+//! frame rate for sampling rate — neither of which a headless test can show anyone. Both print the
+//! settings and the size they took effect at, so a screenshot of the terminal says what the window is
+//! showing.
 
 // The generator clamps before converting and its inputs are bounded constants, so the width casts
 // below cannot lose anything.
@@ -34,9 +43,11 @@ use std::time::Instant;
 use cic_assets::model::{Model, ModelImage, ModelMaterial, ModelPrimitive, ModelVertex};
 use cic_assets::{MapPackage, PackageLimits, Terrain, TerrainLayer};
 use cic_camera::{RtsCamera, RtsCameraProfile};
+use cic_render::display::{MAX_RESOLUTION_SCALE, MIN_RESOLUTION_SCALE};
 use cic_render::{
-    Action, DeferredFrame, GpuContext, InputState, LayerMaterial, ModelBatch, ModelInstance,
-    SurfaceRenderer, TerrainGround, TerrainRenderer, TextureImage, WaterBody, WaterSurface,
+    Action, Antialiasing, DeferredFrame, DisplaySettings, GpuContext, InputState, LayerMaterial,
+    ModelBatch, ModelInstance, SurfaceRenderer, TerrainGround, TerrainRenderer, TextureImage,
+    WaterBody, WaterSurface,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -53,6 +64,19 @@ const DRAG_PIXELS_TO_UNITS: f32 = 0.05;
 /// A stall — a breakpoint, a window drag, a shader recompile — otherwise arrives as one enormous
 /// delta and flings the camera across the map before the first frame after it is drawn.
 const MAXIMUM_FRAME_SECONDS: f32 = 0.1;
+
+/// How much one press of `[` or `]` moves the resolution scale.
+///
+/// A quarter, so the offered range is six steps rather than a continuum. A finer step would let someone
+/// walk to a cost they cannot afford one imperceptible increment at a time.
+const RESOLUTION_SCALE_STEP: f32 = 0.25;
+
+/// How often the per-pass breakdown is read back while timing is on.
+///
+/// Once a second, because reading it *blocks until the GPU has finished the frame*. Every frame would
+/// serialise the CPU against the GPU and change the numbers being measured, which is the trap a
+/// profiler-shaped diagnostic invites.
+const TIMING_REPORT_SECONDS: f32 = 1.0;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let terrain = if let Some(path) = std::env::args().nth(1) {
@@ -480,6 +504,10 @@ struct Viewer {
     last_frame: Option<Instant>,
     /// Seconds since the first frame, which is what animates the water.
     elapsed: f32,
+    /// Held here rather than only inside the surface, so the setting survives the window being rebuilt.
+    display: DisplaySettings,
+    /// Seconds since the last per-pass breakdown was printed, or `None` when timing is off.
+    timing_countdown: Option<f32>,
     failure: Option<String>,
 }
 
@@ -498,8 +526,66 @@ impl Viewer {
             active: None,
             last_frame: None,
             elapsed: 0.0,
+            // Starts where the headless captures are, so the first frame in the window is the frame the
+            // references were rendered from and pressing a key is the only difference from them.
+            display: DisplaySettings::NATIVE,
+            timing_countdown: None,
             failure: None,
         }
+    }
+
+    /// Turns the per-pass timing printout on or off.
+    fn toggle_timing(&mut self) {
+        let Some(active) = &mut self.active else {
+            return;
+        };
+        let wanted = self.timing_countdown.is_none();
+        let enabled = active.surface.set_timing(&active.context, wanted);
+        self.timing_countdown = enabled.then_some(TIMING_REPORT_SECONDS);
+        if wanted && !enabled {
+            eprintln!("timing: unavailable, this device does not offer TIMESTAMP_QUERY");
+        } else {
+            eprintln!("timing: {}", if enabled { "on" } else { "off" });
+        }
+    }
+
+    /// Prints the per-pass breakdown when the interval has elapsed.
+    fn report_timings(&mut self, delta: f32) {
+        let Some(remaining) = &mut self.timing_countdown else {
+            return;
+        };
+        *remaining -= delta;
+        if *remaining > 0.0 {
+            return;
+        }
+        self.timing_countdown = Some(TIMING_REPORT_SECONDS);
+        let Some(active) = &self.active else { return };
+        match active.surface.timings(&active.context) {
+            Some(Ok(timings)) => eprintln!("timing: {timings}"),
+            Some(Err(error)) => eprintln!("timing: could not read the breakdown: {error}"),
+            None => self.timing_countdown = None,
+        }
+    }
+
+    /// Applies a change to the display settings and reports what took effect.
+    ///
+    /// Reported rather than assumed: the resolution scale is clamped and rounded on its way to a target
+    /// size, so the figure that matters is the one the chain allocated and not the one asked for.
+    fn change_display(&mut self, event_loop: &ActiveEventLoop, display: DisplaySettings) {
+        self.display = display;
+        let Some(active) = &mut self.active else {
+            return;
+        };
+        if let Err(error) =
+            active
+                .surface
+                .set_display(&active.context, &active.terrain_renderer, display)
+        {
+            self.fail(event_loop, error.to_string());
+            return;
+        }
+        report_display(&active.surface);
+        active.window.request_redraw();
     }
 
     /// Records a fatal error and asks the loop to stop.
@@ -548,11 +634,13 @@ impl ApplicationHandler for Viewer {
             surface,
             size.width,
             size.height,
+            self.display,
         ) {
             Ok(surface) => surface,
             Err(error) => return self.fail(event_loop, error.to_string()),
         };
         eprintln!("surface: {:?} at {:?}", surface.format(), surface.size());
+        report_display(&surface);
 
         // A scattering of buildings, so the scene has something with a silhouette in it and the
         // shadow pass has a caster that is not terrain.
@@ -620,6 +708,17 @@ impl ApplicationHandler for Viewer {
                 if let PhysicalKey::Code(code) = event.physical_key {
                     if code == KeyCode::Escape && pressed {
                         event_loop.exit();
+                        return;
+                    }
+                    // Display settings act once per press rather than every frame they are held: each one
+                    // reallocates every intermediate target, and repeating that at the key-repeat rate
+                    // would rebuild the chain dozens of times a second.
+                    if pressed && code == KeyCode::KeyP {
+                        self.toggle_timing();
+                        return;
+                    }
+                    if pressed && let Some(display) = display_change(code, self.display) {
+                        self.change_display(event_loop, display);
                         return;
                     }
                     if let Some(action) = action_for(code) {
@@ -702,8 +801,45 @@ impl Viewer {
                 &active.water,
                 frame,
             )
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+
+        // After the frame, so the breakdown read back describes one that has been submitted. It blocks on
+        // the GPU, which is why it runs about once a second rather than here every time.
+        self.report_timings(delta);
+        Ok(())
     }
+}
+
+/// Maps a physical key to a change of display settings, or `None` if it is not one.
+fn display_change(code: KeyCode, current: DisplaySettings) -> Option<DisplaySettings> {
+    Some(match code {
+        KeyCode::KeyT => current.with_antialiasing(match current.antialiasing {
+            Antialiasing::None => Antialiasing::Fxaa,
+            Antialiasing::Fxaa => Antialiasing::None,
+        }),
+        // Stepped from the *sanitised* scale rather than the stored one, so a press at either end of
+        // the range moves back into it instead of walking a value that is already clamped.
+        KeyCode::BracketLeft => {
+            current.at_scale((current.scale() - RESOLUTION_SCALE_STEP).max(MIN_RESOLUTION_SCALE))
+        }
+        KeyCode::BracketRight => {
+            current.at_scale((current.scale() + RESOLUTION_SCALE_STEP).min(MAX_RESOLUTION_SCALE))
+        }
+        _ => return None,
+    })
+}
+
+/// Prints the settings in force and the size they produced.
+fn report_display(surface: &SurfaceRenderer) {
+    let display = surface.display();
+    let (render_width, render_height) = surface.render_size();
+    let (output_width, output_height) = surface.size();
+    eprintln!(
+        "display: scale {:.2} ({render_width}x{render_height} into {output_width}x{output_height}), \
+         antialiasing {:?}",
+        display.scale(),
+        display.antialiasing
+    );
 }
 
 /// Maps a physical key to a camera action.

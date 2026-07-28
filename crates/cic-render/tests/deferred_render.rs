@@ -16,13 +16,15 @@ mod support;
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use cic_assets::{Terrain, TerrainLayer};
 use cic_camera::CameraPose;
 use cic_render::terrain::LayerColour;
 use cic_render::{
-    Capture, CaptureTarget, Clouds, DeferredFrame, DeferredRenderer, DeferredTargets, Environment,
-    Fog, GpuContext, TerrainRenderer, WaterBody, WaterMaterial, WaterSurface, Weather,
+    Antialiasing, Capture, CaptureTarget, Clouds, DeferredFrame, DeferredRenderer, DeferredTargets,
+    DisplaySettings, Environment, Fog, GpuContext, TerrainRenderer, TimedPass, WaterBody,
+    WaterMaterial, WaterSurface, Weather,
 };
 
 const WIDTH: u32 = 720;
@@ -159,16 +161,24 @@ fn harness(context: &GpuContext) -> Harness {
 }
 
 fn harness_for(context: &GpuContext, terrain: Terrain) -> Harness {
+    harness_with(context, terrain, DisplaySettings::NATIVE)
+}
+
+fn harness_with(context: &GpuContext, terrain: Terrain, display: DisplaySettings) -> Harness {
     let renderer =
         TerrainRenderer::new(context, &terrain, &palette()).expect("build terrain renderer");
-    let targets = DeferredTargets::new(context, WIDTH, HEIGHT).expect("allocate targets");
-    let deferred = DeferredRenderer::new(
+    let targets = DeferredTargets::new(
         context,
-        &renderer,
-        &targets,
+        WIDTH,
+        HEIGHT,
         cic_render::gpu::CAPTURE_FORMAT,
+        display,
     )
-    .expect("build deferred renderer");
+    .expect("allocate targets");
+    let deferred =
+        DeferredRenderer::new(context, &renderer, &targets).expect("build deferred renderer");
+    // The capture is always the *output* size. That is the whole point of a resolution scale: what
+    // changes is the sampling rate, not the size of the image the caller receives.
     let output = CaptureTarget::new(context, WIDTH, HEIGHT).expect("output target");
     Harness {
         terrain,
@@ -354,6 +364,12 @@ fn ambient_occlusion_is_computed_and_varies() {
     // Read the AO target directly, so a broken occlusion pass cannot hide behind the lighting.
     let Some(context) = context() else { return };
     let harness = harness(context);
+
+    // The estimate is half resolution and its resolve is full. Pinned structurally as well as by the
+    // reference image, because reverting it costs 42% of the frame and would otherwise show up only as a
+    // handful of pixels differing on a capture — a change nobody would read as a performance regression.
+    assert_eq!(harness.targets.render_size(), (WIDTH, HEIGHT));
+    assert_eq!(harness.targets.occlusion_size(), (WIDTH / 2, HEIGHT / 2));
     let frame = DeferredFrame::new(pose(&harness.terrain), WIDTH, HEIGHT);
     harness
         .deferred
@@ -386,14 +402,16 @@ fn ambient_occlusion_is_computed_and_varies() {
     )
     .expect("valid flat terrain");
     let flat_renderer = TerrainRenderer::new(context, &flat, &[]).expect("flat renderer");
-    let flat_targets = DeferredTargets::new(context, WIDTH, HEIGHT).expect("flat targets");
-    let flat_deferred = DeferredRenderer::new(
+    let flat_targets = DeferredTargets::new(
         context,
-        &flat_renderer,
-        &flat_targets,
+        WIDTH,
+        HEIGHT,
         cic_render::gpu::CAPTURE_FORMAT,
+        DisplaySettings::NATIVE,
     )
-    .expect("flat deferred");
+    .expect("flat targets");
+    let flat_deferred =
+        DeferredRenderer::new(context, &flat_renderer, &flat_targets).expect("flat deferred");
     let flat_output = CaptureTarget::new(context, WIDTH, HEIGHT).expect("flat output");
     let flat_frame = DeferredFrame::new(pose(&harness.terrain), WIDTH, HEIGHT);
     flat_deferred
@@ -452,10 +470,20 @@ fn the_chain_renders_into_a_bgra_target() {
     let terrain = shadowing_terrain();
     let renderer =
         TerrainRenderer::new(context, &terrain, &palette()).expect("build terrain renderer");
-    let targets = DeferredTargets::new(context, WIDTH, HEIGHT).expect("allocate targets");
-
     let format = wgpu::TextureFormat::Bgra8UnormSrgb;
-    let deferred = DeferredRenderer::new(context, &renderer, &targets, format)
+    // Antialiasing on as well, so the BGRA plumbing is exercised on both passes that write the output
+    // format *and* on the intermediate the composite writes when a pass follows it. That intermediate is
+    // allocated in the output format precisely so one composite pipeline serves both cases, which makes
+    // it the thing most likely to be wrong here.
+    let targets = DeferredTargets::new(
+        context,
+        WIDTH,
+        HEIGHT,
+        format,
+        DisplaySettings::NATIVE.with_antialiasing(Antialiasing::Fxaa),
+    )
+    .expect("allocate targets");
+    let deferred = DeferredRenderer::new(context, &renderer, &targets)
         .expect("a BGRA composite pipeline must build");
 
     let output = context.device().create_texture(&wgpu::TextureDescriptor {
@@ -1053,14 +1081,16 @@ fn a_water_body_survives_the_chain_being_rebuilt() {
     let terrain = basin_terrain();
     let renderer =
         TerrainRenderer::new(context, &terrain, &palette()).expect("build terrain renderer");
-    let first_targets = DeferredTargets::new(context, WIDTH, HEIGHT).expect("first targets");
-    let first = DeferredRenderer::new(
+    let first_targets = DeferredTargets::new(
         context,
-        &renderer,
-        &first_targets,
+        WIDTH,
+        HEIGHT,
         cic_render::gpu::CAPTURE_FORMAT,
+        DisplaySettings::NATIVE,
     )
-    .expect("first deferred renderer");
+    .expect("first targets");
+    let first =
+        DeferredRenderer::new(context, &renderer, &first_targets).expect("first deferred renderer");
 
     let (floor, rim) = world_elevation_range(&terrain);
     let water = vec![
@@ -1074,14 +1104,16 @@ fn a_water_body_survives_the_chain_being_rebuilt() {
 
     // The resize: new targets at a new size, and a renderer rebuilt against them.
     let (wide, tall) = (WIDTH + 96, HEIGHT + 64);
-    let second_targets = DeferredTargets::new(context, wide, tall).expect("second targets");
-    let second = DeferredRenderer::new(
+    let second_targets = DeferredTargets::new(
         context,
-        &renderer,
-        &second_targets,
+        wide,
+        tall,
         cic_render::gpu::CAPTURE_FORMAT,
+        DisplaySettings::NATIVE,
     )
-    .expect("second deferred renderer");
+    .expect("second targets");
+    let second = DeferredRenderer::new(context, &renderer, &second_targets)
+        .expect("second deferred renderer");
     let output = CaptureTarget::new(context, wide, tall).expect("resized output");
 
     let frame = DeferredFrame::new(pose(&terrain), wide, tall);
@@ -1138,5 +1170,535 @@ fn a_sun_in_the_mirror_direction_puts_glitter_on_the_water() {
         glinting_peak > default_peak + 0.15,
         "the mirrored sun peaked at {glinting_peak:.3} against {default_peak:.3} under the default \
          one, so the highlight is not reaching the frame"
+    );
+}
+
+#[test]
+fn per_pass_timing_attributes_the_frame_to_the_passes_that_ran() {
+    // The point of the whole module: that a *breakdown* exists, not that a total does. Every performance
+    // question this renderer has open is a subtraction between two of these numbers, and the tests below
+    // it in `timing` cover the arithmetic on synthetic ticks — what only a device can show is that the
+    // slots line up with the passes, that a conditional pass is reported when it runs and absent when it
+    // does not, and that the durations are physically plausible rather than nanoseconds or minutes.
+    let Some(context) = context() else { return };
+    if !context.supports_timing() {
+        eprintln!("skipping: this adapter does not offer TIMESTAMP_QUERY");
+        return;
+    }
+    let terrain = shadowing_terrain();
+    let mut harness = harness_with(
+        context,
+        terrain,
+        DisplaySettings::NATIVE.with_antialiasing(Antialiasing::Fxaa),
+    );
+    assert!(
+        harness.deferred.set_timing(context, true),
+        "the device reported timing support, so enabling it must take"
+    );
+
+    let frame = DeferredFrame::new(pose(&harness.terrain), WIDTH, HEIGHT);
+    let _ = render(context, &harness, frame);
+    let timings = harness
+        .deferred
+        .timings(context)
+        .expect("timing is on")
+        .expect("read the breakdown");
+    eprintln!("{timings}");
+
+    // Every unconditional pass ran, and the antialias pass ran because the settings asked for it.
+    for pass in [
+        TimedPass::ShadowCascade0,
+        TimedPass::ShadowCascade3,
+        TimedPass::Gbuffer,
+        TimedPass::Occlusion,
+        TimedPass::OcclusionBlur,
+        TimedPass::Lighting,
+        TimedPass::Composite,
+        TimedPass::Antialias,
+    ] {
+        let elapsed = timings
+            .get(pass)
+            .unwrap_or_else(|| panic!("{pass:?} was not timed"));
+        // A pass that drew a 720x480 frame on real hardware is neither instant nor a tenth of a second.
+        // Loose by design: this is a plausibility bound, and a tight one would fail on the next GPU.
+        assert!(
+            elapsed > Duration::ZERO && elapsed < Duration::from_millis(100),
+            "{pass:?} took {elapsed:?}, which is not a plausible pass time"
+        );
+    }
+
+    // And the conditional pass that did *not* run is absent rather than zero. This is the half a fixed
+    // slot layout has to earn: reporting water at 0.000ms in a scene with no water would be a claim about
+    // its cost rather than about its absence.
+    assert_eq!(
+        timings.get(TimedPass::Water),
+        None,
+        "no water was drawn, so the water pass must not appear at all"
+    );
+    assert_eq!(timings.entries().len(), TimedPass::ALL.len() - 1);
+
+    // The four cascades draw the terrain four more times over, so their total is a real share of the
+    // frame rather than a rounding error -- which is the first number the outstanding terrain LOD work
+    // wants. Asserted as a share of the sum, not in milliseconds, so it holds on any device.
+    let shadow_share = harness_share(timings.shadow_total(), timings.sum());
+    eprintln!(
+        "shadow cascades are {:.1}% of the summed passes",
+        shadow_share * 100.0
+    );
+    assert!(
+        shadow_share > 0.01,
+        "the four cascades came to {shadow_share:.4} of the frame, which would mean they are not \
+         drawing the terrain they are supposed to be drawing"
+    );
+
+    // Turning it off stops the reporting rather than leaving stale numbers reachable.
+    assert!(!harness.deferred.set_timing(context, false));
+    assert!(harness.deferred.timings(context).is_none());
+}
+
+/// One duration as a share of another, with a zero denominator answering zero.
+fn harness_share(part: Duration, whole: Duration) -> f32 {
+    if whole.is_zero() {
+        return 0.0;
+    }
+    (part.as_secs_f64() / whole.as_secs_f64()) as f32
+}
+
+#[test]
+fn a_terrain_that_does_not_fill_its_last_chunk_draws_no_ground_past_its_edge() {
+    // The one path the other fixtures cannot reach. Chunks are 32 cells and both the shadowing terrain
+    // (192 cells) and the model terrain (128) divide evenly, so every committed reference exercises the
+    // chunked draw without ever producing a *partial* chunk.
+    //
+    // A partial chunk still submits a full chunk's vertices, and the out-of-range ones are collapsed to a
+    // degenerate triangle in the vertex shader. Clamping them instead would not be harmless: `elevation`
+    // clamps the coordinate it looks a height up at, but `world_position` does *not* clamp the x and y it
+    // derives from the same coordinate — so a cell past the edge lands at its true world position carrying
+    // the edge's height, and the terrain grows a slab hanging past its own extent. That is the water-slab
+    // bug this renderer has already had once.
+    //
+    // Two terrains at the same spacing, one that divides evenly and one that does not, framed by the same
+    // camera. Their footprints should differ by exactly the ratio of their extents; a slab out to the end
+    // of the last chunk would make the ragged one almost twice the area it should be.
+    let Some(context) = context() else { return };
+    let spacing = 8.0;
+    let exact = flat_at(96 + 1, spacing);
+    let ragged = flat_at(99 + 1, spacing);
+
+    // High enough that both terrains sit well inside the frame with sky around them, and looking straight
+    // down so the footprint is the map's own rectangle rather than a perspective wedge.
+    let framing = |samples: u32| {
+        let extent = f32::from(u16::try_from(samples - 1).expect("small fixture")) * spacing;
+        let centre = extent * 0.5;
+        CameraPose {
+            eye: [centre, centre - 1.0, 2_400.0],
+            focus: [centre, centre, 0.0],
+            forward: [0.0, 0.0, -1.0],
+        }
+    };
+
+    let exact_cover = ground_fraction(context, exact, framing(97));
+    let ragged_cover = ground_fraction(context, ragged, framing(100));
+    // Both cameras frame their own map the same way, so a correct render gives both the same footprint.
+    eprintln!("ground cover: {exact_cover:.4} at 96 cells, {ragged_cover:.4} at 99");
+    assert!(
+        exact_cover > 0.05,
+        "the evenly divided terrain covered only {exact_cover:.4} of the frame, so this fixture is not \
+         measuring a footprint at all"
+    );
+    let ratio = ragged_cover / exact_cover;
+    assert!(
+        (0.85..=1.15).contains(&ratio),
+        "the ragged terrain covered {ragged_cover:.4} against {exact_cover:.4} for the evenly divided \
+         one, a ratio of {ratio:.3}. Both frame their own extent identically, so the partial chunk is \
+         drawing ground that is not there -- out to the end of its chunk, this reads about 1.7."
+    );
+}
+
+/// A flat terrain of `samples` per side, at one elevation.
+fn flat_at(samples: u32, spacing: f32) -> Terrain {
+    Terrain::new(
+        samples,
+        samples,
+        spacing,
+        VERTICAL,
+        vec![400; (samples * samples) as usize],
+        Vec::new(),
+    )
+    .expect("valid flat terrain")
+}
+
+/// The fraction of a rendered frame that is ground rather than sky.
+///
+/// Classified by hue, as `sky_mask` does and for the same reason: the lighting pass paints a blue gradient
+/// where coverage is zero, and no terrain in these fixtures is bluer than it is red.
+fn ground_fraction(context: &GpuContext, terrain: Terrain, pose: CameraPose) -> f32 {
+    let harness = harness_with(context, terrain, DisplaySettings::NATIVE);
+    let frame = DeferredFrame::new(pose, WIDTH, HEIGHT);
+    let capture = render(context, &harness, frame);
+    let ground = capture
+        .rgba()
+        .chunks_exact(4)
+        .filter(|pixel| pixel[2] <= pixel[0])
+        .count();
+    ground as f32 / (capture.rgba().len() / 4) as f32
+}
+
+/// Mean absolute Laplacian of luminance, over the pixels a mask selects.
+///
+/// A *second* difference rather than a gradient, and that choice is what makes the number mean
+/// something. On a linear ramp — a sky gradient, an evenly lit slope — a pixel is the mean of its
+/// neighbours and the term is zero however steep the ramp is. What survives is variation that changes
+/// abruptly from one pixel to the next, which is precisely what a staircased silhouette is made of. A
+/// gradient magnitude would instead report mostly how much contrast the scene happens to contain.
+///
+/// # Why it is masked, which was learned the hard way
+///
+/// Measured over the *whole* frame this number rises under supersampling, and the first version of the
+/// test below read that as the resolution scale failing. It was not: magnifying the silhouette showed
+/// the staircase properly graded, exactly as intended. The number rose because a higher sampling rate
+/// legitimately puts *more* real high-frequency content into the frame — finer mip levels, a finer
+/// occlusion estimate — and a Laplacian cannot tell detail that belongs there from aliasing that does
+/// not. Two separate things were also feeding it, and only one was a fault: the composite's sharpen was
+/// re-hardening the softened edges, which is fixed at the source in `composite.wgsl`.
+///
+/// Restricted to the silhouette the question becomes answerable, because there the correct image is
+/// known to be a smooth boundary: any pixel-to-pixel step across it is aliasing and nothing else.
+fn masked_edge_energy(capture: &Capture, mask: &[bool]) -> f32 {
+    let (width, height) = (capture.width(), capture.height());
+    assert!(width > 2 && height > 2, "frame too small to measure");
+    let luma = |x: u32, y: u32| channel_luma(&capture.pixel(x, y).expect("pixel in range"));
+    let mut total = 0.0;
+    let mut counted = 0_u32;
+    for y in 1..height - 1 {
+        for x in 1..width - 1 {
+            if !mask[(y * width + x) as usize] {
+                continue;
+            }
+            let neighbours = luma(x, y - 1) + luma(x, y + 1) + luma(x - 1, y) + luma(x + 1, y);
+            total += (4.0 * luma(x, y) - neighbours).abs() / 4.0;
+            counted += 1;
+        }
+    }
+    assert!(counted > 500, "only {counted} pixels selected to measure");
+    total / counted as f32
+}
+
+/// Marks the pixels the sky was painted on.
+///
+/// By *hue* rather than by brightness: the lighting pass paints a blue gradient where coverage is zero,
+/// and this terrain's palette is a desaturated green, so the blue channel exceeding the red separates
+/// them cleanly at any elevation in the gradient. A luminance threshold would not — the sky near the
+/// horizon and the terrain in shadow overlap in brightness.
+fn sky_mask(capture: &Capture) -> Vec<bool> {
+    capture
+        .rgba()
+        .chunks_exact(4)
+        .map(|pixel| pixel[2] > pixel[0])
+        .collect()
+}
+
+/// Marks the pixels within `radius` of a change in `mask` — that is, the silhouette band.
+///
+/// Derived once from the *aliased* frame and then applied to every frame compared against it. That
+/// matters: an antialiased edge is a blend and classifies either way, so a band recomputed per frame
+/// would be measuring a different set of pixels in each and the comparison would mean nothing.
+fn boundary_band(mask: &[bool], width: u32, height: u32, radius: u32) -> Vec<bool> {
+    let at = |x: u32, y: u32| mask[(y * width + x) as usize];
+    let mut band = vec![false; mask.len()];
+    for y in 0..height {
+        for x in 0..width {
+            let here = at(x, y);
+            let mut differs = false;
+            // Clamped at the frame's edges rather than offset and range-checked, so the neighbourhood
+            // walk stays in unsigned coordinates throughout.
+            for ny in y.saturating_sub(radius)..=(y + radius).min(height - 1) {
+                for nx in x.saturating_sub(radius)..=(x + radius).min(width - 1) {
+                    if at(nx, ny) != here {
+                        differs = true;
+                    }
+                }
+            }
+            band[(y * width + x) as usize] = differs;
+        }
+    }
+    band
+}
+
+/// A mask selecting everything the band does not, so a claim about edges can be checked against a
+/// control that contains no edges at all.
+fn outside(band: &[bool]) -> Vec<bool> {
+    band.iter().map(|inside| !inside).collect()
+}
+
+/// Mean absolute luminance difference between two captures, over the pixels a mask selects.
+///
+/// The measure for *where* a setting acts rather than how much. Two of these — one over the silhouette
+/// band and one over everything else — say whether a change is an edge treatment or a change to the
+/// whole image, which is the distinction every claim below turns on.
+fn masked_difference(first: &Capture, second: &Capture, mask: &[bool]) -> f32 {
+    assert_eq!(first.width(), second.width());
+    assert_eq!(first.height(), second.height());
+    let mut total = 0.0;
+    let mut counted = 0_u32;
+    for (index, (left, right)) in first
+        .rgba()
+        .chunks_exact(4)
+        .zip(second.rgba().chunks_exact(4))
+        .enumerate()
+    {
+        if !mask[index] {
+            continue;
+        }
+        total += (channel_luma(left) - channel_luma(right)).abs();
+        counted += 1;
+    }
+    assert!(counted > 500, "only {counted} pixels selected to measure");
+    total / counted as f32
+}
+
+/// Rec. 709 luma of one stored pixel, matching `Capture`'s own measure.
+fn channel_luma(pixel: &[u8]) -> f32 {
+    let channel = |value: u8| f32::from(value) / 255.0;
+    0.2126 * channel(pixel[0]) + 0.7152 * channel(pixel[1]) + 0.0722 * channel(pixel[2])
+}
+
+/// The fraction of pixels two captures agree on byte for byte.
+fn fraction_identical(first: &Capture, second: &Capture) -> f32 {
+    assert_eq!(first.width(), second.width());
+    assert_eq!(first.height(), second.height());
+    let identical = first
+        .rgba()
+        .chunks_exact(4)
+        .zip(second.rgba().chunks_exact(4))
+        .filter(|(left, right)| left == right)
+        .count();
+    identical as f32 / (first.rgba().len() / 4) as f32
+}
+
+/// Mean luminance across the whole frame.
+fn mean_luminance(capture: &Capture) -> f32 {
+    let total: f32 = capture.rgba().chunks_exact(4).map(channel_luma).sum();
+    total / (capture.rgba().len() / 4) as f32
+}
+
+#[test]
+fn antialiasing_softens_edges_without_dimming_or_blurring_the_frame() {
+    // Three claims, because "the image changed" is not one of them and each of the three fails
+    // differently.
+    //
+    // 1. Edge energy falls. That is the pass acting at all.
+    // 2. Mean luminance does not move. A pass that redistributes brightness across an edge cannot
+    //    change the frame's average by more than rounding; one whose luma weights, transfer curve, or
+    //    blend direction are wrong shifts it. This is the assertion a plausible-looking wrong
+    //    implementation fails.
+    // 3. A substantial part of the frame is left *byte-identical*. This is the one that separates
+    //    antialiasing from a blur: the luma gate has to be deciding not to fire. A pass that touches
+    //    every pixel is a soft-focus filter wearing an antialiasing name — and it would satisfy both of
+    //    the assertions above.
+    let Some(context) = context() else { return };
+    let terrain = shadowing_terrain();
+    let aliased = harness_with(context, terrain.clone(), DisplaySettings::NATIVE);
+    let resolved = harness_with(
+        context,
+        terrain,
+        DisplaySettings::NATIVE.with_antialiasing(Antialiasing::Fxaa),
+    );
+
+    let frame = DeferredFrame::new(pose(&aliased.terrain), WIDTH, HEIGHT);
+    let before = render(context, &aliased, frame);
+    let after = render(context, &resolved, frame);
+    write_capture("deferred-antialiased.png", &after);
+    // The capture is the verification. A silhouette softened in the wrong direction, or shifted by half
+    // a pixel, produces exactly the statistics below.
+    support::check_reference(context, "deferred-antialiased.png", &after);
+
+    assert_eq!(after.width(), WIDTH, "the output size must not change");
+    assert_eq!(after.height(), HEIGHT);
+
+    let band = boundary_band(&sky_mask(&before), WIDTH, HEIGHT, 2);
+    let (rough, smooth) = (
+        masked_edge_energy(&before, &band),
+        masked_edge_energy(&after, &band),
+    );
+    eprintln!("silhouette edge energy: {rough:.5} aliased, {smooth:.5} resolved");
+    assert!(
+        smooth < rough * 0.8,
+        "silhouette edge energy went from {rough:.5} to {smooth:.5}, so the pass is barely acting \
+         where the aliasing is"
+    );
+
+    let shift = (mean_luminance(&after) - mean_luminance(&before)).abs();
+    assert!(
+        shift < 0.005,
+        "mean luminance moved by {shift:.4}: the pass is changing the frame's brightness rather \
+         than redistributing it across edges"
+    );
+
+    let untouched = fraction_identical(&before, &after);
+    assert!(
+        untouched > 0.2,
+        "only {:.1}% of the frame was left alone, so the luma gate is not gating: this is a blur \
+         rather than an antialias pass",
+        untouched * 100.0
+    );
+    // And it must not be so timid that it is doing nothing either. A gate that never fires satisfies
+    // every assertion above except the first, and it is worth recording which side of it we are on.
+    assert!(
+        untouched < 0.98,
+        "{:.1}% of the frame is untouched, which is a pass that found almost no edges",
+        untouched * 100.0
+    );
+}
+
+#[test]
+fn a_resolution_scale_raises_the_sampling_rate_rather_than_resizing_the_frame() {
+    // Measured on the silhouette band and nowhere else. Over the whole frame the number goes the other
+    // way, and it is right to: a higher sampling rate puts more genuine detail into the image, and no
+    // second difference can separate detail that belongs there from a staircase that does not. On the
+    // sky boundary the correct image is known to be a smooth curve, so there the question has an answer.
+    // See `masked_edge_energy`.
+    //
+    // The ordering is the claim, not the direction: supersampling has to sit *between* an aliased frame
+    // and a blurred one. "It got smoother" says nothing on its own, because upscaling a smaller render
+    // does that too — and much further, since adjacent output pixels are then interpolated from the same
+    // pair of source texels. A scale accepted and then ignored makes the first comparison an equality; a
+    // downsample reading the wrong size fails it outright.
+    let Some(context) = context() else { return };
+    let terrain = shadowing_terrain();
+    let native = harness_with(context, terrain.clone(), DisplaySettings::NATIVE);
+    let supersampled = harness_with(
+        context,
+        terrain.clone(),
+        DisplaySettings::NATIVE.at_scale(2.0),
+    );
+    let undersampled = harness_with(context, terrain, DisplaySettings::NATIVE.at_scale(0.5));
+
+    assert_eq!(supersampled.targets.render_size(), (WIDTH * 2, HEIGHT * 2));
+    assert_eq!(supersampled.targets.output_size(), (WIDTH, HEIGHT));
+    assert_eq!(undersampled.targets.render_size(), (WIDTH / 2, HEIGHT / 2));
+
+    let frame = DeferredFrame::new(pose(&native.terrain), WIDTH, HEIGHT);
+    let at_native = render(context, &native, frame);
+    let at_double = render(context, &supersampled, frame);
+    let at_half = render(context, &undersampled, frame);
+    write_capture("deferred-supersampled.png", &at_double);
+    // A wrong downsample is a wrong *framing* — a quarter of the scene stretched across the whole target,
+    // say — and every statistic here survives that. Only the image says so.
+    support::check_reference(context, "deferred-supersampled.png", &at_double);
+
+    for capture in [&at_double, &at_half] {
+        assert_eq!(capture.width(), WIDTH, "the output size must not change");
+        assert_eq!(capture.height(), HEIGHT);
+    }
+
+    let band = boundary_band(&sky_mask(&at_native), WIDTH, HEIGHT, 2);
+    let elsewhere = outside(&band);
+
+    // What it changes, and where. Supersampling is an edge treatment in effect even though it is not one
+    // in construction: a smooth interior averages to what it already was, while a boundary pixel that
+    // was wholly one side becomes a quarter, a half or three-quarters covered. So the change has to be
+    // concentrated on the silhouette — which is also the assertion that fails if the downsample reads the
+    // wrong size, because a quarter of the scene stretched over the whole target changes every pixel
+    // about equally.
+    let on_edges = masked_difference(&at_native, &at_double, &band);
+    let off_edges = masked_difference(&at_native, &at_double, &elsewhere);
+    eprintln!(
+        "2x moved the silhouette by {on_edges:.4} and the rest of the frame by {off_edges:.4}"
+    );
+    assert!(
+        on_edges > 0.01,
+        "supersampling barely moved the silhouette at all ({on_edges:.4}), so the larger render is \
+         not reaching the frame"
+    );
+    assert!(
+        on_edges > off_edges * 4.0,
+        "supersampling moved the silhouette by {on_edges:.4} and everything else by {off_edges:.4}, \
+         which is not a change concentrated where the aliasing is"
+    );
+
+    // And the control that tells "rendered larger and averaged down" apart from "rendered smaller and
+    // stretched". Both concentrate their change on the silhouette, because a smooth interior neither
+    // averages nor interpolates to anything much different — so concentration alone does not say which
+    // way the scale went. What does is the interior itself: averaging four samples of a smooth surface
+    // returns very nearly what was already there, while magnifying from half as many samples shifts every
+    // pixel to somewhere between two of them.
+    let half_on_edges = masked_difference(&at_native, &at_half, &band);
+    let half_off_edges = masked_difference(&at_native, &at_half, &elsewhere);
+    eprintln!(
+        "0.5x moved the silhouette by {half_on_edges:.4} and the rest of the frame by \
+         {half_off_edges:.4}"
+    );
+    assert!(
+        off_edges < half_off_edges * 0.5,
+        "supersampling moved the frame's interior by {off_edges:.4} against {half_off_edges:.4} for an \
+         upscale, so it is not leaving the smooth surfaces where they were"
+    );
+
+    // What this fixture cannot show, recorded so the next person does not read the silence as coverage:
+    // whether supersampling *preserves* fine detail an upscale destroys. Its terrain is a smooth
+    // heightfield in flat palette colours, so there is almost no detail off the silhouette either way —
+    // measured at 0.00046 native against 0.00049 and 0.00045, which is three numbers agreeing rather than
+    // an assertion. Making that claim needs a fixture with a texture in it, and the first candidate is the
+    // world-space tiled albedo `terrain_render.rs` already exercises.
+
+    // Supersampling must not dim the scene either. The composite's exposure and tone curve run per
+    // output pixel whatever the render size, so a brightness change here would mean the downsample is
+    // happening on the wrong side of that curve.
+    let shift = (mean_luminance(&at_double) - mean_luminance(&at_native)).abs();
+    assert!(
+        shift < 0.01,
+        "mean luminance moved by {shift:.4} under supersampling, so the downsample and the tone curve \
+         are in the wrong order"
+    );
+}
+
+#[test]
+fn antialiasing_composes_with_a_resolution_scale() {
+    // Both at once, which is how a settings screen will present them and therefore how they will be
+    // used. It is also the arrangement with a size disagreement available in it: the composite reads a
+    // target larger than the output and writes one at the output size, and the antialias pass then reads
+    // *that* and must step by one output pixel rather than one render pixel. Stepping by the wrong one
+    // shrinks its kernel and it quietly does much less.
+    let Some(context) = context() else { return };
+    let terrain = shadowing_terrain();
+    let plain = harness_with(
+        context,
+        terrain.clone(),
+        DisplaySettings::NATIVE.at_scale(1.5),
+    );
+    let resolved = harness_with(
+        context,
+        terrain,
+        DisplaySettings::NATIVE
+            .at_scale(1.5)
+            .with_antialiasing(Antialiasing::Fxaa),
+    );
+    // A non-integer scale on purpose: the exact-average case at 2.0 is the easy one, and 1.5 is the
+    // ratio where a downsample that assumed integer texel alignment shows itself.
+    assert_eq!(plain.targets.render_size(), (1_080, 720));
+
+    let frame = DeferredFrame::new(pose(&plain.terrain), WIDTH, HEIGHT);
+    let scaled_only = render(context, &plain, frame);
+    let both = render(context, &resolved, frame);
+    write_capture("deferred-scaled-antialiased.png", &both);
+
+    let band = boundary_band(&sky_mask(&scaled_only), WIDTH, HEIGHT, 2);
+    let (rough, smooth) = (
+        masked_edge_energy(&scaled_only, &band),
+        masked_edge_energy(&both, &band),
+    );
+    eprintln!("silhouette edge energy at 1.5x: {rough:.5} plain, {smooth:.5} resolved");
+    assert!(
+        smooth < rough * 0.9,
+        "with a 1.5x scale already in place the resolve took silhouette edge energy from {rough:.5} \
+         only to {smooth:.5}, which is consistent with it stepping by render pixels rather than output \
+         ones"
+    );
+    let untouched = fraction_identical(&scaled_only, &both);
+    assert!(
+        untouched > 0.2,
+        "only {:.1}% of the supersampled frame was left alone",
+        untouched * 100.0
     );
 }

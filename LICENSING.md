@@ -166,17 +166,28 @@ inherited one, which is precisely the copy-paste worth catching. A test in `cic-
 That accounts for all 13 shaders present at the seed: 8 clean and 5 with a region removed.
 
 **The set has since been restructured, and the tally is worth restating because this table is the audit.**
-Shaders are now assembled from composable chunks under `cic-render/src/shaders/`, and the tree holds 15 of
+Shaders are now assembled from composable chunks under `cic-render/src/shaders/`, and the tree holds 16 of
 them. Six of the 8 *clean* seeded shaders were deleted as superseded dead code — `shader.wgsl`,
 `terrain.wgsl`, `model.wgsl`, `terrain_shadow.wgsl`, `scene_shadow.wgsl` and `viewer.wgsl` — leaving `ui`
 and `terrain_virtual` from that group. **All 5 of the region-removed shaders survive**, which is the half
 that matters here: `terrain_ao`, `boundary_viewer`, `road_viewer` and `terrain_viewer` unchanged, and
 `terrain_deferred.wgsl` split into the `scene`, `shadow`, `atmosphere`, `lighting` and `composite` chunks.
 Splitting a file moves the region-removed code between files without reintroducing anything, and the
-per-chunk licence-header test now runs over all 15.
+per-chunk licence-header test now runs over all 16.
 
-The remaining 4 — `terrain_forward`, `terrain_gbuffer`, `model_gbuffer` and `water` — were written after
-the seed against the native formats and have no predecessor.
+The remaining 5 — `terrain_forward`, `terrain_gbuffer`, `model_gbuffer`, `water` and `antialias` — were
+written after the seed against the native formats and have no predecessor.
+
+**`antialias.wgsl` is worth a sentence of its own, because "FXAA" names a file as well as a technique.**
+Timothy Lottes' `fxaa3_11.h` is the reference implementation everybody reaches for, it carries NVIDIA's
+own licence terms, and it was **not** consulted — nor was any derivative or port of it. What is in the
+tree is an independent construction: a luma gate with an absolute and a relative term, a Sobel pair for
+edge orientation, and a blend weight built from the second difference across the edge, each derived in the
+file with its reasoning beside it. It is FXAA in the sense that it is a single luminance-directed post
+pass, which is a category rather than a codebase. Vendoring the real thing would be a deliberate change
+with its own `NOTICE` entry; the same reasoning already ruled SMAA out of
+[ADR 0005](docs/adr/0005-antialiasing-strategy.md), whose two precomputed lookup textures are data blobs
+under someone else's terms.
 
 **Deliberately not seeded — must be written from scratch**
 

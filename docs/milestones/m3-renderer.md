@@ -2,14 +2,18 @@
 
 Draw a map: terrain, water, models, lighting, and shadows, in a window and headlessly.
 
-**Status:** Charter complete, plus the atmosphere and weather that were not in it. Every item below is landed and tested; the one qualification is that CI
-has no GPU, so the regression harness runs on a developer machine and not yet on a runner. See
-[Exit condition](#exit-condition).
+**Status:** Charter complete **except for terrain level of detail**, plus the atmosphere and weather that
+were not in it. Two qualifications: CI has no GPU, so the regression harness runs on a developer machine
+and not yet on a runner; and a visible terrain chunk still draws at full density, though it is now only
+drawn when visible at all. The second half of that used to read "with level of detail", which was simply
+untrue, and the frustum culling that has since landed is the first half of closing it. See
+[Exit condition](#exit-condition) and the remaining item below.
 
 ## Charter
 
 - Terrain rendering from a heightfield, with level of detail that holds up at both a tactical zoom and
-  a strategic one.
+  a strategic one. **The heightfield renders and is frustum-culled; the level of detail does not exist
+  yet** — see [Remaining](#remaining).
 - Static and instanced model rendering from imported geometry.
 - Directional lighting with cascaded shadows, and ambient occlusion.
 - Water surfaces.
@@ -35,7 +39,7 @@ has no GPU, so the regression harness runs on a developer machine and not yet on
 - **Texture resources**, deduplicated by content hash under explicit byte budgets.
 - **The camera**, as a standalone model with no window, input, or GPU dependency.
 
-- **The deferred chain**, now in seven passes: four depth-only shadow cascades, a G-buffer, ground-truth
+- **The deferred chain**, in seven passes, plus an eighth when antialiasing is on: four depth-only shadow cascades, a G-buffer, ground-truth
   ambient occlusion with a bilateral blur, deferred lighting that reconstructs world position from
   depth, a blended water pass, and a tone-mapping composite. The lighting and occlusion shaders were adapted rather than
   rewritten, keeping their technique and their reasoning; only their legacy camera layout and
@@ -114,11 +118,87 @@ has no GPU, so the regression harness runs on a developer machine and not yet on
   hour moves the sun instead of leaving a light that silently disagrees with it. The derivation is calibrated
   against the hand-tuned preset it replaced, in direction as well as colour, and a test pins it there.
 
+- **Antialiasing, in the two cheaper tiers [ADR 0005](../adr/0005-antialiasing-strategy.md) settles on** —
+  and with MSAA declined outright rather than left open. Both halves are one value,
+  `DisplaySettings`, because a settings screen will present them as one choice.
+  - **A resolution scale**, from a half to two, as a multiplier on the render resolution. Every pass from
+    the G-buffer to the HDR accumulation is allocated at that size and the composite's filtered read of the
+    HDR target *is* the downsample, so this costs a size multiplier at allocation and no extra pass. It is
+    the only control here that addresses every class of aliasing at once, because it is the only one that
+    raises the actual sampling rate.
+  - **A post pass**, written from scratch: a luma gate with an absolute and a relative term, a Sobel pair
+    for edge orientation, and a blend weight built from the second difference across the edge — so it
+    leaves smooth ramps alone, halves a hard step, and hits an isolated sub-pixel highlight hardest. FXAA
+    as a category; Lottes' implementation was not consulted. See [LICENSING.md](../../LICENSING.md).
+  - **The composite's sharpen now switches off above a scale of one**, which was a fault rather than a
+    preference: it amplified soft edges hardest, and a supersampled silhouette is soft by construction. The
+    numbers are in the ADR.
+  - Both are togglable in the viewer, on `T` and the bracket keys, because what an edge does *as the camera
+    moves* is the whole subject and no still capture reports it.
+
+- **Per-pass GPU timing** ([`timing`](../../crates/cic-render/src/timing.rs)). Each pass owns a fixed pair
+  of timestamp queries; the resolve buffer is cleared before only the passes that ran are resolved, so a
+  skipped pass reads back *absent* rather than as a duration of zero. The tick arithmetic is a pure
+  function with its own tests, and `TIMESTAMP_QUERY` is requested only where the adapter offers it, so a
+  device without it renders identically and reports nothing. `P` in the viewer prints a breakdown once a
+  second — reading blocks on the GPU, which is why it is not per frame.
+
+- **Terrain frustum culling**, over a chunk decomposition ([`culling`](../../crates/cic-render/src/culling.rs)).
+  The terrain divides into 32-cell chunks, each with a world-space box; the camera and each *fitted cascade*
+  cull against their own frustum, and the surviving chunks draw as instanced runs. The instance index **is**
+  the chunk index, which is what keeps this free of any new binding, buffer or upload: the vertex shader
+  turns it into a grid origin from counts already in the terrain uniform, and adjacent chunks collapse into
+  one draw.
+  - Cascades cull against their own frusta and not the camera's, because a cascade reaches *behind* the
+    camera toward the light — a caster off screen still throws a shadow into view, and culling it against
+    the camera would make shadows wink out as their caster left the frame.
+  - **Culling against the pass's own matrix cannot change the image, and that is the safety argument.**
+    Each frustum is extracted from the very view-projection that pass renders with, so a chunk the test
+    rejects is one the rasterizer would have clipped anyway. The only way to lose visible ground is to
+    extract the planes wrongly — which is what the byte-identical references disprove, and what the unit
+    tests attack directly, including the near-plane convention that would otherwise cull the whole world.
+  - **It is invisible, and that is how it is verified.** Every committed reference still matches byte for
+    byte with culling active. What the references could *not* cover is a partial chunk — 192 cells and 128
+    both divide evenly by 32 — so there is a test for the ragged case, and it was confirmed by breaking the
+    degenerate-vertex handling on purpose and watching it fail with the predicted number.
+  - The win is a function of map size, and honestly nil at the size the fixtures use: about 0.008 ms on a
+    257x257 terrain, where the camera sees most of the map anyway. On a **1025x1025** one, which is the size
+    this project is actually aimed at, the four cascades go from **0.809 ms to 0.131 ms** and the G-buffer
+    from **0.239 ms to 0.071 ms** — the frame from **1.534 ms to 0.692 ms, 55% off**. The number worth
+    keeping is the other one: at 0.692 ms that sixteen-times-larger terrain costs the *same* as the small
+    one, so terrain no longer scales with map size at all.
+
+- **A half-resolution occlusion estimate**, which is what the timing was built to find and immediately
+  paid for itself. One estimate per 2x2 block of render pixels, resolved back to full resolution by the
+  bilateral pass that was already there — so that pass is now the upsample as well as the blur, weighting
+  each tap by the world distance to the render pixel the estimate was actually *taken* at. What halves is
+  the number of estimates, not the resolution of anything they read: each one still loads full-resolution
+  depth and normals and still walks its slices at full-resolution spacing.
+  - At 1920x1200 the estimate went from **0.668 ms to 0.303 ms** and its resolve from **0.161 ms to
+    0.075 ms**, taking the summed frame from **1.160 ms to 0.677 ms — 42% off**. Occlusion is still the
+    largest single cost at 56% of the frame, down from 72%.
+  - The blur radius is 1 in half-resolution taps, not 2. Two was tried first on the reasoning that coarser
+    noise needs a wider kernel; the captures said the opposite, and said it twice — 3x3 shows no more noise
+    than the old 5x5 *and* lands closer to the full-resolution frame it replaces, because 5x5 in
+    half-resolution space was simply over-blurring.
+  - Every committed reference except the forward-pass one moved, by 0.1% to 0.6% of pixels at a peak
+    channel difference of 6 — sub-perceptual, and confirmed by magnifying the spire's contact shadow, the
+    concave bowl, and a building base against the pre-change captures before regenerating.
+
 ## Remaining
 
-- Antialiasing. Terrain silhouettes stair-step, water glitter sparkles, and cloud-shadow edges alias, and
-  [ADR 0005](../adr/0005-antialiasing-strategy.md) settles what to do about it: a resolution scale, FXAA,
-  and TAA — and explicitly *not* MSAA.
+- **Terrain level of detail.** Frustum culling has landed and is half the charter item — see Landed — but
+  a chunk that *is* visible still draws every cell it has, whether it fills forty pixels or four. The chunk
+  decomposition culling introduced is what LOD needs: a per-chunk stride chosen from distance, and either
+  skirts or edge stitching so neighbouring densities do not crack.
+  - Note what this is *not*. [`terrain_virtual`](../../crates/cic-render/src/terrain_virtual.rs) and
+    [`detail`](../../crates/cic-render/src/detail.rs) are residency bookkeeping for terrain *texture*
+    pages, decided in texels per cell. They are unwired, and wiring them would not remove a triangle.
+- **Temporal antialiasing**, the quality tier of [ADR 0005](../adr/0005-antialiasing-strategy.md). The two
+  cheaper tiers below have landed; this one needs jittered projection, a motion-vector target, a history
+  buffer, and neighbourhood clamping — and it constrains the regression harness, since a temporal
+  accumulator makes one captured frame depend on the frames before it. Scene time already being a frame
+  parameter is the precondition, and it is met.
 - Normal, roughness, and metallic *maps*. Only base colour is textured; the other channels are still
   per-material or per-layer factors.
 - Alpha-tested materials. Everything is opaque, so the shadow passes have no fragment stage — foliage
@@ -312,6 +392,40 @@ which a surface commonly reports as BGRA rather than RGBA, and that a resize rea
 intermediate target — which invalidates every bind group holding a view of one, so the chain is rebuilt
 rather than just the surface reconfigured.
 
+**The first thing per-pass timing did was refute the reason it was built.** The case for it was that the
+terrain submits its whole heightfield five times a frame with nothing culled, and that this was presumably
+where the time went. It is not. At 1920x1200 the four shadow cascades come to **7%** of the summed passes
+and the G-buffer to 6%, while ambient occlusion is **58%** and its blur another 14% — the frame is
+overwhelmingly fragment-bound in one screen-space pass, and barely troubled by two million vertices. The
+same numbers measured at 720x480 said the cascades were 36%, which is what a small render target does to a
+ratio: the cascades draw into fixed-resolution shadow maps and so cost the same at every window size, and
+at 720x480 there was nothing else large enough to compare against. **A profile taken at a resolution nobody
+plays at ranks passes in an order nobody experiences.**
+
+That does not retire terrain LOD — it is a charter item, it matters more on a larger map and a weaker GPU,
+and two million unculled vertices is not a thing to leave standing. It does move it behind the occlusion
+pass, and it settles the depth pre-pass question outright: a pre-pass buys back fragment work in the
+G-buffer, which is 6% of the frame, by paying for a second full geometry submission. There is nothing there
+to win.
+
+**A frame cannot carry a size the targets already decide.** `DeferredFrame` used to hold a viewport, and
+the reason it did was itself a fix — the figure had previously been passed twice and nothing checked the two
+agreed. But the size the shaders reconstruct world positions against is a property of the *targets*, since
+they are the textures being loaded from, so putting it on the frame left the same disagreement one step
+further along: `SurfaceRenderer::render` had to overwrite whatever the caller supplied, because a frame one
+resize behind moved every receiver and read as a shadowing fault rather than as a wrong number. A
+resolution scale made this worse rather than better, splitting the one figure into two. The field is gone
+and both sizes now come from `DeferredTargets`, which is the only thing that knows them. The same
+reasoning removed `output_format` from `DeferredRenderer::new`: the LDR intermediate has to be *allocated*
+in that format, so the two were bound to agree and nothing said so.
+
+**A prefix is a contract, and nothing enforced it.** `terrain_ao.wgsl` binds the scene uniform through its
+own struct declaring only the fields it reads, which is sound precisely while that declaration stays a
+prefix of the full block. Adding the output size *after* the weather vector keeps it sound; adding it after
+the viewport, where it reads better, would have misaligned every field past it in a shader that still
+validates and still runs. There is now a test asserting the shared leading fields, since the failure mode
+is silent in both directions.
+
 **A shadow fixture has to be shaped for the sun it is lit by.** Two separate versions of the test
 measured nothing: one placed the sun so every shadow fell behind its own caster and out of frame; the
 other used a ridge wider than its own shadow was long, so the shadow landed entirely on the ridge's
@@ -321,14 +435,26 @@ unlit back slope. Neither was a renderer fault, and neither was visible from the
 
 - No post-processing chain beyond what the shader set already covers.
 - No particle system; it belongs with the gameplay that spawns effects.
-- No level-of-detail generation for models. Terrain has it because a heightfield's regularity makes it
-  cheap; model LOD wants measurement first.
+- No level-of-detail generation for models, and none for terrain either. A heightfield's regularity makes
+  terrain LOD *cheap to build*, which is why the format is shaped to permit it — see
+  [the terrain format](../formats/terrain.md) — but nothing has been built. This entry used to read
+  "Terrain has it", which was simply false, and it is the reason the charter above is not complete. Both
+  now want the same thing first: measurement.
 - **MSAA is declined outright**, rather than pending. Multisampling a deferred G-buffer means four times
   the memory on every target *and* per-sample lighting behind a stencil pass, because averaging normals
   or depths across a silhouette yields values describing no surface that exists — and having paid for all
   that it still fixes only geometric edges, not the texture and specular aliasing that are now the more
   visible cases. This entry previously appeared under both "remaining" and "not done", which read as an
   omission nobody had decided about. [ADR 0005](../adr/0005-antialiasing-strategy.md) decides it.
+- No edge search in the post pass, so it softens each step of a long shallow staircase rather than
+  reconstructing the line, and it cannot tell a one-pixel bright feature from a one-pixel artifact —
+  because at that size the image holds no difference between them. Both are the cost class, and both are
+  what TAA is for.
+- No claim that a resolution scale *preserves fine detail* an upscale destroys. It should, and the fixture
+  cannot show it: the shadowing terrain is a smooth heightfield in flat palette colours, so off the
+  silhouette the three scales measure 0.00046, 0.00049 and 0.00045 — three numbers agreeing rather than an
+  assertion. Making that claim needs a textured fixture, and the world-space tiled albedo in
+  `terrain_render.rs` is the candidate.
 - No reflections of scene geometry in water. The surface reflects the sky gradient and nothing else, so a
   cliff at the water's edge does not appear in it. A planar reflection pass means drawing the scene twice
   and a screen-space one means a ray march over the depth buffer; both are worth more than they cost only

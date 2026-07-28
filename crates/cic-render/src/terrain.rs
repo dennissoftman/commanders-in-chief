@@ -31,9 +31,12 @@
 //! against flat colours renders unchanged, and a greyscale detail texture can be recoloured per map
 //! without a second copy of the image.
 
+use std::ops::Range;
+
 use cic_assets::Terrain;
 
 use crate::RenderError;
+use crate::culling::{CHUNK_CELLS, ChunkGrid};
 use crate::gpu::{CAPTURE_FORMAT, DEPTH_FORMAT, GpuContext};
 use crate::texture::{TextureArray, TextureImage, array_sampler};
 
@@ -184,6 +187,11 @@ pub struct TerrainRenderer {
     /// Per layer: world units per albedo repeat.
     detail_scale: [f32; MAX_LAYERS],
     height_range: f32,
+    /// The chunk decomposition the deferred passes cull and draw against.
+    ///
+    /// Built once from the terrain's own dimensions and elevation range. It survives a height write
+    /// because its boxes span the whole elevation range rather than each chunk's own — see [`ChunkGrid`].
+    chunks: ChunkGrid,
 }
 
 impl TerrainRenderer {
@@ -311,7 +319,41 @@ impl TerrainRenderer {
                 .copied()
                 .max()
                 .map_or(0.0, |peak| f32::from(peak) * terrain.vertical_scale()),
+            chunks: ChunkGrid::new(terrain),
         })
+    }
+
+    /// Returns the chunk decomposition the deferred passes cull against.
+    #[must_use]
+    pub const fn chunks(&self) -> &ChunkGrid {
+        &self.chunks
+    }
+
+    /// Vertices in one chunk's worth of grid.
+    ///
+    /// Every chunk submits the same count, including the partial ones at the terrain's far edge: their
+    /// out-of-range vertices are collapsed to a degenerate triangle in the vertex shader rather than
+    /// clamped, because clamping would smear the last row of cells across the missing ones. A uniform
+    /// count is what lets a run of adjacent chunks draw as one instanced call.
+    #[must_use]
+    pub const fn chunk_vertex_count() -> u32 {
+        CHUNK_CELLS * CHUNK_CELLS * 6
+    }
+
+    /// Records a terrain draw for each run of adjacent visible chunks.
+    ///
+    /// The instance index *is* the chunk index, which is what keeps this free of any new binding: the
+    /// vertex shader turns it into a chunk origin using the counts already in the terrain uniform. Runs
+    /// are drawn as single instanced calls, so a camera looking at a contiguous patch of map — which is
+    /// every camera — costs a handful of draws rather than one per chunk.
+    ///
+    /// The pipeline and bind group are the caller's to set, because this is used by the G-buffer pass and
+    /// by four shadow cascades that each bind their own cascade group first.
+    pub fn draw_chunks(&self, pass: &mut wgpu::RenderPass<'_>, runs: &[Range<u32>]) {
+        let vertices = Self::chunk_vertex_count();
+        for run in runs {
+            pass.draw(0..vertices, run.clone());
+        }
     }
 
     /// Returns the layer albedo array, for reporting what was actually uploaded.
@@ -507,7 +549,11 @@ impl TerrainRenderer {
             ],
             &mut bytes,
         );
-        for value in [self.layer_count, 0, 0, 0] {
+        // `y` and `z` carry the chunk decomposition, which the G-buffer and shadow entry points need to
+        // turn an instance index into a chunk origin. The forward pass shares this block byte for byte and
+        // ignores both, drawing the whole grid as it always has.
+        let (chunks_x, _) = self.chunks.counts();
+        for value in [self.layer_count, chunks_x, CHUNK_CELLS, 0] {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
         for entry in self.palette {
