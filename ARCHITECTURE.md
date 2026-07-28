@@ -6,18 +6,21 @@
 cic-core          (no dependencies)
    └── cic-vfs    (+ flate2)
           └── cic-assets   (+ gltf, serde, serde_json)
+                 └── cic-render   (+ cic-camera, wgpu, png, sha2;
+                                    naga for shader validation in tests)
 
 cic-camera        (no dependencies)
-cic-render        (+ sha2; naga for shader validation in tests)
 ```
 
 Two crates deliberately depend on nothing: `cic-core`, because bounded reading is a primitive, and
 `cic-camera`, because the same camera must drive the game, the editor, and any debug viewer without
 dragging a window system into each of them.
 
-`cic-render` does not yet depend on `cic-assets`. It will, once the M3 pipelines are rebuilt against the
-native formats — and that direction is the one to keep. The renderer consumes assets; assets never know
-about rendering.
+`cic-render` depends on `cic-assets`, and that direction is the one to keep: the renderer consumes
+assets, and assets never know about rendering. Nothing in `cic-assets` mentions a GPU, a texture format,
+or a pipeline, and the water surface is the clearest illustration — where a body of water *is* lives in
+the renderer rather than in the terrain container, because tint and wave scale are things an artist
+changes without touching a map.
 
 ## Layering rules
 
@@ -66,3 +69,9 @@ comment, a declared expansion that would exhaust memory — legibly enough to re
 Rendering is the exception to "tests are enough". A green suite coexists comfortably with a visibly
 broken frame, which is why M3 treats capture-based visual regression as a deliverable rather than as
 follow-up work.
+
+That harness now exists, and two of its properties are structural rather than incidental. The comparison
+is a pure function over bytes — the library never opens a file, so the caller supplies the reference and
+the file handling stays in the tests — which also means the comparison is unit-tested on machines with no
+GPU at all. And **references are committed per adapter**, because two GPUs do not agree to the byte and
+a tolerance loose enough to span them would accept the regressions it exists to catch.
