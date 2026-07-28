@@ -64,6 +64,13 @@ Two specific files were held back from the seed for this reason and still need w
 water rendering and scenery sway. If you implement either, do not consult the originals. See
 [LICENSING.md](LICENSING.md).
 
+**The predecessor's code is in this repository's history.** Its 86 commits were merged in as an ancestor
+so they would stay reachable, so a clone gives you the GPL-licensed tree along with this one. Nothing may
+be copied backward across the seed commit `5e824cf` — no revert, no cherry-pick, no `git show` of an old
+file into a new one. That is the easiest way to undo the licence by accident, and nothing in the build
+would fail when it happened. [LICENSING.md](LICENSING.md#the-history-carries-two-licences) sets out which
+range is which.
+
 Reimplementing a *published* technique is fine and encouraged; cite the paper. The ambient-occlusion
 pass does exactly that.
 

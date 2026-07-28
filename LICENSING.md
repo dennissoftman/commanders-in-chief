@@ -53,6 +53,58 @@ Dropping support for the predecessor's data formats removed the obligation, but 
 derived logic went with it**. Deleting the parsers was not sufficient: derived *constants and policies*
 had leaked into otherwise-original engine code, and each had to be found and removed individually.
 
+## The history carries two licences
+
+This repository has two unrelated roots. The predecessor's line was merged in with `-s ours` so that its
+commits stay reachable from `main` rather than being orphaned by a force-push, which means **a clone
+carries the GPL history as well as the current tree**. That is deliberate. It is also not a
+contradiction — but a reader does need to know which region they are holding.
+
+| Region | Range | Licence |
+|---|---|---|
+| The predecessor | root `3e53e1c` … tip `2216924` — 86 commits | **GPL-3.0-only.** Carries the GPL text as `LICENSE.md`. |
+| This engine, before a licence was chosen | `5e824cf` … `76b99d1` — 5 commits, all one day | No licence file. Retroactively offered under Apache-2.0, below. |
+| This engine, dual-licensed | `91964e0` … `eb65483` | `MIT OR Apache-2.0`, as offered at the time. |
+| This engine, current | `8839332` onward | **Apache-2.0.** |
+
+`d58f31f` is the merge that joined the two. It took zero bytes from the predecessor's tree.
+
+**Why the GPL region does not reach the current tree.** Copyleft attaches to derivative works, not to
+commits that happen to share a version-control ancestor. Git ancestry is bookkeeping, not authorship, and
+the question that decides a licence is only ever whether *this snapshot* contains or derives from the GPL
+material. For the current tree it does not, which is what the audit below establishes file by file. The
+content at `main` therefore has no path back to the predecessor; only the commit graph does. Were it
+otherwise, deleting GPL code from a repository would be impossible and no project could ever change its
+licence.
+
+**The predecessor's snapshots stay GPL-3.0-only, permanently.** Anyone who checks out that region
+receives it on those terms and may use and fork it accordingly. They are not this project's to
+relicense: that obligation came from the third-party derivation rather than from any choice made here.
+The same principle running the other way is why the unlicensed commits below *can* be granted after the
+fact, and why the dual-licensed region keeps its MIT option for anyone already holding a copy. A licence
+once given cannot be withdrawn.
+
+**Retroactive grant.** Every snapshot in this project's own line, from its root `2115ce9` onward, is
+offered under Apache-2.0. Five of those commits predate the licence file and so granted nothing at the
+time; they were an unlicensed window of a few hours in a repository with no users, and for a sole
+copyright holder a sentence like this one is all that closing it requires. No history was rewritten to
+achieve it, and none should be: the seed history is the evidence that the derivation was removed, and
+that record is worth considerably more than a tidy log.
+
+### The rule this section exists to state
+
+**Nothing may be copied backward across `5e824cf`.** No revert, no cherry-pick, no `git show` of a
+predecessor file into a current one, from any commit in the GPL region into this tree.
+
+That region still contains every constant removed on purpose: the camera profile, the standing-water
+policy, and the scenery sway families. They are one command away for anyone who knows they are there, and
+attaching the ancestry to `main` is what made them easy to reach by accident. A single pasted table
+reinstates the copyleft obligation for every snapshot after it and silently voids the Apache-2.0 offer
+this file records — silently, because nothing in the build would fail.
+
+The risk is highest for whoever implements water and scenery, since the removed code is precisely the
+code they would most like to consult. Do not consult it.
+
 ## Audit result
 
 Every file in this tree is project-authored and carries no `GeneralsGameCode` derivation. Verified by
