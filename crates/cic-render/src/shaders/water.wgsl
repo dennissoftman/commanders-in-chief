@@ -30,7 +30,7 @@ struct Water {
 @group(1) @binding(0) var<uniform> water: Water;
 
 const WATER_WAVE_COUNT: i32 = 5;
-const TAU: f32 = 6.2831853;
+// `TAU` comes from `atmosphere.wgsl`, which every program composing this one also composes.
 
 // Successive wave directions are advanced by the golden angle.
 //
@@ -194,7 +194,10 @@ fn water_fragment(input: WaterVertexOutput) -> @location(0) vec4<f32> {
     let primary_length = length(light.source_direction.xyz);
     if (primary_length > 0.00001) {
         let light_direction = -light.source_direction.xyz / primary_length;
-        let shaded = mix(WATER_DIRECT_FLOOR, 1.0, visibility);
+        // The same cloud term the ground gets, on the same direct share. Skipping it here would leave a
+        // lake glittering under a deck that has visibly shaded every field around it.
+        let shaded = mix(WATER_DIRECT_FLOOR, 1.0, visibility)
+            * cloud_shadow(input.world_position.xy);
         body += tint * light.diffuse.rgb * max(dot(normal, light_direction), 0.0) * shaded;
         // A tight highlight, driven by the material's roughness, so a choppy lake and a still one
         // differ in the size of the glitter and not only in how high the waves stand.
@@ -218,7 +221,9 @@ fn water_fragment(input: WaterVertexOutput) -> @location(0) vec4<f32> {
     let fresnel = WATER_F0 + (1.0 - WATER_F0) * pow(1.0 - incidence, 5.0);
     let reflected = sky_colour(reflect(-view_direction, normal));
 
-    let colour = mix(body, reflected, fresnel) + glitter;
+    // Fogged like any other surface, and before the alpha is decided. Water that ignores fog while the
+    // shore beside it fades out is the most conspicuous way to break a foggy scene.
+    let colour = apply_fog(mix(body, reflected, fresnel) + glitter, input.world_position);
     // Opacity is the greater of what depth and what reflectance imply. A shallow edge seen from
     // overhead is nearly clear, but the same edge seen at a grazing angle is a mirror, and an alpha
     // taken from depth alone would fade out the far shore of every lake.
