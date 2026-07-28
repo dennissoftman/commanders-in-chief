@@ -18,9 +18,6 @@ import pathlib
 import subprocess
 import sys
 
-# Crates in this workspace, excluded because the notices are about third-party code.
-OURS = {"cic-assets", "cic-camera", "cic-core", "cic-render", "cic-vfs"}
-
 HEADER = """# Third-party notices
 
 The engine depends on the crates listed below. Each is distributed under the licence shown, and this
@@ -62,10 +59,27 @@ def main() -> int:
         print(f"could not run cargo metadata: {error}", file=sys.stderr)
         return 1
 
+    metadata = json.loads(raw)
+
+    # This workspace's own crates are excluded, because the notices are about third-party code.
+    #
+    # Derived from `workspace_members` rather than from a list written down here. A hardcoded set has
+    # to be updated every time a crate is added, nothing fails when it is not, and the symptom is one
+    # of this project's own Apache-2.0 crates listed as a dependency it must give notice for -- which
+    # is how `cic-ui` first appeared in this file. Matching on package id rather than on name because
+    # the id is what `workspace_members` holds, and its exact string format has changed between cargo
+    # releases.
+    ours = set(metadata.get("workspace_members", ()))
+    if not ours:
+        print(
+            "cargo metadata reported no workspace members, which would list this project's own "
+            "crates as third-party dependencies; refusing to write NOTICES.md",
+            file=sys.stderr,
+        )
+        return 1
+
     packages = [
-        package
-        for package in json.loads(raw)["packages"]
-        if package["name"] not in OURS
+        package for package in metadata["packages"] if package["id"] not in ours
     ]
     packages.sort(key=lambda package: (package["name"].lower(), package["version"]))
 

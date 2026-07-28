@@ -8,6 +8,7 @@ game's format, because nothing here reads one.
 | `.cict` | Terrain heightfield and layer weights | [terrain.md](terrain.md) |
 | `map.json` | Scenario: players, placements, waypoints | [scenario.md](scenario.md) |
 | `.cicmap` | Map package | [package.md](package.md) |
+| `*.ciclayout.json` | Interface layout: one screen's structure | [ui-layout.md](ui-layout.md) |
 | `.glb` | Models, props, units | [glTF 2.0](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html) |
 | `.zip`, `.tar` | Content containers | Their own published specifications |
 
