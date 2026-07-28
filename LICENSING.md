@@ -88,8 +88,34 @@ once given cannot be withdrawn.
 offered under Apache-2.0. Five of those commits predate the licence file and so granted nothing at the
 time; they were an unlicensed window of a few hours in a repository with no users, and for a sole
 copyright holder a sentence like this one is all that closing it requires. No history was rewritten to
-achieve it, and none should be: the seed history is the evidence that the derivation was removed, and
-that record is worth considerably more than a tidy log.
+achieve it, and **none of the history this section describes may be**: the seed history is the evidence
+that the derivation was removed, and that record is worth considerably more than a tidy log.
+
+### One history rewrite, after the licence boundary
+
+On 2026-07-28 the seven commits merged by pull requests #27 and #28 were rewritten once, to add the DCO
+`Signed-off-by` trailers they had been merged without. They are recorded here because a rewrite of `main`
+is exactly the kind of event this file exists to make legible rather than leave for someone to discover.
+
+What it did and did not touch:
+
+- **Every commit rewritten is newer than `3a69fa6`**, which is well after `8839332` — so no commit named in
+  the table above changed, no region boundary moved, and the seed history that carries the audit evidence is
+  untouched. The prohibition in the paragraph above is intact; this happened on the far side of it.
+- **The trees are byte-identical.** `main`'s tree hash before and after the rewrite is
+  `7bcb873c654d9a57240c8f839af63316d0879f0b` in both cases. Only commit metadata changed.
+- **Both merge commits were preserved** rather than flattened, so the shape of the history still records
+  which work arrived through which pull request. They carry no sign-off themselves, which is correct: GitHub
+  authored them, and a DCO certification belongs to whoever wrote the contribution.
+- The pre-rewrite tip is kept as the branch `backup/pre-signoff-main` at `9bae1b2`, and pull requests #27 and
+  #28 still cite their original hashes. Those commits are unreachable from `main` but not destroyed.
+
+Why it was worth doing at all: `CONTRIBUTING.md` requires a sign-off on every commit, and seven commits
+without one is a gap in precisely the record the DCO exists to create. In a repository that documents a
+removed derivation file by file, an auditable trail with a hole in it is worse than the cost of one
+rewrite. Nothing enforces the requirement mechanically — CI runs formatting, lints, tests and the notices
+check, and no DCO bot is installed — so it is a convention, and conventions want either enforcement or
+honesty about their gaps.
 
 ### The rule this section exists to state
 
