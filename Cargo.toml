@@ -5,6 +5,7 @@ members = [
     "crates/cic-camera",
     "crates/cic-core",
     "crates/cic-render",
+    "crates/cic-ui",
     "crates/cic-vfs",
 ]
 
@@ -41,6 +42,7 @@ serde_json = "1"
 cic-assets = { path = "crates/cic-assets" }
 cic-camera = { path = "crates/cic-camera" }
 cic-core = { path = "crates/cic-core" }
+cic-ui = { path = "crates/cic-ui" }
 cic-vfs = { path = "crates/cic-vfs" }
 
 # Dependencies are optimized even in the dev profile, because an unoptimized renderer is not slow
