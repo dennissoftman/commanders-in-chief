@@ -11,9 +11,10 @@ level of detail**: chunks are now frustum-culled per pass, but a chunk that is d
 density whatever its size on screen. This document and the milestone both claimed the whole item was done
 until it was checked.
 
-**M4 has started.** Its layout foundation is in: a `cic-ui` crate holding the
-[layout format](docs/formats/ui-layout.md), a two-pass solver, a string table, and the closed action set.
-No widget behaves yet and nothing draws it.
+**M4 is under way.** A `cic-ui` crate holds the [layout format](docs/formats/ui-layout.md), a two-pass
+solver, a string table, the closed action set, and now widget behaviour: retained state keyed by node id,
+semantic input routing with focus and keyboard navigation, and input-method composition. Nothing draws it
+yet, and there is no screen stack.
 
 **All five of M3's outstanding renderer items have landed** — temporal antialiasing, the physically-based
 map set, alpha-tested foliage, scenery sway (which was the last provenance case in
@@ -197,17 +198,17 @@ per-pass breakdown once a second, which is where the figures above came from.
 [layout format](docs/formats/ui-layout.md), a two-pass solver producing pixel-snapped rectangles, a
 string table, and the closed action set. What is next, in order:
 
-1. **Widget behaviour and retained state.** The kinds position correctly and none of them does anything
-   yet. Retained state keys off the node ids the format already validates as unique, which is why they
-   are validated now rather than when something needs them.
-2. **Input routing** — focus, hover, and keyboard navigation as semantic events, the separation the
-   camera already uses. Hit testing is done, including resolving a click to the topmost *activatable*
-   node rather than to the panel beneath it.
-3. **The screen stack**, and the transactional settings apply the milestone's design notes require: a
+1. **The screen stack**, and the transactional settings apply the milestone's design notes require: a
    display change has to survive a revert timer rather than depend on the user being able to see well
    enough to click undo.
-4. **Drawing it.** `ui.wgsl` is already in the shader set marked `staged` for this, and the capture
-   harness that will cover the result now runs in CI — which is what makes it worth covering.
+2. **Drawing it.** `ui.wgsl` is already in the shader set marked `staged` for this, and the capture
+   harness that will cover the result now runs in CI — which is what makes it worth covering. Text
+   rendering is the substantial part.
+
+**Widget behaviour and input routing have landed**, including input-method composition — because a single
+character per keystroke is the Latin case, and assuming it is the only one is how an engine ends up unable
+to accept CJK text without being rebuilt. Retained state keys off node ids, which is why the format now
+*requires* one on any widget holding state or taking focus rather than treating it as optional.
 
 The settings screen has real content waiting for it, since a display setting exists with more than one
 option.
@@ -235,14 +236,14 @@ densities itself. The residency map already ranks by projected size.
 ## Gate status
 
 Formatting, strict lints (`clippy::all` and `clippy::pedantic` as errors, plus `-D warnings` as CI runs
-it), and the full test suite all pass on the pinned toolchain: **361 tests across six crates**, up from 316.
-The CI runner runs the same suite against Mesa's lavapipe.
+it), and the full test suite all passes on the pinned toolchain: **403 tests across six crates**. The CI
+runner runs the same suite against Mesa's lavapipe.
 
 **The lavapipe reference set has to be regenerated on the runner before CI can pass.** The half-pixel fix
-above changed ten of the eleven scenes, and those images can only be rendered where lavapipe is — so this
-branch fails CI once, with the captures and difference images uploaded as an artifact for review, which is
-the flow the harness is built around for a deliberate rendering change. The NVIDIA set is regenerated and
-each image was opened and checked. The rendering ones take about eleven
+above changed ten of the eleven scenes, and those images can only be rendered where lavapipe is — so a branch
+carrying that fix fails CI once, with the captures and difference images uploaded as an artifact for review,
+which is the flow the harness is built around for a deliberate rendering change. The NVIDIA set is
+regenerated and each image was opened and checked. The rendering ones take about eleven
 seconds there, which is what makes this affordable on every pull request. Captures go to `target/tmp/` and
 upload as an artifact on every outcome, so a harness failure's capture and amplified difference image can
 be looked at rather than being stranded on the runner.

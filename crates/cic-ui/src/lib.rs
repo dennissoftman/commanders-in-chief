@@ -11,8 +11,19 @@
 //! - [`layout`] — the authored tree and its JSON format, bounded and validated.
 //! - [`solve`] — the two-pass solver that turns that tree into positioned physical rectangles.
 //! - [`geometry`] — rectangles, insets, and the single place logical units become physical pixels.
+//! - [`input`] — what the user did, as intent rather than as key codes.
+//! - [`state`] — what the interface remembers between frames, and what input does to it.
 //! - [`strings`] — display text, behind a key rather than written into a layout.
 //! - [`action`] — the closed set of effects a layout may attach to a control.
+//!
+//! # Text input is not one character per keystroke
+//!
+//! Worth stating at the top because assuming otherwise is how an engine ends up unable to accept Chinese,
+//! Japanese, or Korean text without being rebuilt. Under an input method, text passes through an
+//! uncommitted **composition** that is replaced as the user types and committed only at the end — so
+//! [`state::TextField`] holds that composition as a range inside itself, [`UiEvent`] carries it as its own
+//! events, and a field has two readers: the text to *draw* and the field's *value*. See [`input`] for the
+//! rest, and [`Interface::ime_wanted`] and [`Interface::ime_cursor_area`] for what a host must drive.
 //!
 //! # The three rules this crate exists to enforce
 //!
@@ -56,14 +67,19 @@
 
 pub mod action;
 pub mod geometry;
+pub mod input;
 pub mod layout;
 pub mod solve;
+pub mod state;
 pub mod strings;
 
 pub use action::Action;
 pub use geometry::{Insets, Rect, Viewport, ViewportError};
+pub use input::{Adjust, Edit, FocusMove, UiEvent};
 pub use layout::{
-    Align, Direction, FORMAT_VERSION, Justify, Layout, LayoutError, Node, Sizing, Widget,
+    Align, DEFAULT_MAX_LENGTH, Direction, FORMAT_VERSION, Justify, Layout, LayoutError, Node,
+    Range, Sizing, Widget,
 };
 pub use solve::{Measure, NoContent, Solved, SolvedNode, solve};
+pub use state::{Interface, TextField, Value};
 pub use strings::StringTable;
