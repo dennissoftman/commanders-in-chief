@@ -13,10 +13,17 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.93"
 publish = false
-# Dual-licensed, which is the Rust ecosystem's convention: MIT for maximum compatibility, Apache-2.0
-# for its explicit patent grant. A permissive licence was only available here because a derivation was
-# removed file by file -- see LICENSING.md, which records that work so nobody undoes it by accident.
-license = "MIT OR Apache-2.0"
+# Apache-2.0 alone, rather than the ecosystem's usual MIT/Apache-2.0 pair. The dual convention exists
+# to keep a published crate maximally combinable, and these crates are `publish = false`, so what is
+# left to choose on is the licence text itself: Apache-2.0 carries an explicit patent grant, states in
+# section 5 that a contribution arrives under the same terms (which is why a DCO sign-off suffices and
+# no CLA is needed), reserves trademarks in section 6, and obliges a redistributor to keep NOTICE and
+# to state its changes. MIT grants the copyright permissions and is silent on all four.
+#
+# A permissive licence was only available here because a derivation was removed file by file -- see
+# LICENSING.md, which records that work so nobody undoes it by accident. That file also draws the line
+# this expression does not: it covers the software, not the design and narrative content.
+license = "Apache-2.0"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

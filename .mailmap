@@ -1,0 +1,19 @@
+# Canonical contributor identities.
+#
+# This project has one author writing from three addresses: a personal account, a work account used by
+# mistake for part of one day, and GitHub's noreply form on commits made through the web interface. Left
+# alone, `git log` and `git shortlog` report that as three contributors, which is wrong in the one place
+# it matters -- LICENSING.md rests on there being a single copyright holder, and a reader checking that
+# claim reaches for `git shortlog` first.
+#
+# Mapping them here fixes the reporting without rewriting a single commit. Rewriting was considered and
+# rejected: it would change every hash from the seed commit onward, including the hashes LICENSING.md
+# cites as the licence boundary, and GitHub's permanent pull-request refs would keep the original commits
+# fetchable anyway. Nothing is concealed -- the addresses are still in the commit objects, and this file
+# says why they differ.
+#
+# Committer identities are deliberately not mapped. GitHub genuinely authored the pull-request merge
+# commits, and claiming otherwise would be the opposite of what this file is for.
+
+Denys Mitin <denisukmol2002@gmail.com> <denysm@korra.ai>
+Denys Mitin <denisukmol2002@gmail.com> <42491173+dennissoftman@users.noreply.github.com>

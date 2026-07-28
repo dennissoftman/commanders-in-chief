@@ -14,7 +14,10 @@ make deliberately rather than a diff to wave through: see [LICENSING.md](LICENSI
 
 Note when scanning this list: an SPDX expression joined by `OR` offers a *choice*, and a copyleft option
 among permissive ones is not an obligation — `r-efi` reads `MIT OR Apache-2.0 OR LGPL-2.1-or-later`, and
-this project takes MIT. Only a licence with no permissive alternative would need attention.
+this project takes Apache-2.0. Only a licence with no permissive alternative would need attention.
+
+Where a dependency offers Apache-2.0 among its options, this project takes it, matching the engine's own
+licence — one set of redistribution obligations to satisfy at packaging time rather than several.
 
 A release must also ship the full licence *texts*, which several of these require and a summary cannot
 satisfy. Collect them from the vendored sources at packaging time.

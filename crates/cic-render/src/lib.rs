@@ -265,8 +265,10 @@ mod shader_tests {
 
     #[test]
     fn no_shader_carries_an_inherited_licence_header() {
-        // The licence is an open decision, so no file may assert one. This guards against a
-        // header being reintroduced by a copy-paste before that decision is made.
+        // The licence is declared once, in the workspace manifest, so no shader asserts one of
+        // its own. That makes any licence header in this directory an *inherited* one, which is
+        // exactly the copy-paste this guards against: the predecessor's shaders carried GPL
+        // headers, and a pasted region would bring the obligation back with it. See LICENSING.md.
         for (name, source) in SHADERS {
             for marker in ["SPDX", "GPL", "Copyright (C)", "License"] {
                 assert!(

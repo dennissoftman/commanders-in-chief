@@ -32,3 +32,16 @@ under many markings.
 
 Working draft. The companion presentation document it references — bark families, voice generation,
 radio processing, and the diegetic footage formats — has not been written yet.
+
+## Licence
+
+**This directory is not covered by the engine's Apache-2.0 licence.** Everything here is reserved — see
+[LICENSE-CONTENT](../../LICENSE-CONTENT).
+
+That is a deliberate split rather than an oversight: the engine is meant to be reused and the game's world
+is not. Reading it, quoting it to discuss or review the project, and proposing changes to it are all fine.
+Shipping it in another game is not. Nothing in this directory is needed to build or run the engine, so a
+fork takes the software under Apache-2.0 without inheriting anything here.
+
+The reasoning is in [LICENSING.md](../../LICENSING.md), and the terms a contribution here carries are in
+[CONTRIBUTING.md](../../CONTRIBUTING.md).

@@ -1,0 +1,19 @@
+Commanders in Chief
+Copyright 2026 Denys Mitin
+
+This product includes software developed by Denys Mitin and the Commanders in
+Chief contributors.
+
+Licensed under the Apache License, Version 2.0. You may not use this software
+except in compliance with the License. A copy is distributed as LICENSE and is
+available at http://www.apache.org/licenses/LICENSE-2.0
+
+The design and narrative content of the game -- everything under docs/design/,
+and any art, audio, or narrative asset added later -- is not covered by that
+License and is reserved. See LICENSE-CONTENT. The software may be used,
+modified, and redistributed under the Apache License without reference to it.
+
+This project is independent. It is not affiliated with, endorsed by, or
+sponsored by any game publisher, and no publisher's trademark is claimed.
+
+Third-party dependency notices are listed in NOTICES.md.

@@ -8,6 +8,45 @@ and fight other players or the AI in real time. Classic base-building RTS, built
 This is not a reimplementation of, or a compatibility layer for, any existing game. Nothing here reads
 another game's data or derives from another game's code.
 
+## The game
+
+Three belligerents contest a single trade corridor. All three want the road open — the war exists because
+"open" has three incompatible definitions, and none of them is fighting for territory. They are fighting
+over the terms of passage.
+
+The setting has no correct side. Each faction has a defensible internal logic, a constituency it
+genuinely serves, one real thing it is wrong about, and an internal wing that thinks the current course
+is a mistake. Institutions here cause harm through process rather than malice; a form filed correctly
+should be able to kill people. The register is restrained and procedural, never comic and never "dark".
+
+| | **AEC** | **Concord** | **Authority** |
+|---|---|---|---|
+| Full form | Allied Expeditionary Command | Continental Concord | Corridor Authority |
+| Names itself after | a command structure | a civilisation | a jurisdiction |
+| Claim to legitimacy | mandate, legality, coalition consent | delivered outcomes — the road exists | presence, and the consent of people on the road |
+| What it cannot admit | that it is a foreign army | that order is being imposed | that it needs the war |
+| Production | **Logistics.** Force arrives off-map via pads and drop zones | **Industry.** Few huge factories, batch delivery, permanent infrastructure | **Occupation.** Converts existing map buildings into production |
+| Economy | expensive, precise, air-dependent | slow to spin up, then unstoppable | taxes throughput on held route nodes |
+| Army | small, exact, drone-repaired | mass with attrition tolerance | salvaged enemy hulls at degraded reliability |
+| Buys | **vision** — ISR sweeps on cooldown | **permanence** — graded roads, depots | **ambiguity** — tunnels, false signatures |
+| Breaks against | air denial, EW and GPS denial | anything it did not plan for | being observed and pinned |
+
+Every faction covers every tactical role. Divergence is in *how* a role is filled, never in whether it
+exists — no faction is helpless against anything.
+
+The full treatment is the **[faction character bible](docs/design/faction-bible.md)**: self-conception,
+voice, doctrine, aesthetic, internal fault lines, and the lexicon of what each faction calls the others.
+It is a specification for generated text, not flavour — briefing copy, unit barks, and UI strings will be
+written by several people and tools over the project's life, and the failure mode is not bad writing but
+*inconsistent* writing.
+
+It is also a source of engine requirements, and has already been one. A faction whose map presence is
+literally paved has to grade roads across terrain at runtime, and a faction that converts existing
+buildings into production needs those buildings to be destructible map objects — which is why terrain
+heights and layer weights are writable GPU textures rather than a baked mesh. An army fielded from
+recovered enemy hulls is one mesh under many markings, which is why a model instance carries its own
+colour. Both were nearly free to design for and expensive to retrofit.
+
 ## Status
 
 Early. The foundation, resource layer, and asset formats are complete; the renderer is in progress.
@@ -28,6 +67,15 @@ The full gate, which is what CI runs:
 cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace
 ```
 
+To see it draw something:
+
+```bash
+cargo run -p cic-render --example terrain_viewer --release
+```
+
+Pass a `.cicmap` path to view a real map; with no argument it generates terrain, buildings, and their
+surfaces, so the viewer runs before any content exists.
+
 ## Crates
 
 | Crate | Purpose |
@@ -47,9 +95,10 @@ cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings
 | Scenario | JSON (`map.json`) |
 | A whole map | zip (`.cicmap`) |
 
-The reasoning behind each choice is in [docs/milestones/m2-assets.md](docs/milestones/m2-assets.md).
-The short version: authored data a human edits and reviews should be text, bulk numeric data should be
-tight binary, and geometry should use a standard that content tools already export.
+Specifications are in [docs/formats/](docs/formats/README.md), and the reasoning is in
+[docs/milestones/m2-assets.md](docs/milestones/m2-assets.md). The short version: authored data a human
+edits and reviews should be text, bulk numeric data should be tight binary, and geometry should use a
+standard that content tools already export.
 
 ## Engineering standards
 
@@ -60,12 +109,9 @@ Two documents that later work is measured against, both of them load-bearing rat
 - [Determinism invariants](docs/invariants/determinism.md) — lockstep multiplayer, replays, and desync
   diagnosis all reduce to the same requirement, and it cannot be retrofitted.
 
-`unsafe_code` is forbidden at workspace scope. Strict lints are errors in CI.
-
-Design decisions with consequences are recorded as [ADRs](docs/adr/), and what the game *is* — as
-distinct from how it is built — lives in [docs/design/](docs/design/README.md). That is not decoration
-either: the factions described there are why terrain heights and layer weights are writable GPU
-textures rather than a baked mesh, and why a model instance carries its own colour.
+`unsafe_code` is forbidden at workspace scope. Strict lints are errors in CI. Design decisions with
+consequences are recorded as [ADRs](docs/adr/), and [ARCHITECTURE.md](ARCHITECTURE.md) covers the
+dependency direction and layering rules.
 
 ## Contributing
 
@@ -76,9 +122,15 @@ ported constant table would undo it.
 
 ## Licence
 
-Dual-licensed **MIT OR Apache-2.0**, at your option — see [LICENSE-MIT](LICENSE-MIT) and
-[LICENSE-APACHE](LICENSE-APACHE).
+The **engine** is licensed under **Apache-2.0** — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+That covers everything you need to build and run it: the crates, the tools, the build configuration, the
+format specifications, and the engineering documentation.
+
+The **game's design and narrative content** is reserved — see [LICENSE-CONTENT](LICENSE-CONTENT). That is
+`docs/design/`, including the faction bible, plus any narrative or art asset added later. Quoting it to
+discuss or review the project is fine; shipping it in your own game is not. None of it is required to use
+the engine, so a fork takes the software under Apache-2.0 without touching it.
 
 Third-party dependency notices are in [NOTICES.md](NOTICES.md); all 281 are permissive.
-[LICENSING.md](LICENSING.md) records the provenance audit that made a permissive licence possible, and
-the two files still to be written from scratch because of it.
+[LICENSING.md](LICENSING.md) explains both choices, records the provenance audit that made a permissive
+licence possible, and names the two files still to be written from scratch because of it.
