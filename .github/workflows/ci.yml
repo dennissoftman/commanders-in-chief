@@ -34,12 +34,6 @@ jobs:
     # pure noise for an image rollout nobody chose, so the label is a deliberate decision.
     runs-on: ubuntu-24.04
     env:
-      # Hosted runners have no GPU, so the adapter is Mesa's lavapipe — see the install step.
-      # `mesa-vulkan-drivers` installs the hardware ICDs alongside it (radv, anv, nvk), and naming
-      # lavapipe's explicitly means the loader does not probe drivers that will find no device.
-      # It also pins which rasteriser the committed reference set below describes, rather than
-      # leaving that to whichever ICD the loader happens to enumerate first.
-      VK_DRIVER_FILES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
       # Turns "no adapter" from a skip into a failure. Without this the rasteriser could stop
       # being usable — a renamed ICD path, a dropped package — and every rendering test would
       # skip while the job stayed green, which is exactly the state this runner exists to end.
@@ -49,12 +43,23 @@ jobs:
       # Mesa's lavapipe is a software Vulkan implementation, which is what lets the rendering
       # tests and the visual regression harness execute here at all. Before this they found no
       # adapter and skipped, so the harness ran only on a developer machine and CI could not
-      # fail on a rendering regression. `vulkaninfo` is diagnostic and deliberately strict: if
-      # it cannot see a device then neither can wgpu, and failing here says why in one line.
+      # fail on a rendering regression.
+      #
+      # The installed ICDs are listed rather than one of them being named: pointing the loader at
+      # a literal path is how the first attempt at this failed, because a wrong filename reports
+      # itself as "found no drivers", which reads like a missing package rather than a typo. On a
+      # runner with no GPU lavapipe is the only Vulkan driver that will enumerate a device
+      # anyway, so there is nothing to disambiguate — and if that ever stops being true, the
+      # adapter name the tests print carries into the reference set's name, so the harness fails
+      # loudly asking for a set rather than quietly comparing against the wrong rasteriser.
+      #
+      # `vulkaninfo` is deliberately strict: if it cannot see a device then neither can wgpu, and
+      # failing here says so in one line instead of as 36 skipped tests.
       - name: install a software Vulkan adapter
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends mesa-vulkan-drivers vulkan-tools
+          ls -la /usr/share/vulkan/icd.d/
           vulkaninfo --summary
       - uses: dtolnay/rust-toolchain@1.93.0
         with:
