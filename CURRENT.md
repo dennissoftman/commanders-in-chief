@@ -15,11 +15,12 @@ until it was checked.
 [layout format](docs/formats/ui-layout.md), a two-pass solver, a string table, and the closed action set.
 No widget behaves yet and nothing draws it.
 
-**All five of M3's outstanding renderer items have since been worked** — temporal antialiasing, the
-physically-based map set, alpha-tested foliage, scenery sway (which was the last provenance case in
-[LICENSING.md](LICENSING.md)), and the virtual-texture cache. The cache is wired to the GPU and composes
-pages correctly; what is left of it is the *fragment* path, which is the next verified step below. Terrain
-level of detail is still the open charter line, and still a decision rather than a queue position.
+**All five of M3's outstanding renderer items have landed** — temporal antialiasing, the physically-based
+map set, alpha-tested foliage, scenery sway (which was the last provenance case in
+[LICENSING.md](LICENSING.md)), and the virtual-texture cache, whose whole route from residency arithmetic to
+sampled fragment is now in. What the cache still lacks is page mip chains, which is the difference between
+correct and *better* — see the next verified step. Terrain level of detail is still the open charter line,
+and still a decision rather than a queue position.
 
 Landing them turned up a defect every committed reference had been rendered through, so **ten of the
 twenty-two references changed** — see the antialiasing entry below.
@@ -84,9 +85,14 @@ What works:
     reads across it — and a clamped border would put a seam on every boundary, crawling as the camera moves.
     Verified by reading a page back: a page straddling a colour boundary shows border red 144 against
     interior red 89, where a clamp would read 89.
+  - The G-buffer samples pages once a cache is attached, and the two paths agree to a **mean of 0.001** and
+    a worst case of **2** eight-bit steps. The direct blend stays as the fallback: a cache may run out of
+    slots, and a frame must not depend on it having won — a one-slot cache draws 99.9% of the frame from the
+    fallback.
   - Three fixtures in a row could not show what they measured before one did, which is the standing warning
     below earning its place a third time: `surface()` divides by the summed weight, so a single ramped layer
-    normalizes to a constant.
+    normalizes to a constant. A fourth mistake of the same shape followed — the agreement test first drew
+    through the *forward* pass, which has no page lookup, and reported the two frames as identical.
 - **A physically-based map set for models**: normal, roughness and metallic maps beside the base colour,
   with the tangent frame the first of them needs — read from glTF's `TANGENT` where a model supplies one and
   derived from the texture coordinates where it does not, which is the ordinary case rather than the
@@ -215,18 +221,21 @@ that already exists, plus skirts or stitching so neighbouring densities do not c
 amended to record that culling delivered what LOD was for, with the measurement as the reason. What is not
 acceptable is leaving the line reading as though it were done, which is what it did before.
 
-**The virtual-texture cache needs its fragment path.** The GPU side is in — physical pages, a page table
-per level, and a compute pass that composes this project's own layer blend, with the composition verified by
-reading pages back. The terrain G-buffer still blends eight layers per fragment. Finishing it needs two
-bindings on the terrain group, a page-table lookup, a fallback to the direct blend for a cell whose page is
-not resident, and a second compute pass to give each page a mip chain — without which a page sampled at a
-shallow angle would alias where the direct blend does not, making the terrain look *worse* on exactly the
-ground the cache is for.
+**The virtual-texture path is correct but not yet better, and the gap is page mip chains.** The whole route
+is in — physical pages, a page table per level, a compute pass composing this project's own layer blend, and
+a G-buffer that samples it with a fallback to the direct blend. The two paths agree to a mean of 0.001 and a
+worst case of 2 eight-bit steps. What is missing is that a page has one mip level, so a page sampled at a
+shallow angle aliases where the direct blend does not — which would make the terrain look *worse* on exactly
+the ground the cache is for. A second compute pass reducing each resident page closes it, and the reduction
+has to respect the border or the seam the border prevents comes back at every level below the base.
+
+After that: a `TerrainDetailRequest` derived from the camera, so a caller does not have to name cells and
+densities itself. The residency map already ranks by projected size.
 
 ## Gate status
 
 Formatting, strict lints (`clippy::all` and `clippy::pedantic` as errors, plus `-D warnings` as CI runs
-it), and the full test suite all pass on the pinned toolchain: **358 tests across six crates**, up from 316.
+it), and the full test suite all pass on the pinned toolchain: **361 tests across six crates**, up from 316.
 The CI runner runs the same suite against Mesa's lavapipe.
 
 **The lavapipe reference set has to be regenerated on the runner before CI can pass.** The half-pixel fix

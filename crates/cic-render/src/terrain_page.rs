@@ -20,12 +20,30 @@
 //!
 //! # The state of the wiring
 //!
-//! The cache composes pages and publishes a page table. The terrain G-buffer does **not** yet sample it —
-//! that is the next step, and it is deliberately a separate one: switching the fragment path over changes
-//! every terrain frame, and the honest order is to prove the composition first. What is here is verified by
-//! reading pages back and checking the two properties that decide whether the cache is usable at all: that a
-//! page over known ground holds that ground's surface, and that a page's border matches the interior of the
-//! page beside it. See the tests in `tests/terrain_render.rs`.
+//! The cache composes pages, publishes a page table, and the terrain G-buffer samples it once
+//! [`TerrainRenderer::attach_pages`] has been called. The two paths agree: measured over the whole frame, a
+//! mean channel difference of **0.001** and a worst case of **2** eight-bit steps, which is the quantisation
+//! a page store costs and nothing else.
+//!
+//! Three things are verified separately, because no one of them implies the others. That a page over known
+//! ground holds that ground's surface, and that a page's border matches the interior of the page beside it,
+//! are read back from the pages themselves — `tests/terrain_render.rs` — because a rendered comparison
+//! cannot isolate either. That the *fragment* path agrees with the direct blend, and that a cell with no
+//! resident page falls back to it, are rendered — `tests/deferred_render.rs`.
+//!
+//! The forward pass deliberately has no page lookup. It draws terrain alone in one pass, which is the case a
+//! cache has nothing to offer.
+//!
+//! # What is still missing
+//!
+//! **Page mip chains.** A page has one level, so a page sampled at a shallow angle aliases where the direct
+//! blend does not — the terrain would look *worse* on exactly the ground the cache is for. The fix is a
+//! second compute pass reducing each resident page, and until it exists the cache is a correctness-complete
+//! path that is not yet the better one at a strategic zoom.
+//!
+//! **A view-driven request.** Nothing derives a [`TerrainDetailRequest`] from a camera yet, so a caller has
+//! to say which cells it wants at which density. The residency map already ranks by projected size, so this
+//! is a small function rather than a design.
 
 use crate::RenderError;
 use crate::detail::TerrainDetailRequest;
@@ -462,7 +480,9 @@ fn build_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
 mod tests {
     use super::{JOB_BYTES, LEVELS};
     use crate::shader;
-    use crate::terrain_virtual::{VIRTUAL_PAGE_BORDER, VirtualPageJob};
+    use crate::terrain_virtual::{
+        VIRTUAL_PAGE_BORDER, VIRTUAL_PAGE_EXTENT, VIRTUAL_PAGE_INTERIOR, VirtualPageJob,
+    };
 
     #[test]
     fn a_job_record_is_the_size_the_shader_declares() {
@@ -487,6 +507,41 @@ mod tests {
         assert!(
             source.contains(&format!("const PAGE_BORDER: u32 = {VIRTUAL_PAGE_BORDER}u;")),
             "the shader's page border must match VIRTUAL_PAGE_BORDER"
+        );
+    }
+
+    #[test]
+    fn the_gbuffer_agrees_about_every_page_dimension() {
+        // Five figures duplicated into `terrain_gbuffer.wgsl` so a fragment can find its page without a
+        // uniform read per lookup. A disagreement in any of them does not fail to compile: it samples the
+        // right page at the wrong place, which reads as terrain sliding under itself as the camera moves.
+        let source = shader::chunk("terrain_gbuffer").expect("the chunk exists");
+        let border = f64::from(VIRTUAL_PAGE_BORDER);
+        let extent = f64::from(VIRTUAL_PAGE_EXTENT);
+        for (name, value) in [
+            ("PAGE_BORDER", border),
+            ("PAGE_EXTENT", extent),
+            // The two levels the residency map decomposes into. Their product with the density beside them
+            // is the page interior, which is what makes both levels the same memory.
+            ("PAGE_FINE_CELLS", 8.0),
+            ("PAGE_FINE_DENSITY", 32.0),
+            ("PAGE_COARSE_CELLS", 16.0),
+            ("PAGE_COARSE_DENSITY", 16.0),
+        ] {
+            let declaration = format!("const {name}: f32 = {value:?};");
+            assert!(
+                source.contains(&declaration),
+                "the G-buffer must declare `{declaration}`"
+            );
+        }
+        // And the two levels really do fill the same interior, which is the invariant the four cell and
+        // density figures encode between them. Compared as integers, because that is what they are — the
+        // figures above are `f32` in the shader only because a coordinate is.
+        assert_eq!(8 * 32, VIRTUAL_PAGE_INTERIOR);
+        assert_eq!(16 * 16, VIRTUAL_PAGE_INTERIOR);
+        assert_eq!(
+            VIRTUAL_PAGE_BORDER * 2 + VIRTUAL_PAGE_INTERIOR,
+            VIRTUAL_PAGE_EXTENT
         );
     }
 

@@ -31,6 +31,9 @@ struct Uniforms {
     jitter: vec4<f32>,
     // The previous frame's unjittered view-projection, for the motion target.
     previous_view_projection: mat4x4<f32>,
+    // x nonzero when the virtual-texture bindings hold a real cache rather than placeholders. See
+    // `TerrainRenderer::attach_pages`.
+    virtual_config: vec4<u32>,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -39,6 +42,11 @@ struct Uniforms {
 @group(0) @binding(3) var weight_sampler: sampler;
 @group(0) @binding(4) var albedo_texture: texture_2d_array<f32>;
 @group(0) @binding(5) var albedo_sampler: sampler;
+// The virtual-texture cache: one page table per level, then the composed pages. Loaded and sampled only by
+// the fragment stage, and only when `virtual_config.x` says they are real -- see `page_surface`.
+@group(0) @binding(6) var page_table_fine: texture_2d<u32>;
+@group(0) @binding(7) var page_table_coarse: texture_2d<u32>;
+@group(0) @binding(8) var page_texture: texture_2d_array<f32>;
 
 // The cascade being rendered, for the depth-only pass. A separate group so the terrain group can be
 // bound once and this one swapped per cascade.
@@ -212,13 +220,126 @@ fn surface(uv: vec2<f32>) -> vec4<f32> {
     return vec4<f32>(accumulated / total, roughness / total);
 }
 
+// Page geometry, duplicated across the language boundary from `terrain_virtual.rs`. A test pins each pair,
+// because a disagreement here does not fail to compile -- it samples the right page at the wrong place.
+const PAGE_BORDER: f32 = 4.0;
+const PAGE_EXTENT: f32 = 264.0;
+// Cells a page spans, and texels it holds per cell, at each level. Their product is the page interior, which
+// is what makes the two levels the same memory at different densities: 8 cells at 32 texels and 16 at 16.
+const PAGE_FINE_CELLS: f32 = 8.0;
+const PAGE_FINE_DENSITY: f32 = 32.0;
+const PAGE_COARSE_CELLS: f32 = 16.0;
+const PAGE_COARSE_DENSITY: f32 = 16.0;
+
+/// What a page lookup found, or that it found nothing.
+struct PageSample {
+    surface: vec4<f32>,
+    resident: bool,
+}
+
+/// Linear light from the sRGB-encoded colour a page stores. See `terrain_virtual.wgsl` for why the transfer
+/// function is in the shaders rather than in the sampler.
+fn page_linear(value: vec3<f32>) -> vec3<f32> {
+    let low = value / 12.92;
+    let high = pow((value + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
+    return select(high, low, value <= vec3<f32>(0.04045));
+}
+
+/// Reads one page, given the table entry for the page containing `cell`.
+///
+/// `entry` is the physical layer plus one, so zero means not resident — which is what a cleared table reads
+/// as, and what the one-by-one placeholder reads as when no cache is attached. One code path for "the cache
+/// has not staged this yet", "the cache evicted it", and "there is no cache", because the fragment wants the
+/// same answer in all three.
+fn page_lookup(entry: u32, cell: vec2<f32>, cells_per_page: f32, density: f32) -> PageSample {
+    var output: PageSample;
+    output.surface = vec4<f32>(0.0);
+    output.resident = entry != 0u;
+    if (!output.resident) {
+        return output;
+    }
+    // Where in its page this cell sits, then where that lands in the page's texels. The half-texel the
+    // compose pass added when it wrote is *not* re-added here: this converts a texel index to a normalized
+    // coordinate, and a texel's centre is at its index plus a half, so the two halves cancel.
+    let local = cell - floor(cell / cells_per_page) * cells_per_page;
+    let texel = PAGE_BORDER + local * density;
+    let page_uv = texel / PAGE_EXTENT;
+    let stored = textureSampleLevel(
+        page_texture,
+        weight_sampler,
+        page_uv,
+        i32(entry - 1u),
+        0.0,
+    );
+    // Colour is sRGB-encoded and roughness is not, which is the same split the G-buffer's own albedo target
+    // has.
+    output.surface = vec4<f32>(page_linear(stored.rgb), stored.a);
+    return output;
+}
+
+/// The composed surface for a terrain coordinate, preferring the finer page level.
+///
+/// Finer first because that is the whole point of two levels: a page at 32 texels per cell is the one staged
+/// for ground near the camera, and falling back to the coarse level where it is absent is a graceful
+/// degradation rather than a compromise.
+fn page_surface(uv: vec2<f32>) -> PageSample {
+    var output: PageSample;
+    output.surface = vec4<f32>(0.0);
+    output.resident = false;
+    if (uniforms.virtual_config.x == 0u) {
+        return output;
+    }
+    let cells = max(
+        vec2<f32>(uniforms.terrain.z, uniforms.terrain.w) - vec2<f32>(1.0),
+        vec2<f32>(1.0),
+    );
+    let cell = clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)) * cells;
+
+    // Clamped to the table rather than tested against it. A coordinate exactly at the terrain's far edge
+    // lands one page past the end, and clamping there reads the last page — whose border covers that very
+    // edge, because the compose pass composed it from the same clamped ground.
+    let fine_page = vec2<i32>(min(
+        cell / PAGE_FINE_CELLS,
+        vec2<f32>(textureDimensions(page_table_fine)) - vec2<f32>(1.0),
+    ));
+    let fine = page_lookup(
+        textureLoad(page_table_fine, fine_page, 0).x,
+        cell,
+        PAGE_FINE_CELLS,
+        PAGE_FINE_DENSITY,
+    );
+    if (fine.resident) {
+        return fine;
+    }
+    let coarse_page = vec2<i32>(min(
+        cell / PAGE_COARSE_CELLS,
+        vec2<f32>(textureDimensions(page_table_coarse)) - vec2<f32>(1.0),
+    ));
+    return page_lookup(
+        textureLoad(page_table_coarse, coarse_page, 0).x,
+        cell,
+        PAGE_COARSE_CELLS,
+        PAGE_COARSE_DENSITY,
+    );
+}
+
 @fragment
 fn gbuffer_fragment(input: VertexOutput) -> GBufferOutput {
     var normal = normalize(input.normal);
     if (normal.z < 0.0) {
         normal = -normal;
     }
-    let surface_value = surface(input.uv);
+    // A composed page when one is resident, and the direct blend otherwise. The fallback is not
+    // belt-and-braces: a cache is allowed to run out of slots, so a frame that depended on it having won
+    // would turn a memory budget into a correctness requirement.
+    //
+    // Both branches are evaluated. That is the same constraint the model materials live under -- a mip level
+    // comes from screen-space derivatives, which are undefined in non-uniform control flow, and page
+    // residency varies per fragment. Guarding the blend would leave the mip level of every fragment that
+    // *does* fall back undefined.
+    let page = page_surface(input.uv);
+    let blended = surface(input.uv);
+    let surface_value = select(blended, page.surface, page.resident);
     var output: GBufferOutput;
     output.albedo = vec4<f32>(surface_value.rgb, 0.0);
     // Roughness is per layer and blended by the same weights as the colour, so a gravel layer and a

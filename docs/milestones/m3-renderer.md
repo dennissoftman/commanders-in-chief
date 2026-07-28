@@ -282,11 +282,19 @@ regression fails the build. See [Exit condition](#exit-condition) and the remain
     than to the screen, so the seams would crawl as the camera moved. A test reads a page back and checks
     that a page straddling a colour boundary carries the far side in its border: interior red 89 against
     border red 144, where a clamped border would read 89.
-  - **What remains is the fragment path.** The terrain G-buffer does not sample pages yet, and that is
-    deliberately a separate step: switching it over changes every terrain frame, and the honest order was to
-    prove the composition first. The properties that decide whether the cache is usable at all are verified
-    by readback rather than by a rendered comparison, because a render cannot isolate them — see
-    `tests/terrain_render.rs`.
+  - **The G-buffer samples it**, and the two paths agree: a mean channel difference of **0.001** over the
+    whole frame with a worst case of **2** eight-bit steps, which is the quantisation a page store costs and
+    nothing else. The direct blend stays in the shader as the fallback, and that is not belt-and-braces — a
+    cache is allowed to run out of slots, so a frame that depended on it having won would turn a memory
+    budget into a correctness requirement. A one-slot cache renders 99.9% of the frame from the fallback and
+    the rest from its single page, which is the assertion.
+  - Both bounds above were set *from the measurement* rather than guessed. A page resolved to the wrong
+    layer, or a coordinate off by a border, differs by tens to hundreds — so a bound loose enough to be safe
+    is still two orders of magnitude tighter than any real fault, and a bound chosen before measuring would
+    have been the loose one and would have caught nothing.
+  - The forward pass has no page lookup, deliberately: it draws terrain alone in one pass, which is the case
+    a cache has nothing to offer. The first draft of the agreement test used it and reported the two frames
+    as identical for exactly that reason.
 - **Temporal antialiasing** ([`deferred`](../../crates/cic-render/src/deferred.rs), `taa.wgsl`), the last
   tier of [ADR 0005](../adr/0005-antialiasing-strategy.md) and the last item on its list: a jittered
   projection on an eight-phase Halton sequence, a motion-vector target, a ping-ponged float history, and a
@@ -318,14 +326,14 @@ regression fails the build. See [Exit condition](#exit-condition) and the remain
   - Note what this is *not*. [`terrain_virtual`](../../crates/cic-render/src/terrain_virtual.rs) and
     [`detail`](../../crates/cic-render/src/detail.rs) are residency bookkeeping for terrain *texture*
     pages, decided in texels per cell. They are unwired, and wiring them would not remove a triangle.
-- **Sampling composed pages in the terrain G-buffer.** The cache exists and composes correctly — see
-  Landed — and the fragment path still does the eight-layer blend itself. What it needs: two more bindings on
-  the terrain group, a page-table lookup to resolve a cell to a physical layer, and a fallback to the direct
-  blend for a cell whose page is not resident. The fallback is not optional: a cache is allowed to run out of
-  slots, and a frame must not depend on it having won.
-  - Page mip chains go with it. A page has one level, so a page sampled at a shallow angle would alias where
-    the direct blend does not — the terrain would look *worse* on exactly the ground a virtual texture is
-    for. The downsample is a second compute pass over the resident pages.
+- **Page mip chains**, which is what stands between the virtual-texture path being *correct* and being
+  *better*. A page has one level, so a page sampled at a shallow angle aliases where the direct blend does
+  not — the terrain would look worse on exactly the ground a virtual texture is for. The fix is a second
+  compute pass reducing each resident page, and the reduction has to respect the border or the seam the
+  border exists to prevent returns at every level below the base.
+- **A view-driven detail request.** Nothing derives a `TerrainDetailRequest` from a camera yet, so a caller
+  states which cells it wants at which density. The residency map already ranks pages by projected size, so
+  this is a small function over the frustum rather than a design.
 
 ## Exit condition
 

@@ -51,8 +51,8 @@
 //!
 //! # What is next
 //!
-//! A real virtual-texture cache behind the residency bookkeeping, and terrain level of detail. See
-//! `docs/milestones/m3-renderer.md`.
+//! Mip chains for the virtual-texture pages, without which a page aliases at a shallow angle where the
+//! direct blend does not; and terrain level of detail. See `docs/milestones/m3-renderer.md`.
 
 pub mod culling;
 pub mod deferred;

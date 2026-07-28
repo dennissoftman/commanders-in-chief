@@ -20,8 +20,10 @@ use std::time::Duration;
 
 use cic_assets::{Terrain, TerrainLayer};
 use cic_camera::CameraPose;
+use cic_render::detail::TerrainDetailRequest;
 use cic_render::display::JITTER_PHASES;
 use cic_render::terrain::LayerColour;
+use cic_render::terrain_virtual::VirtualPageView;
 use cic_render::{
     Antialiasing, Capture, CaptureTarget, Clouds, DeferredFrame, DeferredRenderer, DeferredTargets,
     DisplaySettings, Environment, Fog, GpuContext, TerrainRenderer, TimedPass, WaterBody,
@@ -1935,5 +1937,206 @@ fn the_temporal_history_survives_a_frame_that_moves_nothing() {
     assert_eq!(
         total, 0,
         "the accumulation drifted by {total} over four repeated frames"
+    );
+}
+
+/// A terrain split down the middle: the left half is layer 0 at full weight, the right half layer 1.
+///
+/// A hard boundary rather than a gradient, because what the page tests check is *where* a page reads its
+/// data from, and a smooth field looks plausible under a coordinate that is off by a page.
+fn split_terrain() -> Terrain {
+    let samples = 65u32;
+    let count = (samples * samples) as usize;
+    let mut left = vec![0u8; count];
+    let mut right = vec![0u8; count];
+    for index in 0..count {
+        if index as u32 % samples < samples / 2 {
+            left[index] = 255;
+        } else {
+            right[index] = 255;
+        }
+    }
+    Terrain::new(
+        samples,
+        samples,
+        10.0,
+        0.25,
+        vec![200u16; count],
+        vec![
+            TerrainLayer {
+                name: "left".to_owned(),
+                weights: left,
+            },
+            TerrainLayer {
+                name: "right".to_owned(),
+                weights: right,
+            },
+        ],
+    )
+    .expect("valid split terrain")
+}
+
+/// A view looking down at the middle of a terrain, in the terms the residency map wants.
+fn page_view(terrain: &Terrain) -> VirtualPageView {
+    let [extent_x, extent_y] = terrain.world_extent();
+    VirtualPageView::new(
+        [extent_x * 0.5, extent_y * 0.5 - 200.0, 300.0],
+        [0.0, 0.8, -0.6],
+        [1.0, 0.0, 0.0],
+        [0.0, 0.6, 0.8],
+        ([0.0, 0.0, 0.0], [extent_x, extent_y, 100.0]),
+        (std::f32::consts::PI / 6.0).tan(),
+        16.0 / 9.0,
+        terrain.horizontal_scale(),
+    )
+}
+
+/// A cache holding `layers` pages, warmed over the whole terrain at the coarse level.
+fn warmed_cache(
+    context: &GpuContext,
+    harness: &Harness,
+    layers: u32,
+) -> cic_render::TerrainPageCache {
+    let mut cache =
+        cic_render::TerrainPageCache::new(context, &harness.renderer, layers).expect("page cache");
+    let (cells_x, cells_y) = harness.renderer.cell_size();
+    let composed = cache.update(
+        context,
+        &[TerrainDetailRequest::uniform(
+            [0, 0],
+            [cells_x, cells_y],
+            16,
+        )],
+        page_view(&harness.terrain),
+    );
+    assert!(composed > 0, "the cache must stage pages to be useful");
+    cache
+}
+
+/// Mean and worst per-channel difference between two captures of the same size.
+fn channel_difference(left: &Capture, right: &Capture) -> (f64, u8) {
+    let mut total = 0u64;
+    let mut worst = 0u8;
+    let mut counted = 0u64;
+    for (a, b) in left
+        .rgba()
+        .chunks_exact(4)
+        .zip(right.rgba().chunks_exact(4))
+    {
+        for channel in 0..3 {
+            let difference = a[channel].abs_diff(b[channel]);
+            total += u64::from(difference);
+            worst = worst.max(difference);
+            counted += 1;
+        }
+    }
+    (total as f64 / counted.max(1) as f64, worst)
+}
+
+#[test]
+fn terrain_sampled_from_pages_matches_the_direct_blend() {
+    // The property that makes the cache worth having: the two paths compute the *same* surface, so a frame
+    // drawn from pages and a frame drawn by blending must agree. If they did not, the cache would be a second
+    // appearance for the same ground and the camera's distance would decide which one a player saw.
+    //
+    // Not byte-identical, and every reason is in the design rather than in the arithmetic: a page stores eight
+    // bits per channel where the blend keeps float precision, a page sample is filtered from page texels
+    // rather than from the layer weights, and a page picks its own mip level because a compute shader has no
+    // derivatives. So the assertion is a bound on the difference, in eight-bit steps.
+    //
+    // Drawn through the *deferred* chain, which is where the page lookup lives. The forward pass deliberately
+    // has none: it draws terrain alone in one pass, which is the case a cache has nothing to offer — and the
+    // first draft of this test used it and reported the two frames as identical for that reason.
+    let Some(context) = context() else { return };
+    let mut harness = harness_for(context, split_terrain());
+    let frame = DeferredFrame::new(pose(&harness.terrain), WIDTH, HEIGHT);
+    let direct = render(context, &harness, frame);
+
+    let cache = warmed_cache(context, &harness, 16);
+    assert!(!harness.renderer.samples_pages());
+    harness.renderer.attach_pages(context, &cache);
+    assert!(harness.renderer.samples_pages());
+    let paged = render(context, &harness, frame);
+
+    write_capture("terrain-direct-blend.png", &direct);
+    write_capture("terrain-from-pages.png", &paged);
+    // The capture is the verification. A page coordinate off by a border, a level chosen the wrong way round,
+    // or a transfer function applied twice all produce a plausible image and a small mean difference.
+    support::check_reference(context, "terrain-from-pages.png", &paged);
+
+    // The frame must actually have changed hands: a bind group that silently kept its placeholders would make
+    // the two captures identical and every bound below trivially true.
+    assert_ne!(
+        direct.rgba(),
+        paged.rgba(),
+        "the paged frame is byte-identical to the direct one, so the cache is not being read at all"
+    );
+
+    let (mean, worst) = channel_difference(&direct, &paged);
+    eprintln!("direct against paged: mean channel difference {mean:.3}, worst {worst}");
+    // Both bounds are set from what was measured — 0.001 and 2 — with a wide margin rather than a generous
+    // guess, and the distinction is the point. A page resolved to the wrong layer, or a coordinate off by a
+    // border, differs by *tens to hundreds*; so a bound loose enough to be safe against adapter and filter
+    // variation is still two orders of magnitude tighter than any real fault. Choosing one without measuring
+    // first would have meant the looser number, which would have caught nothing.
+    assert!(
+        mean < 0.5,
+        "the two paths must agree on the surface: mean channel difference {mean:.3}"
+    );
+    // The worst case is bounded separately, because a mean can hide a small region that is wholly wrong —
+    // which is exactly what a page resolved to the wrong layer looks like.
+    assert!(
+        worst <= 8,
+        "some pixel differs by {worst}, which is a region reading the wrong page rather than the eight-bit \
+         quantisation a page store costs"
+    );
+
+    // Detaching restores the direct frame exactly, which is what says the fallback path is untouched by the
+    // feature rather than merely available.
+    harness.renderer.detach_pages(context);
+    assert!(!harness.renderer.samples_pages());
+    let restored = render(context, &harness, frame);
+    assert_eq!(
+        direct.rgba(),
+        restored.rgba(),
+        "detaching the cache must restore the direct frame byte for byte"
+    );
+}
+
+#[test]
+fn a_cell_with_no_resident_page_falls_back_to_the_direct_blend() {
+    // The reason the direct blend stays in the shader. A cache with one slot holds one page, so almost every
+    // fragment misses — and the frame has to be *the frame*, not a hole where the cache was. A cache is
+    // allowed to run out of slots, so a frame that depended on it having won would turn a memory budget into a
+    // correctness requirement.
+    let Some(context) = context() else { return };
+    let mut harness = harness_for(context, split_terrain());
+    let frame = DeferredFrame::new(pose(&harness.terrain), WIDTH, HEIGHT);
+    let direct = render(context, &harness, frame);
+
+    let cache = warmed_cache(context, &harness, 1);
+    assert_eq!(cache.layer_count(), 1);
+    harness.renderer.attach_pages(context, &cache);
+    let starved = render(context, &harness, frame);
+    write_capture("terrain-one-page.png", &starved);
+
+    // Most of the frame must be the direct blend's, byte for byte: one coarse page covers a sixteenth of this
+    // terrain. A comfortable majority identical is the fallback working, and a small minority differing is the
+    // one resident page being read rather than the cache being ignored.
+    let identical = direct
+        .rgba()
+        .chunks_exact(4)
+        .zip(starved.rgba().chunks_exact(4))
+        .filter(|(left, right)| left[0..3] == right[0..3])
+        .count();
+    let share = identical as f64 / (direct.rgba().len() / 4) as f64;
+    eprintln!("pixels identical to the direct blend with one page resident: {share:.3}");
+    assert!(
+        share > 0.8,
+        "only {share:.3} of the frame fell back to the direct blend, so a cache miss is not being handled"
+    );
+    assert!(
+        share < 1.0,
+        "the whole frame is the direct blend, so the one resident page is not being read"
     );
 }

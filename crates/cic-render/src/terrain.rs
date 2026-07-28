@@ -56,14 +56,15 @@ pub const DEFAULT_DETAIL_SCALE: f32 = 32.0;
 ///
 /// A mat4x4 (64), five vec4<f32> (80), one vec4<u32> (16), eight vec4<f32> of palette (128), eight
 /// vec4<f32> of per-layer detail parameters (128), one vec4<f32> of wind and the two scene times (16),
-/// one vec4<f32> of the projection jitter (16), and the previous frame's view-projection (64).
+/// one vec4<f32> of the projection jitter (16), the previous frame's view-projection (64), and one
+/// vec4<u32> of virtual-texture state (16).
 ///
-/// Everything a geometry pass needs to write a motion vector is in the last three entries, and they are
-/// **last** because `model_gbuffer.wgsl` and `terrain_forward.wgsl` bind this same buffer through structs
-/// declaring only a prefix of it — which holds exactly as long as anything they do not read is appended
-/// rather than inserted. The same rule already governs the scene block in [`crate::deferred`], for the
-/// same reason.
-const UNIFORM_BYTES: usize = 64 + 80 + 16 + 128 + 128 + 16 + 16 + 64;
+/// Everything a geometry pass needs to write a motion vector is in the middle three of the last four
+/// entries, and the whole tail is **appended** rather than inserted because `model_gbuffer.wgsl` and
+/// `terrain_forward.wgsl` bind this same buffer through structs declaring only a prefix of it. That holds
+/// exactly as long as anything they do not read comes after what they do. The same rule already governs the
+/// scene block in [`crate::deferred`], for the same reason.
+const UNIFORM_BYTES: usize = 64 + 80 + 16 + 128 + 128 + 16 + 16 + 64 + 16;
 
 /// Wind, scene time, and the previous frame's, as a geometry pass needs them.
 ///
@@ -244,9 +245,20 @@ pub struct TerrainRenderer {
     bind_group_layout: wgpu::BindGroupLayout,
     /// Retained so the page-compose pass can bind the same view and samplers this group does. See
     /// [`TerrainBindings`].
+    height_view: wgpu::TextureView,
     weight_view: wgpu::TextureView,
     weight_sampler: wgpu::Sampler,
     albedo_sampler: wgpu::Sampler,
+    /// One-by-one stand-ins for the virtual-texture bindings, held so the group can be rebuilt back to
+    /// them.
+    ///
+    /// The layout declares those bindings whether or not a cache exists, because it is shared by six
+    /// pipelines and a layout that changed with the cache would mean rebuilding all of them. Every binding a
+    /// layout declares has to be filled, so the alternative to a placeholder is a second layout — which is a
+    /// second thing to keep in step, for a case that renders identically either way.
+    placeholders: VirtualPlaceholders,
+    /// Whether the G-buffer samples composed pages. False until [`Self::attach_pages`] is called.
+    virtual_pages: bool,
     uniform_buffer: wgpu::Buffer,
     height_texture: wgpu::Texture,
     weight_texture: wgpu::Texture,
@@ -342,6 +354,7 @@ impl TerrainRenderer {
 
         let bindings = build_bindings(
             device,
+            context.queue(),
             &uniform_buffer,
             &height_texture,
             &weight_texture,
@@ -375,6 +388,9 @@ impl TerrainRenderer {
             weight_view: bindings.weight_view,
             weight_sampler: bindings.weight_sampler,
             albedo_sampler: bindings.albedo_sampler,
+            height_view: bindings.height_view,
+            placeholders: bindings.placeholders,
+            virtual_pages: false,
             uniform_buffer,
             height_texture,
             weight_texture,
@@ -431,6 +447,91 @@ impl TerrainRenderer {
         for run in runs {
             pass.draw(0..vertices, run.clone());
         }
+    }
+
+    /// Points the G-buffer at a page cache, so it samples composed pages instead of blending layers.
+    ///
+    /// # What changes and what does not
+    ///
+    /// The bind group is rebuilt against the cache's tables and pages, and a flag in the uniform tells the
+    /// shader they are real. Nothing else moves: the layout, the pipelines, and the forward pass are
+    /// untouched, and the forward pass never reads a page at all — it draws terrain alone in one pass, which
+    /// is the case a cache has nothing to offer.
+    ///
+    /// **The direct blend stays in the shader as the fallback**, and that is not belt-and-braces. A cache is
+    /// allowed to run out of slots — the residency map treats it as a normal condition — so a fragment over
+    /// ground whose page was evicted has to have an answer. Making the frame depend on the cache having won
+    /// would turn a memory budget into a correctness requirement.
+    ///
+    /// Views are cloned rather than borrowed, so the cache and the terrain do not have to outlive each other
+    /// in a particular order. `wgpu` handles are reference-counted, so this shares the textures rather than
+    /// copying them.
+    pub fn attach_pages(&mut self, context: &GpuContext, cache: &crate::TerrainPageCache) {
+        self.bind_group = build_bind_group(
+            context.device(),
+            &self.bind_group_layout,
+            &self.uniform_buffer,
+            &self.height_view,
+            &self.weight_view,
+            &self.weight_sampler,
+            self.albedo.view(),
+            &self.albedo_sampler,
+            &VirtualViews {
+                fine: cache.table_view(0).unwrap_or(&self.placeholders.table),
+                coarse: cache.table_view(1).unwrap_or(&self.placeholders.table),
+                pages: cache.page_view(),
+            },
+        );
+        self.set_virtual_flag(context, true);
+    }
+
+    /// Stops the G-buffer sampling pages, restoring the direct blend.
+    ///
+    /// The counterpart to [`Self::attach_pages`], and it exists because a caller may want the comparison: the
+    /// two paths compute the same surface, so rendering both is how anyone checks that they do.
+    pub fn detach_pages(&mut self, context: &GpuContext) {
+        self.bind_group = build_bind_group(
+            context.device(),
+            &self.bind_group_layout,
+            &self.uniform_buffer,
+            &self.height_view,
+            &self.weight_view,
+            &self.weight_sampler,
+            self.albedo.view(),
+            &self.albedo_sampler,
+            &VirtualViews {
+                fine: &self.placeholders.table,
+                coarse: &self.placeholders.table,
+                pages: &self.placeholders.pages,
+            },
+        );
+        self.set_virtual_flag(context, false);
+    }
+
+    /// Records the switch and pushes it to the GPU at once.
+    ///
+    /// Written immediately rather than left for the next [`Self::set_frame`], and the difference is not
+    /// cosmetic: attaching a cache and then rendering without an intervening frame upload would draw the
+    /// direct blend while every accessor said otherwise. The first draft did exactly that, and the test that
+    /// caught it reported the whole frame as byte-identical to the unattached one.
+    ///
+    /// A sixteen-byte write at the end of the block rather than a rebuild of it, because the rest of the
+    /// block is a *frame's* worth of state and this is not part of a frame.
+    fn set_virtual_flag(&mut self, context: &GpuContext, enabled: bool) {
+        self.virtual_pages = enabled;
+        let mut bytes = Vec::with_capacity(16);
+        for value in [u32::from(enabled), 0, 0, 0] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        context
+            .queue()
+            .write_buffer(&self.uniform_buffer, (UNIFORM_BYTES - 16) as u64, &bytes);
+    }
+
+    /// Whether the G-buffer is sampling composed pages.
+    #[must_use]
+    pub const fn samples_pages(&self) -> bool {
+        self.virtual_pages
     }
 
     /// Returns the terrain's sample dimensions minus one: the number of *cells* along each axis.
@@ -722,6 +823,13 @@ impl TerrainRenderer {
                 bytes.extend_from_slice(&value.to_le_bytes());
             }
         }
+        // Whether the G-buffer reads composed pages instead of blending layers itself. A flag rather than an
+        // inference the shader could make, because "the page table says nothing is resident" and "there is no
+        // cache attached" want the same answer in the fragment and arrive by different routes — one is a
+        // texel and the other is a bind group full of one-by-one placeholders.
+        for value in [u32::from(self.virtual_pages), 0, 0, 0] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
         debug_assert_eq!(bytes.len(), UNIFORM_BYTES, "uniform block size drifted");
         context
             .queue()
@@ -799,13 +907,125 @@ fn build_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 count: None,
             },
+            // The virtual-texture bindings: one page table per level, then the physical pages. Declared
+            // whether or not a cache is attached, and filled with one-by-one placeholders when it is not —
+            // see `TerrainRenderer::attach_pages` for why that beats a second layout.
+            //
+            // Integer tables rather than float: an entry is a physical layer index, and a normalized read
+            // would have to be scaled back to one, which is a division that can round to the wrong layer.
+            page_table_entry(6),
+            page_table_entry(7),
+            wgpu::BindGroupLayoutEntry {
+                binding: 8,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                    multisampled: false,
+                },
+                count: None,
+            },
         ],
     })
+}
+
+/// One page-table binding: a single unsigned integer per page, loaded rather than filtered.
+const fn page_table_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Uint,
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
+/// The three virtual-texture views a terrain bind group needs, real or placeholder.
+struct VirtualViews<'a> {
+    fine: &'a wgpu::TextureView,
+    coarse: &'a wgpu::TextureView,
+    pages: &'a wgpu::TextureView,
+}
+
+/// One-by-one textures standing in for the virtual-texture bindings when no cache is attached.
+///
+/// The table reads as zero, which the shader takes as "not resident" — so a terrain with no cache falls
+/// through to the direct blend by the same path a cache miss does, rather than by a second one.
+#[derive(Debug)]
+struct VirtualPlaceholders {
+    table: wgpu::TextureView,
+    pages: wgpu::TextureView,
+}
+
+impl VirtualPlaceholders {
+    fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
+        let table = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("cic-render empty page table"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R32Uint,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        // Written explicitly rather than left to the zero-initialisation the API promises, because "the
+        // shader reads zero here" is the whole behaviour and a promise is a worse place to keep it than a
+        // four-byte upload.
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &table,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &0u32.to_le_bytes(),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4),
+                rows_per_image: Some(1),
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+        let pages = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("cic-render empty pages"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: crate::terrain_page::PAGE_FORMAT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        Self {
+            table: table.create_view(&wgpu::TextureViewDescriptor::default()),
+            pages: pages.create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(wgpu::TextureViewDimension::D2Array),
+                ..Default::default()
+            }),
+        }
+    }
 }
 
 /// Builds the terrain bind group and the layout it was made against.
 fn build_bindings(
     device: &wgpu::Device,
+    queue: &wgpu::Queue,
     uniform_buffer: &wgpu::Buffer,
     height_texture: &wgpu::Texture,
     weight_texture: &wgpu::Texture,
@@ -834,52 +1054,91 @@ fn build_bindings(
         ..Default::default()
     });
 
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+    let placeholders = VirtualPlaceholders::new(device, queue);
+    let bind_group = build_bind_group(
+        device,
+        &layout,
+        uniform_buffer,
+        &height_view,
+        &weight_view,
+        &sampler,
+        albedo.view(),
+        &albedo_sampler,
+        &VirtualViews {
+            fine: &placeholders.table,
+            coarse: &placeholders.table,
+            pages: &placeholders.pages,
+        },
+    );
+
+    TerrainBindings {
+        layout,
+        bind_group,
+        height_view,
+        weight_view,
+        weight_sampler: sampler,
+        albedo_sampler,
+        placeholders,
+    }
+}
+
+/// Assembles the terrain bind group from the resources it names.
+///
+/// Its own function because the group is built twice — once with placeholders and again when a page cache
+/// is attached — and a nine-entry list written out twice is a list that drifts.
+#[allow(clippy::too_many_arguments)]
+fn build_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    uniform_buffer: &wgpu::Buffer,
+    height_view: &wgpu::TextureView,
+    weight_view: &wgpu::TextureView,
+    weight_sampler: &wgpu::Sampler,
+    albedo_view: &wgpu::TextureView,
+    albedo_sampler: &wgpu::Sampler,
+    virtual_views: &VirtualViews<'_>,
+) -> wgpu::BindGroup {
+    fn view(binding: u32, view: &wgpu::TextureView) -> wgpu::BindGroupEntry<'_> {
+        wgpu::BindGroupEntry {
+            binding,
+            resource: wgpu::BindingResource::TextureView(view),
+        }
+    }
+    fn sampler(binding: u32, sampler: &wgpu::Sampler) -> wgpu::BindGroupEntry<'_> {
+        wgpu::BindGroupEntry {
+            binding,
+            resource: wgpu::BindingResource::Sampler(sampler),
+        }
+    }
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("cic-render terrain bindings"),
-        layout: &layout,
+        layout,
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
                 resource: uniform_buffer.as_entire_binding(),
             },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::TextureView(&height_view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: wgpu::BindingResource::TextureView(&weight_view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: wgpu::BindingResource::Sampler(&sampler),
-            },
-            wgpu::BindGroupEntry {
-                binding: 4,
-                resource: wgpu::BindingResource::TextureView(albedo.view()),
-            },
-            wgpu::BindGroupEntry {
-                binding: 5,
-                resource: wgpu::BindingResource::Sampler(&albedo_sampler),
-            },
+            view(1, height_view),
+            view(2, weight_view),
+            sampler(3, weight_sampler),
+            view(4, albedo_view),
+            sampler(5, albedo_sampler),
+            view(6, virtual_views.fine),
+            view(7, virtual_views.coarse),
+            view(8, virtual_views.pages),
         ],
-    });
-    TerrainBindings {
-        layout,
-        bind_group,
-        weight_view,
-        weight_sampler: sampler,
-        albedo_sampler,
-    }
+    })
 }
 
 /// What [`build_bindings`] produces: the group, its layout, and the resources a second pass may rebind.
 struct TerrainBindings {
     layout: wgpu::BindGroupLayout,
     bind_group: wgpu::BindGroup,
+    height_view: wgpu::TextureView,
     weight_view: wgpu::TextureView,
     weight_sampler: wgpu::Sampler,
     albedo_sampler: wgpu::Sampler,
+    placeholders: VirtualPlaceholders,
 }
 
 /// Builds the forward render pipeline against a bind group layout.
