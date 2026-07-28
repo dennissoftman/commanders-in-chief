@@ -30,7 +30,7 @@ What works:
   moves with the swell.
 - **Shaders compose from named chunks** ([`shader`](crates/cic-render/src/shader.rs)). WGSL has no include
   mechanism, and without composition every pass needing the cascade selection had to share one file with
-  it — which is how a single shader reached 620 lines. Twelve programs are assembled from fifteen chunks;
+  it — which is how a single shader reached 620 lines. Thirteen programs are assembled from sixteen chunks;
   a test fails if any chunk is named by no program, and five programs are marked `staged` so work held for
   a later milestone is distinguishable from dead code.
 - **An atmosphere** ([`environment`](crates/cic-render/src/environment.rs)) derived from two authored
