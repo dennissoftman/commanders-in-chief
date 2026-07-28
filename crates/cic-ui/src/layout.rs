@@ -120,8 +120,11 @@ pub enum Justify {
 
 /// What kind of control a node is.
 ///
-/// The set the charter names for an RTS shell. This slice positions them; their behaviour — focus,
-/// hover, retained state — is the next one, which is why there is nothing here but the kind.
+/// The set the charter names for an RTS shell. A kind decides three things beyond how it draws: whether
+/// an [`Action`] on it means anything, whether it can take focus, and whether it remembers anything
+/// between frames. All three are answered here rather than in the interaction code, so a layout can be
+/// *validated* against them at load — which is what turns "a checkbox with no id" from a control that
+/// silently forgets its value into a refused file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Widget {
@@ -157,6 +160,105 @@ impl Widget {
             self,
             Self::Button | Self::Checkbox | Self::List | Self::Tabs
         )
+    }
+
+    /// Whether keyboard navigation stops here.
+    ///
+    /// A `Scroll` is deliberately absent: it holds an offset but nothing inside it is *it*, so landing
+    /// focus on the container would give the user a stop where no key does anything. Scrolling follows
+    /// the pointer, or the focused control inside it once that exists.
+    #[must_use]
+    pub const fn focusable(self) -> bool {
+        matches!(
+            self,
+            Self::Button
+                | Self::Checkbox
+                | Self::Slider
+                | Self::TextEntry
+                | Self::List
+                | Self::Tabs
+        )
+    }
+
+    /// Whether this widget remembers something between frames.
+    ///
+    /// A `Button` does not: being armed lasts from press to release and is not state anybody wants
+    /// preserved across a relayout.
+    #[must_use]
+    pub const fn retains_state(self) -> bool {
+        matches!(
+            self,
+            Self::Checkbox
+                | Self::Slider
+                | Self::TextEntry
+                | Self::List
+                | Self::Tabs
+                | Self::Scroll
+        )
+    }
+
+    /// Whether an authored node of this kind must carry an id.
+    ///
+    /// Retained state is keyed by id — that is what makes a scroll offset survive a resize — and focus
+    /// is named the same way. A widget that needs either and has neither cannot work, so it is refused
+    /// at load rather than silently forgetting its value at run time.
+    #[must_use]
+    pub const fn needs_id(self) -> bool {
+        self.focusable() || self.retains_state()
+    }
+}
+
+/// Longest text a `text_entry` accepts when the layout does not say.
+///
+/// Bounded because typed input is input, and the project's rule is that nothing grows without a limit
+/// somebody chose. A default rather than a required field so the common case stays short to author.
+pub const DEFAULT_MAX_LENGTH: usize = 256;
+
+/// The span a `slider` moves over.
+///
+/// Structural, so it belongs in the layout: it describes the control rather than its value. The *value*
+/// does not appear here — that comes from whatever the screen is editing, and a layout file stating one
+/// would be a second source of truth for a setting the host already owns.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Range {
+    /// Lowest value.
+    pub min: f32,
+    /// Highest value.
+    pub max: f32,
+    /// How far one keyboard press or notch moves it.
+    #[serde(default = "one")]
+    pub step: f32,
+}
+
+const fn one() -> f32 {
+    1.0
+}
+
+impl Range {
+    /// Clamps a value into this range.
+    #[must_use]
+    pub fn clamp(&self, value: f32) -> f32 {
+        value.clamp(self.min, self.max)
+    }
+
+    /// How far along the range a value sits, from zero to one.
+    ///
+    /// A zero-width range reports zero rather than dividing by it. Such a range is refused by
+    /// validation, so this is a guard against arithmetic rather than a supported case.
+    #[must_use]
+    pub fn fraction(&self, value: f32) -> f32 {
+        let span = self.max - self.min;
+        if span <= 0.0 {
+            return 0.0;
+        }
+        ((value - self.min) / span).clamp(0.0, 1.0)
+    }
+
+    /// The value a fraction of the way along.
+    #[must_use]
+    pub fn at(&self, fraction: f32) -> f32 {
+        self.clamp(self.min + (self.max - self.min) * fraction.clamp(0.0, 1.0))
     }
 }
 
@@ -199,9 +301,27 @@ pub struct Node {
     /// What activating this node asks the engine to do.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<Action>,
+    /// The span a `slider` moves over. Only meaningful on one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range: Option<Range>,
+    /// Longest text a `text_entry` accepts. Only meaningful on one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_length: Option<usize>,
     /// Children, in drawing and navigation order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<Node>,
+}
+
+impl Node {
+    /// The longest text this node accepts, defaulted when the layout did not say.
+    ///
+    /// Named for the question rather than after the field, so reading `node.max_length` and
+    /// `node.text_limit()` side by side makes the difference between "what was authored" and "what
+    /// applies" obvious.
+    #[must_use]
+    pub fn text_limit(&self) -> usize {
+        self.max_length.unwrap_or(DEFAULT_MAX_LENGTH)
+    }
 }
 
 /// A whole authored layout.
@@ -304,6 +424,10 @@ fn validate_node<'a>(
         if !seen.insert(id) {
             return Err(LayoutError::DuplicateId { id: id.to_owned() });
         }
+    } else if node.widget.needs_id() {
+        return Err(LayoutError::MissingId {
+            widget: node.widget,
+        });
     }
 
     check_sizing(node.width, "width")?;
@@ -324,8 +448,51 @@ fn validate_node<'a>(
         });
     }
 
+    // A `range` or a `max_length` on the wrong widget is inert, and inert authoring is the class of
+    // mistake this format refuses everywhere else. A slider *without* a range is refused too, because
+    // there is no defensible default span for a value the layout knows nothing about.
+    match (node.widget, node.range) {
+        (Widget::Slider, None) => return Err(LayoutError::SliderWithoutRange),
+        (Widget::Slider, Some(range)) => check_range(range)?,
+        (widget, Some(_)) => {
+            return Err(LayoutError::FieldOnWrongWidget {
+                field: "range",
+                widget,
+            });
+        }
+        (_, None) => {}
+    }
+    if node.max_length.is_some() && node.widget != Widget::TextEntry {
+        return Err(LayoutError::FieldOnWrongWidget {
+            field: "max_length",
+            widget: node.widget,
+        });
+    }
+    if node.max_length == Some(0) {
+        return Err(LayoutError::ZeroMaxLength);
+    }
+
     for child in &node.children {
         validate_node(child, depth + 1, seen, counted)?;
+    }
+    Ok(())
+}
+
+fn check_range(range: Range) -> Result<(), LayoutError> {
+    for (value, field) in [
+        (range.min, "range.min"),
+        (range.max, "range.max"),
+        (range.step, "range.step"),
+    ] {
+        if !value.is_finite() {
+            return Err(LayoutError::Measurement { field, value });
+        }
+    }
+    // `max > min` rather than `>=`: a collapsed range is a slider that cannot move, and a step of zero
+    // is one whose keys do nothing. Both are almost certainly a mistake, and allowing either would put a
+    // division by zero one arithmetic step away.
+    if range.max <= range.min || range.step <= 0.0 {
+        return Err(LayoutError::EmptyRange { range });
     }
     Ok(())
 }
@@ -393,6 +560,27 @@ pub enum LayoutError {
         /// The widget that carried it.
         widget: Widget,
     },
+    /// A widget that needs an id to hold focus or state did not have one.
+    MissingId {
+        /// The widget that needed one.
+        widget: Widget,
+    },
+    /// A slider declared no range.
+    SliderWithoutRange,
+    /// A range could not be moved over.
+    EmptyRange {
+        /// The rejected range.
+        range: Range,
+    },
+    /// A field appeared on a widget it means nothing to.
+    FieldOnWrongWidget {
+        /// Which field.
+        field: &'static str,
+        /// The widget that carried it.
+        widget: Widget,
+    },
+    /// A text entry accepted no characters at all.
+    ZeroMaxLength,
 }
 
 impl std::fmt::Display for LayoutError {
@@ -427,6 +615,28 @@ impl std::fmt::Display for LayoutError {
                 formatter,
                 "a {widget:?} cannot be activated, so it must not carry an action"
             ),
+            Self::MissingId { widget } => write!(
+                formatter,
+                "a {widget:?} takes focus or holds state, both of which are keyed by id, so it needs one"
+            ),
+            Self::SliderWithoutRange => {
+                write!(formatter, "a Slider must declare the range it moves over")
+            }
+            Self::EmptyRange { range } => write!(
+                formatter,
+                "a range of {}..{} stepping {} cannot be moved over",
+                range.min, range.max, range.step
+            ),
+            Self::FieldOnWrongWidget { field, widget } => write!(
+                formatter,
+                "{field} means nothing on a {widget:?} and must be left out"
+            ),
+            Self::ZeroMaxLength => {
+                write!(
+                    formatter,
+                    "a TextEntry accepting no characters is not usable"
+                )
+            }
         }
     }
 }
@@ -435,8 +645,13 @@ impl std::error::Error for LayoutError {}
 
 #[cfg(test)]
 mod tests {
+    // The range arithmetic below is over halves and quarters, which are exact in binary, so an exact
+    // comparison is the assertion rather than a tolerance nobody chose.
+    #![allow(clippy::float_cmp)]
+
     use super::{
-        Align, Direction, Justify, Layout, LayoutError, MAX_DEPTH, MAX_NODES, Node, Sizing, Widget,
+        Align, Direction, Justify, Layout, LayoutError, MAX_DEPTH, MAX_NODES, Node, Range, Sizing,
+        Widget,
     };
     use crate::Action;
     use crate::geometry::Insets;
@@ -560,10 +775,12 @@ mod tests {
                 widget: Widget::Panel
             })
         );
-        // The activatable set is accepted.
+        // The activatable set is accepted. Each carries an id because all four take focus, which is
+        // keyed by id.
         for widget in [Widget::Button, Widget::Checkbox, Widget::List, Widget::Tabs] {
             assert!(
                 wrap(Node {
+                    id: Some(format!("{widget:?}")),
                     widget,
                     action: Some(Action::Back),
                     ..Node::default()
@@ -573,6 +790,161 @@ mod tests {
                 "{widget:?} must accept an action"
             );
         }
+    }
+
+    #[test]
+    fn a_widget_that_needs_an_id_to_work_must_carry_one() {
+        // Focus and retained state are both keyed by id. A checkbox without one cannot remember whether
+        // it is checked, so this is refused at load rather than forgotten at run time.
+        for widget in [
+            Widget::Button,
+            Widget::Checkbox,
+            Widget::Slider,
+            Widget::TextEntry,
+            Widget::List,
+            Widget::Tabs,
+            Widget::Scroll,
+        ] {
+            let refused = wrap(Node {
+                widget,
+                range: (widget == Widget::Slider).then_some(Range {
+                    min: 0.0,
+                    max: 1.0,
+                    step: 0.1,
+                }),
+                ..Node::default()
+            })
+            .validate();
+            assert_eq!(
+                refused,
+                Err(LayoutError::MissingId { widget }),
+                "{widget:?} must require an id"
+            );
+        }
+        // Structure does not need one, because it remembers nothing and takes no focus.
+        for widget in [Widget::Panel, Widget::Label] {
+            assert!(
+                wrap(Node {
+                    widget,
+                    ..Node::default()
+                })
+                .validate()
+                .is_ok(),
+                "{widget:?} must not require an id"
+            );
+        }
+    }
+
+    #[test]
+    fn a_slider_must_declare_a_range_it_can_actually_move_over() {
+        let slider = |range: Option<Range>| {
+            wrap(Node {
+                id: Some("volume".to_owned()),
+                widget: Widget::Slider,
+                range,
+                ..Node::default()
+            })
+            .validate()
+        };
+        assert_eq!(slider(None), Err(LayoutError::SliderWithoutRange));
+        // Collapsed, inverted, and a step of zero are all sliders that cannot move.
+        for (min, max, step) in [(1.0, 1.0, 0.1), (2.0, 1.0, 0.1), (0.0, 1.0, 0.0)] {
+            let range = Range { min, max, step };
+            assert_eq!(
+                slider(Some(range)),
+                Err(LayoutError::EmptyRange { range }),
+                "{min}..{max} stepping {step} must be refused"
+            );
+        }
+        assert!(
+            slider(Some(Range {
+                min: 0.5,
+                max: 2.0,
+                step: 0.25
+            }))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_field_on_a_widget_it_means_nothing_to_is_refused() {
+        // The same posture as an action on a panel: inert authoring is a mistake that looks correct.
+        let refused = wrap(Node {
+            id: Some("label".to_owned()),
+            widget: Widget::Label,
+            range: Some(Range {
+                min: 0.0,
+                max: 1.0,
+                step: 0.1,
+            }),
+            ..Node::default()
+        })
+        .validate();
+        assert_eq!(
+            refused,
+            Err(LayoutError::FieldOnWrongWidget {
+                field: "range",
+                widget: Widget::Label
+            })
+        );
+        let wrong_length = wrap(Node {
+            id: Some("check".to_owned()),
+            widget: Widget::Checkbox,
+            max_length: Some(8),
+            ..Node::default()
+        })
+        .validate();
+        assert_eq!(
+            wrong_length,
+            Err(LayoutError::FieldOnWrongWidget {
+                field: "max_length",
+                widget: Widget::Checkbox
+            })
+        );
+    }
+
+    #[test]
+    fn typed_text_is_bounded_by_default_and_never_by_zero() {
+        let entry = |max_length: Option<usize>| Node {
+            id: Some("name".to_owned()),
+            widget: Widget::TextEntry,
+            max_length,
+            ..Node::default()
+        };
+        // Bounded because typed input is input, and nothing here grows without a limit somebody chose.
+        assert_eq!(entry(None).text_limit(), super::DEFAULT_MAX_LENGTH);
+        assert_eq!(entry(Some(12)).text_limit(), 12);
+        assert_eq!(
+            wrap(entry(Some(0))).validate(),
+            Err(LayoutError::ZeroMaxLength)
+        );
+    }
+
+    #[test]
+    fn a_range_maps_between_values_and_fractions_without_dividing_by_zero() {
+        let range = Range {
+            min: 0.5,
+            max: 2.0,
+            step: 0.25,
+        };
+        assert_eq!(range.fraction(0.5), 0.0);
+        assert_eq!(range.fraction(2.0), 1.0);
+        assert_eq!(range.fraction(1.25), 0.5);
+        assert_eq!(range.at(0.0), 0.5);
+        assert_eq!(range.at(1.0), 2.0);
+        assert_eq!(range.at(0.5), 1.25);
+        // Out of range in either direction clamps rather than extrapolating.
+        assert_eq!(range.fraction(-10.0), 0.0);
+        assert_eq!(range.fraction(10.0), 1.0);
+        assert_eq!(range.at(-1.0), 0.5);
+        assert_eq!(range.clamp(99.0), 2.0);
+        // Validation refuses a collapsed range, so this is a guard rather than a supported case.
+        let collapsed = Range {
+            min: 1.0,
+            max: 1.0,
+            step: 1.0,
+        };
+        assert_eq!(collapsed.fraction(1.0), 0.0);
     }
 
     #[test]

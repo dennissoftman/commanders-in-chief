@@ -3,20 +3,20 @@
 A retained user-interface layer: layout, widgets, input routing, and the screen stack the game is
 navigated through.
 
-**Status:** In progress. The layout foundation has landed — the format, the solver, the string table, and
-the action set. Widget behaviour, input routing, the screen stack, and drawing are still ahead.
+**Status:** In progress. The layout foundation and widget behaviour have landed — the format, the solver,
+the string table, the action set, retained state, and input routing including input-method composition.
+The screen stack and drawing are still ahead.
 
 ## Charter
 
 - A layout model of the project's own design, defined in a text format that is authored and reviewed
   like the scenario format is. **Done** — see [Landed](#landed).
 - A widget set covering what an RTS shell actually needs: buttons, labels, lists, sliders, checkboxes,
-  text entry, tabs, and a scrollable container. **Kinds exist and position correctly; none of them
-  behaves yet.**
-- Retained state across frames, so a scroll position or a text cursor survives a redraw.
+  text entry, tabs, and a scrollable container. **Behaviour done; none of them draws yet.**
+- Retained state across frames, so a scroll position or a text cursor survives a redraw. **Done**, keyed
+  by node id, which is why the format requires one on every widget that holds state.
 - Input routing with focus, hover, and keyboard navigation, expressed as semantic events rather than
-  raw key codes — the same separation the camera uses. **Hit testing exists; focus and navigation do
-  not.**
+  raw key codes — the same separation the camera uses. **Done**, including input-method composition.
 - A screen stack: push a modal, pop back, and have the screen underneath still be there.
 - Resolution and DPI independence, because a fixed-pixel layout is a bug on every display that is not
   the developer's. **Done**, and structural rather than added: a layout is authored in logical units and
@@ -56,18 +56,48 @@ the action set. Widget behaviour, input routing, the screen stack, and drawing a
 - **A closed action set**, so a layout cannot name an effect the engine does not define. An unknown
   action fails to load rather than failing to find a handler when somebody clicks.
 
+- **Widget behaviour and retained state**, as pure logic against a solved layout.
+  - **Semantic input**, not key codes: a caller maps its own devices to `UiEvent`, so a key-binding screen
+    changes which key produces `Activate` without any widget learning that happened.
+  - **A press arms and a release fires**, and only if the release lands on the same control. Pressing a
+    button and letting go somewhere else is how a user cancels after aiming wrong; its absence reads as a
+    bug.
+  - **State is keyed by node id**, so a scroll offset and a half-typed name survive a resize. Keyed by
+    rectangle or by index they would not, since re-solving replaces both — which is why the format now
+    *requires* an id on any widget that holds state or takes focus rather than treating it as optional.
+  - **Values are not in the layout file.** A slider's range is, because it describes the control; its value
+    is not, because it describes whatever the screen is editing, and a layout stating one would be a second
+    source of truth for a setting the host owns.
+  - **Focus order is reading order**, not screen position. Position would make the tab sequence depend on a
+    solved layout, so a resize could silently reorder it.
+  - **Everything adjustable is bounded by the layout**: a slider by its own range, a list or tab strip by
+    the children it actually has, typed text by `max_length`. Clamped rather than wrapped, because a list
+    jumping from its last row to its first on one key press reads as a lost keystroke.
+- **Input-method composition**, so Chinese, Japanese and Korean text can be typed at all.
+  - A single character per keystroke is the *Latin* case. Under an input method a user types keys that
+    produce no text, an uncommitted composition appears and changes as they continue, and only then is text
+    committed — possibly several characters at once. That cannot be a sequence of inserts, because the
+    composition is replaced rather than appended to.
+  - The composition lives *inside* the field as a character range, so a renderer draws one string and marks
+    a span of it rather than stitching two together and getting the caret wrong at the join.
+  - Two readers, and using the wrong one is a real bug: the text to **draw** includes the composition, the
+    field's **value** does not. Saving the former stores a half-formed word as though it were finished.
+  - `ime_wanted` and `ime_cursor_area` are what a host drives `set_ime_allowed` and `set_ime_cursor_area`
+    from. Without the first, an input method is either off everywhere or on over menus; without the second,
+    the candidate window appears in a corner instead of beside the text.
+  - **This is why it is here rather than later.** Retrofitting composition means changing the event
+    vocabulary, the field's representation, and every renderer that assumed one string with one cursor.
+  - The cursor is a **character** index throughout. Byte offsets are what `String` indexes by and what a
+    naive implementation reaches for, and they land inside a multi-byte character the first time somebody
+    types one — which panics rather than merely looking wrong.
+
 ## Remaining
 
-- **Widget behaviour.** The kinds exist and position correctly; nothing toggles, slides, scrolls, or
-  accepts a keystroke yet.
-- **Retained state across frames**, keyed by the node ids the format already carries — which is why they
-  are validated as unique now rather than when something needs them.
-- **Input routing**: focus, hover, and keyboard navigation as semantic events. Hit testing is done,
-  including the part worth naming — a click resolves to the topmost *activatable* node, because the panel
-  beneath a button contains the point too and reporting it would swallow the press.
 - **The screen stack**, and the transactional settings apply the design notes below require.
 - **Drawing.** `ui.wgsl` is already in the shader set marked `staged`, and the M3 capture harness is what
-  will cover the rendered result — which is now worth having, since it runs in CI.
+  will cover the rendered result — which is now worth having, since it runs in CI. Text rendering is the
+  substantial part, and it is also what would let `ime_cursor_area` narrow from the field to the caret.
+- **A caret-tight IME cursor area**, which needs the text metrics drawing will bring.
 
 ## Exit condition
 
@@ -75,8 +105,9 @@ A navigable shell: main menu, settings with transactional apply-and-rollback, an
 screen that can launch a map. Layout and widget behaviour covered by tests; the rendered result covered
 by the M3 capture harness.
 
-**Not met.** The layout half is covered — 44 tests across the format, the solver, the string table and
-the action set — and there is no shell yet, so nothing is navigable.
+**Not met.** Layout and widget behaviour are covered — 85 tests across the format, the solver, retained
+state, input routing, composition, the string table and the action set — but there is no shell yet, so
+nothing is navigable and nothing is drawn.
 
 ## Design notes
 

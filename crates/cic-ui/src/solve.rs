@@ -38,7 +38,9 @@
 #![allow(clippy::cast_precision_loss)]
 
 use crate::geometry::{Rect, Viewport};
-use crate::layout::{Align, Direction, Justify, Layout, Node, Sizing, Widget};
+use crate::layout::{
+    Align, DEFAULT_MAX_LENGTH, Direction, Justify, Layout, Node, Range, Sizing, Widget,
+};
 use crate::{Action, StringTable};
 
 /// Supplies the intrinsic size of content the solver cannot measure itself.
@@ -100,10 +102,29 @@ pub struct SolvedNode {
     pub text_key: Option<String>,
     /// What activating it asks for.
     pub action: Option<Action>,
+    /// The span a slider moves over.
+    pub range: Option<Range>,
+    /// Longest text a text entry accepts, as authored.
+    pub max_length: Option<usize>,
+    /// How many direct children it has, which is what bounds a list's or a tab strip's selection.
+    pub children: usize,
+    /// This node plus every descendant.
+    ///
+    /// The sequence is pre-order, so a node's descendants are exactly the `subtree - 1` entries after
+    /// it. That is what lets a scrollable container measure its own content without a second walk.
+    pub subtree: usize,
     /// Index of the parent in the same sequence, absent for the root.
     pub parent: Option<usize>,
     /// Nesting level, the root being one.
     pub depth: usize,
+}
+
+impl SolvedNode {
+    /// The longest text this node accepts, defaulted when the layout did not say.
+    #[must_use]
+    pub fn text_limit(&self) -> usize {
+        self.max_length.unwrap_or(DEFAULT_MAX_LENGTH)
+    }
 }
 
 /// A whole layout, positioned.
@@ -167,6 +188,71 @@ impl Solved {
             .iter()
             .rev()
             .find(|node| node.widget.activatable() && node.rect.contains(x, y))
+    }
+
+    /// The index of the node carrying an id.
+    #[must_use]
+    pub fn index_of(&self, id: &str) -> Option<usize> {
+        self.nodes
+            .iter()
+            .position(|node| node.id.as_deref() == Some(id))
+    }
+
+    /// The index of the topmost focusable node containing a physical point.
+    ///
+    /// An index rather than a reference, because a caller that has hit something usually needs to walk
+    /// its ancestors next — a scroll wheel acts on the enclosing container, not on what is under it.
+    #[must_use]
+    pub fn hit_focusable(&self, x: f32, y: f32) -> Option<usize> {
+        self.nodes
+            .iter()
+            .rposition(|node| node.widget.focusable() && node.rect.contains(x, y))
+    }
+
+    /// The nearest enclosing node of a given kind, starting with the node itself.
+    #[must_use]
+    pub fn enclosing(&self, index: usize, widget: Widget) -> Option<usize> {
+        let mut current = Some(index);
+        while let Some(at) = current {
+            let node = self.nodes.get(at)?;
+            if node.widget == widget {
+                return Some(at);
+            }
+            current = node.parent;
+        }
+        None
+    }
+
+    /// Every focusable node's id, in pre-order, which is navigation order.
+    ///
+    /// Pre-order rather than by position on screen. Reading order is what an author controls and what a
+    /// reviewer can see in the file; geometric order would make tab sequence depend on a solved layout,
+    /// so a resize could silently reorder it.
+    #[must_use]
+    pub fn focus_order(&self) -> Vec<&str> {
+        self.nodes
+            .iter()
+            .filter(|node| node.widget.focusable())
+            .filter_map(|node| node.id.as_deref())
+            .collect()
+    }
+
+    /// How far a scrollable node can be scrolled before its content runs out.
+    ///
+    /// Measured from the solved rectangles rather than from an authored figure, because the content's
+    /// extent is what the layout worked out and not something an author states. Zero when everything
+    /// fits, which is also what a non-scrollable node reports.
+    #[must_use]
+    pub fn scroll_limit(&self, index: usize) -> f32 {
+        let Some(node) = self.nodes.get(index) else {
+            return 0.0;
+        };
+        let descendants = &self.nodes[index + 1..(index + node.subtree).min(self.nodes.len())];
+        let content = descendants
+            .iter()
+            .map(|child| child.rect.bottom())
+            .fold(node.rect.y, f32::max);
+        (content - node.rect.y - node.rect.height).max(0.0)
     }
 
     /// Resolves every node's text against a table, in pre-order, skipping nodes without a key.
@@ -310,6 +396,15 @@ impl Arrange<'_> {
             id: node.id.clone(),
             text_key: node.text_key.clone(),
             action: node.action,
+            range: node.range,
+            max_length: node.max_length,
+            children: node.children.len(),
+            // The measure pass counted this already, and it counted it over the same tree in the same
+            // order, so taking it from there beats walking the children again.
+            subtree: self
+                .intrinsics
+                .get(slot)
+                .map_or(1, |intrinsic| intrinsic.subtree),
             parent,
             depth,
         });
