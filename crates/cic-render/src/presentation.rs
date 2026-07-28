@@ -18,6 +18,7 @@ use crate::RenderError;
 use crate::deferred::{DeferredFrame, DeferredRenderer, DeferredTargets};
 use crate::model::ModelBatch;
 use crate::terrain::TerrainRenderer;
+use crate::water::WaterBody;
 
 /// Adapts a [`Terrain`] to the camera's ground-height lookup.
 ///
@@ -102,6 +103,12 @@ impl SurfaceRenderer {
         self.deferred.material_layout()
     }
 
+    /// Returns the layout a [`WaterBody`] binds its uniform through.
+    #[must_use]
+    pub const fn water_layout(&self) -> &wgpu::BindGroupLayout {
+        self.deferred.water_layout()
+    }
+
     /// Returns the format the composite writes.
     #[must_use]
     pub const fn format(&self) -> wgpu::TextureFormat {
@@ -154,7 +161,8 @@ impl SurfaceRenderer {
         context: &crate::GpuContext,
         terrain: &TerrainRenderer,
         models: &[ModelBatch],
-        frame: DeferredFrame,
+        water: &[WaterBody],
+        mut frame: DeferredFrame,
     ) -> Result<(), RenderError> {
         // Every non-success case here is a "skip this frame" rather than an error. A resize, a
         // minimise, or a compositor hiccup all land in one of them, and treating any as fatal would
@@ -188,16 +196,14 @@ impl SurfaceRenderer {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        self.deferred.set_frame(
-            context,
-            terrain,
-            models,
-            frame,
-            self.configuration.width,
-            self.configuration.height,
-        )?;
+        // The surface is authoritative about its own size, so its configuration wins over whatever the
+        // caller put on the frame. A stale viewport here — one frame behind a resize, say — would
+        // misplace every world position the lighting pass reconstructs.
+        frame.viewport = [self.configuration.width, self.configuration.height];
         self.deferred
-            .render(context, terrain, models, &self.targets, &view);
+            .set_frame(context, terrain, models, water, frame)?;
+        self.deferred
+            .render(context, terrain, models, water, &self.targets, &view);
         // Presenting is the queue's operation in this API version, not the texture's.
         context.queue().present(surface_frame);
         Ok(())

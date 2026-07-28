@@ -12,6 +12,8 @@
     clippy::cast_sign_loss
 )]
 
+mod support;
+
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
@@ -309,12 +311,13 @@ fn render(
 ) -> Capture {
     harness
         .deferred
-        .set_frame(context, &harness.renderer, models, frame, WIDTH, HEIGHT)
+        .set_frame(context, &harness.renderer, models, &[], frame)
         .expect("upload uniforms");
     harness.deferred.render(
         context,
         &harness.renderer,
         models,
+        &[],
         &harness.targets,
         harness.output.colour_view(),
     );
@@ -556,6 +559,9 @@ fn a_base_colour_texture_reaches_the_frame() {
     let with = render(context, &harness, std::slice::from_ref(&textured), frame);
     write_capture("model-untextured.png", &without);
     write_capture("model-textured.png", &with);
+    // Pins instanced geometry, per-vertex material indexing, and the base-colour array together. A
+    // sheared UV mapping passed every assertion in this file until an image was finally looked at.
+    support::check_reference(context, "model-textured.png", &with);
 
     let mut changed = 0usize;
     for (bare, patterned) in without
