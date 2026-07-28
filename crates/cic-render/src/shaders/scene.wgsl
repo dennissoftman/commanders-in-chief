@@ -25,6 +25,18 @@ struct SceneCamera {
     // xy viewport size in pixels, zw its reciprocal.
     viewport: vec4<f32>,
     lights: array<DirectionalLight, 3>,
+    // rgb the fog colour, w its density per world unit at the reference elevation.
+    //
+    // The colour is derived on the CPU from the sky's horizon colour rather than authored separately, so
+    // the two cannot disagree. They must not: fog that is a different colour from the sky it fades into
+    // puts a visible band along the horizon exactly where the terrain silhouette meets it.
+    fog: vec4<f32>,
+    // x the height falloff in world units, y the elevation the density is quoted at, zw reserved.
+    fog_params: vec4<f32>,
+    // x coverage, y world units across one cloud cell, z shadow strength, w edge softness.
+    clouds: vec4<f32>,
+    // xy the cloud pattern's drift in world units, zw reserved.
+    cloud_drift: vec4<f32>,
 }
 
 // `params` packs the world units spanned by the full normalized depth range in `y` and the world

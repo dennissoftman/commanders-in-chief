@@ -40,6 +40,7 @@
 
 pub mod deferred;
 pub mod detail;
+pub mod environment;
 pub mod gpu;
 pub mod model;
 pub mod presentation;
@@ -58,6 +59,7 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
 pub use deferred::{DeferredFrame, DeferredRenderer, DeferredTargets};
+pub use environment::{Clouds, Environment, Fog, Weather};
 pub use gpu::{Capture, CaptureTarget, GpuContext};
 pub use model::{ModelBatch, ModelInstance};
 pub use presentation::{Action, InputState, SurfaceRenderer, TerrainGround};

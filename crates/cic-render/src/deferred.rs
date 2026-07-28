@@ -30,6 +30,7 @@
 use cic_camera::CameraPose;
 
 use crate::RenderError;
+use crate::environment::Environment;
 use crate::gpu::{DEPTH_FORMAT, GpuContext};
 use crate::model::{ModelBatch, buffer_layouts};
 use crate::shadow::{CASCADE_COUNT, CASCADE_RESOLUTION, Cascade, fit_cascades};
@@ -56,8 +57,9 @@ pub const AO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
 /// Lighting accumulates before tone mapping, so it needs range above one.
 pub const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
-/// Byte size of the `SceneCamera` uniform block: two matrices, two vectors, three lights.
-const SCENE_UNIFORM_BYTES: usize = 64 + 64 + 16 + 16 + 3 * 48;
+/// Byte size of the `SceneCamera` uniform block: two matrices, two vectors, three lights, and the four
+/// atmosphere vectors — fog colour and density, fog falloff, cloud parameters, and cloud drift.
+const SCENE_UNIFORM_BYTES: usize = 64 + 64 + 16 + 16 + 3 * 48 + 4 * 16;
 
 /// Byte size of the `ShadowCamera` uniform block: a matrix and a parameter vector per cascade.
 const SHADOW_UNIFORM_BYTES: usize = CASCADE_COUNT * (64 + 16);
@@ -91,6 +93,13 @@ pub struct DeferredFrame {
     /// reconstructs a world position using the viewport's reciprocal, so a disagreement moves every
     /// receiver and reads as a shadowing fault rather than as a wrong number.
     pub viewport: [u32; 2],
+    /// The air and the weather: fog, cloud shadows, and what the time of day implies.
+    ///
+    /// Defaults to a clear, fogless, cloudless environment, which is exactly the frame this renderer
+    /// produced before one existed — that is what let every committed reference capture stay
+    /// byte-identical when the atmosphere was added, and so what proved the plumbing had not quietly
+    /// altered the lighting passing through it.
+    pub environment: Environment,
     /// Scene time in seconds, which drives every animated surface.
     ///
     /// A frame *parameter* rather than a clock reading taken inside the renderer, and that is a
@@ -113,9 +122,17 @@ impl DeferredFrame {
             // realistic skylight ambient affordable. See `daylight_with_occlusion`.
             light: DirectionalLight::daylight_with_occlusion(),
             shadow_distance: DEFAULT_SHADOW_DISTANCE,
+            environment: Environment::default(),
             viewport: [width, height],
             time: 0.0,
         }
+    }
+
+    /// Returns the frame with its environment replaced.
+    #[must_use]
+    pub const fn in_environment(mut self, environment: Environment) -> Self {
+        self.environment = environment;
+        self
     }
 
     /// Returns the frame with its scene time replaced.
@@ -600,8 +617,72 @@ fn scene_bytes(
     for _ in 0..6 {
         push_vec4(&mut scene, [0.0; 4]);
     }
+
+    let environment = frame.environment;
+    let weather = environment.weather.sanitised();
+    // The fog colour is the sky's horizon colour, not a separately authored one. Fog fades distance
+    // toward whatever is behind it, and behind it is the sky — a fog colour that disagrees puts a band
+    // along the horizon precisely where the terrain silhouette meets it. Overcast desaturates both
+    // together, which is why this is computed rather than configured.
+    let [fog_r, fog_g, fog_b] = mix_colour(SKY_HORIZON, OVERCAST_HORIZON, weather.overcast);
+    push_vec4(
+        &mut scene,
+        [fog_r, fog_g, fog_b, environment.fog.density.max(0.0)],
+    );
+    push_vec4(
+        &mut scene,
+        [
+            environment.fog.height_falloff.max(0.001),
+            environment.fog.base,
+            0.0,
+            0.0,
+        ],
+    );
+    let clouds = environment.clouds;
+    push_vec4(
+        &mut scene,
+        [
+            clouds.coverage.clamp(0.0, 1.0),
+            clouds.scale.max(1.0),
+            clouds.strength.clamp(0.0, 1.0),
+            clouds.softness.clamp(0.0, 1.0),
+        ],
+    );
+    // Drift is the wind integrated over scene time, computed here rather than in the shader so the two
+    // callers of `cloud_shadow` cannot disagree about where the deck has got to.
+    push_vec4(
+        &mut scene,
+        [
+            weather.wind[0] * frame.time,
+            weather.wind[1] * frame.time,
+            0.0,
+            0.0,
+        ],
+    );
+
     debug_assert_eq!(scene.len(), SCENE_UNIFORM_BYTES, "scene uniform drifted");
     scene
+}
+
+/// The clear sky's horizon colour, matching `SKY_HORIZON` in `atmosphere.wgsl`.
+///
+/// Duplicated across the language boundary because the shader needs it as a constant and the fog colour
+/// is derived from it on the CPU. A test pins the pair rather than trusting the comment.
+const SKY_HORIZON: [f32; 3] = [0.12, 0.20, 0.30];
+
+/// The horizon under a full cloud deck: brighter, and desaturated toward grey.
+///
+/// Brighter *and* flatter, which is the part that is easy to get backwards. An overcast sky scatters the
+/// sun across the whole dome, so the horizon gains light even as the ground loses it.
+const OVERCAST_HORIZON: [f32; 3] = [0.34, 0.36, 0.39];
+
+fn mix_colour(from: [f32; 3], to: [f32; 3], amount: f32) -> [f32; 3] {
+    let amount = amount.clamp(0.0, 1.0);
+    [
+        from[0] + (to[0] - from[0]) * amount,
+        from[1] + (to[1] - from[1]) * amount,
+        from[2] + (to[2] - from[2]) * amount,
+    ]
 }
 
 /// Builds one uniform buffer and bind group per shadow cascade.
@@ -1323,14 +1404,31 @@ fn normalize(vector: [f32; 3]) -> [f32; 3] {
 
 #[cfg(test)]
 mod tests {
-    use super::{CASCADE_COUNT, SCENE_UNIFORM_BYTES, SHADOW_UNIFORM_BYTES};
+    use super::{CASCADE_COUNT, SCENE_UNIFORM_BYTES, SHADOW_UNIFORM_BYTES, SKY_HORIZON};
 
     #[test]
     fn uniform_block_sizes_match_the_shader_declarations() {
         // These are the sizes `SceneCamera` and `ShadowCamera` occupy in the WGSL. A mismatch does not
         // fail validation -- it silently misaligns every field past the drift -- so it is asserted here
         // as well as debug-asserted at upload.
-        assert_eq!(SCENE_UNIFORM_BYTES, 304);
+        assert_eq!(SCENE_UNIFORM_BYTES, 368);
         assert_eq!(SHADOW_UNIFORM_BYTES, CASCADE_COUNT * 80);
+    }
+
+    #[test]
+    fn the_clear_horizon_colour_matches_the_shader_constant() {
+        // `SKY_HORIZON` exists on both sides of the language boundary: the sky gradient needs it as a
+        // WGSL constant, and the fog colour is derived from it here. Nothing but this test stops the two
+        // drifting, and the symptom would be a fog bank a different colour from the sky it fades into --
+        // a band along the horizon, exactly where it is most visible.
+        let declared = crate::shader::chunk("atmosphere").expect("atmosphere chunk");
+        let expected = format!(
+            "vec3<f32>({:.2}, {:.2}, {:.2})",
+            SKY_HORIZON[0], SKY_HORIZON[1], SKY_HORIZON[2]
+        );
+        assert!(
+            declared.contains(&expected),
+            "atmosphere.wgsl does not declare SKY_HORIZON as {expected}"
+        );
     }
 }

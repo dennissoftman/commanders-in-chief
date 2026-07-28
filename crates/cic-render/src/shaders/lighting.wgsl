@@ -54,9 +54,13 @@ fn lighting_fragment(input: FullscreenOutput) -> @location(0) vec4<f32> {
         color += albedo * light.ambient.rgb * ambient_scale;
         let direction_length = length(light.source_direction.xyz);
         if (direction_length > 0.00001) {
+            // The cloud deck attenuates the primary light's *direct* share and nothing else: a cloud
+            // occludes the sun's disc, not the sky, so the ambient term above passes through it whole.
+            // Only slot 0 is the sun; the fills stand in for sky and bounce and are not shadowed at all.
+            let clouds = select(1.0, cloud_shadow(world.xy), shadowed);
             let visibility = select(
                 1.0,
-                mix(SHADOW_DIRECT_FLOOR, 1.0, primary_visibility),
+                mix(SHADOW_DIRECT_FLOOR, 1.0, primary_visibility) * clouds,
                 shadowed
             );
             let light_direction = -light.source_direction.xyz / direction_length;
@@ -78,5 +82,8 @@ fn lighting_fragment(input: FullscreenOutput) -> @location(0) vec4<f32> {
     // it survives full shade, which is the whole point of a lamp: the emitted term takes its hue
     // from the material's own albedo, and the intensity is the material's emissive strength.
     color += albedo * max(coverage - 1.0, 0.0);
-    return vec4<f32>(color, 1.0);
+    // Fog last, and inside this pass rather than as a later screen-space one. A depth-based fog pass
+    // could not fog the water surface: water writes no depth, so it would be fogged at the depth of the
+    // terrain *behind* it and would sit in front of its own fog.
+    return vec4<f32>(apply_fog(color, world), 1.0);
 }

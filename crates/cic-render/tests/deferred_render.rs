@@ -21,8 +21,8 @@ use cic_assets::{Terrain, TerrainLayer};
 use cic_camera::CameraPose;
 use cic_render::terrain::LayerColour;
 use cic_render::{
-    Capture, CaptureTarget, DeferredFrame, DeferredRenderer, DeferredTargets, GpuContext,
-    TerrainRenderer, WaterBody, WaterMaterial, WaterSurface,
+    Capture, CaptureTarget, Clouds, DeferredFrame, DeferredRenderer, DeferredTargets, Environment,
+    Fog, GpuContext, TerrainRenderer, WaterBody, WaterMaterial, WaterSurface,
 };
 
 const WIDTH: u32 = 720;
@@ -672,6 +672,41 @@ fn masked_luminance(dry: &Capture, wet: &Capture) -> (f32, f32, usize) {
     (lowest, highest, counted)
 }
 
+/// How much luminance each changed pixel lost, as `(smallest, largest, mean)`.
+///
+/// Compared position by position rather than as two whole-frame ranges, which is what a first attempt at
+/// the cloud test did and why it measured nothing: the darkest pixel in either frame is a corner of the
+/// sky, which a cloud deck correctly does not touch, so a frame-wide minimum is identical with and
+/// without clouds however much ground went into shade.
+fn luminance_drop(before: &Capture, after: &Capture) -> (f32, f32, f32) {
+    let luminance = |pixel: &[u8]| {
+        (0.2126 * f32::from(pixel[0]) + 0.7152 * f32::from(pixel[1]) + 0.0722 * f32::from(pixel[2]))
+            / 255.0
+    };
+    let mut smallest = f32::MAX;
+    let mut largest = f32::MIN;
+    let mut total = 0.0;
+    let mut counted = 0usize;
+    for (a, b) in before
+        .rgba()
+        .chunks_exact(4)
+        .zip(after.rgba().chunks_exact(4))
+    {
+        if a == b {
+            continue;
+        }
+        let drop = luminance(a) - luminance(b);
+        smallest = smallest.min(drop);
+        largest = largest.max(drop);
+        total += drop;
+        counted += 1;
+    }
+    if counted == 0 {
+        return (0.0, 0.0, 0.0);
+    }
+    (smallest, largest, total / counted as f32)
+}
+
 /// The basin fixture, its dry capture, and a water level between floor and rim.
 struct WaterScene {
     harness: Harness,
@@ -806,6 +841,88 @@ fn the_water_surface_varies_rather_than_reading_as_a_flat_sheet() {
         spread > 0.10,
         "the water spans only {spread:.3} in luminance across {counted} pixels, \
          which is a flat sheet rather than a lit surface"
+    );
+}
+
+#[test]
+fn cloud_shadows_dapple_the_ground_rather_than_dimming_it() {
+    // The distinction this test exists for. Raising coverage must grow *patches* of shade, so the frame
+    // gains contrast between lit and shaded ground; scaling a density instead would darken every pixel by
+    // the same factor, which is a brightness change wearing a cloud's name and would pass any assertion
+    // that only asked whether the image got darker.
+    let Some(context) = context() else { return };
+    let scene = water_scene(context);
+    let clouded = scene.frame.in_environment(Environment {
+        clouds: Clouds {
+            coverage: 0.55,
+            // Small enough that several patches fall inside a 1,536-unit map, or the capture shows one
+            // uniform state and the test measures nothing.
+            scale: 320.0,
+            ..Clouds::default()
+        },
+        ..Environment::default()
+    });
+    let shaded = render_water(context, &scene.harness, &[], clouded);
+    write_capture("atmosphere-clouds.png", &shaded);
+    support::check_reference(context, "atmosphere-clouds.png", &shaded);
+
+    let changed = fraction_differing(&scene.dry, &shaded);
+    assert!(
+        changed > 0.20,
+        "clouds changed only {:.1}% of the frame",
+        changed * 100.0
+    );
+    // Light was removed on the whole.
+    let (smallest, largest, mean) = luminance_drop(&scene.dry, &shaded);
+    assert!(
+        mean > 0.0,
+        "the deck brightened the scene: mean drop {mean:.4}"
+    );
+    // And it was removed *unevenly*, which is the whole claim. A deck that scaled the light instead would
+    // take about the same amount from every pixel, leaving almost no spread between the least and most
+    // affected — so this range is what separates a cloud shadow from a brightness slider.
+    assert!(
+        largest - smallest > 0.10,
+        "every changed pixel lost about the same amount ({smallest:.4} to {largest:.4}), \
+         so the deck dimmed the scene rather than dappling it"
+    );
+}
+
+#[test]
+fn fog_fills_the_basin_more_deeply_than_it_veils_the_rim() {
+    // The property that separates height fog from a distance haze, and the reason the density is
+    // integrated along the view ray rather than sampled at the fragment: a low basin seen from above must
+    // fog *more* than the high ground beside it, even where the two are the same distance away.
+    let Some(context) = context() else { return };
+    let scene = water_scene(context);
+    let (floor, rim) = world_elevation_range(&scene.harness.terrain);
+    let foggy = scene.frame.in_environment(Environment {
+        fog: Fog {
+            density: 0.006,
+            // A falloff well under the basin's depth, so the rim stands clear of what fills the floor.
+            height_falloff: (rim - floor) * 0.35,
+            base: floor,
+        },
+        ..Environment::default()
+    });
+    let veiled = render_water(context, &scene.harness, &[], foggy);
+    write_capture("atmosphere-fog.png", &veiled);
+    support::check_reference(context, "atmosphere-fog.png", &veiled);
+
+    let changed = fraction_differing(&scene.dry, &veiled);
+    assert!(
+        changed > 0.30,
+        "fog changed only {:.1}% of the frame",
+        changed * 100.0
+    );
+    // Fog flattens: it pulls everything toward one colour, so the spread has to shrink.
+    let (low_before, high_before) = scene.dry.luminance_range();
+    let (low_after, high_after) = veiled.luminance_range();
+    assert!(
+        (high_after - low_after) < (high_before - low_before),
+        "fog did not reduce the luminance spread: {:.3} against {:.3}",
+        high_after - low_after,
+        high_before - low_before
     );
 }
 
