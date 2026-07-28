@@ -12,6 +12,8 @@
     clippy::cast_sign_loss
 )]
 
+mod support;
+
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
@@ -20,7 +22,7 @@ use cic_camera::CameraPose;
 use cic_render::terrain::LayerColour;
 use cic_render::{
     Capture, CaptureTarget, DeferredFrame, DeferredRenderer, DeferredTargets, GpuContext,
-    TerrainRenderer,
+    TerrainRenderer, WaterBody, WaterMaterial, WaterSurface,
 };
 
 const WIDTH: u32 = 720;
@@ -153,7 +155,10 @@ struct Harness {
 }
 
 fn harness(context: &GpuContext) -> Harness {
-    let terrain = shadowing_terrain();
+    harness_for(context, shadowing_terrain())
+}
+
+fn harness_for(context: &GpuContext, terrain: Terrain) -> Harness {
     let renderer =
         TerrainRenderer::new(context, &terrain, &palette()).expect("build terrain renderer");
     let targets = DeferredTargets::new(context, WIDTH, HEIGHT).expect("allocate targets");
@@ -186,11 +191,12 @@ fn encoder(context: &GpuContext) -> wgpu::CommandEncoder {
 fn render(context: &GpuContext, harness: &Harness, frame: DeferredFrame) -> Capture {
     harness
         .deferred
-        .set_frame(context, &harness.renderer, &[], frame, WIDTH, HEIGHT)
+        .set_frame(context, &harness.renderer, &[], &[], frame)
         .expect("upload frame uniforms");
     harness.deferred.render(
         context,
         &harness.renderer,
+        &[],
         &[],
         &harness.targets,
         harness.output.colour_view(),
@@ -208,6 +214,9 @@ fn the_deferred_chain_produces_a_lit_scene() {
     let frame = DeferredFrame::new(pose(&harness.terrain), WIDTH, HEIGHT);
     let capture = render(context, &harness, frame);
     write_capture("deferred-composite.png", &capture);
+    // The whole chain in one image: cascades, occlusion, deferred lighting, and the tone curve. The
+    // assertions below cannot tell a correct frame from several wrong ones that share its statistics.
+    support::check_reference(context, "deferred-composite.png", &capture);
 
     assert_eq!(capture.width(), WIDTH);
     assert_eq!(capture.height(), HEIGHT);
@@ -348,11 +357,12 @@ fn ambient_occlusion_is_computed_and_varies() {
     let frame = DeferredFrame::new(pose(&harness.terrain), WIDTH, HEIGHT);
     harness
         .deferred
-        .set_frame(context, &harness.renderer, &[], frame, WIDTH, HEIGHT)
+        .set_frame(context, &harness.renderer, &[], &[], frame)
         .expect("upload frame uniforms");
     harness.deferred.render(
         context,
         &harness.renderer,
+        &[],
         &[],
         &harness.targets,
         harness.output.colour_view(),
@@ -387,11 +397,12 @@ fn ambient_occlusion_is_computed_and_varies() {
     let flat_output = CaptureTarget::new(context, WIDTH, HEIGHT).expect("flat output");
     let flat_frame = DeferredFrame::new(pose(&harness.terrain), WIDTH, HEIGHT);
     flat_deferred
-        .set_frame(context, &flat_renderer, &[], flat_frame, WIDTH, HEIGHT)
+        .set_frame(context, &flat_renderer, &[], &[], flat_frame)
         .expect("upload flat uniforms");
     flat_deferred.render(
         context,
         &flat_renderer,
+        &[],
         &[],
         &flat_targets,
         flat_output.colour_view(),
@@ -424,7 +435,7 @@ fn a_singular_camera_is_reported_rather_than_rendered() {
     frame.projection.vertical_fov = 0.0;
     let error = harness
         .deferred
-        .set_frame(context, &harness.renderer, &[], frame, WIDTH, HEIGHT)
+        .set_frame(context, &harness.renderer, &[], &[], frame)
         .expect_err("a singular camera must be refused");
     assert!(
         matches!(error, cic_render::RenderError::SingularCamera),
@@ -465,9 +476,9 @@ fn the_chain_renders_into_a_bgra_target() {
 
     let frame = DeferredFrame::new(pose(&terrain), WIDTH, HEIGHT);
     deferred
-        .set_frame(context, &renderer, &[], frame, WIDTH, HEIGHT)
+        .set_frame(context, &renderer, &[], &[], frame)
         .expect("upload frame uniforms");
-    deferred.render(context, &renderer, &[], &targets, &view);
+    deferred.render(context, &renderer, &[], &[], &targets, &view);
 
     // Validation errors surface asynchronously, so drain the queue before declaring success.
     context
@@ -498,5 +509,401 @@ fn moving_the_camera_changes_the_frame() {
         first.rgba(),
         second.rgba(),
         "the camera moved, so the frame must differ"
+    );
+}
+
+// -------------------------------------------------------------------------------------------------
+// Water
+//
+// Every assertion below is differential: the same scene with and without water, or at two scene
+// times. That is deliberate. An absolute threshold on a water frame mostly reports how the fixture
+// was lit, whereas "these two frames differ over this fraction of the image, and only over that
+// fraction" states a property the pass actually has to hold.
+// -------------------------------------------------------------------------------------------------
+
+/// A clear basin with a definite rim, and open ground around it.
+///
+/// A separate fixture from `shadowing_terrain` for the same reason the shadow tests needed their own
+/// shape. That terrain's spire puts its elevation range in the hundreds, so any water level high
+/// enough to fill its bowl also drowns the plain, and a capture of the result says nothing about the
+/// shoreline. This one has a single basin, a single rim, and a level that separates them.
+fn basin_terrain() -> Terrain {
+    let count = (SAMPLES * SAMPLES) as usize;
+    let mut elevations = Vec::with_capacity(count);
+    let last = (SAMPLES - 1) as f32;
+    for y in 0..SAMPLES {
+        for x in 0..SAMPLES {
+            let fx = x as f32 / last;
+            let fy = y as f32 / last;
+            // A basin wide enough to hold a lake that covers a real share of the frame. A narrow one
+            // is a worse fixture than it looks: at this camera's standoff a 180-unit lake occupies
+            // under two percent of the image, which leaves no room between "drew nothing" and "failed
+            // to clip" for an assertion to sit in.
+            let basin = 300.0 * (-((fx - 0.5).powi(2) + (fy - 0.5).powi(2)) / 0.14).exp();
+            // Relief on the rim, so the shoreline is an irregular contour rather than a circle. A
+            // circle would be satisfied by a broken clip that simply drew the whole rectangle.
+            let undulation = 20.0 * ((fx * 5.3).sin() * (fy * 4.1).cos());
+            let elevation = 420.0 - basin + undulation;
+            elevations.push(elevation.round().clamp(0.0, 65_535.0) as u16);
+        }
+    }
+
+    let mut ground = Vec::with_capacity(count);
+    let mut rock = Vec::with_capacity(count);
+    for elevation in &elevations {
+        let into_rock = ramp(f32::from(*elevation), 300.0, 420.0);
+        ground.push(((1.0 - into_rock) * 255.0).round() as u8);
+        rock.push((into_rock * 255.0).round() as u8);
+    }
+
+    Terrain::new(
+        SAMPLES,
+        SAMPLES,
+        SPACING,
+        VERTICAL,
+        elevations,
+        vec![
+            TerrainLayer {
+                name: "ground".to_owned(),
+                weights: ground,
+            },
+            TerrainLayer {
+                name: "rock".to_owned(),
+                weights: rock,
+            },
+        ],
+    )
+    .expect("valid basin terrain")
+}
+
+/// The terrain's lowest and highest elevation, in world units.
+fn world_elevation_range(terrain: &Terrain) -> (f32, f32) {
+    let (low, high) = terrain
+        .elevations()
+        .iter()
+        .fold((u16::MAX, u16::MIN), |(low, high), sample| {
+            (low.min(*sample), high.max(*sample))
+        });
+    let scale = terrain.vertical_scale();
+    (f32::from(low) * scale, f32::from(high) * scale)
+}
+
+/// Waves scaled to be legible in a 720x480 capture of a 1,536-unit map.
+///
+/// The defaults in `water.rs` are sized for a camera at playing distance. At this fixture's standoff a
+/// 0.35-unit swell is well under one pixel, so a capture could not show whether the surface animates
+/// at all — which would make the animation test vacuous rather than failing.
+fn visible_waves() -> WaterMaterial {
+    WaterMaterial {
+        wave_height: 1.6,
+        wave_length: 64.0,
+        ..WaterMaterial::default()
+    }
+}
+
+/// A water table over the whole map at `elevation`.
+fn lake(terrain: &Terrain, elevation: f32) -> WaterSurface {
+    let [extent_x, extent_y] = terrain.world_extent();
+    WaterSurface::new([0.0, 0.0, extent_x, extent_y], elevation).with_material(visible_waves())
+}
+
+/// Renders the chain with water and resolves the composite.
+fn render_water(
+    context: &GpuContext,
+    harness: &Harness,
+    water: &[WaterBody],
+    frame: DeferredFrame,
+) -> Capture {
+    harness
+        .deferred
+        .set_frame(context, &harness.renderer, &[], water, frame)
+        .expect("upload frame uniforms");
+    harness.deferred.render(
+        context,
+        &harness.renderer,
+        &[],
+        water,
+        &harness.targets,
+        harness.output.colour_view(),
+    );
+    harness
+        .output
+        .resolve(context, encoder(context))
+        .expect("resolve composite")
+}
+
+/// Pixels that differ between two captures, as a fraction of the frame.
+fn fraction_differing(first: &Capture, second: &Capture) -> f32 {
+    assert_eq!(first.rgba().len(), second.rgba().len(), "size mismatch");
+    let differing = first
+        .rgba()
+        .chunks_exact(4)
+        .zip(second.rgba().chunks_exact(4))
+        .filter(|(a, b)| a != b)
+        .count();
+    differing as f32 / (first.width() * first.height()) as f32
+}
+
+/// Luminance spread over only those pixels where two captures differ, and how many there were.
+///
+/// The difference between a dry frame and a flooded one *is* a mask of the water, which is what makes
+/// this measurable: a spread taken over the whole frame would mostly report the terrain's own range,
+/// and the question here is whether the water surface itself varies.
+fn masked_luminance(dry: &Capture, wet: &Capture) -> (f32, f32, usize) {
+    let luminance = |pixel: &[u8]| {
+        (0.2126 * f32::from(pixel[0]) + 0.7152 * f32::from(pixel[1]) + 0.0722 * f32::from(pixel[2]))
+            / 255.0
+    };
+    let mut lowest = f32::MAX;
+    let mut highest = f32::MIN;
+    let mut counted = 0usize;
+    for (a, b) in dry.rgba().chunks_exact(4).zip(wet.rgba().chunks_exact(4)) {
+        if a == b {
+            continue;
+        }
+        let value = luminance(b);
+        lowest = lowest.min(value);
+        highest = highest.max(value);
+        counted += 1;
+    }
+    if counted == 0 {
+        return (0.0, 0.0, 0);
+    }
+    (lowest, highest, counted)
+}
+
+/// The basin fixture, its dry capture, and a water level between floor and rim.
+struct WaterScene {
+    harness: Harness,
+    dry: Capture,
+    level: f32,
+    frame: DeferredFrame,
+}
+
+fn water_scene(context: &GpuContext) -> WaterScene {
+    let harness = harness_for(context, basin_terrain());
+    let frame = DeferredFrame::new(pose(&harness.terrain), WIDTH, HEIGHT);
+    let dry = render_water(context, &harness, &[], frame);
+    let (floor, rim) = world_elevation_range(&harness.terrain);
+    // Just under halfway from floor to rim. Deep enough that the tint ramp reaches its far end near the
+    // middle and the lake covers a usable share of the frame, shallow enough to leave a broad margin of
+    // dry ground for the shoreline clip to be visible against.
+    let level = floor + (rim - floor) * 0.45;
+    WaterScene {
+        harness,
+        dry,
+        level,
+        frame,
+    }
+}
+
+fn water_body(context: &GpuContext, scene: &WaterScene, elevation: f32) -> Vec<WaterBody> {
+    vec![
+        WaterBody::new(
+            context,
+            lake(&scene.harness.terrain, elevation),
+            scene.harness.deferred.water_layout(),
+        )
+        .expect("build water body"),
+    ]
+}
+
+#[test]
+fn water_fills_the_basin_and_leaves_the_high_ground_dry() {
+    let Some(context) = context() else { return };
+    let scene = water_scene(context);
+    let water = water_body(context, &scene, scene.level);
+    let flooded = render_water(context, &scene.harness, &water, scene.frame);
+
+    write_capture("water-dry.png", &scene.dry);
+    write_capture("water-basin.png", &flooded);
+    // Pins the shoreline, the depth ramp, and the wave detail at a known scene time. The bounds below
+    // would accept a lake of the right size with entirely the wrong surface on it.
+    support::check_reference(context, "water-basin.png", &flooded);
+
+    let changed = fraction_differing(&scene.dry, &flooded);
+    // Both bounds matter and each catches a different fault. Too little means the surface never drew or
+    // was clipped away entirely; too much means the depth comparison is not clipping it at the shore
+    // and the whole rectangle was painted over the terrain.
+    assert!(
+        changed > 0.08,
+        "water covers only {:.1}% of the frame, so it barely drew",
+        changed * 100.0
+    );
+    assert!(
+        changed < 0.75,
+        "water covers {:.1}% of the frame, so the shore is not clipping it",
+        changed * 100.0
+    );
+}
+
+#[test]
+fn a_water_table_below_the_terrain_draws_nothing() {
+    // The clip test at its limit. Every fragment's bed sits above the surface, so every one has to be
+    // discarded, and the frame must come back byte-identical to the dry one rather than merely similar.
+    let Some(context) = context() else { return };
+    let scene = water_scene(context);
+    let (floor, _) = world_elevation_range(&scene.harness.terrain);
+    let water = water_body(context, &scene, floor - 25.0);
+    let flooded = render_water(context, &scene.harness, &water, scene.frame);
+    write_capture("water-below-terrain.png", &flooded);
+
+    assert_eq!(
+        scene.dry.rgba(),
+        flooded.rgba(),
+        "a table below the terrain must leave the frame untouched"
+    );
+}
+
+#[test]
+fn water_animates_with_scene_time_and_only_with_it() {
+    // What makes a reference capture of water safe. The surface has to move with the frame's time and
+    // with nothing else; if it read a clock instead, the first and third captures here would differ
+    // despite being taken at the same time, which is exactly what the last assertion rules out.
+    let Some(context) = context() else { return };
+    let scene = water_scene(context);
+    let water = water_body(context, &scene, scene.level);
+
+    let first = render_water(context, &scene.harness, &water, scene.frame.at_time(0.0));
+    let later = render_water(context, &scene.harness, &water, scene.frame.at_time(3.0));
+    let repeated = render_water(context, &scene.harness, &water, scene.frame.at_time(0.0));
+
+    write_capture("water-time-0.png", &first);
+    write_capture("water-time-3.png", &later);
+
+    let moved = fraction_differing(&first, &later);
+    assert!(
+        moved > 0.02,
+        "the surface changed over only {:.2}% of the frame between t=0 and t=3",
+        moved * 100.0
+    );
+    assert!(
+        moved < 0.75,
+        "advancing time changed {:.1}% of the frame, more than the water covers",
+        moved * 100.0
+    );
+    assert_eq!(
+        first.rgba(),
+        repeated.rgba(),
+        "one scene time must render one frame, or no capture can serve as a reference"
+    );
+}
+
+#[test]
+fn the_water_surface_varies_rather_than_reading_as_a_flat_sheet() {
+    // The fault this exists for is a shader that compiles, blends, and clips correctly while emitting
+    // one constant colour. Every assertion above still passes on that, and the image looks like a sheet
+    // of plastic laid over the basin.
+    let Some(context) = context() else { return };
+    let scene = water_scene(context);
+    let water = water_body(context, &scene, scene.level);
+    let flooded = render_water(context, &scene.harness, &water, scene.frame);
+
+    let (lowest, highest, counted) = masked_luminance(&scene.dry, &flooded);
+    assert!(counted > 1_000, "only {counted} water pixels to measure");
+    let spread = highest - lowest;
+    assert!(
+        spread > 0.10,
+        "the water spans only {spread:.3} in luminance across {counted} pixels, \
+         which is a flat sheet rather than a lit surface"
+    );
+}
+
+#[test]
+fn a_water_body_survives_the_chain_being_rebuilt() {
+    // What a window resize does. `SurfaceRenderer::resize` reallocates every target and builds a fresh
+    // `DeferredRenderer`, which creates a *new* water bind group layout — while the bodies the caller
+    // is holding were bound against the old one. That is only safe if layouts are compatible
+    // structurally rather than by identity, and the same exposure applies to every model batch, so it
+    // is worth pinning rather than assuming. No window is needed to find out.
+    let Some(context) = context() else { return };
+    let terrain = basin_terrain();
+    let renderer =
+        TerrainRenderer::new(context, &terrain, &palette()).expect("build terrain renderer");
+    let first_targets = DeferredTargets::new(context, WIDTH, HEIGHT).expect("first targets");
+    let first = DeferredRenderer::new(
+        context,
+        &renderer,
+        &first_targets,
+        cic_render::gpu::CAPTURE_FORMAT,
+    )
+    .expect("first deferred renderer");
+
+    let (floor, rim) = world_elevation_range(&terrain);
+    let water = vec![
+        WaterBody::new(
+            context,
+            lake(&terrain, floor + (rim - floor) * 0.45),
+            first.water_layout(),
+        )
+        .expect("build water body"),
+    ];
+
+    // The resize: new targets at a new size, and a renderer rebuilt against them.
+    let (wide, tall) = (WIDTH + 96, HEIGHT + 64);
+    let second_targets = DeferredTargets::new(context, wide, tall).expect("second targets");
+    let second = DeferredRenderer::new(
+        context,
+        &renderer,
+        &second_targets,
+        cic_render::gpu::CAPTURE_FORMAT,
+    )
+    .expect("second deferred renderer");
+    let output = CaptureTarget::new(context, wide, tall).expect("resized output");
+
+    let frame = DeferredFrame::new(pose(&terrain), wide, tall);
+    second
+        .set_frame(context, &renderer, &[], &water, frame)
+        .expect("upload frame uniforms");
+    second.render(
+        context,
+        &renderer,
+        &[],
+        &water,
+        &second_targets,
+        output.colour_view(),
+    );
+
+    // Validation errors surface asynchronously, so drain the queue before declaring success.
+    context
+        .device()
+        .poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: Some(std::time::Duration::from_secs(10)),
+        })
+        .expect("a body bound against the old layout must still draw after a rebuild");
+}
+
+#[test]
+fn a_sun_in_the_mirror_direction_puts_glitter_on_the_water() {
+    // Verifies the specular term reaches the *frame*, not merely that it exists in the shader. The
+    // gloss exponent was deliberately lowered from a mirror-like value so glitter would be visible at
+    // realistic wave slopes, and without an assertion that looks for the highlight there is no
+    // difference between that having worked and the term being dead code.
+    let Some(context) = context() else { return };
+    let scene = water_scene(context);
+    let water = water_body(context, &scene, scene.level);
+
+    // The camera sits south-east and above, so a surface normal of +Z bisects view and light exactly
+    // when the sun is placed north-west at the mirrored elevation. `light.direction` points from the
+    // surface *toward* the light, so this is the view direction with its horizontal part negated.
+    let mut glinting_frame = scene.frame;
+    glinting_frame.light.direction = [-0.45, 0.77, 0.43];
+
+    let dry_glinting = render_water(context, &scene.harness, &[], glinting_frame);
+    let glinting = render_water(context, &scene.harness, &water, glinting_frame);
+    write_capture("water-glitter.png", &glinting);
+    support::check_reference(context, "water-glitter.png", &glinting);
+
+    let (_, default_peak, _) = masked_luminance(&scene.dry, &{
+        render_water(context, &scene.harness, &water, scene.frame)
+    });
+    let (_, glinting_peak, counted) = masked_luminance(&dry_glinting, &glinting);
+
+    assert!(counted > 1_000, "only {counted} water pixels to measure");
+    assert!(
+        glinting_peak > default_peak + 0.15,
+        "the mirrored sun peaked at {glinting_peak:.3} against {default_peak:.3} under the default \
+         one, so the highlight is not reaching the frame"
     );
 }

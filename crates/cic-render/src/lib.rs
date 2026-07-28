@@ -10,6 +10,9 @@
 //!   space. See that module for why the writable-texture choice is load-bearing rather than incidental.
 //! - **Models** ([`model`]), instanced, with per-instance transform and tint and one draw call per
 //!   model however many materials it has.
+//! - **Water** ([`water`]), a bounded plane with procedural waves, blended into the scene before tone
+//!   mapping. Its shoreline comes from the depth buffer rather than from an authored outline, so a
+//!   rectangle plus a heightfield already produce an arbitrarily shaped shore.
 //! - **Colour texture arrays** ([`texture`]), which resample to a common slice size and generate their
 //!   mip chain on the CPU in linear light. Both terrain layers and model materials index into one.
 //! - **Headless rendering and capture** ([`gpu`]). Headless comes before any window, because a
@@ -29,14 +32,15 @@
 //!
 //! # What is next
 //!
-//! Water, multisampling, a real virtual-texture cache behind the residency bookkeeping, and the
-//! committed reference captures that close the milestone. See `docs/milestones/m3-renderer.md`.
+//! Antialiasing, a real virtual-texture cache behind the residency bookkeeping, and the committed
+//! reference captures that close the milestone. See `docs/milestones/m3-renderer.md`.
 
 pub mod deferred;
 pub mod detail;
 pub mod gpu;
 pub mod model;
 pub mod presentation;
+pub mod regression;
 pub mod resource;
 pub mod scene;
 pub mod shadow;
@@ -44,6 +48,7 @@ pub mod terrain;
 pub mod terrain_virtual;
 pub mod texture;
 pub mod view;
+pub mod water;
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -52,12 +57,14 @@ pub use deferred::{DeferredFrame, DeferredRenderer, DeferredTargets};
 pub use gpu::{Capture, CaptureTarget, GpuContext};
 pub use model::{ModelBatch, ModelInstance};
 pub use presentation::{Action, InputState, SurfaceRenderer, TerrainGround};
+pub use regression::{Comparison, Tolerance};
 pub use resource::{TextureId, TextureResourceManager};
 pub use scene::{TerrainFrame, capture_terrain, render_terrain_into};
 pub use shadow::{CASCADE_COUNT, Cascade, fit_cascades};
 pub use terrain::{DirectionalLight, LayerColour, LayerMaterial, TerrainRenderer};
 pub use texture::{TextureArray, TextureImage};
 pub use view::{Projection, view_projection};
+pub use water::{WaterBody, WaterMaterial, WaterSurface};
 
 /// Every WGSL shader in the set, as `(name, source)`.
 ///
@@ -120,6 +127,9 @@ pub enum RenderError {
     SurfaceLost(String),
     /// The surface reported no format this renderer can present to.
     NoSurfaceFormat,
+    /// A water body's rectangle was empty or inverted, or one of its material figures was
+    /// non-finite, non-positive, or outside its range.
+    InvalidWater,
     /// A model had no geometry to upload.
     EmptyModel,
     /// A model vertex, index, or instance count exceeded the addressable range.
@@ -128,6 +138,15 @@ pub enum RenderError {
     CaptureTooLarge,
     /// Encoding a capture as a PNG failed.
     EncodePng(String),
+    /// A reference image was not a readable 8-bit RGBA PNG.
+    DecodePng(String),
+    /// A reference image was rendered at a different size than the capture compared against it.
+    ReferenceSizeMismatch {
+        /// The reference's dimensions.
+        reference: [u32; 2],
+        /// The capture's dimensions.
+        capture: [u32; 2],
+    },
     /// A terrain declared more layers than the forward pass blends.
     TooManyLayers {
         /// Layers the terrain declared.
@@ -185,6 +204,8 @@ impl Display for RenderError {
             Self::NoSurfaceFormat => {
                 formatter.write_str("the surface offers no format this renderer can present to")
             }
+            Self::InvalidWater => formatter
+                .write_str("the water body's rectangle or one of its material figures is invalid"),
             Self::EmptyModel => formatter.write_str("the model has no geometry"),
             Self::ModelTooLarge => {
                 formatter.write_str("the model exceeds the addressable vertex range")
@@ -193,6 +214,14 @@ impl Display for RenderError {
                 formatter.write_str("capture size exceeds the renderer's explicit bounds")
             }
             Self::EncodePng(message) => write!(formatter, "encoding a PNG failed: {message}"),
+            Self::DecodePng(message) => {
+                write!(formatter, "decoding a reference PNG failed: {message}")
+            }
+            Self::ReferenceSizeMismatch { reference, capture } => write!(
+                formatter,
+                "the reference is {reference:?} but the capture is {capture:?}, \
+                 so the two cannot be compared"
+            ),
             Self::TooManyLayers { actual, maximum } => write!(
                 formatter,
                 "terrain declares {actual} layers, but the forward pass blends at most {maximum}"
