@@ -1,9 +1,9 @@
-//! Reference-image checking, shared by every rendering test binary.
+//! The shared GPU device and reference-image checking, for every rendering test binary.
 //!
-//! Deliberately exactly one public function rather than a set of helpers. Each integration test target
-//! compiles this module separately, so anything not used by *all* of them would warn as dead code, and
-//! CI denies warnings — a `#[allow]` covering that up would also hide a helper that had genuinely
-//! stopped being used.
+//! Two public functions, both used by all three targets. Each integration test target compiles this
+//! module separately, so anything not used by *all* of them would warn as dead code, and CI denies
+//! warnings — a `#[allow]` covering that up would also hide a helper that had genuinely stopped being
+//! used.
 //!
 //! The comparison itself lives in `cic_render::regression`, which takes bytes rather than paths because
 //! nothing above the resource layer opens a file. The file handling is here, in the tests, where it
@@ -20,6 +20,52 @@ use cic_render::regression::{self, Tolerance};
 /// case the new images are reviewed and committed deliberately — or it is a regression, and there is no
 /// third case that should quietly overwrite the evidence.
 const UPDATE_VARIABLE: &str = "CIC_UPDATE_REFERENCES";
+
+/// Set this where an adapter is *expected*, so its absence fails the run instead of skipping it.
+///
+/// A skipped rendering test and a passing one are the same colour, which is fine on a developer machine
+/// with no GPU and actively misleading in CI. Without this, installing a software rasteriser on the
+/// runner and forgetting to make it *usable* would leave every render test skipping and the job green —
+/// indistinguishable from the state before the rasteriser was installed, and the harness would protect
+/// nothing while appearing to. CI sets this, so a runner that loses its adapter fails loudly.
+const REQUIRE_VARIABLE: &str = "CIC_REQUIRE_ADAPTER";
+
+/// Builds the device a rendering test binary shares, or explains why there is none.
+///
+/// One implementation rather than three identical copies, because the requirement check below has to
+/// hold for every target — a guard present in two binaries out of three is not a guard.
+///
+/// # Panics
+///
+/// Panics when no adapter can be had and [`REQUIRE_VARIABLE`] is set.
+pub fn shared_context() -> Option<GpuContext> {
+    match pollster::block_on(GpuContext::new()) {
+        Ok(context) => {
+            let information = context.adapter_info();
+            // The adapter name and backend decide which reference set this run compares against, so
+            // printing them is what makes a "no reference existed" failure diagnosable from a CI log
+            // alone. `--nocapture` is not needed: a run that fails prints it.
+            eprintln!(
+                "adapter: {} ({:?}), reference set {}",
+                information.name,
+                information.backend,
+                regression::adapter_slug(information.backend, &information.name)
+            );
+            Some(context)
+        }
+        Err(error) => {
+            assert!(
+                std::env::var_os(REQUIRE_VARIABLE).is_none(),
+                "no usable GPU adapter ({error}), and {REQUIRE_VARIABLE} is set. \
+                 Every rendering test would have skipped and the run would have passed \
+                 without drawing anything. On a CI runner this means the software rasteriser \
+                 is missing or the loader cannot see it."
+            );
+            eprintln!("skipping: no usable adapter ({error})");
+            None
+        }
+    }
+}
 
 /// Compares a capture against its committed reference for the current adapter.
 ///

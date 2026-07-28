@@ -33,18 +33,7 @@ const SPACING: f32 = 8.0;
 static CONTEXT: OnceLock<Option<GpuContext>> = OnceLock::new();
 
 fn context() -> Option<&'static GpuContext> {
-    CONTEXT
-        .get_or_init(|| match pollster::block_on(GpuContext::new()) {
-            Ok(context) => {
-                eprintln!("adapter: {}", context.adapter_info().name);
-                Some(context)
-            }
-            Err(error) => {
-                eprintln!("skipping: no usable adapter ({error})");
-                None
-            }
-        })
-        .as_ref()
+    CONTEXT.get_or_init(support::shared_context).as_ref()
 }
 
 /// Flat ground, so anything visible above it is a model and any shadow on it is cast by one.

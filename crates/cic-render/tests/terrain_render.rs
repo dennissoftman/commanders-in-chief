@@ -5,7 +5,8 @@
 //! assertions here are a tripwire and the PNGs are the actual verification.
 //!
 //! Every test skips rather than fails when no adapter is available, because a machine with no GPU
-//! and no software rasteriser cannot say anything about rendering either way.
+//! and no software rasteriser cannot say anything about rendering either way — unless
+//! `CIC_REQUIRE_ADAPTER` is set, which CI does, because there a skip is a silent loss of coverage.
 
 // The fixture generators convert small bounded integers to `f32` and clamped `f32` back to `u16`.
 // Sample counts here are 129 and elevations are clamped to the `u16` range before conversion, so
@@ -48,18 +49,7 @@ const VERTICAL: f32 = 0.5;
 static CONTEXT: OnceLock<Option<GpuContext>> = OnceLock::new();
 
 fn context() -> Option<&'static GpuContext> {
-    CONTEXT
-        .get_or_init(|| match pollster::block_on(GpuContext::new()) {
-            Ok(context) => {
-                eprintln!("adapter: {}", context.adapter_info().name);
-                Some(context)
-            }
-            Err(error) => {
-                eprintln!("skipping: no usable adapter ({error})");
-                None
-            }
-        })
-        .as_ref()
+    CONTEXT.get_or_init(support::shared_context).as_ref()
 }
 
 /// Builds a terrain with a diagonal ridge, two hills, and broad low undulation.
