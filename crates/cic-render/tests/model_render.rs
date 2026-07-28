@@ -285,14 +285,15 @@ struct Harness {
 fn harness(context: &GpuContext) -> Harness {
     let terrain = flat_terrain();
     let renderer = TerrainRenderer::new(context, &terrain, &[]).expect("terrain renderer");
-    let targets = DeferredTargets::new(context, WIDTH, HEIGHT).expect("targets");
-    let deferred = DeferredRenderer::new(
+    let targets = DeferredTargets::new(
         context,
-        &renderer,
-        &targets,
+        WIDTH,
+        HEIGHT,
         cic_render::gpu::CAPTURE_FORMAT,
+        cic_render::DisplaySettings::NATIVE,
     )
-    .expect("deferred renderer");
+    .expect("targets");
+    let deferred = DeferredRenderer::new(context, &renderer, &targets).expect("deferred renderer");
     let output = CaptureTarget::new(context, WIDTH, HEIGHT).expect("output");
     Harness {
         terrain,

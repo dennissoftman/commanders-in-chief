@@ -16,6 +16,7 @@ use cic_camera::{CameraIntent, GroundHeight};
 
 use crate::RenderError;
 use crate::deferred::{DeferredFrame, DeferredRenderer, DeferredTargets};
+use crate::display::DisplaySettings;
 use crate::model::ModelBatch;
 use crate::terrain::TerrainRenderer;
 use crate::water::WaterBody;
@@ -40,6 +41,7 @@ pub struct SurfaceRenderer {
     configuration: wgpu::SurfaceConfiguration,
     targets: DeferredTargets,
     deferred: DeferredRenderer,
+    display: DisplaySettings,
 }
 
 impl SurfaceRenderer {
@@ -55,6 +57,7 @@ impl SurfaceRenderer {
         surface: wgpu::Surface<'static>,
         width: u32,
         height: u32,
+        display: DisplaySettings,
     ) -> Result<Self, RenderError> {
         let capabilities = surface.get_capabilities(context.adapter());
         let format = choose_format(&capabilities.formats).ok_or(RenderError::NoSurfaceFormat)?;
@@ -81,13 +84,20 @@ impl SurfaceRenderer {
         };
         surface.configure(context.device(), &configuration);
 
-        let targets = DeferredTargets::new(context, configuration.width, configuration.height)?;
-        let deferred = DeferredRenderer::new(context, terrain, &targets, format)?;
+        let targets = DeferredTargets::new(
+            context,
+            configuration.width,
+            configuration.height,
+            format,
+            display,
+        )?;
+        let deferred = DeferredRenderer::new(context, terrain, &targets)?;
         Ok(Self {
             surface,
             configuration,
             targets,
             deferred,
+            display,
         })
     }
 
@@ -109,10 +119,60 @@ impl SurfaceRenderer {
         self.deferred.water_layout()
     }
 
-    /// Returns the format the composite writes.
+    /// Returns the format the last pass writes.
     #[must_use]
     pub const fn format(&self) -> wgpu::TextureFormat {
         self.configuration.format
+    }
+
+    /// Returns the display settings in force.
+    #[must_use]
+    pub const fn display(&self) -> DisplaySettings {
+        self.display
+    }
+
+    /// Returns the size the chain renders at, which the resolution scale multiplies.
+    #[must_use]
+    pub const fn render_size(&self) -> (u32, u32) {
+        self.targets.render_size()
+    }
+
+    /// Applies new display settings, rebuilding the chain.
+    ///
+    /// A rebuild rather than a flag, because the resolution scale decides how large every intermediate
+    /// target is: changing it reallocates them, which invalidates every bind group holding a view of one.
+    /// Antialiasing alone could in principle be toggled without this, and is not, so that both halves of
+    /// one settings screen apply the same way — and applying them together is what M4's charter requires
+    /// of a settings screen anyway.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured error when the new targets cannot be allocated.
+    pub fn set_display(
+        &mut self,
+        context: &crate::GpuContext,
+        terrain: &TerrainRenderer,
+        display: DisplaySettings,
+    ) -> Result<(), RenderError> {
+        self.display = display;
+        self.rebuild(context, terrain)
+    }
+
+    /// Reallocates every target for the current size and settings, and rebuilds the chain against them.
+    fn rebuild(
+        &mut self,
+        context: &crate::GpuContext,
+        terrain: &TerrainRenderer,
+    ) -> Result<(), RenderError> {
+        self.targets = DeferredTargets::new(
+            context,
+            self.configuration.width,
+            self.configuration.height,
+            self.configuration.format,
+            self.display,
+        )?;
+        self.deferred = DeferredRenderer::new(context, terrain, &self.targets)?;
+        Ok(())
     }
 
     /// Resizes the surface and everything sized to it.
@@ -144,10 +204,7 @@ impl SurfaceRenderer {
         self.configuration.height = height;
         self.surface
             .configure(context.device(), &self.configuration);
-        self.targets = DeferredTargets::new(context, width, height)?;
-        self.deferred =
-            DeferredRenderer::new(context, terrain, &self.targets, self.configuration.format)?;
-        Ok(())
+        self.rebuild(context, terrain)
     }
 
     /// Renders one frame and presents it.
@@ -162,7 +219,7 @@ impl SurfaceRenderer {
         terrain: &TerrainRenderer,
         models: &[ModelBatch],
         water: &[WaterBody],
-        mut frame: DeferredFrame,
+        frame: DeferredFrame,
     ) -> Result<(), RenderError> {
         // Every non-success case here is a "skip this frame" rather than an error. A resize, a
         // minimise, or a compositor hiccup all land in one of them, and treating any as fatal would
@@ -196,10 +253,10 @@ impl SurfaceRenderer {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        // The surface is authoritative about its own size, so its configuration wins over whatever the
-        // caller put on the frame. A stale viewport here — one frame behind a resize, say — would
-        // misplace every world position the lighting pass reconstructs.
-        frame.viewport = [self.configuration.width, self.configuration.height];
+        // No viewport is forced onto the frame any more: the chain takes both its sizes from the targets
+        // it was built against, which are reallocated by `resize` from this very configuration. A frame
+        // one resize behind can no longer misplace the world positions the lighting pass reconstructs,
+        // because it never carried the figure that did it. See `DeferredFrame`.
         self.deferred
             .set_frame(context, terrain, models, water, frame)?;
         self.deferred

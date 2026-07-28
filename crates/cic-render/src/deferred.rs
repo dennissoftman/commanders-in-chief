@@ -15,21 +15,36 @@
 //! 4. ao blur        bilateral, so occlusion does not bleed across creases
 //! 5. lighting       reconstruct world position from depth, apply light with shadow and AO -> HDR
 //! 6. water          procedural waves, blended into the HDR target
-//! 7. composite      tone map and sharpen -> the caller's target
+//! 7. composite      tone map, downsample and sharpen -> the caller's target
+//! 8. antialias      luma edge-directed blend -> the caller's target, when enabled
 //! ```
 //!
 //! Water sits *inside* the HDR target rather than being composited over the finished image, so its
 //! glitter tone maps with everything else. Over the composite it would clip to white instead of
 //! rolling off, which is the whole reason the accumulation target has range above one.
 //!
+//! # Two sizes, not one
+//!
+//! Passes 1 to 6 run at the *render* resolution, which is the output resolution times
+//! [`DisplaySettings::resolution_scale`]. Passes 7 and 8 run at the output resolution; the composite's
+//! filtered read of the HDR target is the downsample between them. Both sizes reach the shaders in the
+//! scene uniform — `viewport` and `output` — and both are taken from [`DeferredTargets`], which is the
+//! one place they are decided.
+//!
+//! Pass 8 exists only when antialiasing is enabled, and when it does the composite writes into an LDR
+//! intermediate for it to read instead of into the caller's target. With antialiasing off there is no
+//! intermediate and no extra pass, so the default path costs exactly what it did before either setting
+//! existed.
+//!
 //! The G-buffer stores no world position. It is reconstructed from depth in step 5, for the reason
-//! documented at `world_from_depth` in `terrain_deferred.wgsl`: a half-float position target
+//! documented at `world_from_depth` in `scene.wgsl`: a half-float position target
 //! quantises to whole world units past 1024, which striped self-shadowing across the whole terrain in
 //! a way no bias setting could reach.
 
 use cic_camera::CameraPose;
 
 use crate::RenderError;
+use crate::display::DisplaySettings;
 use crate::environment::Environment;
 use crate::gpu::{DEPTH_FORMAT, GpuContext};
 use crate::model::{ModelBatch, buffer_layouts};
@@ -57,10 +72,11 @@ pub const AO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
 /// Lighting accumulates before tone mapping, so it needs range above one.
 pub const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
-/// Byte size of the `SceneCamera` uniform block: two matrices, two vectors, three lights, and the five
+/// Byte size of the `SceneCamera` uniform block: two matrices, two vectors, three lights, the five
 /// atmosphere vectors — fog colour and density, fog falloff, cloud parameters, cloud drift, and the
-/// surface weather the lighting pass applies to the G-buffer.
-const SCENE_UNIFORM_BYTES: usize = 64 + 64 + 16 + 16 + 3 * 48 + 5 * 16;
+/// surface weather the lighting pass applies to the G-buffer — and the output size the composite
+/// resolves to.
+const SCENE_UNIFORM_BYTES: usize = 64 + 64 + 16 + 16 + 3 * 48 + 5 * 16 + 16;
 
 /// Byte size of the `ShadowCamera` uniform block: a matrix and a parameter vector per cascade.
 const SHADOW_UNIFORM_BYTES: usize = CASCADE_COUNT * (64 + 16);
@@ -76,6 +92,19 @@ const CASCADE_UNIFORM_BYTES: usize = 64;
 pub const DEFAULT_SHADOW_DISTANCE: f32 = 1_600.0;
 
 /// Everything one deferred frame needs.
+///
+/// # Why there is no viewport here
+///
+/// There was, and it was a hazard. The size the shaders reconstruct world positions against is a
+/// property of the *targets* — they are the textures being loaded from — so taking it from the frame
+/// meant two sources for one number with nothing checking they agreed. A frame one resize behind the
+/// surface then moved every receiver and read as a shadowing fault rather than as a wrong figure, which
+/// is why [`crate::presentation::SurfaceRenderer::render`] used to overwrite the caller's value.
+///
+/// [`DeferredRenderer`] now takes both the render and the output size from the [`DeferredTargets`] it
+/// was built against, so the disagreement is not expressible. A size still reaches
+/// [`DeferredFrame::new`], because a projection needs an aspect ratio — but that is all it is used for,
+/// and a wrong one distorts the image rather than silently relocating the scene.
 #[derive(Debug, Clone, Copy)]
 pub struct DeferredFrame {
     /// Where the camera is.
@@ -86,14 +115,6 @@ pub struct DeferredFrame {
     pub light: DirectionalLight,
     /// How far shadows are cast.
     pub shadow_distance: f32,
-    /// Viewport size in pixels.
-    ///
-    /// Carried on the frame rather than passed separately to [`DeferredRenderer::set_frame`], because
-    /// it was previously supplied twice — once to build the projection and once to fill the shaders'
-    /// viewport uniform — and nothing checked that the two agreed. They must: the lighting pass
-    /// reconstructs a world position using the viewport's reciprocal, so a disagreement moves every
-    /// receiver and reads as a shadowing fault rather than as a wrong number.
-    pub viewport: [u32; 2],
     /// The air and the weather: fog, cloud shadows, and what the time of day implies.
     ///
     /// Defaults to a clear, fogless, cloudless environment, which is exactly the frame this renderer
@@ -112,8 +133,11 @@ pub struct DeferredFrame {
 }
 
 impl DeferredFrame {
-    /// Builds a frame from a pose and viewport, with the default light and shadow distance, at time
-    /// zero.
+    /// Builds a frame from a pose and an output size, with the default light and shadow distance, at
+    /// time zero.
+    ///
+    /// The size is the caller's target, not the render resolution: it feeds the projection's aspect
+    /// ratio, which a resolution scale does not change.
     #[must_use]
     pub fn new(pose: CameraPose, width: u32, height: u32) -> Self {
         let environment = Environment::default();
@@ -127,7 +151,6 @@ impl DeferredFrame {
             light: environment.sun_light(),
             shadow_distance: DEFAULT_SHADOW_DISTANCE,
             environment,
-            viewport: [width, height],
             time: 0.0,
         }
     }
@@ -154,7 +177,13 @@ impl DeferredFrame {
     }
 }
 
-/// Every render target the chain writes.
+/// Every render target the chain writes, and the two sizes it writes them at.
+///
+/// This type is the single source of truth for both. Every screen-space target from the G-buffer to the
+/// HDR accumulation is allocated at the *render* size; the LDR intermediate, when there is one, is
+/// allocated at the *output* size, because the antialias pass that reads it works on final pixels. A
+/// [`DeferredRenderer`] takes its uniform sizes and its output format from here rather than from its own
+/// parameters, so a renderer and the targets it draws into cannot disagree about either.
 #[derive(Debug)]
 pub struct DeferredTargets {
     albedo: wgpu::TextureView,
@@ -166,22 +195,41 @@ pub struct DeferredTargets {
     ao_raw: wgpu::TextureView,
     ao_blurred: wgpu::TextureView,
     hdr: wgpu::TextureView,
-    width: u32,
-    height: u32,
+    /// The tone-mapped image, at output size and in the output format, when a pass reads it.
+    ///
+    /// `None` with antialiasing off, and then the composite writes into the caller's target directly.
+    /// Allocating it regardless would cost a full-resolution texture for a pass that never runs.
+    ldr: Option<wgpu::TextureView>,
+    render: [u32; 2],
+    output: [u32; 2],
+    output_format: wgpu::TextureFormat,
+    display: DisplaySettings,
 }
 
 impl DeferredTargets {
-    /// Allocates every intermediate target for a viewport.
+    /// Allocates every intermediate target for an output size, at the display settings' render scale.
+    ///
+    /// `output_format` is what the last pass writes into — a capture target, or a surface's own format,
+    /// which is commonly BGRA rather than RGBA. It is taken here rather than at
+    /// [`DeferredRenderer::new`] because the LDR intermediate has to be allocated in it: an antialias
+    /// pass writing to the caller's target has to read something the composite could write.
     ///
     /// # Errors
     ///
     /// Returns [`RenderError::EmptyCapture`] for a zero dimension.
-    pub fn new(context: &GpuContext, width: u32, height: u32) -> Result<Self, RenderError> {
+    pub fn new(
+        context: &GpuContext,
+        width: u32,
+        height: u32,
+        output_format: wgpu::TextureFormat,
+        display: DisplaySettings,
+    ) -> Result<Self, RenderError> {
         if width == 0 || height == 0 {
             return Err(RenderError::EmptyCapture);
         }
+        let (render_width, render_height) = display.render_size(width, height);
         let device = context.device();
-        let screen = |label: &str, format: wgpu::TextureFormat| {
+        let sized = |label: &str, format: wgpu::TextureFormat, width: u32, height: u32| {
             device
                 .create_texture(&wgpu::TextureDescriptor {
                     label: Some(label),
@@ -199,6 +247,9 @@ impl DeferredTargets {
                     view_formats: &[],
                 })
                 .create_view(&wgpu::TextureViewDescriptor::default())
+        };
+        let screen = |label: &str, format: wgpu::TextureFormat| {
+            sized(label, format, render_width, render_height)
         };
 
         let shadow = device.create_texture(&wgpu::TextureDescriptor {
@@ -245,15 +296,40 @@ impl DeferredTargets {
             ao_raw: screen("cic-render ao raw", AO_FORMAT),
             ao_blurred: screen("cic-render ao blurred", AO_FORMAT),
             hdr: screen("cic-render hdr scene", HDR_FORMAT),
-            width,
-            height,
+            // At output size, not render size: the composite has already downsampled by the time this
+            // is written, so the antialias pass reading it measures edges in pixels the viewer sees.
+            ldr: display
+                .needs_resolve_target()
+                .then(|| sized("cic-render tone mapped", output_format, width, height)),
+            render: [render_width, render_height],
+            output: [width, height],
+            output_format,
+            display,
         })
     }
 
-    /// Returns the viewport these targets were sized for.
+    /// Returns the size every pass from the G-buffer to the HDR accumulation is allocated at.
     #[must_use]
-    pub const fn size(&self) -> (u32, u32) {
-        (self.width, self.height)
+    pub const fn render_size(&self) -> (u32, u32) {
+        (self.render[0], self.render[1])
+    }
+
+    /// Returns the size of the caller's target, which the composite resolves to.
+    #[must_use]
+    pub const fn output_size(&self) -> (u32, u32) {
+        (self.output[0], self.output[1])
+    }
+
+    /// Returns the format the last pass writes.
+    #[must_use]
+    pub const fn output_format(&self) -> wgpu::TextureFormat {
+        self.output_format
+    }
+
+    /// Returns the settings these targets were allocated for.
+    #[must_use]
+    pub const fn display(&self) -> DisplaySettings {
+        self.display
     }
 }
 
@@ -269,19 +345,25 @@ pub struct DeferredRenderer {
     water_layout: wgpu::BindGroupLayout,
     ao: AoStage,
     lighting: LightingStage,
+    /// The antialias resolve, present only when the settings asked for one.
+    antialias: Option<AntialiasStage>,
     scene_uniform: wgpu::Buffer,
     shadow_uniform: wgpu::Buffer,
     cascade_uniforms: Vec<wgpu::Buffer>,
     cascade_groups: Vec<wgpu::BindGroup>,
+    /// Copied from the targets this was built against. See [`DeferredFrame`] for why the frame does not
+    /// carry them.
+    render: [u32; 2],
+    output: [u32; 2],
 }
 
 impl DeferredRenderer {
     /// Builds every pipeline and bind group for one terrain and target set.
     ///
-    /// `output_format` is the format of whatever the composite writes into — a capture target, or a
-    /// surface's own format, which is commonly BGRA rather than RGBA. A pipeline built for the wrong
-    /// one fails at creation rather than rendering something subtly wrong, which is why it is a
-    /// parameter and not a constant.
+    /// The output format comes from `targets` rather than from a parameter of its own. A pipeline built
+    /// for the wrong format fails at creation rather than rendering something subtly wrong — which was
+    /// the argument for passing it explicitly — but the LDR intermediate has to be *allocated* in that
+    /// format too, so the two were bound to agree and nothing checked that they did.
     ///
     /// # Errors
     ///
@@ -291,8 +373,8 @@ impl DeferredRenderer {
         context: &GpuContext,
         terrain: &TerrainRenderer,
         targets: &DeferredTargets,
-        output_format: wgpu::TextureFormat,
     ) -> Result<Self, RenderError> {
+        let output_format = targets.output_format;
         let device = context.device();
         let scene_uniform = uniform_buffer(device, "cic-render scene camera", SCENE_UNIFORM_BYTES);
         let shadow_uniform =
@@ -315,7 +397,7 @@ impl DeferredRenderer {
         // pass binds that very group: it needs the camera, the fitted cascades, the shadow array, and
         // the scene depth, all of which are already declared there. Building a second identical layout
         // for it would be two declarations to keep in step by hand.
-        let (lighting, lighting_layout) = build_lighting(
+        let (lighting, lighting_layout, resolved_layout) = build_lighting(
             device,
             targets,
             &scene_uniform,
@@ -324,6 +406,18 @@ impl DeferredRenderer {
             &composite_shader,
             output_format,
         );
+        // Built only when there is a target for the composite to write into, which is the same condition
+        // that allocated one. Both come from the settings the targets carry, so the pass and the texture
+        // it reads exist or not together rather than by two independent decisions.
+        let antialias = targets.ldr.as_ref().map(|ldr| {
+            build_antialias(
+                device,
+                ldr,
+                &lighting_layout,
+                &resolved_layout,
+                output_format,
+            )
+        });
 
         Ok(Self {
             shadow_pipeline: build_shadow_pipeline(
@@ -359,10 +453,13 @@ impl DeferredRenderer {
             water_layout,
             ao: build_ao(device, targets, &scene_uniform, &ao_shader),
             lighting,
+            antialias,
             scene_uniform,
             shadow_uniform,
             cascade_uniforms,
             cascade_groups,
+            render: targets.render,
+            output: targets.output,
         })
     }
 
@@ -424,7 +521,7 @@ impl DeferredRenderer {
         queue.write_buffer(
             &self.scene_uniform,
             0,
-            &scene_bytes(&view_projection, &inverse, frame),
+            &scene_bytes(&view_projection, &inverse, frame, self.render, self.output),
         );
 
         let mut shadow = Vec::with_capacity(SHADOW_UNIFORM_BYTES);
@@ -576,44 +673,71 @@ impl DeferredRenderer {
             }
         }
 
-        // 7. Tone map and sharpen into the output.
+        // 7 and 8. Tone map, downsample, sharpen, and optionally antialias.
+        self.record_resolve(&mut encoder, targets, output);
+
+        context.queue().submit([encoder.finish()]);
+    }
+
+    /// Records the two passes that turn the HDR scene into the caller's image.
+    ///
+    /// Separate from [`Self::render`] because it is the half of the chain that works in *output* pixels
+    /// rather than render pixels — everything above it is sized to the G-buffer.
+    fn record_resolve(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        targets: &DeferredTargets,
+        output: &wgpu::TextureView,
+    ) {
+        // The composite goes straight into the caller's target when nothing follows it, and into the LDR
+        // intermediate when the antialias pass does. Paired rather than checked separately: the stage and
+        // the target it reads were decided by the same settings, and taking them together means a
+        // half-configured chain draws the frame without the resolve rather than skipping the composite
+        // or panicking.
+        let resolve = self.antialias.as_ref().zip(targets.ldr.as_ref());
+        let composite_target = match resolve {
+            Some((_, ldr)) => ldr,
+            None => output,
+        };
         fullscreen_pass(
-            &mut encoder,
+            encoder,
             "cic-render composite",
-            output,
+            composite_target,
             &self.lighting.composite_pipeline,
             &[&self.lighting.group, &self.lighting.composite_group],
         );
 
-        context.queue().submit([encoder.finish()]);
+        if let Some((antialias, _)) = resolve {
+            fullscreen_pass(
+                encoder,
+                "cic-render antialias",
+                output,
+                &antialias.pipeline,
+                &[&self.lighting.group, &antialias.group],
+            );
+        }
     }
 }
 
 /// Packs the `SceneCamera` uniform block.
+///
+/// `render` is the size the scene passes run at and `output` the size of the caller's target; they are
+/// equal at a resolution scale of one. Both come from the targets, which is what stops them disagreeing
+/// with the textures they describe.
 fn scene_bytes(
     view_projection: &[[f32; 4]; 4],
     inverse: &[[f32; 4]; 4],
     frame: DeferredFrame,
+    render: [u32; 2],
+    output: [u32; 2],
 ) -> Vec<u8> {
-    let [width, height] = frame.viewport;
     let mut scene = Vec::with_capacity(SCENE_UNIFORM_BYTES);
     push_matrix(&mut scene, view_projection);
     push_matrix(&mut scene, inverse);
     let [ex, ey, ez] = frame.pose.eye;
     push_vec4(&mut scene, [ex, ey, ez, 0.0]);
-    // Both the viewport and its reciprocal, so the shaders never divide per pixel. Dimensions are
-    // bounded by the capture limits, far inside exact f32 range.
-    #[allow(clippy::cast_precision_loss)]
-    let (viewport_x, viewport_y) = (width as f32, height as f32);
-    push_vec4(
-        &mut scene,
-        [
-            viewport_x,
-            viewport_y,
-            1.0 / viewport_x.max(1.0),
-            1.0 / viewport_y.max(1.0),
-        ],
-    );
+    // Both sizes and their reciprocals, so the shaders never divide per pixel.
+    push_vec4(&mut scene, size_and_reciprocal(render));
     // Slot 0 is the primary and the only shadowed light. The two fill slots are zeroed: the shader
     // skips a zero-length direction, and leaving them empty is what makes shadow contrast achievable,
     // since every fill would contribute unoccluded ambient that shade cannot remove.
@@ -671,9 +795,24 @@ fn scene_bytes(
         ],
     );
     push_vec4(&mut scene, [weather.wetness, weather.snow, 0.0, 0.0]);
+    // Last in the block, and it has to stay last: `terrain_ao.wgsl` binds this same buffer through a
+    // struct declaring only the fields it reads, which holds exactly as long as that declaration is a
+    // prefix of this one.
+    push_vec4(&mut scene, size_and_reciprocal(output));
 
     debug_assert_eq!(scene.len(), SCENE_UNIFORM_BYTES, "scene uniform drifted");
     scene
+}
+
+/// Packs a pixel size as `[width, height, 1 / width, 1 / height]`.
+///
+/// Dimensions are bounded by [`crate::display::MAX_RENDER_DIMENSION`], far inside the range `f32`
+/// represents exactly, and the reciprocal is taken against a floor of one so a zero cannot produce an
+/// infinity the shaders would multiply every coordinate by.
+#[allow(clippy::cast_precision_loss)]
+fn size_and_reciprocal(size: [u32; 2]) -> [f32; 4] {
+    let (width, height) = (size[0] as f32, size[1] as f32);
+    [width, height, 1.0 / width.max(1.0), 1.0 / height.max(1.0)]
 }
 
 /// The clear sky's horizon colour, matching `SKY_HORIZON` in `atmosphere.wgsl`.
@@ -1005,10 +1144,12 @@ struct LightingStage {
     composite_group: wgpu::BindGroup,
 }
 
-/// Builds the lighting and composite stage, returning its bind group layout as well.
+/// Builds the lighting and composite stage, returning both of its bind group layouts as well.
 ///
-/// The layout is returned because the water pass binds this same group and would otherwise need an
-/// identical second declaration.
+/// The lighting layout is returned because the water pass binds that very group and would otherwise need
+/// an identical second declaration. The composite layout is returned because the antialias pass wants
+/// exactly the same shape — one sampled colour texture and one filtering sampler — and reusing it is one
+/// declaration instead of two that must not drift.
 fn build_lighting(
     device: &wgpu::Device,
     targets: &DeferredTargets,
@@ -1017,7 +1158,7 @@ fn build_lighting(
     lighting_shader: &wgpu::ShaderModule,
     composite_shader: &wgpu::ShaderModule,
     output_format: wgpu::TextureFormat,
-) -> (LightingStage, wgpu::BindGroupLayout) {
+) -> (LightingStage, wgpu::BindGroupLayout, wgpu::BindGroupLayout) {
     let comparison_sampler = build_shadow_sampler(device);
     let scene_sampler = build_scene_sampler(device);
 
@@ -1115,7 +1256,50 @@ fn build_lighting(
         group,
         composite_group,
     };
-    (stage, layout)
+    (stage, layout, composite_layout)
+}
+
+/// The antialias resolve: one fullscreen pass over the tone-mapped image.
+#[derive(Debug)]
+struct AntialiasStage {
+    pipeline: wgpu::RenderPipeline,
+    group: wgpu::BindGroup,
+}
+
+/// Builds the antialias pass against the LDR intermediate it reads.
+///
+/// Group 0 is the lighting group, as the composite's is, purely for the scene uniform: the pass needs the
+/// output size to step by one pixel and nothing else from it. Group 1 reuses the composite's layout, with
+/// the tone-mapped image bound where the HDR target is bound there.
+fn build_antialias(
+    device: &wgpu::Device,
+    ldr: &wgpu::TextureView,
+    lighting_layout: &wgpu::BindGroupLayout,
+    resolved_layout: &wgpu::BindGroupLayout,
+    output_format: wgpu::TextureFormat,
+) -> AntialiasStage {
+    let sampler = build_scene_sampler(device);
+    AntialiasStage {
+        pipeline: fullscreen_pipeline(
+            device,
+            "cic-render antialias pipeline",
+            &shader_module(device, "antialias"),
+            "antialias_fragment",
+            &[lighting_layout, resolved_layout],
+            output_format,
+        ),
+        group: device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("cic-render antialias bindings"),
+            layout: resolved_layout,
+            entries: &[
+                view_entry(0, ldr),
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        }),
+    }
 }
 
 /// Builds the water pipeline.
@@ -1423,8 +1607,35 @@ mod tests {
         // These are the sizes `SceneCamera` and `ShadowCamera` occupy in the WGSL. A mismatch does not
         // fail validation -- it silently misaligns every field past the drift -- so it is asserted here
         // as well as debug-asserted at upload.
-        assert_eq!(SCENE_UNIFORM_BYTES, 384);
+        assert_eq!(SCENE_UNIFORM_BYTES, 400);
         assert_eq!(SHADOW_UNIFORM_BYTES, CASCADE_COUNT * 80);
+    }
+
+    #[test]
+    fn the_occlusion_camera_is_a_prefix_of_the_scene_camera() {
+        // `terrain_ao.wgsl` declares its own truncated copy of `SceneCamera` because its bind group is a
+        // different one, and both bind the same buffer. That is sound only while its declaration is a
+        // *prefix* of the full block, so a field inserted rather than appended above would misalign
+        // everything after it there -- silently, since neither shader fails to validate.
+        //
+        // Checked as a substring rather than by parsing: the point is that the leading fields appear in
+        // the same order with the same types, which is exactly what determines the offsets.
+        let scene = crate::shader::chunk("scene").expect("scene chunk");
+        let occlusion = crate::shader::chunk("terrain_ao").expect("terrain_ao chunk");
+        for field in [
+            "view_projection: mat4x4<f32>",
+            "inverse_view_projection: mat4x4<f32>",
+            "camera_position: vec4<f32>",
+            "viewport: vec4<f32>",
+            "lights: array<DirectionalLight, 3>",
+        ] {
+            assert!(scene.contains(field), "scene.wgsl lost {field}");
+            assert!(occlusion.contains(field), "terrain_ao.wgsl lost {field}");
+        }
+        // The one field the occlusion pass must *not* have to know about, and the reason the order above
+        // is load-bearing: it is appended after everything that pass declares.
+        assert!(scene.contains("output: vec4<f32>"));
+        assert!(!occlusion.contains("output: vec4<f32>"));
     }
 
     #[test]

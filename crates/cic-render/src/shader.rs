@@ -28,6 +28,7 @@
 /// Compiled in rather than loaded from disk: a shader is code, and shipping it as a loose file invites a
 /// mismatch between the binary and the file next to it.
 const CHUNKS: &[(&str, &str)] = &[
+    ("antialias", include_str!("shaders/antialias.wgsl")),
     ("atmosphere", include_str!("shaders/atmosphere.wgsl")),
     (
         "boundary_viewer",
@@ -85,6 +86,11 @@ pub const PROGRAMS: &[Program] = &[
     Program {
         name: "composite",
         chunks: &["scene", "composite"],
+        staged: false,
+    },
+    Program {
+        name: "antialias",
+        chunks: &["scene", "antialias"],
         staged: false,
     },
     Program {
@@ -220,9 +226,9 @@ mod tests {
         // oversight. The staged five are `ui`, the virtual-texture pair, and the two viewer passes.
         let live = PROGRAMS.iter().filter(|entry| !entry.staged).count();
         let staged = PROGRAMS.iter().filter(|entry| entry.staged).count();
-        assert_eq!(live, 7, "live programs");
+        assert_eq!(live, 8, "live programs");
         assert_eq!(staged, 5, "staged programs");
-        assert_eq!(CHUNKS.len(), 15);
+        assert_eq!(CHUNKS.len(), 16);
     }
 
     #[test]

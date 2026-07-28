@@ -11,8 +11,15 @@
 // accumulated estimate would shimmer under free-flight camera motion; the noise is a per-pixel
 // interleaved gradient offset resolved by the blur below instead.
 
-// Must match `SceneCamera` in `terrain_deferred.wgsl` byte for byte: both passes bind the same
-// uniform buffer.
+// Must be a *prefix* of `SceneCamera` in `scene.wgsl`, byte for byte: both passes bind the same uniform
+// buffer, and this one declares only the fields it reads.
+//
+// A prefix rather than a copy because the occlusion pass has no use for the atmosphere or the weather,
+// and repeating fields it never reads would be four more declarations to keep in step. The consequence
+// is that a field *inserted* into `SceneCamera` above the end of this struct silently misaligns
+// everything after it here — which is why that block appends. This pass does not compose `scene.wgsl`
+// itself because its bind group is a different one: group 0 here is the occlusion layout, whose
+// bindings are the normal, coverage, camera and depth, in that order and at those numbers.
 struct DirectionalLight {
     ambient: vec4<f32>,
     diffuse: vec4<f32>,
@@ -43,7 +50,7 @@ fn fullscreen_vertex(@builtin(vertex_index) vertex_index: u32) -> FullscreenOutp
 
 @group(0) @binding(0) var g_normal: texture_2d<f32>;
 // Geometry coverage in `r`; below 0.5 no geometry was drawn. See `g_coverage` in
-// `terrain_deferred.wgsl`.
+// `scene.wgsl`.
 @group(0) @binding(1) var g_coverage: texture_2d<f32>;
 @group(0) @binding(2) var<uniform> camera: Camera;
 // Read directly as a depth texture; nothing here is multisampled, so there is no resolve step.
@@ -54,7 +61,7 @@ fn fullscreen_vertex(@builtin(vertex_index) vertex_index: u32) -> FullscreenOutp
 // Occlusion and its bilateral blur both measure distances between neighbouring positions, so they
 // inherited the old world target's whole-unit quantization directly: a tolerance of six world units
 // cannot separate a crease from a flat surface when the positions themselves snap to two-unit steps.
-// See `world_from_depth` in `terrain_deferred.wgsl` for why that target is gone.
+// See `world_from_depth` in `scene.wgsl` for why that target is gone.
 fn world_from_depth(pixel: vec2<i32>, depth: f32) -> vec3<f32> {
     let uv = (vec2<f32>(pixel) + vec2<f32>(0.5)) * camera.viewport.zw;
     let ndc = vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);

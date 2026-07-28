@@ -35,7 +35,7 @@ has no GPU, so the regression harness runs on a developer machine and not yet on
 - **Texture resources**, deduplicated by content hash under explicit byte budgets.
 - **The camera**, as a standalone model with no window, input, or GPU dependency.
 
-- **The deferred chain**, now in seven passes: four depth-only shadow cascades, a G-buffer, ground-truth
+- **The deferred chain**, in seven passes, plus an eighth when antialiasing is on: four depth-only shadow cascades, a G-buffer, ground-truth
   ambient occlusion with a bilateral blur, deferred lighting that reconstructs world position from
   depth, a blended water pass, and a tone-mapping composite. The lighting and occlusion shaders were adapted rather than
   rewritten, keeping their technique and their reasoning; only their legacy camera layout and
@@ -114,11 +114,31 @@ has no GPU, so the regression harness runs on a developer machine and not yet on
   hour moves the sun instead of leaving a light that silently disagrees with it. The derivation is calibrated
   against the hand-tuned preset it replaced, in direction as well as colour, and a test pins it there.
 
+- **Antialiasing, in the two cheaper tiers [ADR 0005](../adr/0005-antialiasing-strategy.md) settles on** —
+  and with MSAA declined outright rather than left open. Both halves are one value,
+  `DisplaySettings`, because a settings screen will present them as one choice.
+  - **A resolution scale**, from a half to two, as a multiplier on the render resolution. Every pass from
+    the G-buffer to the HDR accumulation is allocated at that size and the composite's filtered read of the
+    HDR target *is* the downsample, so this costs a size multiplier at allocation and no extra pass. It is
+    the only control here that addresses every class of aliasing at once, because it is the only one that
+    raises the actual sampling rate.
+  - **A post pass**, written from scratch: a luma gate with an absolute and a relative term, a Sobel pair
+    for edge orientation, and a blend weight built from the second difference across the edge — so it
+    leaves smooth ramps alone, halves a hard step, and hits an isolated sub-pixel highlight hardest. FXAA
+    as a category; Lottes' implementation was not consulted. See [LICENSING.md](../../LICENSING.md).
+  - **The composite's sharpen now switches off above a scale of one**, which was a fault rather than a
+    preference: it amplified soft edges hardest, and a supersampled silhouette is soft by construction. The
+    numbers are in the ADR.
+  - Both are togglable in the viewer, on `T` and the bracket keys, because what an edge does *as the camera
+    moves* is the whole subject and no still capture reports it.
+
 ## Remaining
 
-- Antialiasing. Terrain silhouettes stair-step, water glitter sparkles, and cloud-shadow edges alias, and
-  [ADR 0005](../adr/0005-antialiasing-strategy.md) settles what to do about it: a resolution scale, FXAA,
-  and TAA — and explicitly *not* MSAA.
+- **Temporal antialiasing**, the quality tier of [ADR 0005](../adr/0005-antialiasing-strategy.md). The two
+  cheaper tiers below have landed; this one needs jittered projection, a motion-vector target, a history
+  buffer, and neighbourhood clamping — and it constrains the regression harness, since a temporal
+  accumulator makes one captured frame depend on the frames before it. Scene time already being a frame
+  parameter is the precondition, and it is met.
 - Normal, roughness, and metallic *maps*. Only base colour is textured; the other channels are still
   per-material or per-layer factors.
 - Alpha-tested materials. Everything is opaque, so the shadow passes have no fragment stage — foliage
@@ -312,6 +332,24 @@ which a surface commonly reports as BGRA rather than RGBA, and that a resize rea
 intermediate target — which invalidates every bind group holding a view of one, so the chain is rebuilt
 rather than just the surface reconfigured.
 
+**A frame cannot carry a size the targets already decide.** `DeferredFrame` used to hold a viewport, and
+the reason it did was itself a fix — the figure had previously been passed twice and nothing checked the two
+agreed. But the size the shaders reconstruct world positions against is a property of the *targets*, since
+they are the textures being loaded from, so putting it on the frame left the same disagreement one step
+further along: `SurfaceRenderer::render` had to overwrite whatever the caller supplied, because a frame one
+resize behind moved every receiver and read as a shadowing fault rather than as a wrong number. A
+resolution scale made this worse rather than better, splitting the one figure into two. The field is gone
+and both sizes now come from `DeferredTargets`, which is the only thing that knows them. The same
+reasoning removed `output_format` from `DeferredRenderer::new`: the LDR intermediate has to be *allocated*
+in that format, so the two were bound to agree and nothing said so.
+
+**A prefix is a contract, and nothing enforced it.** `terrain_ao.wgsl` binds the scene uniform through its
+own struct declaring only the fields it reads, which is sound precisely while that declaration stays a
+prefix of the full block. Adding the output size *after* the weather vector keeps it sound; adding it after
+the viewport, where it reads better, would have misaligned every field past it in a shader that still
+validates and still runs. There is now a test asserting the shared leading fields, since the failure mode
+is silent in both directions.
+
 **A shadow fixture has to be shaped for the sun it is lit by.** Two separate versions of the test
 measured nothing: one placed the sun so every shadow fell behind its own caster and out of frame; the
 other used a ridge wider than its own shadow was long, so the shadow landed entirely on the ridge's
@@ -329,6 +367,15 @@ unlit back slope. Neither was a renderer fault, and neither was visible from the
   that it still fixes only geometric edges, not the texture and specular aliasing that are now the more
   visible cases. This entry previously appeared under both "remaining" and "not done", which read as an
   omission nobody had decided about. [ADR 0005](../adr/0005-antialiasing-strategy.md) decides it.
+- No edge search in the post pass, so it softens each step of a long shallow staircase rather than
+  reconstructing the line, and it cannot tell a one-pixel bright feature from a one-pixel artifact —
+  because at that size the image holds no difference between them. Both are the cost class, and both are
+  what TAA is for.
+- No claim that a resolution scale *preserves fine detail* an upscale destroys. It should, and the fixture
+  cannot show it: the shadowing terrain is a smooth heightfield in flat palette colours, so off the
+  silhouette the three scales measure 0.00046, 0.00049 and 0.00045 — three numbers agreeing rather than an
+  assertion. Making that claim needs a textured fixture, and the world-space tiled albedo in
+  `terrain_render.rs` is the candidate.
 - No reflections of scene geometry in water. The surface reflects the sky gradient and nothing else, so a
   cliff at the water's edge does not appear in it. A planar reflection pass means drawing the scene twice
   and a screen-space one means a ray march over the depth buffer; both are worth more than they cost only

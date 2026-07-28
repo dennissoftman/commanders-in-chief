@@ -12,7 +12,7 @@
 //!
 //! # Provenance
 //!
-//! Every constant here, and in the water half of `terrain_deferred.wgsl`, was authored in this
+//! Every constant here, and in `water.wgsl`, was authored in this
 //! module. The predecessor's standing-water shader took its texture scale, tint, alpha, and
 //! depth-feather policy from another game's code; that file was deleted rather than carried across,
 //! and it must not be consulted to write this one. The values below come from the reasoning stated

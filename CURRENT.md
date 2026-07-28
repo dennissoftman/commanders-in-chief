@@ -11,7 +11,8 @@ What works:
 
 - A `cic-assets` terrain uploads to the GPU and renders through a seven-pass deferred chain: four shadow
   cascades, a G-buffer, ambient occlusion with a bilateral blur, deferred lighting that reconstructs
-  world position from depth, a blended water pass, and a tone-mapping composite.
+  world position from depth, a blended water pass, and a composite that tone maps and resolves the render
+  resolution to the caller's. An eighth pass antialiases, when the display settings ask for it.
 - Heights and layer weights live in *writable* textures with displacement and normals computed in the
   vertex shader, so terrain deformation and route grading are texture writes rather than a remesh.
 - Instanced models share the terrain G-buffer and every shadow cascade, one draw call per model
@@ -39,6 +40,20 @@ What works:
   - **A weather surface response** — wetness darkening albedo and dropping roughness, and snow settling by
     *slope* so it lies on flats and not on cliffs. Applied to the G-buffer in the lighting pass, so terrain
     and models both get it from one implementation.
+- **Antialiasing, in its two cheaper tiers** ([`display`](crates/cic-render/src/display.rs)), with MSAA
+  declined outright per [ADR 0005](docs/adr/0005-antialiasing-strategy.md) rather than left open. A
+  **resolution scale** from a half to two multiplies every screen-space target and the composite's filtered
+  read of the HDR target is the downsample, so it costs no extra pass — and it is the only control that
+  raises the actual sampling rate, so the only one that touches geometric, texture, specular *and*
+  occlusion aliasing at once. Beneath it a **post pass** written from scratch: a luma gate, a Sobel
+  orientation test, and a blend weight from the second difference across the edge, so smooth ramps are
+  untouched, a hard step is halved, and an isolated sub-pixel highlight is hit hardest. Both are one
+  `DisplaySettings` value, because a settings screen presents them as one choice.
+  - Two findings came out of it. The composite's sharpen was *fighting* the scale — it amplifies soft edges
+    hardest, and a supersampled silhouette is soft by construction — so it is now off above a scale of one.
+    And no single statistic separates aliasing from detail: the obvious one reports supersampling as a
+    regression, and what works is measuring *where* a setting acts rather than how much. Both are written up
+    in the ADR.
 - **Time of day drives the light by default.** `DeferredFrame::new` derives its sun from the environment,
   and `in_environment` re-derives it, so changing the hour moves the sun rather than leaving a light that
   silently disagrees with it. The derivation is calibrated against the hand-tuned preset it replaced and a
@@ -53,7 +68,8 @@ cargo run -p cic-render --example terrain_viewer --release
 
 Pass a `.cicmap` path to view a real map; with no argument it generates terrain, buildings, a water
 table derived from the heightfield's own low point, and their surfaces, so the viewer runs before any
-content exists.
+content exists. `T` toggles antialiasing and the bracket keys step the resolution scale, because what an
+edge does *as the camera moves* is the whole subject and no still capture reports it.
 
 ## Next verified step
 
@@ -68,17 +84,22 @@ there — true since the first render test landed, not something recent changed.
 References cannot be copied from a developer machine: a software rasteriser and an NVIDIA card differ far
 beyond the tolerance, which is why the sets are keyed by adapter in the first place.
 
-After that, in rough order: antialiasing per
-[ADR 0005](docs/adr/0005-antialiasing-strategy.md) — a resolution scale, FXAA, then TAA, and explicitly
-not MSAA — then normal and roughness maps to go with the base-colour textures, then M4's interface layer.
+After that, in rough order: **TAA**, the quality tier ADR 0005 plans and the last antialiasing item — a
+jittered projection, a motion-vector target, a history buffer, and neighbourhood clamping, and it needs the
+regression harness accounted for, since a temporal accumulator makes one captured frame depend on the frames
+before it. Then normal and roughness maps to go with the base-colour textures, then M4's interface layer —
+whose settings screen has real content waiting for it now that a display setting exists with more than one
+option.
 
 ## Gate status
 
 Formatting, strict lints (`clippy::all` and `clippy::pedantic` as errors, plus `-D warnings` as CI runs
-it), and the full test suite all pass on the pinned toolchain. **227 tests across five crates**, 31 of
+it), and the full test suite all pass on the pinned toolchain. **239 tests across five crates**, 34 of
 which render on a real device (verified on an NVIDIA RTX 4080 SUPER) and write their captures to
-`target/tmp/`. Nine committed references cover terrain layers, instanced models, the deferred chain, water,
-water under a glancing sun, cloud shadows, fog, wet ground, and snow.
+`target/tmp/`. Eleven committed references cover terrain layers, instanced models, the deferred chain, water,
+water under a glancing sun, cloud shadows, fog, wet ground, snow, an antialiased frame, and a supersampled
+one. The nine that predate the antialiasing work are **byte-identical** across it, which is what shows a
+growing uniform block, a rerouted composite, and a removed frame field changed no image on the default path.
 
 The render tests skip rather than fail when no adapter is available, so a machine or CI runner without a
 GPU or software rasteriser reports honestly instead of red. The regression comparison itself is a pure

@@ -6,7 +6,7 @@
 // texture write rather than a remesh.
 //
 // The G-buffer stores no world position. It is reconstructed from depth in the lighting pass -- see
-// `world_from_depth` in `terrain_deferred.wgsl` for why storing it was actively harmful.
+// `world_from_depth` in `scene.wgsl` for why storing it was actively harmful.
 
 const MAX_LAYERS: u32 = 8u;
 

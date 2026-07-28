@@ -22,7 +22,11 @@ struct SceneCamera {
     inverse_view_projection: mat4x4<f32>,
     // xyz camera position, w unused.
     camera_position: vec4<f32>,
-    // xy viewport size in pixels, zw its reciprocal.
+    // xy the size the chain *renders* at in pixels, zw its reciprocal.
+    //
+    // Every G-buffer, occlusion, lighting and water pass is this size, and every pixel coordinate they
+    // load or reconstruct from is in it. At a resolution scale other than one it is not the size of the
+    // image the caller receives -- that is `output` below.
     viewport: vec4<f32>,
     lights: array<DirectionalLight, 3>,
     // rgb the fog colour, w its density per world unit at the reference elevation.
@@ -44,6 +48,19 @@ struct SceneCamera {
     // so one implementation covers both — where doing it at the source would mean the same logic in two
     // shaders reading two different uniform blocks.
     weather: vec4<f32>,
+    // xy the size of the caller's target in pixels, zw its reciprocal. Equal to `viewport` at a
+    // resolution scale of one.
+    //
+    // Only the two passes downstream of the scene read this: the composite, whose filtered read of the
+    // HDR target *is* the downsample, and the antialias pass that runs on its result. Everything
+    // upstream is in render pixels and must keep using `viewport`, since that is the size of the
+    // textures it is loading from.
+    //
+    // Appended at the end of the block deliberately. `terrain_ao.wgsl` binds this same buffer through a
+    // struct declaring only the fields it reads, which is sound exactly as long as that declaration
+    // stays a *prefix* of this one -- so a field inserted above would silently misalign every field
+    // after it there.
+    output: vec4<f32>,
 }
 
 // `params` packs the world units spanned by the full normalized depth range in `y` and the world

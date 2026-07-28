@@ -17,7 +17,15 @@
 //! | `Q` `E` | Rotate |
 //! | `R` | Reset height and rotation |
 //! | `F` | Reset rotation only |
+//! | `T` | Toggle antialiasing |
+//! | `[` `]` | Step the resolution scale |
 //! | `Esc` | Quit |
+//!
+//! The last two are here because antialiasing is the one rendering change a still capture reports
+//! badly. Its whole subject is what an edge does *as the camera moves*, and a resolution scale trades
+//! frame rate for sampling rate — neither of which a headless test can show anyone. Both print the
+//! settings and the size they took effect at, so a screenshot of the terminal says what the window is
+//! showing.
 
 // The generator clamps before converting and its inputs are bounded constants, so the width casts
 // below cannot lose anything.
@@ -34,9 +42,11 @@ use std::time::Instant;
 use cic_assets::model::{Model, ModelImage, ModelMaterial, ModelPrimitive, ModelVertex};
 use cic_assets::{MapPackage, PackageLimits, Terrain, TerrainLayer};
 use cic_camera::{RtsCamera, RtsCameraProfile};
+use cic_render::display::{MAX_RESOLUTION_SCALE, MIN_RESOLUTION_SCALE};
 use cic_render::{
-    Action, DeferredFrame, GpuContext, InputState, LayerMaterial, ModelBatch, ModelInstance,
-    SurfaceRenderer, TerrainGround, TerrainRenderer, TextureImage, WaterBody, WaterSurface,
+    Action, Antialiasing, DeferredFrame, DisplaySettings, GpuContext, InputState, LayerMaterial,
+    ModelBatch, ModelInstance, SurfaceRenderer, TerrainGround, TerrainRenderer, TextureImage,
+    WaterBody, WaterSurface,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -53,6 +63,12 @@ const DRAG_PIXELS_TO_UNITS: f32 = 0.05;
 /// A stall — a breakpoint, a window drag, a shader recompile — otherwise arrives as one enormous
 /// delta and flings the camera across the map before the first frame after it is drawn.
 const MAXIMUM_FRAME_SECONDS: f32 = 0.1;
+
+/// How much one press of `[` or `]` moves the resolution scale.
+///
+/// A quarter, so the offered range is six steps rather than a continuum. A finer step would let someone
+/// walk to a cost they cannot afford one imperceptible increment at a time.
+const RESOLUTION_SCALE_STEP: f32 = 0.25;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let terrain = if let Some(path) = std::env::args().nth(1) {
@@ -480,6 +496,8 @@ struct Viewer {
     last_frame: Option<Instant>,
     /// Seconds since the first frame, which is what animates the water.
     elapsed: f32,
+    /// Held here rather than only inside the surface, so the setting survives the window being rebuilt.
+    display: DisplaySettings,
     failure: Option<String>,
 }
 
@@ -498,8 +516,32 @@ impl Viewer {
             active: None,
             last_frame: None,
             elapsed: 0.0,
+            // Starts where the headless captures are, so the first frame in the window is the frame the
+            // references were rendered from and pressing a key is the only difference from them.
+            display: DisplaySettings::NATIVE,
             failure: None,
         }
+    }
+
+    /// Applies a change to the display settings and reports what took effect.
+    ///
+    /// Reported rather than assumed: the resolution scale is clamped and rounded on its way to a target
+    /// size, so the figure that matters is the one the chain allocated and not the one asked for.
+    fn change_display(&mut self, event_loop: &ActiveEventLoop, display: DisplaySettings) {
+        self.display = display;
+        let Some(active) = &mut self.active else {
+            return;
+        };
+        if let Err(error) =
+            active
+                .surface
+                .set_display(&active.context, &active.terrain_renderer, display)
+        {
+            self.fail(event_loop, error.to_string());
+            return;
+        }
+        report_display(&active.surface);
+        active.window.request_redraw();
     }
 
     /// Records a fatal error and asks the loop to stop.
@@ -548,11 +590,13 @@ impl ApplicationHandler for Viewer {
             surface,
             size.width,
             size.height,
+            self.display,
         ) {
             Ok(surface) => surface,
             Err(error) => return self.fail(event_loop, error.to_string()),
         };
         eprintln!("surface: {:?} at {:?}", surface.format(), surface.size());
+        report_display(&surface);
 
         // A scattering of buildings, so the scene has something with a silhouette in it and the
         // shadow pass has a caster that is not terrain.
@@ -620,6 +664,13 @@ impl ApplicationHandler for Viewer {
                 if let PhysicalKey::Code(code) = event.physical_key {
                     if code == KeyCode::Escape && pressed {
                         event_loop.exit();
+                        return;
+                    }
+                    // Display settings act once per press rather than every frame they are held: each one
+                    // reallocates every intermediate target, and repeating that at the key-repeat rate
+                    // would rebuild the chain dozens of times a second.
+                    if pressed && let Some(display) = display_change(code, self.display) {
+                        self.change_display(event_loop, display);
                         return;
                     }
                     if let Some(action) = action_for(code) {
@@ -704,6 +755,38 @@ impl Viewer {
             )
             .map_err(|error| error.to_string())
     }
+}
+
+/// Maps a physical key to a change of display settings, or `None` if it is not one.
+fn display_change(code: KeyCode, current: DisplaySettings) -> Option<DisplaySettings> {
+    Some(match code {
+        KeyCode::KeyT => current.with_antialiasing(match current.antialiasing {
+            Antialiasing::None => Antialiasing::Fxaa,
+            Antialiasing::Fxaa => Antialiasing::None,
+        }),
+        // Stepped from the *sanitised* scale rather than the stored one, so a press at either end of
+        // the range moves back into it instead of walking a value that is already clamped.
+        KeyCode::BracketLeft => {
+            current.at_scale((current.scale() - RESOLUTION_SCALE_STEP).max(MIN_RESOLUTION_SCALE))
+        }
+        KeyCode::BracketRight => {
+            current.at_scale((current.scale() + RESOLUTION_SCALE_STEP).min(MAX_RESOLUTION_SCALE))
+        }
+        _ => return None,
+    })
+}
+
+/// Prints the settings in force and the size they produced.
+fn report_display(surface: &SurfaceRenderer) {
+    let display = surface.display();
+    let (render_width, render_height) = surface.render_size();
+    let (output_width, output_height) = surface.size();
+    eprintln!(
+        "display: scale {:.2} ({render_width}x{render_height} into {output_width}x{output_height}), \
+         antialiasing {:?}",
+        display.scale(),
+        display.antialiasing
+    );
 }
 
 /// Maps a physical key to a camera action.

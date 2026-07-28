@@ -1,6 +1,6 @@
 # ADR 0005: Antialiasing strategy, and why not MSAA
 
-- Status: accepted
+- Status: accepted. Decisions 1, 2, 3 and 5 are implemented; 4 (TAA) is not started.
 
 ## Context
 
@@ -76,3 +76,39 @@ insufficient before TAA lands.
   restores mid-contrast detail lost to texture filtering, and its own comment says as much; a sharpen
   applied after a resolution downsample or a TAA resolve may well want retuning, which is a tuning task
   and not a change of intent.
+
+## What implementing decisions 2 and 3 established
+
+Recorded here rather than only in the code, because the first of these changed a pass this ADR said it was
+not touching, and the second is the reason a reader should not trust a single number about aliasing.
+
+**The sharpen did want retuning, and more than retuning.** Predicted above as a possibility; it turned out
+to be a fault. The sharpen's amplitude deliberately backs off at hard edges and rises on soft ones, to
+avoid ringing on silhouettes — and a supersampled silhouette is soft *by construction*, being the
+sub-pixel coverage the downsample just produced. So the pass most amplified exactly what the resolution
+scale had just fixed. Measured over the two-pixel band along the sky boundary of the shadowing-terrain
+fixture, a 1.5x render carried **34% more** pixel-to-pixel step energy than a native one with the sharpen
+active, against 4% more with it off. Halving the strength was tried first and left most of the excess,
+because the amplitude term is not a scalar a scale can compensate for — it encodes a *rule* that a soft
+edge wants sharpening, and that rule stops holding the moment the softness is the antialiasing. The
+sharpen is therefore off above a scale of one and unchanged at or below it, which is what keeps every
+committed reference byte-identical. This is still a tuning change and not a change of intent: the pass is
+a correction for magnification, and it now applies only where there is magnification.
+
+**No single statistic distinguishes aliasing from detail, and two attempts failed before one worked.** The
+obvious measure — the mean absolute Laplacian of luminance, which is near zero on any smooth ramp and
+large on a one-pixel step — reports that supersampling makes the frame *worse*. It is not wrong about the
+number: a higher sampling rate genuinely puts more real high-frequency content into the image, and nothing
+local can tell content that belongs there from a staircase that does not. Restricting it to the silhouette
+removed that objection and left a weak instrument, moving 6% across the three settings while shading
+variation covers more than that, because a box-averaged hard edge is still a two-pixel transition — merely
+a more accurately *placed* one. What works is asking **where** a setting acts rather than how much:
+supersampling moves the silhouette band by 0.0217 and the rest of the frame by 0.0006, a ratio of 36, and
+an upscale is separated from it by the interior instead — 0.0024 there against 0.0006, because averaging
+four samples of a smooth surface returns what was already there while magnifying from half as many does
+not. The resolve pass, by contrast, *is* measured well by the Laplacian, and the reason is order: it is
+the last thing to touch the image, so nothing re-hardens what it softened.
+
+The general form of this is already in the milestone's design notes and this is another instance of it: a
+statistical assertion cannot replace a reference image. The committed captures are what verify these two
+settings; the numbers are the tripwire.

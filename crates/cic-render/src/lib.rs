@@ -3,8 +3,12 @@
 //! # What is here
 //!
 //! - **The deferred chain** ([`deferred`]): four depth-only shadow cascades, a G-buffer, ambient
-//!   occlusion with a bilateral blur, lighting that reconstructs world position from depth, and a
-//!   tone-mapping composite.
+//!   occlusion with a bilateral blur, lighting that reconstructs world position from depth, a
+//!   tone-mapping composite, and an optional antialias resolve.
+//! - **Display settings** ([`display`]): the resolution the chain renders at and how it resolves.
+//!   Multisampling is declined rather than pending — see
+//!   [ADR 0005](../../../docs/adr/0005-antialiasing-strategy.md) — so a resolution scale is the primary
+//!   control and a post pass is the floor beneath it.
 //! - **Terrain** ([`terrain`]), rendered from a [`cic_assets::Terrain`] with heights and layer weights
 //!   held in *writable* GPU textures rather than a baked mesh, and per-layer albedo tiled in world
 //!   space. See that module for why the writable-texture choice is load-bearing rather than incidental.
@@ -35,11 +39,13 @@
 //!
 //! # What is next
 //!
-//! Antialiasing, a real virtual-texture cache behind the residency bookkeeping, and the committed
-//! reference captures that close the milestone. See `docs/milestones/m3-renderer.md`.
+//! Temporal antialiasing, normal and roughness maps, a real virtual-texture cache behind the residency
+//! bookkeeping, and a CI runner with an adapter so the reference captures run there. See
+//! `docs/milestones/m3-renderer.md`.
 
 pub mod deferred;
 pub mod detail;
+pub mod display;
 pub mod environment;
 pub mod gpu;
 pub mod model;
@@ -59,6 +65,7 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
 pub use deferred::{DeferredFrame, DeferredRenderer, DeferredTargets};
+pub use display::{Antialiasing, DisplaySettings};
 pub use environment::{Clouds, Environment, Fog, Weather};
 pub use gpu::{Capture, CaptureTarget, GpuContext};
 pub use model::{ModelBatch, ModelInstance};
