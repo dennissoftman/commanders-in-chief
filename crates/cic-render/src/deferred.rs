@@ -270,11 +270,15 @@ impl DeferredRenderer {
         let shadow_uniform =
             uniform_buffer(device, "cic-render shadow camera", SHADOW_UNIFORM_BYTES);
 
-        let gbuffer_shader = shader_module(device, "gbuffer", include_str!("terrain_gbuffer.wgsl"));
-        let model_shader = shader_module(device, "model", include_str!("model_gbuffer.wgsl"));
-        let deferred_shader =
-            shader_module(device, "deferred", include_str!("terrain_deferred.wgsl"));
-        let ao_shader = shader_module(device, "ao", include_str!("terrain_ao.wgsl"));
+        // Composed rather than read from one file each. `lighting`, `composite` and `water` all need the
+        // scene bindings and the cascade selection, and before composition they had to share a file to
+        // reach them. See `crate::shader`.
+        let gbuffer_shader = shader_module(device, "terrain_gbuffer");
+        let model_shader = shader_module(device, "model_gbuffer");
+        let lighting_shader = shader_module(device, "lighting");
+        let composite_shader = shader_module(device, "composite");
+        let water_shader = shader_module(device, "water");
+        let ao_shader = shader_module(device, "terrain_ao");
 
         let (cascade_layout, cascade_uniforms, cascade_groups) = build_cascade_bindings(device);
         let material_layout = ModelBatch::material_layout(device);
@@ -288,7 +292,8 @@ impl DeferredRenderer {
             targets,
             &scene_uniform,
             &shadow_uniform,
-            &deferred_shader,
+            &lighting_shader,
+            &composite_shader,
             output_format,
         );
 
@@ -321,7 +326,7 @@ impl DeferredRenderer {
                 device,
                 &lighting_layout,
                 &water_layout,
-                &deferred_shader,
+                &water_shader,
             ),
             water_layout,
             ao: build_ao(device, targets, &scene_uniform, &ao_shader),
@@ -916,7 +921,8 @@ fn build_lighting(
     targets: &DeferredTargets,
     scene_uniform: &wgpu::Buffer,
     shadow_uniform: &wgpu::Buffer,
-    deferred_shader: &wgpu::ShaderModule,
+    lighting_shader: &wgpu::ShaderModule,
+    composite_shader: &wgpu::ShaderModule,
     output_format: wgpu::TextureFormat,
 ) -> (LightingStage, wgpu::BindGroupLayout) {
     let comparison_sampler = build_shadow_sampler(device);
@@ -1000,7 +1006,7 @@ fn build_lighting(
         pipeline: fullscreen_pipeline(
             device,
             "cic-render lighting pipeline",
-            deferred_shader,
+            lighting_shader,
             "lighting_fragment",
             &[&layout],
             HDR_FORMAT,
@@ -1008,7 +1014,7 @@ fn build_lighting(
         composite_pipeline: fullscreen_pipeline(
             device,
             "cic-render composite pipeline",
-            deferred_shader,
+            composite_shader,
             "composite_fragment",
             &[&layout, &composite_layout],
             output_format,
@@ -1027,20 +1033,22 @@ fn build_water_pipeline(
     device: &wgpu::Device,
     lighting_layout: &wgpu::BindGroupLayout,
     water_layout: &wgpu::BindGroupLayout,
-    deferred_shader: &wgpu::ShaderModule,
+    water_shader: &wgpu::ShaderModule,
 ) -> wgpu::RenderPipeline {
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("cic-render water pipeline layout"),
-        // Group 1 is left empty, the same way the model G-buffer pipeline leaves it: in this module
-        // group 1 belongs to the composite's scene colour, so the water uniform takes group 2.
-        bind_group_layouts: &[Some(lighting_layout), None, Some(water_layout)],
+        // Contiguous, with no empty slot. Water reuses the lighting group because it needs the camera,
+        // the cascades and the scene depth that are already declared there; its own uniform follows in
+        // group 1. It declares only the group-0 bindings it reads, and a layout carrying more than a
+        // shader uses is allowed.
+        bind_group_layouts: &[Some(lighting_layout), Some(water_layout)],
         immediate_size: 0,
     });
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("cic-render water pipeline"),
         layout: Some(&layout),
         vertex: wgpu::VertexState {
-            module: deferred_shader,
+            module: water_shader,
             entry_point: Some("water_vertex"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             buffers: &[],
@@ -1056,7 +1064,7 @@ fn build_water_pipeline(
         depth_stencil: None,
         multisample: wgpu::MultisampleState::default(),
         fragment: Some(wgpu::FragmentState {
-            module: deferred_shader,
+            module: water_shader,
             entry_point: Some("water_fragment"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             targets: &[Some(wgpu::ColorTargetState {
@@ -1131,7 +1139,16 @@ fn fullscreen_pass(
     pass.draw(0..3, 0..1);
 }
 
-fn shader_module(device: &wgpu::Device, name: &str, source: &str) -> wgpu::ShaderModule {
+/// Builds a shader module from a composed program.
+///
+/// # Panics
+///
+/// Panics when `name` is not a declared program. Every call site passes a literal that the shader tests
+/// also compose and validate, so a wrong name is a build-time mistake caught by `cargo test` rather than
+/// a condition a caller can hit at runtime.
+fn shader_module(device: &wgpu::Device, name: &str) -> wgpu::ShaderModule {
+    let source = crate::shader::compose(name)
+        .unwrap_or_else(|| panic!("{name} is not a declared shader program"));
     device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some(name),
         source: wgpu::ShaderSource::Wgsl(source.into()),

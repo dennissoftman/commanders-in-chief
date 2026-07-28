@@ -329,11 +329,8 @@ impl WaterBody {
     }
 
     /// Records a draw. The caller has already set the pipeline and the lighting bind group.
-    ///
-    /// Group 2, not 1: the shader shares a module with the composite, which owns group 1, and one
-    /// module cannot bind two different resources to the same slot.
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
-        pass.set_bind_group(2, &self.group, &[]);
+        pass.set_bind_group(1, &self.group, &[]);
         pass.draw(0..self.vertex_count, 0..1);
     }
 }

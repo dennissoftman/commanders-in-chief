@@ -137,9 +137,20 @@ inherited one, which is precisely the copy-paste worth catching. A test in `cic-
 | `cic-render/src/terrain_ao.wgsl` | Same camera layout. The occlusion integral is from Jimenez et al., *Practical Realtime Strategies for Accurate Indirect Occlusion* (2016) — a published technique, cited in the file. |
 | `boundary_viewer.wgsl`, `road_viewer.wgsl`, `terrain_viewer.wgsl` | The inherited camera struct, so no shader in the tree carries it. These three are staged for passes not yet built. |
 
-That accounts for all 13 shaders present at the seed: 8 clean and 5 with a region removed. The tree now
-holds 16, the difference being `terrain_forward.wgsl`, `terrain_gbuffer.wgsl` and `model_gbuffer.wgsl`,
-which were written afterwards against the native formats and have no predecessor.
+That accounts for all 13 shaders present at the seed: 8 clean and 5 with a region removed.
+
+**The set has since been restructured, and the tally is worth restating because this table is the audit.**
+Shaders are now assembled from composable chunks under `cic-render/src/shaders/`, and the tree holds 15 of
+them. Six of the 8 *clean* seeded shaders were deleted as superseded dead code — `shader.wgsl`,
+`terrain.wgsl`, `model.wgsl`, `terrain_shadow.wgsl`, `scene_shadow.wgsl` and `viewer.wgsl` — leaving `ui`
+and `terrain_virtual` from that group. **All 5 of the region-removed shaders survive**, which is the half
+that matters here: `terrain_ao`, `boundary_viewer`, `road_viewer` and `terrain_viewer` unchanged, and
+`terrain_deferred.wgsl` split into the `scene`, `shadow`, `atmosphere`, `lighting` and `composite` chunks.
+Splitting a file moves the region-removed code between files without reintroducing anything, and the
+per-chunk licence-header test now runs over all 15.
+
+The remaining 4 — `terrain_forward`, `terrain_gbuffer`, `model_gbuffer` and `water` — were written after
+the seed against the native formats and have no predecessor.
 
 **Deliberately not seeded — must be written from scratch**
 
