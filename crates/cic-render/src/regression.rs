@@ -16,13 +16,28 @@
 //!
 //! # Why a reference belongs to one adapter
 //!
-//! Two GPUs do not agree to the byte. `pow`, `sin`, and `exp` differ in their last places, linear
-//! filtering has implementation latitude, and mip selection is not pinned by the specification — and
-//! this renderer's occlusion pass compounds many samples, so small differences do not stay small. A
-//! tolerance loose enough to span an NVIDIA card and a software rasteriser is loose enough to accept a
-//! genuine regression, which makes the harness a rubber stamp. One reference set per adapter keeps the
-//! tolerance tight enough to be worth having; the cost is that a new adapter needs its own set
-//! generated and looked at once.
+//! Two GPUs do not agree to the byte, and since the same eleven scenes are now rendered by an RTX 4080
+//! SUPER and by Mesa's lavapipe, *how much* they disagree is measured rather than assumed. The answer is
+//! not what this paragraph used to claim. The nine scenes that sample **no texture** agree to within
+//! 0.0191% of pixels at a peak channel difference of 9 — inside this tolerance, so each would have
+//! passed against the other adapter's reference. The two that **do** sample one are rejected outright:
+//! textured models by 0.3487%, and the world-space tiled terrain albedo by **11.4092%**, which is 114
+//! times the allowance. Between the worst textured case and the worst untextured one there is a factor
+//! of about six hundred.
+//!
+//! So the split is necessary, and it is necessary for one reason rather than the four that were
+//! guessed at. `pow`, `sin`, and `exp` differing in their last places does not register at this
+//! tolerance, and neither does the occlusion pass compounding samples. Mip selection under trilinear
+//! filtering does, on fine detail at grazing incidence, because the specification leaves it latitude and
+//! two implementations spend it differently. A tolerance loose enough to span both adapters on a
+//! textured frame would be a hundred times looser than one that catches a real regression, which is
+//! what would make the harness a rubber stamp. One set per adapter keeps it tight; the cost is that a
+//! new adapter needs its own set generated and looked at once.
+//!
+//! The useful consequence is a prediction rather than a rule of thumb: as more of the renderer samples
+//! textures — normal and roughness maps being next — more of the set diverges across adapters, not
+//! less. It also prices the decision to decline anisotropic filtering, since that is precisely the
+//! feature that would have narrowed the gap on the terrain case.
 //!
 //! # What the tolerance is for
 //!

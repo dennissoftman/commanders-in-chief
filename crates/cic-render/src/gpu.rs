@@ -46,6 +46,21 @@ pub struct GpuContext {
 /// what is actually available rather than assumed.
 const OPTIONAL_FEATURES: wgpu::Features = wgpu::Features::TIMESTAMP_QUERY;
 
+/// Builds the instance both entry points share, honouring `WGPU_BACKEND` and the other `WGPU_*`
+/// variables.
+///
+/// `wgpu::Instance::default()` reads none of them, and the difference matters because a committed
+/// reference image belongs to one *backend* as much as to one adapter — see [`crate::regression`],
+/// where the backend is half of the set's name. This crate compiles `dx12`, `metal` and `vulkan`, so on
+/// Windows one card is reachable two ways and which of them renders a regenerated reference set was
+/// wgpu's preference order rather than anybody's decision. Being able to pin it is also what makes the
+/// no-adapter path testable at all, since forcing a backend that is not compiled in is the only way to
+/// reach it on a machine that has a GPU. Setting no variable leaves every field at its default, so this
+/// changes nothing unless something asks it to.
+fn instance() -> wgpu::Instance {
+    wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env())
+}
+
 /// Builds a device descriptor asking for whichever optional features this adapter has.
 fn device_descriptor<'a>(adapter: &wgpu::Adapter, label: &'a str) -> wgpu::DeviceDescriptor<'a> {
     wgpu::DeviceDescriptor {
@@ -66,7 +81,7 @@ impl GpuContext {
     /// Returns [`RenderError::RequestAdapter`] or [`RenderError::RequestDevice`] when neither a
     /// native nor a fallback device can be created.
     pub async fn new() -> Result<Self, RenderError> {
-        let instance = wgpu::Instance::default();
+        let instance = instance();
         let mut options = wgpu::RequestAdapterOptions::default();
         let adapter = if let Ok(adapter) = instance.request_adapter(&options).await {
             adapter
@@ -104,7 +119,7 @@ impl GpuContext {
     pub async fn for_window(
         target: impl Into<wgpu::SurfaceTarget<'static>>,
     ) -> Result<(Self, wgpu::Surface<'static>), RenderError> {
-        let instance = wgpu::Instance::default();
+        let instance = instance();
         let surface = instance
             .create_surface(target)
             .map_err(|error| RenderError::CreateSurface(error.to_string()))?;

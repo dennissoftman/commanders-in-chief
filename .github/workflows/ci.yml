@@ -26,9 +26,41 @@ on:
 
 jobs:
   rust:
-    runs-on: ubuntu-latest
+    # Pinned rather than `ubuntu-latest`, because the reference images below are keyed by
+    # adapter *name*, and lavapipe's name carries the LLVM version it was built against. A
+    # runner image moving to a new Ubuntu release would change that string, so the committed
+    # reference set would stop being found and every rendering test would fail asking for a
+    # set to be generated. That is the correct behaviour for a real rasteriser change and
+    # pure noise for an image rollout nobody chose, so the label is a deliberate decision.
+    runs-on: ubuntu-24.04
+    env:
+      # Turns "no adapter" from a skip into a failure. Without this the rasteriser could stop
+      # being usable — a renamed ICD path, a dropped package — and every rendering test would
+      # skip while the job stayed green, which is exactly the state this runner exists to end.
+      CIC_REQUIRE_ADAPTER: 1
     steps:
       - uses: actions/checkout@v4
+      # Mesa's lavapipe is a software Vulkan implementation, which is what lets the rendering
+      # tests and the visual regression harness execute here at all. Before this they found no
+      # adapter and skipped, so the harness ran only on a developer machine and CI could not
+      # fail on a rendering regression.
+      #
+      # The installed ICDs are listed rather than one of them being named: pointing the loader at
+      # a literal path is how the first attempt at this failed, because a wrong filename reports
+      # itself as "found no drivers", which reads like a missing package rather than a typo. On a
+      # runner with no GPU lavapipe is the only Vulkan driver that will enumerate a device
+      # anyway, so there is nothing to disambiguate — and if that ever stops being true, the
+      # adapter name the tests print carries into the reference set's name, so the harness fails
+      # loudly asking for a set rather than quietly comparing against the wrong rasteriser.
+      #
+      # `vulkaninfo` is deliberately strict: if it cannot see a device then neither can wgpu, and
+      # failing here says so in one line instead of as 36 skipped tests.
+      - name: install a software Vulkan adapter
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends mesa-vulkan-drivers vulkan-tools
+          ls -la /usr/share/vulkan/icd.d/
+          vulkaninfo --summary
       - uses: dtolnay/rust-toolchain@1.93.0
         with:
           components: clippy,rustfmt
@@ -46,6 +78,21 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      # The project's standing rule is that a rendering change is verified by looking at the
+      # image, not by a green suite. A regression that trips the harness leaves the capture and
+      # an amplified difference image on the runner's disk, where nobody can look at either, so
+      # uploading them is what makes that rule followable for a CI failure. `always()` because
+      # the interesting case is the failing one, and a fresh reference set written for a new
+      # adapter arrives the same way — it has to be downloaded, reviewed, and committed.
+      - name: upload captures and reference images
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: render-captures
+          path: |
+            target/tmp/
+            crates/cic-render/tests/references/
+          if-no-files-found: warn
       # A dependency bump changes the licences the project must give notice for, and a stale NOTICES.md
       # is an unmet obligation rather than untidy docs. Regenerating and diffing turns that into a
       # failing check instead of something noticed at release.

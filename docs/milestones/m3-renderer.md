@@ -3,11 +3,14 @@
 Draw a map: terrain, water, models, lighting, and shadows, in a window and headlessly.
 
 **Status:** Charter complete **except for terrain level of detail**, plus the atmosphere and weather that
-were not in it. Two qualifications: CI has no GPU, so the regression harness runs on a developer machine
-and not yet on a runner; and a visible terrain chunk still draws at full density, though it is now only
-drawn when visible at all. The second half of that used to read "with level of detail", which was simply
-untrue, and the frustum culling that has since landed is the first half of closing it. See
-[Exit condition](#exit-condition) and the remaining item below.
+were not in it. One qualification remains, and it is that a visible terrain chunk still draws at full
+density — though it is now only drawn when visible at all. That charter line used to read "with level of
+detail", which was simply untrue, and the frustum culling that has since landed is the first half of
+closing it.
+
+The other qualification is closed. CI had no GPU, so the regression harness ran on a developer machine
+and not on a runner; it now runs on Mesa's lavapipe with its own committed reference set, and a rendering
+regression fails the build. See [Exit condition](#exit-condition) and the remaining item below.
 
 ## Charter
 
@@ -19,7 +22,8 @@ untrue, and the frustum culling that has since landed is the first half of closi
 - Water surfaces.
 - Windowed presentation driven by the reusable camera, plus a headless capture path.
 - Visual regression tests: a capture compared against a committed reference, so a rendering change
-  either is intended or fails CI. (Built and verified; "fails CI" awaits a runner with an adapter.)
+  either is intended or fails CI. **Done**, including "fails CI" — see
+  [Exit condition](#exit-condition).
 
 ## Landed
 
@@ -185,6 +189,27 @@ untrue, and the frustum culling that has since landed is the first half of closi
     channel difference of 6 — sub-perceptual, and confirmed by magnifying the spire's contact shadow, the
     concave bowl, and a building base against the pre-change captures before regenerating.
 
+- **A GPU-capable CI runner**, which is what makes the harness able to fail a build. The runner installs
+  Mesa's lavapipe, a software Vulkan implementation, so an adapter exists where there was none; before
+  this `GpuContext::new` found nothing and every rendering test skipped, which had been true since the
+  first render test landed.
+  - **Installing the rasteriser was the easy half.** A skipped rendering test and a passing one are the
+    same colour, so a runner whose adapter quietly stopped being usable would have left the job green
+    while drawing nothing — indistinguishable from the state before the rasteriser existed.
+    `CIC_REQUIRE_ADAPTER`, which CI sets, turns that into a failure, and it was verified by making it
+    fire rather than by assuming it would.
+  - `WGPU_BACKEND` turned out to do nothing: `wgpu::Instance::default()` reads none of the `WGPU_*`
+    variables, so pinning the backend in CI would have been configuration that silently had no effect.
+    `GpuContext` now builds its instance from the environment, which is also the only way to reach the
+    no-adapter path on a machine that has a GPU.
+  - The runner label is pinned to `ubuntu-24.04` rather than `ubuntu-latest`, because lavapipe's adapter
+    name carries the LLVM version it was built against — the set is keyed
+    `vulkan-llvmpipe-llvm-20-1-2-256-bits` — so an image rollout to a new Ubuntu release would orphan the
+    committed set and fail every rendering test asking for a new one.
+  - Captures and reference images upload as an artifact on every outcome, because the standing rule here
+    is that a rendering change is verified by looking at the image, and a harness failure was otherwise
+    leaving the capture and its amplified difference on a disk nobody can reach.
+
 ## Remaining
 
 - **Terrain level of detail.** Frustum culling has landed and is half the charter item — see Landed — but
@@ -205,30 +230,33 @@ untrue, and the frustum culling that has since landed is the first half of closi
   will need one.
 - Wiring the residency bookkeeping to a real virtual-texture cache, so terrain detail scales past what
   one texture can hold.
-- **A GPU-capable CI runner, and a reference set generated on it.** This is the one part of the exit
-  condition not met, and it is infrastructure rather than renderer work — see below.
 
 ## Exit condition
 
 A map package loads and renders, in a window and headlessly, at a stable frame rate; the visual
 regression harness runs in CI with committed references.
 
-**Met, except in CI.** The renderer half is done and the harness works: it catches a change of four
-8-bit steps in one channel — a difference invisible to the eye — across 90% of a frame, verified by
-perturbing the exposure constant and watching all five references fail.
+**Met.** The renderer half was already done and the harness works: it catches a change of four 8-bit
+steps in one channel — a difference invisible to the eye — across 90% of a frame, verified by perturbing
+the exposure constant and watching all five references fail.
 
-What is not met is "in CI". The runner is `ubuntu-latest` with no GPU and no software rasteriser, so
-`GpuContext::new` finds no adapter and **every rendering test skips there** — which has been true since
-the first render test landed and is not something water or the harness changed. Closing it needs two
-steps, in order:
+"In CI" is now met too. The runner installs Mesa's lavapipe, the rendering tests execute there rather
+than skipping, and eleven references are committed under
+`references/vulkan-llvmpipe-llvm-20-1-2-256-bits/` alongside the NVIDIA set. The same **271 tests** pass
+on the runner as on a developer machine, the three rendering binaries taking about eleven seconds between
+them — software rasterisation turned out to be far cheaper here than expected, which is what makes this
+viable on every pull request rather than nightly.
 
-1. Install Mesa's `lavapipe` on the runner, so an adapter exists and the rendering tests execute.
-2. Generate the reference set on that runner — `CIC_UPDATE_REFERENCES=1` — then review those images and
-   commit them under their own adapter directory.
+The reference set was generated on the runner and each image was opened and checked before being
+committed, which is the step the mechanism is built around: the harness deliberately *fails* when a
+reference is missing rather than accepting whatever it first rendered.
 
-The second step has to happen on Linux, which is why it is not in the change that built the harness. Note
-that the references cannot simply be copied from a developer machine: a software rasteriser and an NVIDIA
-card differ far beyond the tolerance, which is the whole reason the sets are keyed by adapter.
+**References could not have been copied from a developer machine, and now there is a number for it.**
+Comparing the two sets under this tolerance, the nine scenes that sample no texture agree — 0.0191% of
+pixels at worst, peak channel difference 9, comfortably inside the allowance — while the two that sample
+one are rejected, textured models by 0.3487% and the tiled terrain albedo by 11.4092%. See
+[`regression`](../../crates/cic-render/src/regression.rs) for what that implies, because the ratio
+between those groups is about six hundred and it locates the cause precisely.
 
 ## Design notes
 
