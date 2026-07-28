@@ -634,8 +634,8 @@ fn scene_bytes(
         [
             environment.fog.height_falloff.max(0.001),
             environment.fog.base,
-            0.0,
-            0.0,
+            environment.fog.patchiness.clamp(0.0, 1.0),
+            environment.fog.patch_scale.max(1.0),
         ],
     );
     let clouds = environment.clouds;

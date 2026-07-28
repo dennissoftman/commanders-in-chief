@@ -29,10 +29,28 @@ fn sky_colour(direction: vec3<f32>) -> vec3<f32> {
 // cloud texture would. See `environment.rs` for what drives these figures.
 // -------------------------------------------------------------------------------------------------
 
-// A hash in `0..1` from a lattice cell. The `fract(sin(...))` form is the standard one; it is not
-// distribution-quality, and does not need to be, because the eye is being shown soft blobs.
+// A hash in `0..1` from a lattice cell, by integer bit mixing.
+//
+// **Not** `fract(sin(dot(cell, k)) * c)`, which is the form every noise snippet reaches for and which was
+// the actual cause of the lattice this pattern showed for three separate attempts to fix it. That hash is a
+// function of a *linear combination* of the coordinates, so every cell on a line perpendicular to `k`
+// receives a correlated value — the pattern is streaked along that direction before any interpolation
+// happens. Rotating the octaves and moving from value noise to gradient noise both attacked the
+// interpolation and so could only ever soften the symptom.
+//
+// Bit mixing has no preferred direction: each coordinate is multiplied by its own large odd constant and
+// the result is avalanched, so adjacent cells and distant ones are equally uncorrelated.
 fn cloud_hash(cell: vec2<f32>) -> f32 {
-    return fract(sin(dot(cell, vec2<f32>(127.1, 311.7))) * 43758.5453);
+    // `bitcast` rather than a conversion, so negative cell coordinates wrap into the integer range
+    // predictably instead of relying on the conversion's behaviour at the boundary.
+    var mixed = bitcast<u32>(i32(floor(cell.x))) * 0x27d4eb2du
+        ^ bitcast<u32>(i32(floor(cell.y))) * 0x9e3779b9u;
+    mixed ^= mixed >> 15u;
+    mixed *= 0x85ebca6bu;
+    mixed ^= mixed >> 13u;
+    mixed *= 0xc2b2ae35u;
+    mixed ^= mixed >> 16u;
+    return f32(mixed) / 4294967295.0;
 }
 
 // A pseudo-random unit vector for a lattice point.
@@ -80,52 +98,82 @@ fn cloud_noise(position: vec2<f32>) -> f32 {
     return clamp(blended * 0.7 + 0.5, 0.0, 1.0);
 }
 
+// Fractal cloud density in `0..1`, warped so its contours are wisps rather than round blobs.
+//
+// Two things make this read as smoke instead of as spots.
+//
+// **Octaves put roughness on the edges.** A two-octave field is smooth at every scale, so however soft its
+// boundary it still reads as a shape with an outline. Five give the boundary detail of its own.
+//
+// **Domain warping tears the contours.** Summing octaves alone keeps every contour locally round, because
+// each octave is isotropic and adding isotropic fields gives an isotropic field. Displacing the *sample
+// position* by a lower-frequency copy of the noise stretches and hooks the contours instead, which is what
+// distinguishes something moving in a fluid from a field of blobs.
+fn cloud_density(sample_position: vec2<f32>) -> f32 {
+    let turn = mat2x2<f32>(0.8, -0.6, 0.6, 0.8);
+
+    // The warp is sampled well below the pattern scale, so it displaces whole regions rather than
+    // roughening them. Roughness is what the octaves are for; doing both jobs with one frequency gives
+    // neither.
+    let warp = vec2<f32>(
+        cloud_noise(sample_position * 0.5 + vec2<f32>(11.7, 3.1)),
+        cloud_noise(sample_position * 0.5 + vec2<f32>(5.3, 19.4))
+    ) - vec2<f32>(0.5);
+    var position = sample_position + warp * 1.6;
+
+    // Rotated as well as scaled between octaves, and a lacunarity of 2.13 rather than 2: doubling would
+    // keep every octave's lattice aligned with the first one's.
+    var amplitude = 1.0;
+    var total = 0.0;
+    var density = 0.0;
+    for (var octave = 0; octave < 5; octave += 1) {
+        density += cloud_noise(position) * amplitude;
+        total += amplitude;
+        position = turn * position * 2.13;
+        amplitude *= 0.55;
+    }
+    density /= total;
+
+    // Summing octaves pulls the distribution toward its mean, and a narrow distribution is fatal here
+    // because coverage is a comparison against it: everything lands half-shaded and the deck reads as a
+    // uniform haze. Stretching the contrast back out costs one multiply, where using fewer octaves would
+    // cost exactly the edge detail they were added for.
+    return clamp((density - 0.5) * 2.1 + 0.5, 0.0, 1.0);
+}
+
 // How much of the sun reaches a point on the ground, in `0..=1`.
 //
-// Sampled in *world* space, which is the same lesson the terrain detail texture had to learn: a screen-
-// or uv-space pattern slides as the camera moves and stretches with the map, and either one reads
-// immediately as a texture stuck to the lens rather than as weather over the ground.
+// Sampled in *world* space, which is the lesson the terrain detail texture had to learn first: a screen- or
+// uv-space pattern slides as the camera moves and stretches with the map, and either reads immediately as a
+// texture stuck to the lens rather than as weather over the ground.
 //
-// This attenuates the sun's *direct* term only. A cloud occludes the sun's disc, not the sky, so the
-// ambient share must survive it -- taking ambient down too is what makes cloud shade read as a hole in
-// the world instead of as an overcast patch.
+// Attenuates the sun's *direct* term only. A cloud occludes the sun's disc, not the sky, so the ambient
+// share must survive it -- taking ambient down as well is what makes cloud shade read as a hole in the
+// world instead of as an overcast patch.
 fn cloud_shadow(world_xy: vec2<f32>) -> f32 {
     let coverage = camera.clouds.x;
     if (coverage <= 0.0) {
         return 1.0;
     }
     let scale = max(camera.clouds.y, 1.0);
+    let density = cloud_density((world_xy + camera.cloud_drift.xy) / scale);
 
-    // Three octaves, each *rotated* as well as scaled.
-    //
-    // The rotation is not decoration. Value noise is bilinear over an axis-aligned lattice, so its
-    // contours follow that lattice — and coverage works by thresholding the density, which turns those
-    // gentle diagonal gradients into hard contours. Stacking octaves that share the lattice's axes made
-    // every shadow edge visibly rectangular, in straight horizontal and vertical steps. Rotating each
-    // octave by an angle sharing no axis with the last removes it, which is the same fix and the same
-    // reason as the golden-angle wave directions in `water.wgsl`.
-    //
-    // The lacunarity is 2.13 rather than 2 for the same reason: doubling keeps every octave's lattice
-    // aligned with the first one's.
-    let turn = mat2x2<f32>(0.8, -0.6, 0.6, 0.8);
-    var position = (world_xy + camera.cloud_drift.xy) / scale;
-    // Two octaves, not three. Each one added pulls the sum further toward its mean, and a narrow
-    // distribution is worse here than a plain one: coverage works by thresholding the density, so once the
-    // spread is narrower than the soft edge band every patch is *partially* shaded and the deck reads as
-    // a uniform haze. Two keeps the range wide enough for distinct patches with distinct edges.
-    let density = cloud_noise(position) * 0.65 + cloud_noise(turn * position * 2.13) * 0.35;
-    // Coverage moves the *threshold* rather than scaling the density, so raising it grows the shaded
-    // patches outward from where they already were. Scaling instead dims the whole map uniformly, which
-    // is a brightness change wearing a cloud's name.
-    // Scaled well down from the authored figure. `softness` reads as "0 is a hard edge and 1 is a very
-    // soft one", but the band it controls is measured against the *noise* range, which spans well under
-    // the full unit interval — so taking it at face value made the band wider than the whole distribution
-    // and turned every setting into the same grey wash.
-    let softness = max(camera.clouds.w, 0.001) * 0.18;
-    let threshold = 1.0 - coverage;
-    let shaded = smoothstep(threshold - softness, threshold + softness, density);
-    return 1.0 - shaded * clamp(camera.clouds.z, 0.0, 1.0);
+    // Coverage moves the *onset* rather than scaling the density, so raising it grows the shaded patches
+    // outward from where they already were. Scaling instead dims the whole map uniformly, which is a
+    // brightness change wearing a cloud's name.
+    let onset = 1.0 - coverage;
+    let softness = max(camera.clouds.w, 0.001) * 0.35;
+
+    // Shade rises from the onset and *keeps rising* with density past it. A `smoothstep` that saturates at
+    // the onset gives every shadowed patch one identical depth, which reads as a stencil laid over the
+    // ground; real cloud shade varies with how much cloud is overhead, so a thick core has to shade harder
+    // than a fringe. The eased term supplies the soft edge and the second factor the varying depth.
+    let entered = clamp((density - onset + softness) / max(softness * 2.0, 0.02), 0.0, 1.0);
+    let eased = entered * entered * (3.0 - 2.0 * entered);
+    let depth = eased * (0.35 + 0.65 * entered);
+    return 1.0 - depth * clamp(camera.clouds.z, 0.0, 1.0);
 }
+
 
 // -------------------------------------------------------------------------------------------------
 // Fog
@@ -142,25 +190,68 @@ fn cloud_shadow(world_xy: vec2<f32>) -> f32 {
 // be as clear as the hilltop itself, because nothing would account for the dense air the ray crossed on
 // the way down. The closed form below is the integral of `exp(-h)` over the segment, which is available
 // precisely because the falloff is exponential.
+// Taps along the view ray. Six is coarse, and deliberately so -- see `fog_structure`.
+const FOG_STEPS: i32 = 6;
+
+// A cheap two-octave field for fog structure, rather than the five-octave warped one the clouds use.
+//
+// This is the trade that makes marching affordable. `cloud_density` costs seven noise evaluations, and
+// walking the ray with it would cost forty-two per pixel. Fog is looked *through*, accumulating over a
+// long path that blurs its own detail, so it does not need the edge roughness a shadow cast onto ground
+// does -- where that detail is the whole point.
+fn fog_structure(position: vec2<f32>) -> f32 {
+    let turn = mat2x2<f32>(0.8, -0.6, 0.6, 0.8);
+    let raw = cloud_noise(position) * 0.65 + cloud_noise(turn * position * 2.13) * 0.35;
+    return clamp((raw - 0.5) * 1.9 + 0.5, 0.0, 1.0);
+}
+
+// Fog opacity between the camera and a world position, in `0..=1`.
+//
+// **Marched, not integrated in closed form**, and that is a correction to an earlier design rather than an
+// escalation of it. The closed form is exact while the density varies only with *height*, and it was
+// genuinely better than sampling at the fragment -- which would leave a valley floor as clear as the
+// hilltop it is seen from, because nothing accounts for the dense air the ray crossed.
+//
+// But once the density also varies in xy there is no closed form, and the first attempt at patchiness --
+// one noise tap at the ray's midpoint, scaling the analytic result -- could not work for a reason that had
+// nothing to do with tuning: multiplying a smooth field by a mildly varying one leaves it smooth. Three
+// rounds of raising patchiness, shrinking the scale, and lowering the density to escape the exponential's
+// saturation all produced the same uniform wash. Fog stands in banks only if the density genuinely differs
+// from one part of the ray to another, and that requires walking it.
+//
+// Height falloff is still exponential, evaluated per tap, so the valley-versus-hilltop behaviour the closed
+// form bought is preserved rather than traded away.
 fn fog_factor(world_position: vec3<f32>) -> f32 {
     let density = camera.fog.w;
     if (density <= 0.0) {
         return 0.0;
     }
-    let distance = length(camera.camera_position.xyz - world_position);
     let falloff = max(camera.fog_params.x, 0.001);
     let base = camera.fog_params.y;
-    let start = (camera.camera_position.z - base) / falloff;
-    let end = (world_position.z - base) / falloff;
-    let difference = end - start;
-    // A level ray makes the integral degenerate, so it falls back to the plain exponential rather than
-    // dividing by a difference of zero.
-    var mean = exp(-start);
-    if (abs(difference) > 0.0001) {
-        mean = (exp(-start) - exp(-end)) / difference;
+    let patchiness = clamp(camera.fog_params.z, 0.0, 1.0);
+    let scale = max(camera.fog_params.w, 1.0);
+    // A fog bank sits in its valley rather than racing the deck overhead, so it drifts at a fraction of
+    // the cloud speed.
+    let drift = camera.cloud_drift.xy * 0.35;
+
+    let along = world_position - camera.camera_position.xyz;
+    let step = length(along) / f32(FOG_STEPS);
+    var optical = 0.0;
+    for (var index = 0; index < FOG_STEPS; index += 1) {
+        // The midpoint of each segment rather than an end, which is the difference between a Riemann sum
+        // that converges at six taps and one that needs twenty.
+        let fraction = (f32(index) + 0.5) / f32(FOG_STEPS);
+        let point = camera.camera_position.xyz + along * fraction;
+        var local = density * exp(-(point.z - base) / falloff);
+        if (patchiness > 0.0) {
+            let structure = fog_structure((point.xy + drift) / scale);
+            local *= mix(1.0 - patchiness, 1.0 + patchiness, structure);
+        }
+        optical += local * step;
     }
-    return 1.0 - exp(-max(density * distance * mean, 0.0));
+    return 1.0 - exp(-max(optical, 0.0));
 }
+
 
 fn apply_fog(colour: vec3<f32>, world_position: vec3<f32>) -> vec3<f32> {
     return mix(colour, camera.fog.rgb, fog_factor(world_position));

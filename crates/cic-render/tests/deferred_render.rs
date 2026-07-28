@@ -898,10 +898,25 @@ fn fog_fills_the_basin_more_deeply_than_it_veils_the_rim() {
     let (floor, rim) = world_elevation_range(&scene.harness.terrain);
     let foggy = scene.frame.in_environment(Environment {
         fog: Fog {
-            density: 0.006,
+            // Deliberately modest. Fog opacity is `1 - exp(-optical)`, which saturates: at a density
+            // thick enough to veil the frame, the exponential is already near its ceiling and a large
+            // swing in density barely moves the result — so the banks below become invisible for a
+            // reason that has nothing to do with the banks. A density leaving the factor mid-range is
+            // what makes any variation in it legible.
+            density: 0.0022,
             // A falloff well under the basin's depth, so the rim stands clear of what fills the floor.
             height_falloff: (rim - floor) * 0.35,
             base: floor,
+            // Banked rather than uniform. The scale has to be small: the patchiness is sampled at each
+            // ray's midpoint, and this camera's midpoints span only about 770 world units, so anything
+            // near the map's own extent gives under one cell of variation across the frame.
+            patchiness: 0.85,
+            // *Large*, not small, and this inverts what a midpoint tap wanted. Marching integrates the
+            // density along the ray, so a scale much smaller than the ray is long makes every ray cross
+            // several banks and average them into the same value -- adjacent pixels then agree and the
+            // result is the uniform wash the patchiness was added to avoid. A scale comparable to the ray
+            // keeps each ray largely inside one bank, so neighbouring rays genuinely differ.
+            patch_scale: 900.0,
         },
         ..Environment::default()
     });

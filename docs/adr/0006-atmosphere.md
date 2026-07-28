@@ -1,4 +1,4 @@
-# ADR 0006: Atmosphere — one environment, analytic fog, procedural cloud shadows
+# ADR 0006: Atmosphere — one environment, marched fog, procedural cloud shadows
 
 - Status: accepted
 
@@ -19,8 +19,9 @@ asking for "storm" is asking for one thing.
    coverage all follow.
 2. **Weather is a set of blendable scalars, not an enum of presets** — `overcast`, `wetness`, `snow`,
    `flash`, `wind`. Presets are constructors over those scalars.
-3. **Fog is analytic height-and-distance fog**, with the density *integrated along the view ray*, applied
-   inside the lighting and water shaders. Volumetric light shafts are declined for now.
+3. **Fog is marched along the view ray in six taps**, with an exponential height falloff per tap,
+   applied inside the lighting and water shaders. Volumetric light shafts - which need the shadow map
+   sampled per step - are declined.
 4. **Cloud shadows are procedural gradient noise sampled in world space**, attenuating the sun's direct
    term only.
 5. **The environment's sun is opt-in.** `DeferredFrame::light` stays authoritative.
@@ -28,10 +29,20 @@ asking for "storm" is asking for one thing.
 
 ## Rationale
 
-**Fog is integrated along the ray, not sampled at the fragment.** Sampling at the surface gets the common
-case visibly wrong: a valley floor seen from a hilltop would be as clear as the hilltop, because nothing
-accounts for the dense air the ray crossed on the way down. The closed form is available precisely
-*because* the falloff is exponential, so the correct version costs about what the wrong one does.
+**Fog is integrated along the ray, not sampled at the fragment.** Sampling at the surface gets the
+common case visibly wrong: a valley floor seen from a hilltop would be as clear as the hilltop, because
+nothing accounts for the dense air the ray crossed on the way down.
+
+This began as a closed form, which is exact while the density varies with height alone. Adding
+patchiness made it vary laterally as well, and no closed form survives that, so it became a six-tap
+march. The first patchiness attempt kept the closed form and merely scaled it by one noise sample at the
+ray's midpoint. That cannot work for a reason independent of tuning: multiplying a smooth field by a
+mildly varying one leaves it smooth. Three rounds of raising patchiness, shrinking the scale, and
+lowering the density to escape the exponential's saturation all produced the same uniform wash before
+the cause was clear.
+
+**Patch scale must be large, which is the reverse of what the single-tap version wanted.** Because the
+density is integrated, a small scale averages several banks per ray and neighbouring pixels agree.
 
 **Fog is applied in the shaders, not as a depth-based post pass.** Water writes no depth — deliberately —
 so a post pass would fog it at the depth of the terrain behind it, putting water in front of its own fog.
@@ -76,5 +87,19 @@ beam and into the sky rather than removing it. Dimming both is what makes an ove
   wanting a day cycle must assign `Environment::sun_light()` to the frame themselves.
 - No latitude, date, or north reference: the sun is a half-sine over a fixed civil day, because no map
   format carries the inputs a real solar position model would need.
-- Cloud shadows cost two gradient-noise samples per lit pixel in both the lighting and water passes, and
-  are skipped entirely at zero coverage.
+- Cloud shadows cost seven gradient-noise evaluations per lit pixel — five octaves plus two for the warp —
+  in both the lighting and water passes, and are skipped entirely at zero coverage. Fog costs two per tap
+  over six taps, using a cheaper two-octave field for exactly that reason: marching the cloud field would
+  have cost forty-two.
+- **The cloud lattice was a hash fault, and two earlier fixes treated symptoms.** `fract(sin(dot(p, k)) * c)`
+  is a function of a linear combination of the coordinates, so every cell on a line perpendicular to `k`
+  gets a correlated value — the field is streaked before any interpolation happens. Rotating the octaves and
+  moving to gradient noise both improved the interpolation and could only ever soften it. Integer bit mixing
+  has no preferred direction and removed it outright. Worth recording because the wrong diagnosis was
+  plausible twice.
+- **Fog banks are not visually verified.** The marched implementation is better founded than the closed form
+  it replaced, and fog demonstrably fills a basin while the rim reads through it. But the basin fixture is a
+  broad, gentle, near-planar surface seen from a distant camera, so every ray has much the same length and
+  direction and the integral smooths out whatever the density does. Showing banks needs a scene with real
+  depth structure — a ridge standing out of the fog, objects at differing distances — which is a fixture
+  this milestone does not have. Treat patchiness as implemented and unproven.
