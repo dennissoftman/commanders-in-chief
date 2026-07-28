@@ -116,9 +116,12 @@ impl Weather {
 
 /// Distance and height fog.
 ///
-/// Analytic rather than volumetric. A ray march through the shadow map buys light shafts and costs an
-/// order of magnitude more; an exponential height falloff buys the thing fog is actually *for* — depth
-/// cues and weather — for a few instructions. See [ADR 0006](../../../docs/adr/0006-atmosphere.md).
+/// Marched along the view ray in six taps, with an exponential height falloff evaluated per tap.
+///
+/// Still not volumetric in the sense that buys light shafts, since nothing here samples the shadow map -
+/// but no longer a closed form either, and that is a correction rather than an escalation. A closed form is
+/// exact only while the density varies with height alone, and `patchiness` makes it vary laterally too. See
+/// [ADR 0006](../../../docs/adr/0006-atmosphere.md).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Fog {
     /// Fog accumulated per world unit of view distance at the reference height.
@@ -130,6 +133,24 @@ pub struct Fog {
     pub height_falloff: f32,
     /// The elevation the density is quoted at, in world units.
     pub base: f32,
+    /// How much the density varies from place to place, in `0..=1`.
+    ///
+    /// Zero is a uniform haze, which is what fog looks like when nobody has thought about it. Real fog
+    /// stands in banks, and the difference between the two is most of whether it reads as air.
+    pub patchiness: f32,
+    /// World units across one bank of fog.
+    ///
+    /// **Large** - comparable to how far the camera can see, not to a cloud.
+    ///
+    /// The density is *integrated* along each ray, so at a scale much smaller than the ray is long every ray
+    /// crosses several banks and averages them to the same figure. Neighbouring pixels then agree, and the
+    /// result is exactly the uniform haze the patchiness exists to avoid. A scale near the ray length keeps
+    /// each ray largely inside one bank, so neighbouring rays genuinely differ.
+    ///
+    /// This is the opposite of what an earlier single-tap version wanted, and the two are easy to confuse:
+    /// with one tap at the ray's midpoint a large scale gives too little variation *across the frame*, and
+    /// with a march it gives too much averaging *along the ray*.
+    pub patch_scale: f32,
 }
 
 impl Default for Fog {
@@ -139,6 +160,8 @@ impl Default for Fog {
             density: 0.0,
             height_falloff: 120.0,
             base: 0.0,
+            patchiness: 0.6,
+            patch_scale: 1_100.0,
         }
     }
 }
