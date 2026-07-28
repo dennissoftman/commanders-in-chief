@@ -1264,6 +1264,86 @@ fn harness_share(part: Duration, whole: Duration) -> f32 {
     (part.as_secs_f64() / whole.as_secs_f64()) as f32
 }
 
+#[test]
+fn a_terrain_that_does_not_fill_its_last_chunk_draws_no_ground_past_its_edge() {
+    // The one path the other fixtures cannot reach. Chunks are 32 cells and both the shadowing terrain
+    // (192 cells) and the model terrain (128) divide evenly, so every committed reference exercises the
+    // chunked draw without ever producing a *partial* chunk.
+    //
+    // A partial chunk still submits a full chunk's vertices, and the out-of-range ones are collapsed to a
+    // degenerate triangle in the vertex shader. Clamping them instead would not be harmless: `elevation`
+    // clamps the coordinate it looks a height up at, but `world_position` does *not* clamp the x and y it
+    // derives from the same coordinate — so a cell past the edge lands at its true world position carrying
+    // the edge's height, and the terrain grows a slab hanging past its own extent. That is the water-slab
+    // bug this renderer has already had once.
+    //
+    // Two terrains at the same spacing, one that divides evenly and one that does not, framed by the same
+    // camera. Their footprints should differ by exactly the ratio of their extents; a slab out to the end
+    // of the last chunk would make the ragged one almost twice the area it should be.
+    let Some(context) = context() else { return };
+    let spacing = 8.0;
+    let exact = flat_at(96 + 1, spacing);
+    let ragged = flat_at(99 + 1, spacing);
+
+    // High enough that both terrains sit well inside the frame with sky around them, and looking straight
+    // down so the footprint is the map's own rectangle rather than a perspective wedge.
+    let framing = |samples: u32| {
+        let extent = f32::from(u16::try_from(samples - 1).expect("small fixture")) * spacing;
+        let centre = extent * 0.5;
+        CameraPose {
+            eye: [centre, centre - 1.0, 2_400.0],
+            focus: [centre, centre, 0.0],
+            forward: [0.0, 0.0, -1.0],
+        }
+    };
+
+    let exact_cover = ground_fraction(context, exact, framing(97));
+    let ragged_cover = ground_fraction(context, ragged, framing(100));
+    // Both cameras frame their own map the same way, so a correct render gives both the same footprint.
+    eprintln!("ground cover: {exact_cover:.4} at 96 cells, {ragged_cover:.4} at 99");
+    assert!(
+        exact_cover > 0.05,
+        "the evenly divided terrain covered only {exact_cover:.4} of the frame, so this fixture is not \
+         measuring a footprint at all"
+    );
+    let ratio = ragged_cover / exact_cover;
+    assert!(
+        (0.85..=1.15).contains(&ratio),
+        "the ragged terrain covered {ragged_cover:.4} against {exact_cover:.4} for the evenly divided \
+         one, a ratio of {ratio:.3}. Both frame their own extent identically, so the partial chunk is \
+         drawing ground that is not there -- out to the end of its chunk, this reads about 1.7."
+    );
+}
+
+/// A flat terrain of `samples` per side, at one elevation.
+fn flat_at(samples: u32, spacing: f32) -> Terrain {
+    Terrain::new(
+        samples,
+        samples,
+        spacing,
+        VERTICAL,
+        vec![400; (samples * samples) as usize],
+        Vec::new(),
+    )
+    .expect("valid flat terrain")
+}
+
+/// The fraction of a rendered frame that is ground rather than sky.
+///
+/// Classified by hue, as `sky_mask` does and for the same reason: the lighting pass paints a blue gradient
+/// where coverage is zero, and no terrain in these fixtures is bluer than it is red.
+fn ground_fraction(context: &GpuContext, terrain: Terrain, pose: CameraPose) -> f32 {
+    let harness = harness_with(context, terrain, DisplaySettings::NATIVE);
+    let frame = DeferredFrame::new(pose, WIDTH, HEIGHT);
+    let capture = render(context, &harness, frame);
+    let ground = capture
+        .rgba()
+        .chunks_exact(4)
+        .filter(|pixel| pixel[2] <= pixel[0])
+        .count();
+    ground as f32 / (capture.rgba().len() / 4) as f32
+}
+
 /// Mean absolute Laplacian of luminance, over the pixels a mask selects.
 ///
 /// A *second* difference rather than a gradient, and that choice is what makes the number mean

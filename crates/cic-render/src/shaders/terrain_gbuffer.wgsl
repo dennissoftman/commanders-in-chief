@@ -76,13 +76,35 @@ fn surface_normal(coordinate: vec2<i32>) -> vec3<f32> {
     return normalize(vec3<f32>(-slope.x, -slope.y, 1.0));
 }
 
-/// Resolves a vertex index to its terrain sample coordinate.
-fn grid_coordinate(vertex_index: u32) -> vec2<i32> {
+/// One vertex of the grid: its sample coordinate, and whether that coordinate is on the terrain at all.
+struct GridSample {
+    coordinate: vec2<i32>,
+    inside: bool,
+}
+
+/// Resolves a vertex within a chunk, plus the chunk it belongs to, to a terrain sample coordinate.
+///
+/// The chunk arrives as the *instance index*, which is what keeps culling free of any new binding: the
+/// CPU decides which chunks to draw and expresses it as instance ranges, and this turns each index back
+/// into a grid origin using the counts already in the terrain uniform. `layers.y` is the number of chunks
+/// across and `layers.z` the cells along a chunk's edge.
+///
+/// `inside` is false for a vertex past the terrain's edge, which happens in the last chunk of a row or
+/// column whenever the cell count is not a multiple of the chunk size. The caller collapses those to a
+/// degenerate triangle. Clamping them instead — which is what `elevation` does to a coordinate it is
+/// handed — would stretch the final row of cells across the ground that is not there.
+fn grid_sample(vertex_index: u32, chunk_index: u32) -> GridSample {
     let samples = sample_count();
-    let cells_x = u32(max(samples.x - 1, 1));
+    let cells = vec2<u32>(u32(max(samples.x - 1, 1)), u32(max(samples.y - 1, 1)));
+    let chunks_across = max(uniforms.layers.y, 1u);
+    let chunk_cells = max(uniforms.layers.z, 1u);
+
     let quad = vertex_index / 6u;
     let corner = vertex_index % 6u;
-    let cell = vec2<u32>(quad % cells_x, quad / cells_x);
+    let local = vec2<u32>(quad % chunk_cells, quad / chunk_cells);
+    let origin = vec2<u32>(chunk_index % chunks_across, chunk_index / chunks_across) * chunk_cells;
+    let cell = origin + local;
+
     var offsets = array<vec2<u32>, 6>(
         vec2<u32>(0u, 0u),
         vec2<u32>(1u, 0u),
@@ -91,7 +113,18 @@ fn grid_coordinate(vertex_index: u32) -> vec2<i32> {
         vec2<u32>(1u, 1u),
         vec2<u32>(0u, 1u),
     );
-    return vec2<i32>(cell + offsets[corner]);
+    var output: GridSample;
+    output.coordinate = vec2<i32>(cell + offsets[corner]);
+    output.inside = cell.x < cells.x && cell.y < cells.y;
+    return output;
+}
+
+/// A clip position no triangle survives: behind the near plane, which this projection puts at zero.
+///
+/// Used for a vertex outside the terrain. All six vertices of an out-of-range quad get the same value, so
+/// the primitive is degenerate as well as clipped.
+fn discarded_vertex() -> vec4<f32> {
+    return vec4<f32>(0.0, 0.0, -1.0, 1.0);
 }
 
 fn world_position(coordinate: vec2<i32>) -> vec3<f32> {
@@ -104,11 +137,18 @@ fn world_position(coordinate: vec2<i32>) -> vec3<f32> {
 }
 
 @vertex
-fn gbuffer_vertex(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
-    let coordinate = grid_coordinate(vertex_index);
+fn gbuffer_vertex(
+    @builtin(vertex_index) vertex_index: u32,
+    @builtin(instance_index) instance_index: u32,
+) -> VertexOutput {
+    let sample = grid_sample(vertex_index, instance_index);
+    let coordinate = sample.coordinate;
     let samples = sample_count();
     var output: VertexOutput;
     output.clip_position = uniforms.view_projection * vec4<f32>(world_position(coordinate), 1.0);
+    if !sample.inside {
+        output.clip_position = discarded_vertex();
+    }
     output.uv = vec2<f32>(coordinate) / max(vec2<f32>(samples - vec2<i32>(1)), vec2<f32>(1.0));
     output.normal = surface_normal(coordinate);
     return output;
@@ -170,6 +210,13 @@ fn gbuffer_fragment(input: VertexOutput) -> GBufferOutput {
 /// Deliberately has no fragment shader: terrain is fully opaque, so the rasterizer's depth write is
 /// the entire output and a fragment stage would only cost bandwidth.
 @vertex
-fn shadow_vertex(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4<f32> {
-    return cascade.view_projection * vec4<f32>(world_position(grid_coordinate(vertex_index)), 1.0);
+fn shadow_vertex(
+    @builtin(vertex_index) vertex_index: u32,
+    @builtin(instance_index) instance_index: u32,
+) -> @builtin(position) vec4<f32> {
+    let sample = grid_sample(vertex_index, instance_index);
+    if !sample.inside {
+        return discarded_vertex();
+    }
+    return cascade.view_projection * vec4<f32>(world_position(sample.coordinate), 1.0);
 }

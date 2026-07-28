@@ -5,9 +5,9 @@
 M0 through M2 are complete: the workspace and its invariants, the resource layer, and the native asset
 formats. **M3's charter is complete bar one item** — the renderer draws a lit, shadowed, occluded, textured
 scene with water and weather, both headlessly and in a window, and a visual regression harness compares
-captures against committed references. The exception is **terrain level of detail**, which does not exist:
-the heightfield is submitted at full density, five times a frame, with nothing culled anywhere. This
-document and the milestone both claimed otherwise until it was checked.
+captures against committed references. The exception is **terrain level of detail**: chunks are now
+frustum-culled per pass, but a chunk that is drawn is drawn at full density whatever its size on screen.
+This document and the milestone both claimed the whole item was done until it was checked.
 
 What works:
 
@@ -72,6 +72,19 @@ What works:
     reason to build it, and at 1920x1200 the four cascades were 7% of the frame while ambient occlusion was
     58%. Measured at 720x480 the same code said the cascades were 36%, because the cascades cost the same at
     every window size and a small target leaves nothing to compare them against.
+- **Terrain frustum culling** ([`culling`](crates/cic-render/src/culling.rs)), over a decomposition into
+  32-cell chunks. The camera and each fitted cascade cull against their own frustum and the survivors draw
+  as instanced runs — the instance index *is* the chunk index, so this needed no new binding, buffer or
+  upload. Cascades use their own frusta rather than the camera's, because a cascade reaches behind the
+  camera toward the light and a caster off screen still casts into view.
+  - Verified by being invisible: every committed reference still matches byte for byte. The one case they
+    could not cover is a chunk the terrain does not fill — 192 cells and 128 both divide evenly by 32 — so
+    that has its own test, confirmed by breaking the shader on purpose and watching it fail at the
+    predicted figure.
+  - The win scales with the map and is nil at fixture size: 0.008 ms on a 257x257 terrain. On a
+    **1025x1025** one the cascades go from **0.809 ms to 0.131 ms** and the G-buffer from **0.239 ms to
+    0.071 ms**, taking the frame from **1.534 ms to 0.692 ms**. The figure that matters is that 0.692 ms is
+    what the *small* terrain costs too: terrain no longer scales with map size.
 - **A half-resolution occlusion estimate**, which is what that measurement led to. One estimate per 2x2
   block of render pixels, resolved back to full resolution by the bilateral pass that already existed — now
   the upsample as well as the blur, weighting each tap by the world distance to the render pixel its
@@ -110,10 +123,10 @@ beyond the tolerance, which is why the sets are keyed by adapter in the first pl
 
 After that, in rough order:
 
-1. **Terrain level of detail and frustum culling**, the outstanding charter item. Two million unculled
-   vertices a frame is not worth leaving standing, and it matters more on a larger map and a weaker GPU —
-   but it is not the biggest win, and the measurement is what said so: all four cascades are 5% of the
-   frame and the G-buffer 11%.
+1. **Terrain level of detail**, the remaining half of the charter item now that culling has landed. A chunk
+   that is visible still draws every cell it has, whether it covers forty pixels or four; the chunk
+   decomposition culling introduced is what a per-chunk stride would hang off, plus skirts or stitching so
+   neighbouring densities do not crack.
 2. **TAA**, the quality tier ADR 0005 plans and the last antialiasing item: a jittered projection, a
    motion-vector target, a history buffer, and neighbourhood clamping. It needs the regression harness
    accounted for, since a temporal accumulator makes one captured frame depend on the frames before it.
@@ -124,7 +137,7 @@ After that, in rough order:
 ## Gate status
 
 Formatting, strict lints (`clippy::all` and `clippy::pedantic` as errors, plus `-D warnings` as CI runs
-it), and the full test suite all pass on the pinned toolchain. **251 tests across five crates**, 35 of
+it), and the full test suite all pass on the pinned toolchain. **271 tests across five crates**, 36 of
 which render on a real device (verified on an NVIDIA RTX 4080 SUPER) and write their captures to
 `target/tmp/`. Eleven committed references cover terrain layers, instanced models, the deferred chain, water,
 water under a glancing sun, cloud shadows, fog, wet ground, snow, an antialiased frame, and a supersampled

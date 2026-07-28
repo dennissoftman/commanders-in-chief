@@ -43,7 +43,11 @@
 
 use cic_camera::CameraPose;
 
+use std::cell::RefCell;
+use std::ops::Range;
+
 use crate::RenderError;
+use crate::culling::{Frustum, contiguous_runs};
 use crate::display::DisplaySettings;
 use crate::environment::Environment;
 use crate::gpu::{DEPTH_FORMAT, GpuContext};
@@ -397,6 +401,25 @@ pub struct DeferredRenderer {
     /// carry them.
     render: [u32; 2],
     output: [u32; 2],
+    /// Which terrain chunks each pass draws, decided by [`Self::set_frame`] and read by [`Self::render`].
+    ///
+    /// In a cell so that both can keep taking `&self`. The alternative was threading the visible set
+    /// through `render` as a further argument, and it is not the caller's business: it is derived from the
+    /// frame the caller already supplied, and a caller free to pass a *different* set than the one
+    /// `set_frame` computed could cull geometry the cascades were fitted around.
+    visible: RefCell<VisibleChunks>,
+}
+
+/// The chunk runs each terrain pass draws, for one frame.
+///
+/// One entry per shadow cascade plus one for the camera. Kept as runs rather than as indices because that
+/// is the form the draw call takes, and converting once per frame beats converting once per pass.
+#[derive(Debug, Default)]
+struct VisibleChunks {
+    cascades: [Vec<Range<u32>>; CASCADE_COUNT],
+    camera: Vec<Range<u32>>,
+    /// Scratch for the index list, reused across the five culls rather than reallocated per pass.
+    scratch: Vec<u32>,
 }
 
 impl DeferredRenderer {
@@ -505,6 +528,7 @@ impl DeferredRenderer {
             timer: None,
             render: targets.render,
             output: targets.output,
+            visible: RefCell::default(),
         })
     }
 
@@ -625,7 +649,43 @@ impl DeferredRenderer {
             body.set_time(context, frame.time);
         }
 
+        // Which terrain chunks each pass will draw. Done here rather than in `render` because it depends on
+        // the frame, and done for the cascades from their *fitted* matrices rather than from the camera, so
+        // each cascade draws the casters it actually covers instead of the whole heightfield five times.
+        self.cull_terrain(terrain, &view_projection, &cascades);
+
         Ok(cascades)
+    }
+
+    /// Decides the visible chunk runs for the camera and for each fitted cascade.
+    ///
+    /// A cascade's frustum is its own, not a subset of the camera's: it reaches *behind* the camera toward
+    /// the light, because a caster outside the view can still throw a shadow into it. Culling a cascade
+    /// against the camera would remove exactly those casters, and the symptom would be shadows winking out
+    /// as their caster left the screen.
+    fn cull_terrain(
+        &self,
+        terrain: &TerrainRenderer,
+        view_projection: &[[f32; 4]; 4],
+        cascades: &[Cascade; CASCADE_COUNT],
+    ) {
+        let chunks = terrain.chunks();
+        let mut visible = self.visible.borrow_mut();
+        let VisibleChunks {
+            cascades: cascade_runs,
+            camera,
+            scratch,
+        } = &mut *visible;
+
+        chunks.cull_into(&Frustum::from_view_projection(view_projection), scratch);
+        contiguous_runs(scratch, camera);
+        for (runs, cascade) in cascade_runs.iter_mut().zip(cascades) {
+            chunks.cull_into(
+                &Frustum::from_view_projection(&cascade.view_projection),
+                scratch,
+            );
+            contiguous_runs(scratch, runs);
+        }
     }
 
     /// Records the whole chain, ending with the composite into `output`.
@@ -672,7 +732,7 @@ impl DeferredRenderer {
             });
             pass.set_pipeline(&self.gbuffer_pipeline);
             pass.set_bind_group(0, terrain.bind_group(), &[]);
-            pass.draw(0..terrain.vertex_count(), 0..1);
+            terrain.draw_chunks(&mut pass, &self.visible.borrow().camera);
 
             if !models.is_empty() {
                 pass.set_pipeline(&self.model_gbuffer_pipeline);
@@ -758,11 +818,13 @@ impl DeferredRenderer {
         targets: &DeferredTargets,
         recorded: &mut Vec<TimedPass>,
     ) {
-        for ((layer, group), cascade) in targets
+        let visible = self.visible.borrow();
+        for (((layer, group), cascade), runs) in targets
             .shadow_layers
             .iter()
             .zip(&self.cascade_groups)
             .zip(TimedPass::CASCADES)
+            .zip(&visible.cascades)
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("cic-render shadow cascade"),
@@ -775,7 +837,7 @@ impl DeferredRenderer {
             pass.set_pipeline(&self.shadow_pipeline);
             pass.set_bind_group(0, terrain.bind_group(), &[]);
             pass.set_bind_group(1, group, &[]);
-            pass.draw(0..terrain.vertex_count(), 0..1);
+            terrain.draw_chunks(&mut pass, runs);
 
             // Models cast into the same cascade. Without this a model is lit as though it were
             // present but throws no shadow, which reads as the model floating.

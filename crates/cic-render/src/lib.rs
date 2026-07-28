@@ -46,6 +46,7 @@
 //! bookkeeping, and a CI runner with an adapter so the reference captures run there. See
 //! `docs/milestones/m3-renderer.md`.
 
+pub mod culling;
 pub mod deferred;
 pub mod detail;
 pub mod display;
@@ -68,6 +69,7 @@ pub mod water;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
+pub use culling::{CHUNK_CELLS, ChunkGrid, Frustum};
 pub use deferred::{DeferredFrame, DeferredRenderer, DeferredTargets, occlusion_size};
 pub use display::{Antialiasing, DisplaySettings};
 pub use environment::{Clouds, Environment, Fog, Weather};

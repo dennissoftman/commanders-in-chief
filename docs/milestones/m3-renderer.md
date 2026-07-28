@@ -3,16 +3,17 @@
 Draw a map: terrain, water, models, lighting, and shadows, in a window and headlessly.
 
 **Status:** Charter complete **except for terrain level of detail**, plus the atmosphere and weather that
-were not in it. Two qualifications, and both were previously understated here: CI has no GPU, so the
-regression harness runs on a developer machine and not yet on a runner; and the terrain draws at full
-density with no culling, which this document claimed for some time that it did not. See
+were not in it. Two qualifications: CI has no GPU, so the regression harness runs on a developer machine
+and not yet on a runner; and a visible terrain chunk still draws at full density, though it is now only
+drawn when visible at all. The second half of that used to read "with level of detail", which was simply
+untrue, and the frustum culling that has since landed is the first half of closing it. See
 [Exit condition](#exit-condition) and the remaining item below.
 
 ## Charter
 
 - Terrain rendering from a heightfield, with level of detail that holds up at both a tactical zoom and
-  a strategic one. **The heightfield renders; the level of detail does not exist yet** — see
-  [Remaining](#remaining).
+  a strategic one. **The heightfield renders and is frustum-culled; the level of detail does not exist
+  yet** — see [Remaining](#remaining).
 - Static and instanced model rendering from imported geometry.
 - Directional lighting with cascaded shadows, and ambient occlusion.
 - Water surfaces.
@@ -142,6 +143,31 @@ density with no culling, which this document claimed for some time that it did n
   device without it renders identically and reports nothing. `P` in the viewer prints a breakdown once a
   second — reading blocks on the GPU, which is why it is not per frame.
 
+- **Terrain frustum culling**, over a chunk decomposition ([`culling`](../../crates/cic-render/src/culling.rs)).
+  The terrain divides into 32-cell chunks, each with a world-space box; the camera and each *fitted cascade*
+  cull against their own frustum, and the surviving chunks draw as instanced runs. The instance index **is**
+  the chunk index, which is what keeps this free of any new binding, buffer or upload: the vertex shader
+  turns it into a grid origin from counts already in the terrain uniform, and adjacent chunks collapse into
+  one draw.
+  - Cascades cull against their own frusta and not the camera's, because a cascade reaches *behind* the
+    camera toward the light — a caster off screen still throws a shadow into view, and culling it against
+    the camera would make shadows wink out as their caster left the frame.
+  - **Culling against the pass's own matrix cannot change the image, and that is the safety argument.**
+    Each frustum is extracted from the very view-projection that pass renders with, so a chunk the test
+    rejects is one the rasterizer would have clipped anyway. The only way to lose visible ground is to
+    extract the planes wrongly — which is what the byte-identical references disprove, and what the unit
+    tests attack directly, including the near-plane convention that would otherwise cull the whole world.
+  - **It is invisible, and that is how it is verified.** Every committed reference still matches byte for
+    byte with culling active. What the references could *not* cover is a partial chunk — 192 cells and 128
+    both divide evenly by 32 — so there is a test for the ragged case, and it was confirmed by breaking the
+    degenerate-vertex handling on purpose and watching it fail with the predicted number.
+  - The win is a function of map size, and honestly nil at the size the fixtures use: about 0.008 ms on a
+    257x257 terrain, where the camera sees most of the map anyway. On a **1025x1025** one, which is the size
+    this project is actually aimed at, the four cascades go from **0.809 ms to 0.131 ms** and the G-buffer
+    from **0.239 ms to 0.071 ms** — the frame from **1.534 ms to 0.692 ms, 55% off**. The number worth
+    keeping is the other one: at 0.692 ms that sixteen-times-larger terrain costs the *same* as the small
+    one, so terrain no longer scales with map size at all.
+
 - **A half-resolution occlusion estimate**, which is what the timing was built to find and immediately
   paid for itself. One estimate per 2x2 block of render pixels, resolved back to full resolution by the
   bilateral pass that was already there — so that pass is now the upsample as well as the blur, weighting
@@ -161,12 +187,10 @@ density with no culling, which this document claimed for some time that it did n
 
 ## Remaining
 
-- **Terrain level of detail, and any culling at all.** This is the outstanding charter item, though *not*
-  the largest cost in the frame — see the note below, which is the first thing the new timing measured and
-  the first guess it refuted. `TerrainRenderer::draw` submits `(width - 1) * (height - 1) * 6` vertices in
-  one call — the *entire* heightfield at full density — and the shadow cascades submit the same thing four
-  more times, so a 257x257 terrain costs about **2.0 million vertices per frame** across five passes with
-  nothing culled at any of them. Neither the camera frustum nor a cascade's own frustum removes a triangle.
+- **Terrain level of detail.** Frustum culling has landed and is half the charter item — see Landed — but
+  a chunk that *is* visible still draws every cell it has, whether it fills forty pixels or four. The chunk
+  decomposition culling introduced is what LOD needs: a per-chunk stride chosen from distance, and either
+  skirts or edge stitching so neighbouring densities do not crack.
   - Note what this is *not*. [`terrain_virtual`](../../crates/cic-render/src/terrain_virtual.rs) and
     [`detail`](../../crates/cic-render/src/detail.rs) are residency bookkeeping for terrain *texture*
     pages, decided in texels per cell. They are unwired, and wiring them would not remove a triangle.
