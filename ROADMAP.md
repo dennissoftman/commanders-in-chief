@@ -19,15 +19,17 @@ exist, but nothing here forbids work starting early on a later milestone's desig
 | [M7](docs/milestones/m7-network.md) | Network: lockstep, replay, desync diagnosis | Planned |
 | [M8](docs/milestones/m8-tooling.md) | Tooling: map editor, asset pipeline | Planned |
 
-## What this engine is
+## Why the milestones read as mechanics
 
-A real-time strategy engine in the classic base-building tradition: a player commands a faction on a
-heightfield map, gathers resources, constructs a base, produces units, and fights other players or
-the AI in real time.
+A milestone describes an engine capability — a heightfield that renders, a kernel that ticks
+deterministically, a lockstep session that replays — because that is what can be finished and tested. The
+game those capabilities add up to is described in [the README](README.md#the-game) and specified in the
+[faction bible](docs/design/faction-bible.md), which is upstream of several entries here rather than
+downstream of them: M3's writable terrain textures exist because a faction paves the map.
 
-That description is deliberately mechanical. This project implements those mechanics from scratch, in
-its own formats, and is not a reimplementation of or a compatibility layer for any existing game.
-Nothing here reads another game's data or derives from another game's code.
+Everything is implemented from scratch in the project's own formats. This is not a reimplementation of or
+a compatibility layer for any existing game, and nothing here reads another game's data or derives from
+another game's code.
 
 ## What "complete" means for a milestone
 

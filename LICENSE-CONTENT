@@ -1,0 +1,54 @@
+Commanders in Chief -- Content Licence
+
+Copyright 2026 Denys Mitin. All rights reserved.
+
+--------------------------------------------------------------------------------
+SCOPE
+--------------------------------------------------------------------------------
+
+This notice covers the project's *content*, as distinct from its software:
+
+  - everything under docs/design/, including the faction character bible
+  - setting, faction, narrative, and character material in any form
+  - game art, audio, video, and prose assets added to this repository later
+
+It does not cover the engine. The software in this repository -- every crate
+under crates/, the tools, the build configuration, the format specifications
+under docs/formats/, and the engineering documentation -- is licensed under the
+Apache License, Version 2.0. See LICENSE.
+
+Nothing in this file narrows that grant. A copy of the engine may be used,
+modified, and redistributed under the Apache License without reference to this
+notice, because none of the content named above is required to build or run it.
+
+--------------------------------------------------------------------------------
+TERMS
+--------------------------------------------------------------------------------
+
+No licence is granted to the content. It may not be copied, reproduced,
+adapted, translated, performed, or redistributed, in whole or in substantial
+part, without prior written permission from Denys Mitin.
+
+Two exceptions, because this content is in a public repository deliberately:
+
+  1. Reading, quoting, and discussion. Quoting the material in order to
+     discuss, review, report on, or critique the project is permitted, as is
+     any use that applicable law reserves to the public regardless of licence.
+
+  2. Contributing. Reproducing the material as far as is necessary to propose a
+     change to this repository is permitted. A contribution to the content is
+     accepted under these same terms rather than under the Apache License; see
+     CONTRIBUTING.md.
+
+--------------------------------------------------------------------------------
+WHY THE SPLIT
+--------------------------------------------------------------------------------
+
+The engine is meant to be reused; the game's world is not. Keeping the boundary
+explicit is what lets the engine stay permissively licensed without also giving
+away the fiction it was built to run -- and a reader who finds the faction bible
+in an open repository is entitled to know which of the two they are holding.
+
+The boundary follows the repository layout, so it stays checkable: if a file
+teaches you how the engine works, it is Apache-2.0; if it tells you what the
+game *is*, it is reserved.

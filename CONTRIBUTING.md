@@ -2,13 +2,21 @@
 
 ## Licence of contributions
 
-The engine is dual-licensed **MIT OR Apache-2.0**. Contributions are accepted under the same terms:
-unless you state otherwise, anything you submit is offered under both, and you keep the copyright in
-your own work.
+The engine is licensed under **Apache-2.0**. Contributions to it are accepted under the same terms:
+unless you state otherwise, anything you submit for inclusion is offered under Apache-2.0, and you keep
+the copyright in your own work. This is not a house rule — it is what §5 of the licence already says, and
+it is a large part of why this project chose Apache-2.0.
 
-There is no copyright assignment and no CLA. The consequence is worth stating plainly: a future change
-of licence would need every contributor's agreement. Dual MIT/Apache-2.0 is permissive enough that this
-should never be necessary, which is exactly why it was chosen over a CLA.
+There is no copyright assignment and no CLA. The consequence is worth stating plainly: a future change of
+licence would need every contributor's agreement. Apache-2.0 is permissive enough that this should never
+be necessary, which is exactly why it was chosen over a CLA.
+
+**Design and narrative content is different.** Everything under `docs/design/` is reserved rather than
+permissively licensed — see [LICENSE-CONTENT](LICENSE-CONTENT) for why the boundary exists and where it
+runs. A contribution there is accepted under those reserved terms rather than under Apache-2.0, so please
+open an issue before writing one: a change to the faction bible is a change to what the game *is*, and it
+wants agreement on direction before it wants prose. Contributions to the engine, the format
+specifications, and the engineering documentation need none of this ceremony.
 
 ## Developer Certificate of Origin
 
@@ -50,7 +58,7 @@ decompilation, not from a reverse-engineered project, not from a wiki that docum
 This is not a stylistic preference. The engine's predecessor was locked to GPL-3.0-only because parts of
 it derived from a GPL reimplementation of a commercial game; the current tree is permissively licensed
 *only* because that derivation was removed file by file. A single ported constant table would put the
-whole distributed work back under obligations MIT and Apache-2.0 cannot satisfy.
+whole distributed work back under obligations Apache-2.0 cannot satisfy.
 
 Two specific files were held back from the seed for this reason and still need writing from scratch —
 water rendering and scenery sway. If you implement either, do not consult the originals. See
