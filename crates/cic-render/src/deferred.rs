@@ -116,22 +116,32 @@ impl DeferredFrame {
     /// zero.
     #[must_use]
     pub fn new(pose: CameraPose, width: u32, height: u32) -> Self {
+        let environment = Environment::default();
         Self {
             pose,
             projection: Projection::for_viewport(width, height),
-            // Not `DirectionalLight::default()`: this chain computes occlusion, which is what makes a
-            // realistic skylight ambient affordable. See `daylight_with_occlusion`.
-            light: DirectionalLight::daylight_with_occlusion(),
+            // Derived from the environment's hour rather than taken from a preset, so a caller who changes
+            // the time of day gets a sun that moves with it instead of one that silently disagrees.
+            // `Environment::sun_light` is calibrated against `daylight_with_occlusion`, which this replaces
+            // as the default and which a test still pins it to.
+            light: environment.sun_light(),
             shadow_distance: DEFAULT_SHADOW_DISTANCE,
-            environment: Environment::default(),
+            environment,
             viewport: [width, height],
             time: 0.0,
         }
     }
 
-    /// Returns the frame with its environment replaced.
+    /// Returns the frame with its environment replaced, and its light re-derived to match.
+    ///
+    /// The light comes along deliberately. An environment carrying a 6 a.m. hour beside a light still pointing
+    /// where it did at noon is not a configuration anyone wants, and leaving the two independent means every
+    /// caller changing the time of day has to remember to update both. A caller wanting them to disagree —
+    /// a test pinning a sun angle while varying the weather, say — assigns [`Self::light`] afterwards, which
+    /// reads as the deliberate override it is.
     #[must_use]
-    pub const fn in_environment(mut self, environment: Environment) -> Self {
+    pub fn in_environment(mut self, environment: Environment) -> Self {
+        self.light = environment.sun_light();
         self.environment = environment;
         self
     }

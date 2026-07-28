@@ -244,6 +244,60 @@ fn add3(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {
     [left[0] + right[0], left[1] + right[1], left[2] + right[2]]
 }
 
+/// Rotates the whole sun path, in radians.
+///
+/// Chosen so the default hour of 10 reproduces the heading of the preset this replaces: that light's
+/// horizontal direction is `[-0.83, -0.55]`, or 33.7 degrees, and the unoffset sweep gives 60 degrees there.
+/// A sun rising a little north of east is perfectly ordinary, so nothing is distorted by it.
+const SUN_AZIMUTH_OFFSET: f32 = -0.459;
+
+/// The lowest the sun's own direction is allowed to sit, as a cosine against vertical.
+///
+/// Above zero so the vector never lies in the ground plane, where the horizontal component would be the
+/// whole of it and every surface would be lit edge-on.
+const MINIMUM_SUN_HEIGHT: f32 = 0.05;
+
+// The colour and intensity constants below are *calibrated against* `DirectionalLight::daylight_with_occlusion`,
+// the hand-tuned preset this replaces as the default. That preset was arrived at by looking at captures on
+// this renderer, through this tone curve, so it is the only trustworthy reference point available -- a set of
+// physically-reasoned values that renders two stops darker is not more correct, it is just wrong here.
+//
+// At the default hour of 10 these reproduce that preset closely: diffuse near `[1.05, 0.98, 0.86]` and
+// ambient near `[0.30, 0.34, 0.42]`, against its `[-0.45, -0.30, 0.84]` direction at a 57-degree elevation.
+// A first attempt derived them from scratch and gave an ambient around `[0.09, 0.11, 0.15]`, roughly three
+// times too dark, which would have visibly dimmed every scene the moment this became the default.
+
+/// The beam's colour with the sun high.
+///
+/// Not neutral white: the ratios are the preset's own, `0.98/1.05` and `0.86/1.05`. Even a high sun is
+/// slightly warm, because the shortest wavelengths have scattered out of it into the sky — which is the same
+/// air that makes [`SKY_NEUTRAL`] blue, so the two are the two halves of one effect.
+const SUN_NEUTRAL: [f32; 3] = [1.0, 0.93, 0.82];
+
+/// The beam's colour at the deepest sunrise or sunset.
+const SUN_LOW: [f32; 3] = [1.0, 0.72, 0.45];
+
+/// Scales [`Environment::daylight`], which is a fraction, into the diffuse range this renderer expects.
+///
+/// Above one deliberately: fully lit ground sits near the top of the tone curve rather than halfway up it,
+/// which is the same reason the composite exposes before applying Reinhard.
+const SUN_DIFFUSE_GAIN: f32 = 1.24;
+
+/// Skylight remaining when the sun is on the horizon, as a fraction of its value overhead.
+const SKYLIGHT_FLOOR: f32 = 0.15;
+
+/// Skylight with the sun high: a cool, fairly strong ambient, which is what the occlusion pass affords.
+const SKY_NEUTRAL: [f32; 3] = [0.32, 0.36, 0.45];
+
+/// Skylight at a low sun, warmer and less blue as the beam takes the blue out of the air.
+const SKY_LOW: [f32; 3] = [0.34, 0.30, 0.30];
+
+/// Skylight under a full cloud deck: brighter than clear sky and nearly colourless.
+const SKY_OVERCAST: [f32; 3] = [0.42, 0.44, 0.48];
+
+/// What a lightning flash adds to the ambient. Cold, because a discharge is.
+const FLASH_AMBIENT: [f32; 3] = [0.55, 0.62, 0.85];
+
 /// Sun elevation in radians at the horizon, below which it contributes no direct light.
 const HORIZON: f32 = 0.0;
 
@@ -292,15 +346,27 @@ impl Environment {
     /// The direction *toward* the sun, matching [`crate::terrain::DirectionalLight::direction`].
     #[must_use]
     pub fn sun_direction(&self) -> [f32; 3] {
-        let elevation = self.sun_elevation().sin();
+        // Clamped above the horizon before the horizontal component is derived from it, so the vector stays
+        // a unit vector at every hour. An earlier version squashed the north-south component by 0.6 to keep
+        // the sun from swinging too far, which quietly made the vector shorter than one -- and since the
+        // shader normalises it, the *effective* elevation came out higher than the figure that produced it.
+        // A sun that reads as 60 degrees while claiming 57 is the kind of discrepancy nothing reports.
+        let height = self.sun_elevation().sin().max(MINIMUM_SUN_HEIGHT);
+        let horizontal = (1.0 - height * height).max(0.0).sqrt();
         // Sweeping the azimuth as well as the elevation is what stops shadows merely shortening and
-        // lengthening in place over a day: they have to rotate, or noon and dusk light the same faces.
-        let azimuth = std::f32::consts::PI * (self.hour() - SUNRISE) / DAY_LENGTH;
-        let horizontal = (1.0 - elevation * elevation).max(0.0).sqrt();
+        // lengthening in place over a day: they have to rotate, or dawn and dusk light the same faces.
+        //
+        // The offset orients that sweep. A single-parameter sun path cannot hit an arbitrary
+        // (elevation, azimuth) pair — both come from the same hour — so without it the default hour landed 27
+        // degrees away from the heading the preset used, which rotated every shadow and flattened a ridge
+        // fixture shaped to run across the old light. The offset costs nothing and makes the derived sun a
+        // genuine drop-in at the default hour, which is what replacing a preset ought to mean.
+        let azimuth =
+            SUN_AZIMUTH_OFFSET + std::f32::consts::PI * (self.hour() - SUNRISE) / DAY_LENGTH;
         [
             -azimuth.cos() * horizontal,
-            -azimuth.sin() * horizontal * 0.6,
-            elevation.max(0.05),
+            -azimuth.sin() * horizontal,
+            height,
         ]
     }
 
@@ -330,27 +396,30 @@ impl Environment {
     #[must_use]
     pub fn sun_light(&self) -> DirectionalLight {
         let weather = self.weather.sanitised();
-        let daylight = self.daylight();
         let warmth = self.sun_warmth();
 
-        // A low sun is warm because its light has crossed more air, which scatters the blue out of it.
-        // The same scattering is why the *ambient* goes the other way and turns bluer as the sun drops:
-        // the light removed from the beam is exactly the light filling the sky.
-        let direct = mix3([1.0, 0.97, 0.92], [1.0, 0.72, 0.45], warmth);
-        let diffuse = scale3(direct, daylight);
+        // A low sun is warm because its light has crossed more air, which scatters the blue out of it. The
+        // same scattering is why the ambient goes the other way and turns bluer as the sun drops: the light
+        // removed from the beam is exactly the light filling the sky.
+        let direct = mix3(SUN_NEUTRAL, SUN_LOW, warmth);
+        let diffuse = scale3(direct, self.daylight() * SUN_DIFFUSE_GAIN);
+
+        // Skylight rises with the sun but never reaches zero while it is up, because the sky is still lit
+        // at dusk by air the ground cannot see the sun through.
+        let lit = self.sun_elevation().sin().clamp(0.0, 1.0);
+        let sky = SKYLIGHT_FLOOR + (1.0 - SKYLIGHT_FLOOR) * lit.sqrt();
+        let clear_ambient = scale3(mix3(SKY_NEUTRAL, SKY_LOW, warmth), sky);
 
         // Overcast raises ambient while lowering the direct term: a cloud deck is a diffuser, so it moves
-        // light out of the beam and into the sky rather than removing it. Getting this backwards — dimming
-        // both — is what makes an overcast scene read as dusk instead of as daylight.
-        let clear_ambient = scale3(mix3([0.16, 0.20, 0.28], [0.22, 0.19, 0.20], warmth), 0.55);
-        let overcast_ambient = [0.34, 0.36, 0.40];
-        let mut ambient = mix3(clear_ambient, overcast_ambient, weather.overcast);
+        // light out of the beam and into the sky rather than removing it. Getting this backwards -- dimming
+        // both -- is what makes an overcast scene read as dusk instead of as daylight.
+        let mut ambient = mix3(clear_ambient, SKY_OVERCAST, weather.overcast);
 
         // A lightning flash lifts ambient rather than the beam, and is cold. It is a discharge across the
-        // whole sky, so it arrives from every direction at once — adding it to the directional term would
+        // whole sky, so it arrives from every direction at once -- adding it to the directional term would
         // put a hard shadow behind every object, from a source that has no position.
         if weather.flash > 0.0 {
-            ambient = add3(ambient, scale3([0.55, 0.62, 0.85], weather.flash));
+            ambient = add3(ambient, scale3(FLASH_AMBIENT, weather.flash));
         }
 
         DirectionalLight {
@@ -467,6 +536,64 @@ mod tests {
         }
         .with_weather(Weather::default());
         assert!((misty.fog.density - 0.02).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn the_default_environment_reproduces_the_preset_it_replaces() {
+        // The calibration, pinned.
+        //
+        // `daylight_with_occlusion` was arrived at by looking at captures on this renderer, through this tone
+        // curve, so it is the only trustworthy statement of what "correct" means here. A sun derived from
+        // physical reasoning that renders two stops darker is not more correct — it is simply wrong for this
+        // pipeline. The first attempt at these constants gave an ambient around `[0.09, 0.11, 0.15]` against
+        // the preset's `[0.30, 0.34, 0.42]`, roughly three times too dark, and would have dimmed every scene
+        // the moment this became the default light.
+        let light = Environment::default().sun_light();
+        let preset = super::DirectionalLight::daylight_with_occlusion();
+        for channel in 0..3 {
+            let diffuse = (light.diffuse[channel] - preset.diffuse[channel]).abs();
+            assert!(
+                diffuse < 0.03,
+                "diffuse channel {channel} differs by {diffuse:.3}: {:?} against {:?}",
+                light.diffuse,
+                preset.diffuse
+            );
+            let ambient = (light.ambient[channel] - preset.ambient[channel]).abs();
+            assert!(
+                ambient < 0.03,
+                "ambient channel {channel} differs by {ambient:.3}: {:?} against {:?}",
+                light.ambient,
+                preset.ambient
+            );
+        }
+        // And a comparable *direction*, not merely a comparable elevation. Colour alone is not enough: an
+        // earlier version matched both diffuse and ambient exactly while sitting 27 degrees away in azimuth,
+        // which rotated every shadow in the scene and visibly flattened a ridge fixture shaped to run across
+        // the old light. The capture showed it; no assertion on brightness could have.
+        for channel in 0..3 {
+            let difference = (light.direction[channel] - preset.direction[channel]).abs();
+            assert!(
+                difference < 0.07,
+                "direction channel {channel} differs by {difference:.3}: {:?} against {:?}",
+                light.direction,
+                preset.direction
+            );
+        }
+    }
+
+    #[test]
+    fn the_sun_direction_is_a_unit_vector_at_every_hour() {
+        // The shader normalises it, so a short vector does not fail — it silently reports a *higher*
+        // elevation than the figure that produced it. An earlier version squashed the north-south component
+        // and read as 60 degrees while claiming 57.
+        for hour in [0.0, 6.0, 8.0, 10.0, 12.0, 16.0, 18.0, 23.0] {
+            let [x, y, z] = at(hour).sun_direction();
+            let length = (x * x + y * y + z * z).sqrt();
+            assert!(
+                (length - 1.0).abs() < 1.0e-4,
+                "hour {hour} gives length {length:.4}"
+            );
+        }
     }
 
     #[test]
