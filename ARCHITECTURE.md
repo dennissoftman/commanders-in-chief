@@ -75,3 +75,10 @@ is a pure function over bytes — the library never opens a file, so the caller 
 the file handling stays in the tests — which also means the comparison is unit-tested on machines with no
 GPU at all. And **references are committed per adapter**, because two GPUs do not agree to the byte and
 a tolerance loose enough to span them would accept the regressions it exists to catch.
+
+Since the harness now runs on a CI runner as well, that second claim is measured rather than assumed —
+and it holds for a narrower reason than it was given. Between an NVIDIA card and a software rasteriser,
+the scenes that sample no texture agree well inside the tolerance; the two that sample one exceed it by
+3.5x and 114x. Mip selection is what separates two implementations, not arithmetic in the last place, so
+the per-adapter split earns its keep wherever a texture is filtered and hardly anywhere else. See
+[`regression`](crates/cic-render/src/regression.rs).

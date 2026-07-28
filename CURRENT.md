@@ -3,11 +3,13 @@
 ## Where the project is
 
 M0 through M2 are complete: the workspace and its invariants, the resource layer, and the native asset
-formats. **M3's charter is complete bar one item** — the renderer draws a lit, shadowed, occluded, textured
-scene with water and weather, both headlessly and in a window, and a visual regression harness compares
-captures against committed references. The exception is **terrain level of detail**: chunks are now
-frustum-culled per pass, but a chunk that is drawn is drawn at full density whatever its size on screen.
-This document and the milestone both claimed the whole item was done until it was checked.
+formats. **M3's exit condition is met and its charter is complete bar one item** — the renderer draws a
+lit, shadowed, occluded, textured scene with water and weather, both headlessly and in a window, and a
+visual regression harness compares captures against committed references **on the CI runner**, so a
+rendering regression now fails a build rather than only a developer's machine. The exception is **terrain
+level of detail**: chunks are now frustum-culled per pass, but a chunk that is drawn is drawn at full
+density whatever its size on screen. This document and the milestone both claimed the whole item was done
+until it was checked.
 
 What works:
 
@@ -110,43 +112,50 @@ per-pass breakdown once a second, which is where the figures above came from.
 
 ## Next verified step
 
-**A GPU-capable CI runner.** This is the last piece of M3's exit condition and the only one outstanding.
-CI is `ubuntu-latest` with no adapter, so `GpuContext::new` finds none and every rendering test skips
-there — true since the first render test landed, not something recent changed. Two steps, in order:
+**M4's interface layer.** M3's exit condition is met, so the next milestone is the shell the engine is
+navigated through: a layout model in the project's own text format, the widget set an RTS shell needs,
+retained state across frames, input routing with focus and keyboard navigation, a screen stack, and DPI
+independence. Its settings screen has real content waiting for it now that a display setting exists with
+more than one option, and `ui.wgsl` already sits in the shader set marked `staged` for exactly this. See
+[M4](docs/milestones/m4-interface.md).
 
-1. Install Mesa's `lavapipe` on the runner so an adapter exists.
-2. On that runner, generate the reference set with `CIC_UPDATE_REFERENCES=1`, review the images, and
-   commit them under their own adapter directory.
+**Terrain level of detail is the one M3 charter item still open**, and it is a decision rather than a
+queue position. Per-pass timing refuted its original premise: at 1920x1200 the four cascades are 7% of
+the frame and the G-buffer 6%, and since culling landed a 1025x1025 terrain costs the same 0.692 ms as a
+257x257 one, so two million unculled vertices barely register on this GPU. It still matters on a weaker
+one, and it is a charter line. So either it gets built — a per-chunk stride off the chunk decomposition
+that already exists, plus skirts or stitching so neighbouring densities do not crack — or the charter is
+amended to record that culling delivered what LOD was for, with the measurement as the reason. What is not
+acceptable is leaving the line reading as though it were done, which is what it did before.
 
-References cannot be copied from a developer machine: a software rasteriser and an NVIDIA card differ far
-beyond the tolerance, which is why the sets are keyed by adapter in the first place.
+Also outstanding from M3, in rough order:
 
-After that, in rough order:
-
-1. **Terrain level of detail**, the remaining half of the charter item now that culling has landed. A chunk
-   that is visible still draws every cell it has, whether it covers forty pixels or four; the chunk
-   decomposition culling introduced is what a per-chunk stride would hang off, plus skirts or stitching so
-   neighbouring densities do not crack.
-2. **TAA**, the quality tier ADR 0005 plans and the last antialiasing item: a jittered projection, a
+1. **TAA**, the quality tier ADR 0005 plans and the last antialiasing item: a jittered projection, a
    motion-vector target, a history buffer, and neighbourhood clamping. It needs the regression harness
    accounted for, since a temporal accumulator makes one captured frame depend on the frames before it.
-3. **Normal and roughness maps** to go with the base-colour textures.
-4. **M4's interface layer**, whose settings screen has real content waiting for it now that a display
-   setting exists with more than one option.
+2. **Normal and roughness maps** to go with the base-colour textures. Note what the runner measured:
+   these will *diverge across adapters*, because sampling a texture is the one thing that does.
 
 ## Gate status
 
 Formatting, strict lints (`clippy::all` and `clippy::pedantic` as errors, plus `-D warnings` as CI runs
-it), and the full test suite all pass on the pinned toolchain. **271 tests across five crates**, 36 of
-which render on a real device (verified on an NVIDIA RTX 4080 SUPER) and write their captures to
-`target/tmp/`. Eleven committed references cover terrain layers, instanced models, the deferred chain, water,
-water under a glancing sun, cloud shadows, fog, wet ground, snow, an antialiased frame, and a supersampled
-one. The nine that predate the antialiasing work are **byte-identical** across it, which is what shows a
-growing uniform block, a rerouted composite, and a removed frame field changed no image on the default path.
+it), and the full test suite all pass on the pinned toolchain — **and now on the CI runner too**, where the
+same **271 tests across five crates** pass against Mesa's lavapipe. The rendering ones take about eleven
+seconds there, which is what makes this affordable on every pull request. Captures go to `target/tmp/` and
+upload as an artifact on every outcome, so a harness failure's capture and amplified difference image can
+be looked at rather than being stranded on the runner.
 
-The render tests skip rather than fail when no adapter is available, so a machine or CI runner without a
-GPU or software rasteriser reports honestly instead of red. The regression comparison itself is a pure
-function over bytes with its own unit tests, so that half is verified even with no GPU present.
+Eleven references per adapter cover terrain layers, instanced models, the deferred chain, water, water
+under a glancing sun, cloud shadows, fog, wet ground, snow, an antialiased frame, and a supersampled one —
+**twenty-two committed in total**, one set for an NVIDIA RTX 4080 SUPER and one for lavapipe, each
+generated on its own machine and looked at before being committed.
+
+The render tests still skip rather than fail when no adapter is available, so a developer machine with no
+GPU reports honestly instead of red. **CI sets `CIC_REQUIRE_ADAPTER`, which makes the same situation a
+failure there**, because a skipped rendering test and a passing one are the same colour and a runner that
+silently lost its adapter would otherwise leave the harness protecting nothing. The regression comparison
+itself is a pure function over bytes with its own unit tests, so that half is verified even with no GPU
+present.
 
 ## Standing constraints
 
@@ -164,8 +173,9 @@ function over bytes with its own unit tests, so that half is verified even with 
   into a diamond lattice, a specular exponent so tight the highlight reached no pixel at all, water
   painted as a slab past the edge of the map, a cloud hash correlated along one axis, and a derived sun
   that matched its preset's colour exactly while sitting 27 degrees away in azimuth. The regression
-  harness now catches this class automatically — but only for the nine scenes it has references for, and
-  only once someone has looked at those references and confirmed they are right.
+  harness now catches this class automatically, and in CI rather than only locally — but only for the
+  eleven scenes it has references for, and only once someone has looked at those references and confirmed
+  they are right.
 - **A fixture can be the bug.** Twice now a correct implementation was tuned against a fixture that could
   not show what was being measured: a shadow fixture whose ridge was wider than its own shadow, and a fog
   fixture so flat and so distant that an integral along the ray smoothed away everything the density did.
