@@ -19,6 +19,7 @@
 //! | `F` | Reset rotation only |
 //! | `T` | Toggle antialiasing |
 //! | `[` `]` | Step the resolution scale |
+//! | `P` | Toggle the per-pass GPU timing printout |
 //! | `Esc` | Quit |
 //!
 //! The last two are here because antialiasing is the one rendering change a still capture reports
@@ -69,6 +70,13 @@ const MAXIMUM_FRAME_SECONDS: f32 = 0.1;
 /// A quarter, so the offered range is six steps rather than a continuum. A finer step would let someone
 /// walk to a cost they cannot afford one imperceptible increment at a time.
 const RESOLUTION_SCALE_STEP: f32 = 0.25;
+
+/// How often the per-pass breakdown is read back while timing is on.
+///
+/// Once a second, because reading it *blocks until the GPU has finished the frame*. Every frame would
+/// serialise the CPU against the GPU and change the numbers being measured, which is the trap a
+/// profiler-shaped diagnostic invites.
+const TIMING_REPORT_SECONDS: f32 = 1.0;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let terrain = if let Some(path) = std::env::args().nth(1) {
@@ -498,6 +506,8 @@ struct Viewer {
     elapsed: f32,
     /// Held here rather than only inside the surface, so the setting survives the window being rebuilt.
     display: DisplaySettings,
+    /// Seconds since the last per-pass breakdown was printed, or `None` when timing is off.
+    timing_countdown: Option<f32>,
     failure: Option<String>,
 }
 
@@ -519,7 +529,41 @@ impl Viewer {
             // Starts where the headless captures are, so the first frame in the window is the frame the
             // references were rendered from and pressing a key is the only difference from them.
             display: DisplaySettings::NATIVE,
+            timing_countdown: None,
             failure: None,
+        }
+    }
+
+    /// Turns the per-pass timing printout on or off.
+    fn toggle_timing(&mut self) {
+        let Some(active) = &mut self.active else {
+            return;
+        };
+        let wanted = self.timing_countdown.is_none();
+        let enabled = active.surface.set_timing(&active.context, wanted);
+        self.timing_countdown = enabled.then_some(TIMING_REPORT_SECONDS);
+        if wanted && !enabled {
+            eprintln!("timing: unavailable, this device does not offer TIMESTAMP_QUERY");
+        } else {
+            eprintln!("timing: {}", if enabled { "on" } else { "off" });
+        }
+    }
+
+    /// Prints the per-pass breakdown when the interval has elapsed.
+    fn report_timings(&mut self, delta: f32) {
+        let Some(remaining) = &mut self.timing_countdown else {
+            return;
+        };
+        *remaining -= delta;
+        if *remaining > 0.0 {
+            return;
+        }
+        self.timing_countdown = Some(TIMING_REPORT_SECONDS);
+        let Some(active) = &self.active else { return };
+        match active.surface.timings(&active.context) {
+            Some(Ok(timings)) => eprintln!("timing: {timings}"),
+            Some(Err(error)) => eprintln!("timing: could not read the breakdown: {error}"),
+            None => self.timing_countdown = None,
         }
     }
 
@@ -669,6 +713,10 @@ impl ApplicationHandler for Viewer {
                     // Display settings act once per press rather than every frame they are held: each one
                     // reallocates every intermediate target, and repeating that at the key-repeat rate
                     // would rebuild the chain dozens of times a second.
+                    if pressed && code == KeyCode::KeyP {
+                        self.toggle_timing();
+                        return;
+                    }
                     if pressed && let Some(display) = display_change(code, self.display) {
                         self.change_display(event_loop, display);
                         return;
@@ -753,7 +801,12 @@ impl Viewer {
                 &active.water,
                 frame,
             )
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+
+        // After the frame, so the breakdown read back describes one that has been submitted. It blocks on
+        // the GPU, which is why it runs about once a second rather than here every time.
+        self.report_timings(delta);
+        Ok(())
     }
 }
 

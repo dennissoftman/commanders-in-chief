@@ -5,6 +5,9 @@
 //! - **The deferred chain** ([`deferred`]): four depth-only shadow cascades, a G-buffer, ambient
 //!   occlusion with a bilateral blur, lighting that reconstructs world position from depth, a
 //!   tone-mapping composite, and an optional antialias resolve.
+//! - **Per-pass GPU timing** ([`timing`]), because every performance question here is
+//!   workload-dependent and none can be settled by argument. A total says something is slow; a
+//!   breakdown says which pass. Optional, since `TIMESTAMP_QUERY` is.
 //! - **Display settings** ([`display`]): the resolution the chain renders at and how it resolves.
 //!   Multisampling is declined rather than pending — see
 //!   [ADR 0005](../../../docs/adr/0005-antialiasing-strategy.md) — so a resolution scale is the primary
@@ -58,6 +61,7 @@ pub mod shadow;
 pub mod terrain;
 pub mod terrain_virtual;
 pub mod texture;
+pub mod timing;
 pub mod view;
 pub mod water;
 
@@ -77,6 +81,7 @@ pub use shader::{PROGRAMS, Program, compose};
 pub use shadow::{CASCADE_COUNT, Cascade, fit_cascades};
 pub use terrain::{DirectionalLight, LayerColour, LayerMaterial, TerrainRenderer};
 pub use texture::{TextureArray, TextureImage};
+pub use timing::{FrameTimings, PassTimer, TimedPass};
 pub use view::{Projection, view_projection};
 pub use water::{WaterBody, WaterMaterial, WaterSurface};
 

@@ -50,6 +50,7 @@ use crate::gpu::{DEPTH_FORMAT, GpuContext};
 use crate::model::{ModelBatch, buffer_layouts};
 use crate::shadow::{CASCADE_COUNT, CASCADE_RESOLUTION, Cascade, fit_cascades};
 use crate::terrain::{DirectionalLight, TerrainRenderer};
+use crate::timing::{FrameTimings, PassTimer, TimedPass};
 use crate::view::{Projection, invert, look_at, multiply, perspective};
 use crate::water::WaterBody;
 
@@ -351,6 +352,11 @@ pub struct DeferredRenderer {
     shadow_uniform: wgpu::Buffer,
     cascade_uniforms: Vec<wgpu::Buffer>,
     cascade_groups: Vec<wgpu::BindGroup>,
+    /// Per-pass GPU timing, present only when it has been asked for and the device supports it.
+    ///
+    /// Held here rather than passed in per frame so [`Self::render`] can stay `&self`: a timestamp write
+    /// mutates the query set on the device, not this struct.
+    timer: Option<PassTimer>,
     /// Copied from the targets this was built against. See [`DeferredFrame`] for why the frame does not
     /// carry them.
     render: [u32; 2],
@@ -458,9 +464,44 @@ impl DeferredRenderer {
             shadow_uniform,
             cascade_uniforms,
             cascade_groups,
+            // Off unless asked for. A query set and two small buffers are cheap, but timing costs a
+            // blocking readback to be of any use, so it is opt-in rather than always present.
+            timer: None,
             render: targets.render,
             output: targets.output,
         })
+    }
+
+    /// Turns per-pass GPU timing on or off, returning whether it is on afterwards.
+    ///
+    /// Asking for it and getting `false` is a normal answer rather than a fault: `TIMESTAMP_QUERY` is
+    /// optional and a software rasteriser may not offer it. The chain then renders exactly as it did
+    /// before and [`Self::timings`] reports nothing — the same shape as the render tests skipping when
+    /// there is no adapter.
+    pub fn set_timing(&mut self, context: &GpuContext, enabled: bool) -> bool {
+        self.timer = enabled.then(|| PassTimer::new(context)).flatten();
+        self.timer.is_some()
+    }
+
+    /// Whether per-pass timing is on.
+    #[must_use]
+    pub const fn is_timing(&self) -> bool {
+        self.timer.is_some()
+    }
+
+    /// Reads back the last rendered frame's per-pass breakdown.
+    ///
+    /// `None` when timing is off. **This blocks until the GPU has finished the frame it is reporting on**,
+    /// so it is a diagnostic to take occasionally rather than something to call every frame — polling it
+    /// per frame serialises the CPU against the GPU and changes the numbers being read. See
+    /// [`PassTimer::read`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured [`RenderError`] when polling or mapping the readback fails.
+    #[must_use]
+    pub fn timings(&self, context: &GpuContext) -> Option<Result<FrameTimings, RenderError>> {
+        self.timer.as_ref().map(|timer| timer.read(context))
     }
 
     /// Returns the layout a [`ModelBatch`] binds its materials through.
@@ -572,32 +613,12 @@ impl DeferredRenderer {
                     label: Some("cic-render deferred chain"),
                 });
 
-        // 1. Shadow cascades, depth only.
-        for (layer, group) in targets.shadow_layers.iter().zip(&self.cascade_groups) {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("cic-render shadow cascade"),
-                color_attachments: &[],
-                depth_stencil_attachment: Some(depth_attachment(layer)),
-                multiview_mask: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            pass.set_pipeline(&self.shadow_pipeline);
-            pass.set_bind_group(0, terrain.bind_group(), &[]);
-            pass.set_bind_group(1, group, &[]);
-            pass.draw(0..terrain.vertex_count(), 0..1);
+        // Which passes were recorded, in recording order, so only those are resolved. A pass that did not run
+        // leaves its slot cleared, which is how an absent pass stays distinguishable from a fast one.
+        let mut recorded: Vec<TimedPass> = Vec::with_capacity(TimedPass::ALL.len());
 
-            // Models cast into the same cascade. Without this a model is lit as though it were
-            // present but throws no shadow, which reads as the model floating.
-            if !models.is_empty() {
-                pass.set_pipeline(&self.model_shadow_pipeline);
-                pass.set_bind_group(0, terrain.bind_group(), &[]);
-                pass.set_bind_group(1, group, &[]);
-                for batch in models {
-                    batch.draw(&mut pass, None);
-                }
-            }
-        }
+        // 1. Shadow cascades, depth only.
+        self.record_shadows(&mut encoder, terrain, models, targets, &mut recorded);
 
         // 2. G-buffer. Coverage clears to zero, which the lighting pass reads as "sky".
         {
@@ -610,7 +631,7 @@ impl DeferredRenderer {
                 ],
                 depth_stencil_attachment: Some(depth_attachment(&targets.depth)),
                 multiview_mask: None,
-                timestamp_writes: None,
+                timestamp_writes: self.time(&mut recorded, TimedPass::Gbuffer),
                 occlusion_query_set: None,
             });
             pass.set_pipeline(&self.gbuffer_pipeline);
@@ -633,6 +654,7 @@ impl DeferredRenderer {
             &targets.ao_raw,
             &self.ao.pipeline,
             &[&self.ao.group],
+            self.time(&mut recorded, TimedPass::Occlusion),
         );
         fullscreen_pass(
             &mut encoder,
@@ -640,6 +662,7 @@ impl DeferredRenderer {
             &targets.ao_blurred,
             &self.ao.blur_pipeline,
             &[&self.ao.group, &self.ao.source_group],
+            self.time(&mut recorded, TimedPass::OcclusionBlur),
         );
 
         // 5. Lighting into HDR.
@@ -649,6 +672,7 @@ impl DeferredRenderer {
             &targets.hdr,
             &self.lighting.pipeline,
             &[&self.lighting.group],
+            self.time(&mut recorded, TimedPass::Lighting),
         );
 
         // 6. Water, blended over the lit scene inside the HDR target.
@@ -663,7 +687,7 @@ impl DeferredRenderer {
                 color_attachments: &[Some(load_attachment(&targets.hdr))],
                 depth_stencil_attachment: None,
                 multiview_mask: None,
-                timestamp_writes: None,
+                timestamp_writes: self.time(&mut recorded, TimedPass::Water),
                 occlusion_query_set: None,
             });
             pass.set_pipeline(&self.water_pipeline);
@@ -674,9 +698,74 @@ impl DeferredRenderer {
         }
 
         // 7 and 8. Tone map, downsample, sharpen, and optionally antialias.
-        self.record_resolve(&mut encoder, targets, output);
+        self.record_resolve(&mut encoder, targets, output, &mut recorded);
+
+        // Last, so every pass it names has been recorded. Nothing here reads back — that happens on
+        // request in `timings`, long after this submission has been retired.
+        if let Some(timer) = &self.timer {
+            timer.resolve(&mut encoder, &recorded);
+        }
 
         context.queue().submit([encoder.finish()]);
+    }
+
+    /// Records the four depth-only cascade passes.
+    ///
+    /// Terrain and every model are submitted to each of them, so this is four more full geometry
+    /// submissions on top of the G-buffer's — the figure the outstanding terrain level-of-detail work
+    /// exists to bring down, and the one [`TimedPass::CASCADES`] makes measurable.
+    fn record_shadows(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        terrain: &TerrainRenderer,
+        models: &[ModelBatch],
+        targets: &DeferredTargets,
+        recorded: &mut Vec<TimedPass>,
+    ) {
+        for ((layer, group), cascade) in targets
+            .shadow_layers
+            .iter()
+            .zip(&self.cascade_groups)
+            .zip(TimedPass::CASCADES)
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("cic-render shadow cascade"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(depth_attachment(layer)),
+                multiview_mask: None,
+                timestamp_writes: self.time(recorded, *cascade),
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.shadow_pipeline);
+            pass.set_bind_group(0, terrain.bind_group(), &[]);
+            pass.set_bind_group(1, group, &[]);
+            pass.draw(0..terrain.vertex_count(), 0..1);
+
+            // Models cast into the same cascade. Without this a model is lit as though it were
+            // present but throws no shadow, which reads as the model floating.
+            if !models.is_empty() {
+                pass.set_pipeline(&self.model_shadow_pipeline);
+                pass.set_bind_group(0, terrain.bind_group(), &[]);
+                pass.set_bind_group(1, group, &[]);
+                for batch in models {
+                    batch.draw(&mut pass, None);
+                }
+            }
+        }
+    }
+
+    /// Returns the timestamp writes for one pass, noting that it was recorded.
+    ///
+    /// `None` when timing is off, which is the only reason a pass descriptor would carry no writes — so a
+    /// pass whose slot stays cleared did not run, rather than having been forgotten here.
+    fn time(
+        &self,
+        recorded: &mut Vec<TimedPass>,
+        pass: TimedPass,
+    ) -> Option<wgpu::RenderPassTimestampWrites<'_>> {
+        let timer = self.timer.as_ref()?;
+        recorded.push(pass);
+        Some(timer.writes(pass))
     }
 
     /// Records the two passes that turn the HDR scene into the caller's image.
@@ -688,6 +777,7 @@ impl DeferredRenderer {
         encoder: &mut wgpu::CommandEncoder,
         targets: &DeferredTargets,
         output: &wgpu::TextureView,
+        recorded: &mut Vec<TimedPass>,
     ) {
         // The composite goes straight into the caller's target when nothing follows it, and into the LDR
         // intermediate when the antialias pass does. Paired rather than checked separately: the stage and
@@ -705,6 +795,7 @@ impl DeferredRenderer {
             composite_target,
             &self.lighting.composite_pipeline,
             &[&self.lighting.group, &self.lighting.composite_group],
+            self.time(recorded, TimedPass::Composite),
         );
 
         if let Some((antialias, _)) = resolve {
@@ -714,6 +805,7 @@ impl DeferredRenderer {
                 output,
                 &antialias.pipeline,
                 &[&self.lighting.group, &antialias.group],
+                self.time(recorded, TimedPass::Antialias),
             );
         }
     }
@@ -1400,13 +1492,14 @@ fn fullscreen_pass(
     target: &wgpu::TextureView,
     pipeline: &wgpu::RenderPipeline,
     groups: &[&wgpu::BindGroup],
+    timestamp_writes: Option<wgpu::RenderPassTimestampWrites<'_>>,
 ) {
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some(label),
         color_attachments: &[Some(clear_attachment(target))],
         depth_stencil_attachment: None,
         multiview_mask: None,
-        timestamp_writes: None,
+        timestamp_writes,
         occlusion_query_set: None,
     });
     pass.set_pipeline(pipeline);

@@ -16,14 +16,15 @@ mod support;
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use cic_assets::{Terrain, TerrainLayer};
 use cic_camera::CameraPose;
 use cic_render::terrain::LayerColour;
 use cic_render::{
     Antialiasing, Capture, CaptureTarget, Clouds, DeferredFrame, DeferredRenderer, DeferredTargets,
-    DisplaySettings, Environment, Fog, GpuContext, TerrainRenderer, WaterBody, WaterMaterial,
-    WaterSurface, Weather,
+    DisplaySettings, Environment, Fog, GpuContext, TerrainRenderer, TimedPass, WaterBody,
+    WaterMaterial, WaterSurface, Weather,
 };
 
 const WIDTH: u32 = 720;
@@ -1164,6 +1165,97 @@ fn a_sun_in_the_mirror_direction_puts_glitter_on_the_water() {
         "the mirrored sun peaked at {glinting_peak:.3} against {default_peak:.3} under the default \
          one, so the highlight is not reaching the frame"
     );
+}
+
+#[test]
+fn per_pass_timing_attributes_the_frame_to_the_passes_that_ran() {
+    // The point of the whole module: that a *breakdown* exists, not that a total does. Every performance
+    // question this renderer has open is a subtraction between two of these numbers, and the tests below
+    // it in `timing` cover the arithmetic on synthetic ticks — what only a device can show is that the
+    // slots line up with the passes, that a conditional pass is reported when it runs and absent when it
+    // does not, and that the durations are physically plausible rather than nanoseconds or minutes.
+    let Some(context) = context() else { return };
+    if !context.supports_timing() {
+        eprintln!("skipping: this adapter does not offer TIMESTAMP_QUERY");
+        return;
+    }
+    let terrain = shadowing_terrain();
+    let mut harness = harness_with(
+        context,
+        terrain,
+        DisplaySettings::NATIVE.with_antialiasing(Antialiasing::Fxaa),
+    );
+    assert!(
+        harness.deferred.set_timing(context, true),
+        "the device reported timing support, so enabling it must take"
+    );
+
+    let frame = DeferredFrame::new(pose(&harness.terrain), WIDTH, HEIGHT);
+    let _ = render(context, &harness, frame);
+    let timings = harness
+        .deferred
+        .timings(context)
+        .expect("timing is on")
+        .expect("read the breakdown");
+    eprintln!("{timings}");
+
+    // Every unconditional pass ran, and the antialias pass ran because the settings asked for it.
+    for pass in [
+        TimedPass::ShadowCascade0,
+        TimedPass::ShadowCascade3,
+        TimedPass::Gbuffer,
+        TimedPass::Occlusion,
+        TimedPass::OcclusionBlur,
+        TimedPass::Lighting,
+        TimedPass::Composite,
+        TimedPass::Antialias,
+    ] {
+        let elapsed = timings
+            .get(pass)
+            .unwrap_or_else(|| panic!("{pass:?} was not timed"));
+        // A pass that drew a 720x480 frame on real hardware is neither instant nor a tenth of a second.
+        // Loose by design: this is a plausibility bound, and a tight one would fail on the next GPU.
+        assert!(
+            elapsed > Duration::ZERO && elapsed < Duration::from_millis(100),
+            "{pass:?} took {elapsed:?}, which is not a plausible pass time"
+        );
+    }
+
+    // And the conditional pass that did *not* run is absent rather than zero. This is the half a fixed
+    // slot layout has to earn: reporting water at 0.000ms in a scene with no water would be a claim about
+    // its cost rather than about its absence.
+    assert_eq!(
+        timings.get(TimedPass::Water),
+        None,
+        "no water was drawn, so the water pass must not appear at all"
+    );
+    assert_eq!(timings.entries().len(), TimedPass::ALL.len() - 1);
+
+    // The four cascades draw the terrain four more times over, so their total is a real share of the
+    // frame rather than a rounding error -- which is the first number the outstanding terrain LOD work
+    // wants. Asserted as a share of the sum, not in milliseconds, so it holds on any device.
+    let shadow_share = harness_share(timings.shadow_total(), timings.sum());
+    eprintln!(
+        "shadow cascades are {:.1}% of the summed passes",
+        shadow_share * 100.0
+    );
+    assert!(
+        shadow_share > 0.01,
+        "the four cascades came to {shadow_share:.4} of the frame, which would mean they are not \
+         drawing the terrain they are supposed to be drawing"
+    );
+
+    // Turning it off stops the reporting rather than leaving stale numbers reachable.
+    assert!(!harness.deferred.set_timing(context, false));
+    assert!(harness.deferred.timings(context).is_none());
+}
+
+/// One duration as a share of another, with a zero denominator answering zero.
+fn harness_share(part: Duration, whole: Duration) -> f32 {
+    if whole.is_zero() {
+        return 0.0;
+    }
+    (part.as_secs_f64() / whole.as_secs_f64()) as f32
 }
 
 /// Mean absolute Laplacian of luminance, over the pixels a mask selects.

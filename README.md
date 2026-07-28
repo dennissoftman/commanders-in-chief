@@ -75,7 +75,8 @@ cargo run -p cic-render --example terrain_viewer --release
 
 Pass a `.cicmap` path to view a real map; with no argument it generates terrain, buildings, and their
 surfaces, so the viewer runs before any content exists. `T` toggles antialiasing and the bracket keys step
-the resolution scale; the viewer's own header lists every control.
+the resolution scale; `P` prints a per-pass GPU timing breakdown. The viewer's own header lists every
+control.
 
 ## Crates
 

@@ -42,6 +42,10 @@ pub struct SurfaceRenderer {
     targets: DeferredTargets,
     deferred: DeferredRenderer,
     display: DisplaySettings,
+    /// Whether per-pass timing should be on. Held here because a rebuild replaces the renderer that owns
+    /// the query set, and a diagnostic that silently switched itself off on the first resize would be
+    /// worse than one that was never available.
+    timing: bool,
 }
 
 impl SurfaceRenderer {
@@ -98,6 +102,7 @@ impl SurfaceRenderer {
             targets,
             deferred,
             display,
+            timing: false,
         })
     }
 
@@ -172,7 +177,34 @@ impl SurfaceRenderer {
             self.display,
         )?;
         self.deferred = DeferredRenderer::new(context, terrain, &self.targets)?;
+        // Re-applied rather than assumed lost. A rebuild replaces the renderer that owns the query set, and
+        // a diagnostic that switched itself off on the first resize would be worse than one never offered.
+        self.timing = self.deferred.set_timing(context, self.timing);
         Ok(())
+    }
+
+    /// Turns per-pass GPU timing on or off, returning whether it is on afterwards.
+    ///
+    /// Survives a resize and a settings change, both of which replace the renderer that owns the query
+    /// set. Asking for it can still answer `false`: `TIMESTAMP_QUERY` is optional.
+    pub fn set_timing(&mut self, context: &crate::GpuContext, enabled: bool) -> bool {
+        self.timing = self.deferred.set_timing(context, enabled);
+        self.timing
+    }
+
+    /// Reads back the last presented frame's per-pass breakdown.
+    ///
+    /// `None` when timing is off. **Blocks until the GPU has finished that frame**, so this belongs on a
+    /// once-a-second diagnostic and not in the frame loop — see [`DeferredRenderer::timings`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured error when polling or mapping the readback fails.
+    pub fn timings(
+        &self,
+        context: &crate::GpuContext,
+    ) -> Option<Result<crate::timing::FrameTimings, RenderError>> {
+        self.deferred.timings(context)
     }
 
     /// Resizes the surface and everything sized to it.

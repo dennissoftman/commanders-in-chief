@@ -2,14 +2,17 @@
 
 Draw a map: terrain, water, models, lighting, and shadows, in a window and headlessly.
 
-**Status:** Charter complete, plus the atmosphere and weather that were not in it. Every item below is landed and tested; the one qualification is that CI
-has no GPU, so the regression harness runs on a developer machine and not yet on a runner. See
-[Exit condition](#exit-condition).
+**Status:** Charter complete **except for terrain level of detail**, plus the atmosphere and weather that
+were not in it. Two qualifications, and both were previously understated here: CI has no GPU, so the
+regression harness runs on a developer machine and not yet on a runner; and the terrain draws at full
+density with no culling, which this document claimed for some time that it did not. See
+[Exit condition](#exit-condition) and the remaining item below.
 
 ## Charter
 
 - Terrain rendering from a heightfield, with level of detail that holds up at both a tactical zoom and
-  a strategic one.
+  a strategic one. **The heightfield renders; the level of detail does not exist yet** — see
+  [Remaining](#remaining).
 - Static and instanced model rendering from imported geometry.
 - Directional lighting with cascaded shadows, and ambient occlusion.
 - Water surfaces.
@@ -134,6 +137,20 @@ has no GPU, so the regression harness runs on a developer machine and not yet on
 
 ## Remaining
 
+- **Terrain level of detail, and any culling at all.** This is the outstanding charter item, though *not*
+  the largest cost in the frame — see the note below, which is the first thing the new timing measured and
+  the first guess it refuted. `TerrainRenderer::draw` submits `(width - 1) * (height - 1) * 6` vertices in
+  one call — the *entire* heightfield at full density — and the shadow cascades submit the same thing four
+  more times, so a 257x257 terrain costs about **2.0 million vertices per frame** across five passes with
+  nothing culled at any of them. Neither the camera frustum nor a cascade's own frustum removes a triangle.
+  - Note what this is *not*. [`terrain_virtual`](../../crates/cic-render/src/terrain_virtual.rs) and
+    [`detail`](../../crates/cic-render/src/detail.rs) are residency bookkeeping for terrain *texture*
+    pages, decided in texels per cell. They are unwired, and wiring them would not remove a triangle.
+- **A cheaper ambient-occlusion pass**, which the measurement says is where the frame actually goes: 58% in
+  the occlusion estimate and another 14% in its bilateral blur, at 1920x1200. It scales with pixels rather
+  than with geometry, so it is the pass a resolution scale multiplies hardest. Nothing here is urgent — the
+  whole chain is 1.2 ms — but this is the pass to look at first when it stops being comfortable, and a
+  half-resolution estimate with a full-resolution blur is the standard answer.
 - **Temporal antialiasing**, the quality tier of [ADR 0005](../adr/0005-antialiasing-strategy.md). The two
   cheaper tiers below have landed; this one needs jittered projection, a motion-vector target, a history
   buffer, and neighbourhood clamping — and it constrains the regression harness, since a temporal
@@ -332,6 +349,22 @@ which a surface commonly reports as BGRA rather than RGBA, and that a resize rea
 intermediate target — which invalidates every bind group holding a view of one, so the chain is rebuilt
 rather than just the surface reconfigured.
 
+**The first thing per-pass timing did was refute the reason it was built.** The case for it was that the
+terrain submits its whole heightfield five times a frame with nothing culled, and that this was presumably
+where the time went. It is not. At 1920x1200 the four shadow cascades come to **7%** of the summed passes
+and the G-buffer to 6%, while ambient occlusion is **58%** and its blur another 14% — the frame is
+overwhelmingly fragment-bound in one screen-space pass, and barely troubled by two million vertices. The
+same numbers measured at 720x480 said the cascades were 36%, which is what a small render target does to a
+ratio: the cascades draw into fixed-resolution shadow maps and so cost the same at every window size, and
+at 720x480 there was nothing else large enough to compare against. **A profile taken at a resolution nobody
+plays at ranks passes in an order nobody experiences.**
+
+That does not retire terrain LOD — it is a charter item, it matters more on a larger map and a weaker GPU,
+and two million unculled vertices is not a thing to leave standing. It does move it behind the occlusion
+pass, and it settles the depth pre-pass question outright: a pre-pass buys back fragment work in the
+G-buffer, which is 6% of the frame, by paying for a second full geometry submission. There is nothing there
+to win.
+
 **A frame cannot carry a size the targets already decide.** `DeferredFrame` used to hold a viewport, and
 the reason it did was itself a fix — the figure had previously been passed twice and nothing checked the two
 agreed. But the size the shaders reconstruct world positions against is a property of the *targets*, since
@@ -359,8 +392,11 @@ unlit back slope. Neither was a renderer fault, and neither was visible from the
 
 - No post-processing chain beyond what the shader set already covers.
 - No particle system; it belongs with the gameplay that spawns effects.
-- No level-of-detail generation for models. Terrain has it because a heightfield's regularity makes it
-  cheap; model LOD wants measurement first.
+- No level-of-detail generation for models, and none for terrain either. A heightfield's regularity makes
+  terrain LOD *cheap to build*, which is why the format is shaped to permit it — see
+  [the terrain format](../formats/terrain.md) — but nothing has been built. This entry used to read
+  "Terrain has it", which was simply false, and it is the reason the charter above is not complete. Both
+  now want the same thing first: measurement.
 - **MSAA is declined outright**, rather than pending. Multisampling a deferred G-buffer means four times
   the memory on every target *and* per-sample lighting behind a stencil pass, because averaging normals
   or depths across a silhouette yields values describing no surface that exists — and having paid for all

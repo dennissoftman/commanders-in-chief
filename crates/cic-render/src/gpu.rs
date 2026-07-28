@@ -37,8 +37,26 @@ pub struct GpuContext {
     adapter_info: wgpu::AdapterInfo,
 }
 
+/// Optional features requested when the adapter offers them, and silently skipped when it does not.
+///
+/// `TIMESTAMP_QUERY` is the whole list. It is what [`crate::timing`] needs to attribute frame time to
+/// individual passes, and it is *optional* on purpose: a software rasteriser may not offer it, and the
+/// answer to that is a renderer that draws without timing rather than one that refuses to start. Asking
+/// for a feature the adapter lacks fails device creation outright, so the request is intersected with
+/// what is actually available rather than assumed.
+const OPTIONAL_FEATURES: wgpu::Features = wgpu::Features::TIMESTAMP_QUERY;
+
+/// Builds a device descriptor asking for whichever optional features this adapter has.
+fn device_descriptor<'a>(adapter: &wgpu::Adapter, label: &'a str) -> wgpu::DeviceDescriptor<'a> {
+    wgpu::DeviceDescriptor {
+        label: Some(label),
+        required_features: adapter.features() & OPTIONAL_FEATURES,
+        ..Default::default()
+    }
+}
+
 impl GpuContext {
-    /// Requests an adapter and a device with no optional features.
+    /// Requests an adapter and a device, with optional features taken where offered.
     ///
     /// A fallback (software) adapter is tried when no native adapter answers, because CI runners
     /// frequently have no GPU and a renderer that cannot be tested there is untested.
@@ -61,10 +79,7 @@ impl GpuContext {
         };
         let adapter_info = adapter.get_info();
         let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: Some("cic-render device"),
-                ..Default::default()
-            })
+            .request_device(&device_descriptor(&adapter, "cic-render device"))
             .await
             .map_err(RenderError::RequestDevice)?;
         Ok(Self {
@@ -108,10 +123,10 @@ impl GpuContext {
         };
         let adapter_info = adapter.get_info();
         let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: Some("cic-render presentation device"),
-                ..Default::default()
-            })
+            .request_device(&device_descriptor(
+                &adapter,
+                "cic-render presentation device",
+            ))
             .await
             .map_err(RenderError::RequestDevice)?;
         Ok((
@@ -151,6 +166,18 @@ impl GpuContext {
     #[must_use]
     pub const fn adapter_info(&self) -> &wgpu::AdapterInfo {
         &self.adapter_info
+    }
+
+    /// Whether this device can attribute time to individual passes.
+    ///
+    /// False is a normal answer, not a fault: `TIMESTAMP_QUERY` is optional, and a device without it
+    /// renders identically and reports no timings. Callers should treat it the way the render tests treat
+    /// a missing adapter — skip the measurement, do not fail.
+    #[must_use]
+    pub fn supports_timing(&self) -> bool {
+        self.device
+            .features()
+            .contains(wgpu::Features::TIMESTAMP_QUERY)
     }
 }
 

@@ -3,9 +3,11 @@
 ## Where the project is
 
 M0 through M2 are complete: the workspace and its invariants, the resource layer, and the native asset
-formats. **M3's charter is complete** — the renderer draws a lit, shadowed, occluded, textured scene with
-water and weather, both headlessly and in a window, and a visual regression harness compares captures
-against committed references.
+formats. **M3's charter is complete bar one item** — the renderer draws a lit, shadowed, occluded, textured
+scene with water and weather, both headlessly and in a window, and a visual regression harness compares
+captures against committed references. The exception is **terrain level of detail**, which does not exist:
+the heightfield is submitted at full density, five times a frame, with nothing culled anywhere. This
+document and the milestone both claimed otherwise until it was checked.
 
 What works:
 
@@ -60,6 +62,15 @@ What works:
   test pins it there.
 - **Scene time is a frame parameter** — `DeferredFrame::time` — and nothing in the renderer reads a
   clock. That is what makes a capture of moving water or drifting cloud reproducible.
+- **Per-pass GPU timing** ([`timing`](crates/cic-render/src/timing.rs)), because every performance question
+  here is workload-dependent: a total says something is slow, a breakdown says which pass. Each pass owns a
+  fixed pair of timestamp queries, a skipped pass reads back as absent rather than as zero, and the
+  tick-to-duration arithmetic is a pure function with its own tests. Optional, since `TIMESTAMP_QUERY` is —
+  a device without it renders identically and reports nothing.
+  - It refuted its own premise immediately. The terrain's two million unculled vertices a frame were the
+    reason to build it, and at 1920x1200 the four cascades are 7% of the frame while ambient occlusion is
+    58%. Measured at 720x480 the same code said the cascades were 36%, because the cascades cost the same at
+    every window size and a small target leaves nothing to compare them against.
 - Windowed presentation, driven by the reusable camera:
 
 ```bash
@@ -69,7 +80,8 @@ cargo run -p cic-render --example terrain_viewer --release
 Pass a `.cicmap` path to view a real map; with no argument it generates terrain, buildings, a water
 table derived from the heightfield's own low point, and their surfaces, so the viewer runs before any
 content exists. `T` toggles antialiasing and the bracket keys step the resolution scale, because what an
-edge does *as the camera moves* is the whole subject and no still capture reports it.
+edge does *as the camera moves* is the whole subject and no still capture reports it; `P` prints the
+per-pass breakdown once a second, which is where the figures above came from.
 
 ## Next verified step
 
@@ -84,17 +96,27 @@ there — true since the first render test landed, not something recent changed.
 References cannot be copied from a developer machine: a software rasteriser and an NVIDIA card differ far
 beyond the tolerance, which is why the sets are keyed by adapter in the first place.
 
-After that, in rough order: **TAA**, the quality tier ADR 0005 plans and the last antialiasing item — a
-jittered projection, a motion-vector target, a history buffer, and neighbourhood clamping, and it needs the
-regression harness accounted for, since a temporal accumulator makes one captured frame depend on the frames
-before it. Then normal and roughness maps to go with the base-colour textures, then M4's interface layer —
-whose settings screen has real content waiting for it now that a display setting exists with more than one
-option.
+After that, in rough order:
+
+1. **A cheaper ambient-occlusion pass.** Per-pass GPU timing
+   ([`timing`](crates/cic-render/src/timing.rs)) says this is where the frame goes: at 1920x1200, 58% in the
+   occlusion estimate and 14% more in its blur, against 7% for all four shadow cascades and 6% for the
+   G-buffer. Nothing is urgent — the whole chain is 1.2 ms on an RTX 4080 SUPER — but that is the ranking,
+   and it is not the one that was expected. See the milestone's design note.
+2. **Terrain level of detail and frustum culling**, the outstanding charter item. Two million unculled
+   vertices a frame is not worth leaving standing, and it matters more on a larger map and a weaker GPU —
+   but it is not the biggest win, and the measurement is what said so.
+2. **TAA**, the quality tier ADR 0005 plans and the last antialiasing item: a jittered projection, a
+   motion-vector target, a history buffer, and neighbourhood clamping. It needs the regression harness
+   accounted for, since a temporal accumulator makes one captured frame depend on the frames before it.
+3. **Normal and roughness maps** to go with the base-colour textures.
+4. **M4's interface layer**, whose settings screen has real content waiting for it now that a display
+   setting exists with more than one option.
 
 ## Gate status
 
 Formatting, strict lints (`clippy::all` and `clippy::pedantic` as errors, plus `-D warnings` as CI runs
-it), and the full test suite all pass on the pinned toolchain. **239 tests across five crates**, 34 of
+it), and the full test suite all pass on the pinned toolchain. **251 tests across five crates**, 35 of
 which render on a real device (verified on an NVIDIA RTX 4080 SUPER) and write their captures to
 `target/tmp/`. Eleven committed references cover terrain layers, instanced models, the deferred chain, water,
 water under a glancing sun, cloud shadows, fog, wet ground, snow, an antialiased frame, and a supersampled
