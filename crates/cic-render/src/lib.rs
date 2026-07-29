@@ -61,6 +61,7 @@ pub mod shader;
 pub mod shadow;
 pub mod terrain;
 pub mod terrain_virtual;
+pub mod text;
 pub mod texture;
 pub mod timing;
 pub mod view;
