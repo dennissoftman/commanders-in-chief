@@ -78,6 +78,16 @@ surfaces, so the viewer runs before any content exists. `T` cycles antialiasing 
 pass, and the temporal one; the bracket keys step the resolution scale; `P` prints a per-pass GPU timing
 breakdown. The viewer's own header lists every control.
 
+And to navigate the shell:
+
+```bash
+cargo run -p cic-render --example shell --release
+```
+
+A main menu, settings, skirmish setup, and a quit modal, drawn with a typeface authored in this tree.
+Change the resolution scale, press Apply, and do nothing: fifteen seconds later the setting takes itself
+back, because a display change can leave the person who made it unable to see well enough to undo it.
+
 ## Crates
 
 | Crate | Purpose |
@@ -86,7 +96,8 @@ breakdown. The viewer's own header lists every control.
 | `cic-vfs` | Virtual paths, ordered mounts, overlay resolution, zip and tar containers. |
 | `cic-assets` | glTF model import, the terrain container, JSON scenarios, map packages. |
 | `cic-camera` | The RTS camera model, free of window, input, and GPU dependencies. |
-| `cic-render` | Deferred chain, terrain, instanced models, physically-based texturing, scenery sway, antialiasing to a temporal tier, windowed presentation, the WGSL shader set. |
+| `cic-ui` | Interface layout and its format, the two-pass solver, widgets and retained state, input routing with input-method composition, the screen stack, transactional settings, screen transitions, and the paint layer. Free of window, GPU and font dependencies. |
+| `cic-render` | Deferred chain, terrain, instanced models, physically-based texturing, scenery sway, antialiasing to a temporal tier, interface drawing with an authored typeface, windowed presentation, the WGSL shader set. |
 
 ## Asset formats
 
@@ -96,6 +107,8 @@ breakdown. The viewer's own header lists every control.
 | Terrain heightfield and layers | Custom chunked binary (`.cict`) |
 | Scenario | JSON (`map.json`) |
 | A whole map | zip (`.cicmap`) |
+| One interface screen | JSON (`*.ciclayout.json`) |
+| Display text | JSON, keyed (`strings.<language>.json`) |
 
 Specifications are in [docs/formats/](docs/formats/README.md), and the reasoning is in
 [docs/milestones/m2-assets.md](docs/milestones/m2-assets.md). The short version: authored data a human

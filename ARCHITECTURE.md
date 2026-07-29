@@ -6,7 +6,7 @@
 cic-core          (no dependencies)
    └── cic-vfs    (+ flate2)
           └── cic-assets   (+ gltf, serde, serde_json)
-                 └── cic-render   (+ cic-camera, wgpu, png, sha2;
+                 └── cic-render   (+ cic-camera, cic-ui, wgpu, png, sha2;
                                     naga for shader validation in tests)
 
 cic-camera        (no dependencies)
@@ -20,11 +20,31 @@ out. A layout solver that pulled in a graphics stack would make every tool that 
 depend on one, so the two facts it cannot derive — how large a piece of text is, and what the display
 scale is — arrive from the caller instead.
 
+`cic-render` depends on `cic-ui` and never the reverse, which is the same rule as for assets and holds
+for the same reason. The renderer draws an interface; an interface model that knew how it was drawn would
+drag a graphics stack into every editor and debug tool that wanted to lay out a box. The split is drawn
+where the mistakes are rather than at the crate boundary for its own sake: which colour a focused button
+takes and where a slider's knob sits are arithmetic and live in `cic-ui`, testable by asserting on a list;
+what is left in `cic-render` is a glyph rasteriser, a vertex buffer and a draw call.
+
 `cic-render` depends on `cic-assets`, and that direction is the one to keep: the renderer consumes
 assets, and assets never know about rendering. Nothing in `cic-assets` mentions a GPU, a texture format,
 or a pipeline, and the water surface is the clearest illustration — where a body of water *is* lives in
 the renderer rather than in the terrain container, because tint and wave scale are things an artist
 changes without touching a map.
+
+## Where content lives
+
+`content/` holds authored game data that is not code: at present the four interface screens and their
+string table. It is a plain directory rather than a package because the resource layer already reads
+loose files and packages interchangeably — that is what `cic-vfs`'s ordered mounts are for — so a
+directory during development and a `.cicmap` at release are the same code path. Nothing above the
+resource layer knows which it got.
+
+It is separate from `crates/` because the boundary is a licence boundary as well as a layering one: see
+[LICENSING.md](LICENSING.md), which puts the engine under Apache-2.0 and reserves the game. What is in
+`content/` today is structural rather than narrative — a layout is engineering — but the directory is
+where narrative content will arrive, and the split is cheaper to keep than to introduce later.
 
 ## Layering rules
 

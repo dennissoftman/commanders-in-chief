@@ -11,11 +11,11 @@ level of detail**: chunks are now frustum-culled per pass, but a chunk that is d
 density whatever its size on screen. This document and the milestone both claimed the whole item was done
 until it was checked.
 
-**M4's exit condition is met.** A `cic-ui` crate holds the [layout format](docs/formats/ui-layout.md), a
-two-pass solver, a string table, the closed action set, widget behaviour with retained state and
-input-method composition, the screen stack with transactional settings, and a paint layer; `cic-render`
-draws it, with a typeface authored in this tree. **The shell navigates and it is on screen** — four
-authored screens, covered by four committed reference captures.
+**M4 is complete.** A `cic-ui` crate holds the [layout format](docs/formats/ui-layout.md), a two-pass
+solver, a string table, the closed action set, widget behaviour with retained state and input-method
+composition, the screen stack with transactional settings, animated screen changes, and a paint layer;
+`cic-render` draws it, with a typeface authored in this tree. **The shell navigates and it is on screen** —
+four authored screens, covered by six committed reference captures and driven by hand in a window.
 
 **All five of M3's outstanding renderer items have landed** — temporal antialiasing, the physically-based
 map set, alpha-tested foliage, scenery sway (which was the last provenance case in
