@@ -7,6 +7,7 @@
 //!   [`Kernel::advance`].
 //! - [`activation`] — a scenario's players and placements constructed into kernel state, in
 //!   authored order.
+//! - [`units`] — the first verbs: spawn, move, stop, with deterministic straight-line movement.
 //! - [`subsystem`] — the [`Subsystem`] trait and the [`TickContext`] a tick hands one.
 //! - [`command`] — the tick-stamped input stream, recorded so every run is reproducible.
 //! - [`random`] — named, versioned, seeded streams; drawing is part of the state transition.
@@ -46,6 +47,7 @@ pub mod kernel;
 pub mod random;
 pub mod subsystem;
 pub mod tick;
+pub mod units;
 
 pub use activation::{ActivationError, Forces, Placed, Player, activate};
 pub use command::{Command, CommandError, CommandLog, PlayerId};
@@ -57,3 +59,4 @@ pub use kernel::{
 pub use random::{Stream, Streams};
 pub use subsystem::{Subsystem, TickContext};
 pub use tick::TickAccumulator;
+pub use units::{Unit, Units, move_command, spawn_command, stop_command};

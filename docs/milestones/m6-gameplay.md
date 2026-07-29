@@ -14,6 +14,13 @@ consumers exactly as the deferral intended.
   weapons and footprints arrive with the mechanics that read them, for the same reason the format
   itself waited.
 - Selection and orders: move, attack, attack-move, stop, hold, patrol, and formation movement.
+  **First slice landed** — spawn, move, and stop, as `cic_sim::units`: command payloads decoded by the
+  gameplay layer (the kernel keeps them opaque), ownership checked with rejections *counted and
+  hashed* so an ignored order is visible rather than silent drift, and straight-line movement in the
+  permitted operation set only — a `sqrt` and a division, no trigonometry, arrival snapping exactly to
+  the target. Straight-line on purpose: pathfinding is its own charter line below, and a straight line
+  is what proves the command-to-motion pipe end to end. The template set gained `speed`, the first
+  field to arrive with the mechanic that reads it.
 - Pathfinding over the heightfield, with terrain passability, dynamic obstruction from structures, and
   local avoidance between units.
 - Combat: weapons, ranges, damage types, armour classes, health, death.

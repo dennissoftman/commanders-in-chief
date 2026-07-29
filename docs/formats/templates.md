@@ -30,13 +30,15 @@ model a placed object wears.
 | `templates[].kind` | yes | — | One of `unit`, `structure`, `prop`, `faction`. |
 | `templates[].model` | for placeable kinds | absent | Package-relative `.glb` path. Required for `unit`, `structure`, `prop`; refused for `faction`, which has no pose to draw at. |
 | `templates[].name` | no | absent | String-table key for the display name. |
+| `templates[].speed` | for `unit` | absent | World units per second, finite and positive. Required for a `unit` — one that cannot move is a structure wearing the wrong kind — and refused for every other kind, which has no movement for it to mean anything to. |
 
 ## Deliberately minimal, and how it grows
 
-Health, speed, cost, weapons, footprints: none are here yet, and that is the point rather than an
-oversight. A field nothing consumes is a field nothing tests, which is the same argument that deferred
-the whole format from M2. Each arrives with the M6 mechanic that reads it. Adding an optional field
-later does not break existing files; changing what an existing field means takes a version bump.
+Health, cost, weapons, footprints: none are here yet, and that is the point rather than an oversight. A
+field nothing consumes is a field nothing tests, which is the same argument that deferred the whole
+format from M2. Each arrives with the M6 mechanic that reads it — `speed` is the first to have done so,
+arriving with movement exactly as this paragraph promised. Adding an optional field later does not
+break existing files; changing what an existing field means takes a version bump.
 
 ## One document, overridden wholesale
 

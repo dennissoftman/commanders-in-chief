@@ -190,6 +190,7 @@ fn demo(terrain: &Terrain) -> (Scenario, TemplateSet) {
         kind,
         model: model.map(str::to_owned),
         name: None,
+        speed: None,
     };
     let templates = TemplateSet {
         format_version: 1,
