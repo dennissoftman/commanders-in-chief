@@ -259,7 +259,7 @@ half a widget.
 - **A caret-tight IME cursor area.** `Interface::ime_cursor_area` reports the field because that module
   cannot measure text; `Painter::ime_cursor_area` knows the caret's offset along the string, and on a wide
   field those are a long way apart.
-- **The four authored screens**, in `content/ui/`, and the capture tests load *those* rather than fixtures
+- **The five authored screens**, in `content/ui/`, and the capture tests load *those* rather than fixtures
   — because a fixture can be the bug, twice already in this tree, and a layout written to be photographed
   would go on passing while the screens the game navigates rotted.
 
@@ -286,7 +286,7 @@ half a widget.
 ## Remaining
 
 - Nothing. The charter's last open line was `tabs`, and it is closed — see [Landed](#landed).
-  - `scroll` is unused by the four authored screens and is deliberately not listed as a gap: it is
+  - `scroll` is unused by the five authored screens and is deliberately not listed as a gap: it is
     complete — an offset, a clip, a proportional indicator — and it has a capture of its own. Being unused
     is not the same as being unfinished, which is exactly the distinction `tabs` failed for a while.
 
@@ -318,8 +318,8 @@ it.
 capture at 1.0 cannot show that a theme's sizes were multiplied, an atlas rebuilt, and every quad still
 landed on whole pixels.
 
-No authored screen uses a tab strip yet, so nothing in the six references moved when tabs learned to switch
-pages. That is worth stating rather than leaving to inference: it is the reason this change is covered by
+No authored screen uses a tab strip yet, so none of the six references that existed then moved when tabs
+learned to switch pages. That is worth stating rather than leaving to inference: it is the reason this change is covered by
 unit tests and by no new capture.
 
 ## Design notes
