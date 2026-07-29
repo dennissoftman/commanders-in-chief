@@ -92,6 +92,37 @@ impl Measure for NoContent {
     }
 }
 
+/// Supplies each tab strip's chosen tab, so the solver knows which page is showing.
+///
+/// # Why the solver needs this at all
+///
+/// Everything else here is a pure function of the layout and the viewport. Tab pages are not: which of a
+/// stack of pages is the visible one is *state*, held by [`Interface`](crate::Interface) and keyed by the
+/// strip's id — and a page that is not showing must take no clicks, hold no tab stop, and draw nothing. All
+/// three read the solved sequence, so marking the hidden nodes here answers them at once, rather than
+/// leaving each consumer to remember to ask.
+///
+/// It also means a tab change is a *relayout*, exactly as a resize is. That is the cost of the decision and
+/// it is the right way round: solving is cheap and already happens per frame, whereas a consumer that
+/// forgot to filter would hand a click to an invisible control.
+pub trait Selections {
+    /// The chosen entry for a control, or `None` when nothing has chosen yet.
+    fn selection(&self, id: &str) -> Option<usize>;
+}
+
+/// A [`Selections`] where nothing has been chosen, so every tab strip shows its first page.
+///
+/// The default for [`solve`], and correct rather than merely convenient: a screen that has never been
+/// interacted with shows its first tab.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoSelection;
+
+impl Selections for NoSelection {
+    fn selection(&self, _id: &str) -> Option<usize> {
+        None
+    }
+}
+
 /// One node's intrinsic size, with the size of the subtree it heads.
 #[derive(Debug, Clone, Copy)]
 struct Intrinsic {
@@ -125,6 +156,14 @@ pub struct SolvedNode {
     pub range: Option<Range>,
     /// Longest text a text entry accepts, as authored.
     pub max_length: Option<usize>,
+    /// The pages container this tab strip switches, when it has one.
+    pub pages: Option<String>,
+    /// Whether this node is on screen at all.
+    ///
+    /// False for a tab page that is not the selected one, and for everything inside it. A hidden node is
+    /// still *solved* — its rectangle is correct for when its tab is chosen — but every consumer here skips
+    /// it, so it takes no clicks, holds no tab stop, and is not drawn.
+    pub visible: bool,
     /// How many direct children it has, which is what bounds a list's or a tab strip's selection.
     pub children: usize,
     /// This node plus every descendant.
@@ -153,10 +192,84 @@ pub struct Solved {
 }
 
 impl Solved {
-    /// Every node in pre-order, which is back-to-front drawing order.
+    /// Every node in pre-order, visible or not.
+    ///
+    /// A renderer wants [`Self::visible_nodes`]; this is for a caller that needs the sequence indices to
+    /// line up with what [`Self::get`] returns.
     #[must_use]
     pub fn nodes(&self) -> &[SolvedNode] {
         &self.nodes
+    }
+
+    /// Every node that is on screen, in pre-order, which is back-to-front drawing order.
+    pub fn visible_nodes(&self) -> impl Iterator<Item = &SolvedNode> {
+        self.nodes.iter().filter(|node| node.visible)
+    }
+
+    /// Marks every tab page except the chosen one — and everything inside it — as not visible.
+    ///
+    /// The selection is clamped to the pages that exist and defaults to the first, so a stale selection left
+    /// behind by a layout that has since lost a tab shows the last page rather than nothing at all. Blanking
+    /// the screen would be the alternative, and a blank screen reads as a crash.
+    fn hide_unselected_pages(&mut self, selections: &impl Selections) {
+        // Collected first because the walk below mutates, and the strips are few.
+        let strips: Vec<(String, usize)> = self
+            .nodes
+            .iter()
+            .filter_map(|node| {
+                let pages = node.pages.clone()?;
+                let id = node.id.as_deref()?;
+                Some((pages, selections.selection(id).unwrap_or(0)))
+            })
+            .collect();
+        for (pages, chosen) in strips {
+            let Some(container) = self.index_of(&pages) else {
+                continue;
+            };
+            let children = self.children_of(container);
+            let chosen = chosen.min(children.len().saturating_sub(1));
+            for (index, child) in children.into_iter().enumerate() {
+                if index == chosen {
+                    continue;
+                }
+                // The page and its whole subtree, which is exactly the `subtree - 1` entries after it —
+                // the sequence being pre-order is what makes hiding a branch a range rather than a walk.
+                let span = self.nodes.get(child).map_or(1, |node| node.subtree);
+                for hidden in child..(child + span).min(self.nodes.len()) {
+                    self.nodes[hidden].visible = false;
+                }
+            }
+        }
+    }
+
+    /// The rectangles of a node's direct children, in authored order.
+    ///
+    /// What a tab strip's headers are: the strip is one control, and which of its children a click landed in
+    /// is what says which tab was chosen.
+    #[must_use]
+    pub fn child_rects(&self, index: usize) -> Vec<Rect> {
+        self.children_of(index)
+            .into_iter()
+            .filter_map(|child| self.nodes.get(child).map(|node| node.rect))
+            .collect()
+    }
+
+    /// The sequence indices of a node's direct children.
+    ///
+    /// Stepping over whole subtrees rather than scanning for a matching parent, which is what keeps this
+    /// linear in the children rather than in the whole tree.
+    fn children_of(&self, index: usize) -> Vec<usize> {
+        let Some(node) = self.nodes.get(index) else {
+            return Vec::new();
+        };
+        let end = (index + node.subtree).min(self.nodes.len());
+        let mut children = Vec::with_capacity(node.children);
+        let mut next = index + 1;
+        while next < end {
+            children.push(next);
+            next += self.nodes.get(next).map_or(1, |child| child.subtree);
+        }
+        children
     }
 
     /// How many nodes there are.
@@ -185,7 +298,7 @@ impl Solved {
             .find(|node| node.id.as_deref() == Some(id))
     }
 
-    /// The topmost node containing a physical point, or nothing if the point misses everything.
+    /// The topmost visible node containing a physical point, or nothing if the point misses everything.
     ///
     /// Searched in reverse, because pre-order draws parents first and so the *last* match is the one on
     /// top — the one a click has to reach. Searching forward would hand every click to the backdrop.
@@ -194,10 +307,10 @@ impl Solved {
         self.nodes
             .iter()
             .rev()
-            .find(|node| node.rect.contains(x, y))
+            .find(|node| node.visible && node.rect.contains(x, y))
     }
 
-    /// The topmost activatable node containing a physical point.
+    /// The topmost visible activatable node containing a physical point.
     ///
     /// What a click actually wants. The panel beneath a button contains the point too, and reporting it
     /// would swallow the press.
@@ -206,7 +319,7 @@ impl Solved {
         self.nodes
             .iter()
             .rev()
-            .find(|node| node.widget.activatable() && node.rect.contains(x, y))
+            .find(|node| node.visible && node.widget.activatable() && node.rect.contains(x, y))
     }
 
     /// The index of the node carrying an id.
@@ -225,7 +338,7 @@ impl Solved {
     pub fn hit_focusable(&self, x: f32, y: f32) -> Option<usize> {
         self.nodes
             .iter()
-            .rposition(|node| node.widget.focusable() && node.rect.contains(x, y))
+            .rposition(|node| node.visible && node.widget.focusable() && node.rect.contains(x, y))
     }
 
     /// The index of a node's nth direct child.
@@ -264,16 +377,19 @@ impl Solved {
         None
     }
 
-    /// Every focusable node's id, in pre-order, which is navigation order.
+    /// Every visible focusable node's id, in pre-order, which is navigation order.
     ///
     /// Pre-order rather than by position on screen. Reading order is what an author controls and what a
     /// reviewer can see in the file; geometric order would make tab sequence depend on a solved layout,
     /// so a resize could silently reorder it.
+    ///
+    /// Controls on a tab page that is not showing are absent, which is the whole reason visibility reaches
+    /// this far: a keyboard sequence that stopped on an invisible field would look like focus vanishing.
     #[must_use]
     pub fn focus_order(&self) -> Vec<&str> {
         self.nodes
             .iter()
-            .filter(|node| node.widget.focusable())
+            .filter(|node| node.visible && node.widget.focusable())
             .filter_map(|node| node.id.as_deref())
             .collect()
     }
@@ -291,16 +407,20 @@ impl Solved {
         let descendants = &self.nodes[index + 1..(index + node.subtree).min(self.nodes.len())];
         let content = descendants
             .iter()
+            // A hidden tab page inside a scrollable container is not content the user can scroll to, so it
+            // must not extend the range: it would leave the container able to scroll past its own end.
+            .filter(|child| child.visible)
             .map(|child| child.rect.bottom())
             .fold(node.rect.y, f32::max);
         (content - node.rect.y - node.rect.height).max(0.0)
     }
 
-    /// Resolves every node's text against a table, in pre-order, skipping nodes without a key.
+    /// Resolves every visible node's text against a table, in pre-order, skipping nodes without a key.
     #[must_use]
     pub fn texts<'a>(&'a self, strings: &'a StringTable) -> Vec<(&'a SolvedNode, &'a str)> {
         self.nodes
             .iter()
+            .filter(|node| node.visible)
             .filter_map(|node| {
                 node.text_key
                     .as_deref()
@@ -310,12 +430,25 @@ impl Solved {
     }
 }
 
-/// Positions a layout against a viewport.
+/// Positions a layout against a viewport, with every tab strip on its first page.
 ///
 /// The root is solved against the whole viewport, so a root sized `Fill` covers the surface and a root
 /// sized `Auto` collapses to its content.
 #[must_use]
 pub fn solve(layout: &Layout, viewport: Viewport, measure: &impl Measure) -> Solved {
+    solve_selected(layout, viewport, measure, &NoSelection)
+}
+
+/// Positions a layout against a viewport, showing the tab page each strip's selection names.
+///
+/// [`Interface`](crate::Interface) implements [`Selections`], so a host passes its own state straight in.
+#[must_use]
+pub fn solve_selected(
+    layout: &Layout,
+    viewport: Viewport,
+    measure: &impl Measure,
+    selections: &impl Selections,
+) -> Solved {
     let scale = viewport.scale();
     let bounds = viewport.bounds();
     let available = [bounds.width / scale, bounds.height / scale];
@@ -330,9 +463,11 @@ pub fn solve(layout: &Layout, viewport: Viewport, measure: &impl Measure) -> Sol
         nodes: Vec::with_capacity(intrinsics.len()),
     };
     arrange.node(&layout.root, root, None, 1, 0);
-    Solved {
+    let mut solved = Solved {
         nodes: arrange.nodes,
-    }
+    };
+    solved.hide_unselected_pages(selections);
+    solved
 }
 
 /// The arrange pass's invariant state.
@@ -441,6 +576,10 @@ impl Arrange<'_> {
             action: node.action,
             range: node.range,
             max_length: node.max_length,
+            pages: node.pages.clone(),
+            // Everything is visible until the visibility pass says otherwise, which it can only do once
+            // the whole sequence exists: a strip's pages container may be anywhere in the tree.
+            visible: true,
             children: node.children.len(),
             // The measure pass counted this already, and it counted it over the same tree in the same
             // order, so taking it from there beats walking the children again.
@@ -656,7 +795,7 @@ mod tests {
     // tolerance nobody chose. A layout that lands half a pixel out is a layout that is wrong.
     #![allow(clippy::float_cmp)]
 
-    use super::{Measure, NoContent, Solved, solve};
+    use super::{Measure, NoContent, NoSelection, Selections, Solved, solve, solve_selected};
     use crate::geometry::{Insets, Rect, Viewport};
     use crate::layout::{Align, Direction, Justify, Layout, Node, Sizing, Widget};
     use crate::{Action, StringTable};
@@ -925,6 +1064,93 @@ mod tests {
         let expected = Rect::new(0.0, 0.0, 200.0, 100.0);
         assert_eq!(solved.nodes()[1].rect, expected);
         assert_eq!(solved.nodes()[2].rect, expected, "and not stacked in a row");
+    }
+
+    /// A [`Selections`] that answers the same chosen index for everything.
+    struct Chosen(usize);
+
+    impl Selections for Chosen {
+        fn selection(&self, _id: &str) -> Option<usize> {
+            Some(self.0)
+        }
+    }
+
+    /// A strip of two headers over a stack of two pages, each page holding one child.
+    fn tabbed() -> Layout {
+        wrap(Node {
+            width: Sizing::Fill(1),
+            height: Sizing::Fill(1),
+            children: vec![
+                Node {
+                    id: Some("tabs".to_owned()),
+                    widget: Widget::Tabs,
+                    pages: Some("pages".to_owned()),
+                    children: vec![Node::default(), Node::default()],
+                    ..Node::default()
+                },
+                Node {
+                    id: Some("pages".to_owned()),
+                    direction: Direction::Stack,
+                    children: vec![
+                        Node {
+                            id: Some("first".to_owned()),
+                            widget: Widget::Button,
+                            children: vec![Node::default()],
+                            ..Node::default()
+                        },
+                        Node {
+                            id: Some("second".to_owned()),
+                            widget: Widget::Button,
+                            children: vec![Node::default()],
+                            ..Node::default()
+                        },
+                    ],
+                    ..Node::default()
+                },
+            ],
+            ..Node::default()
+        })
+    }
+
+    fn tabbed_with(selections: &impl Selections) -> Solved {
+        let layout = tabbed();
+        layout.validate().expect("the fixture must be valid");
+        let viewport = Viewport::new(200, 100, 1.0).expect("valid viewport");
+        solve_selected(&layout, viewport, &NoContent, selections)
+    }
+
+    #[test]
+    fn every_tab_page_but_the_chosen_one_is_hidden_along_with_its_subtree() {
+        // A page's *subtree* and not just the page, which is the part worth a test: hiding only the page node
+        // would leave every control on it clickable and every label on it drawn, over the top of the page
+        // that is actually showing.
+        let solved = tabbed_with(&Chosen(1));
+        let hidden: Vec<&str> = solved
+            .nodes()
+            .iter()
+            .filter(|node| !node.visible)
+            .map(|node| node.id.as_deref().unwrap_or("-"))
+            .collect();
+        // The first page and the one child beneath it.
+        assert_eq!(hidden, vec!["first", "-"]);
+        assert_eq!(solved.visible_nodes().count(), solved.len() - 2);
+        assert_eq!(solved.focus_order(), vec!["tabs", "second"]);
+    }
+
+    #[test]
+    fn nothing_chosen_shows_the_first_page_and_a_stale_choice_shows_the_last() {
+        // Two ends of the same decision. A screen nobody has touched shows its first tab, which is why
+        // `solve` can keep its signature and default to `NoSelection`. And a selection left behind by a
+        // layout that has since lost a tab is clamped rather than hiding everything: a blank screen reads as
+        // a crash, and the last page reads as a screen.
+        assert_eq!(
+            tabbed_with(&NoSelection).focus_order(),
+            vec!["tabs", "first"]
+        );
+        assert_eq!(
+            tabbed_with(&Chosen(9)).focus_order(),
+            vec!["tabs", "second"]
+        );
     }
 
     #[test]

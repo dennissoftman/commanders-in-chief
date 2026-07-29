@@ -31,7 +31,7 @@
 // data, so a tap across the edge reads what it would have read from the adjacent page.
 
 // Must match `VIRTUAL_PAGE_BORDER` in `terrain_virtual.rs`; a test pins the pair.
-const PAGE_BORDER: u32 = 4u;
+const PAGE_BORDER: u32 = 8u;
 
 const MAX_LAYERS: u32 = 8u;
 
@@ -70,7 +70,10 @@ struct PageJob {
 // `rgba8unorm` because WebGPU has no sRGB *storage* format. That is not merely a format substitution: the
 // blend below is in linear light, and eight bits of linear is visibly banded in the darks — which is the
 // entire reason sRGB storage exists. So the pass encodes on write and whoever reads a page decodes, moving
-// the transfer function from the sampler into the two shaders rather than dropping it.
+// the transfer function out of the sampler and into the `transfer` chunk the three passes on that route share.
+//
+// A single mip level, because a storage binding has exactly one. This pass writes the base and
+// `terrain_reduce.wgsl` fills the levels below it from what this wrote.
 @group(0) @binding(6) var composed: texture_storage_2d_array<rgba8unorm, write>;
 
 fn sample_count() -> vec2<f32> {
@@ -125,20 +128,8 @@ fn surface(uv: vec2<f32>, pixels_per_cell: f32) -> vec4<f32> {
     return vec4<f32>(accumulated / total, roughness / total);
 }
 
-/// sRGB encoding of a linear value, for the storage write.
-///
-/// The direction is worth stating because getting it backwards is invisible in a unit test and obvious in a
-/// frame: the layer albedo is sampled through an sRGB texture, so `surface` returns *linear* light, and this
-/// is the encode on the way into an eight-bit store rather than a decode of something already encoded.
-fn srgb_from_linear(value: vec3<f32>) -> vec3<f32> {
-    let low = value * 12.92;
-    let high = 1.055 * pow(max(value, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.4)) - 0.055;
-    return clamp(
-        select(high, low, value <= vec3<f32>(0.0031308)),
-        vec3<f32>(0.0),
-        vec3<f32>(1.0),
-    );
-}
+// The write below encodes through `srgb_from_linear` from the `transfer` chunk, which the reduce pass and the
+// G-buffer share — see that file for why the transfer function lives in the shaders rather than in a sampler.
 
 // One workgroup per 8x8 block of page texels, and one dispatch depth per job. `z` indexes the job rather
 // than the physical layer, because the jobs are the compacted list of pages that actually need composing —

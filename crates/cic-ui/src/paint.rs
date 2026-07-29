@@ -487,7 +487,11 @@ impl<'a, M: Measure> Pass<'a, '_, '_, M> {
                 .rect
                 .translated(self.shift[0], self.shift[1] - offset)
                 .snapped();
-            if !clip.intersection(rect).is_empty() {
+            // A tab page that is not the chosen one is solved but not shown. Its rectangles are real and
+            // correct for when its tab *is* chosen, so the only thing that stops it drawing over the page in
+            // front of it is this — and hit testing and focus order skip it by the same flag, which is what
+            // keeps "on screen" one answer rather than three.
+            if node.visible && !clip.intersection(rect).is_empty() {
                 self.node(index, node, rect, clip);
             }
             // Pushed whether or not the container itself was visible, so a child that *is* visible still
@@ -926,7 +930,7 @@ mod tests {
     use crate::layout::{
         Align, Direction, FORMAT_VERSION, Layout, Node, Range, Sizing, Style, Widget,
     };
-    use crate::solve::{Measure, Solved, solve};
+    use crate::solve::{Measure, Solved, solve, solve_selected};
     use crate::state::Interface;
     use crate::transition::Reveal;
     use crate::{StringTable, Viewport};
@@ -999,6 +1003,61 @@ mod tests {
                 Content::Fill { .. } => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn a_tab_page_that_is_not_showing_draws_nothing() {
+        // The third consumer of the solver's visibility flag, after hit testing and focus order. All three
+        // pages are solved and all three overlap, so a walk that drew every node would paint the last one
+        // over the chosen one and the screen would show whichever tab was authored last whatever was picked.
+        let page = |key: &str| Node {
+            width: Sizing::Fill(1),
+            height: Sizing::Fill(1),
+            children: vec![Node {
+                widget: Widget::Label,
+                text_key: Some(key.to_owned()),
+                ..Node::default()
+            }],
+            ..Node::default()
+        };
+        let layout = Layout {
+            format_version: FORMAT_VERSION,
+            root: Node {
+                width: Sizing::Fill(1),
+                height: Sizing::Fill(1),
+                children: vec![
+                    Node {
+                        id: Some("strip".to_owned()),
+                        widget: Widget::Tabs,
+                        height: Sizing::Fixed(20.0),
+                        pages: Some("pages".to_owned()),
+                        children: vec![Node::default(), Node::default()],
+                        ..Node::default()
+                    },
+                    Node {
+                        id: Some("pages".to_owned()),
+                        direction: Direction::Stack,
+                        width: Sizing::Fill(1),
+                        height: Sizing::Fill(1),
+                        children: vec![page("first"), page("second")],
+                        ..Node::default()
+                    },
+                ],
+                ..Node::default()
+            },
+        };
+        layout.validate().expect("the fixture must be valid");
+
+        let mut interface = Interface::new();
+        interface.set_selection("strip", 1);
+        let solved = solve_selected(&layout, viewport(), &Monospace, &interface);
+        let strings = StringTable::new();
+        let theme = Theme::default();
+        let drawn: Vec<&str> = texts(&paint(&solved, &interface, &strings, &theme))
+            .into_iter()
+            .map(|(text, ..)| text)
+            .collect();
+        assert_eq!(drawn, vec!["second"]);
     }
 
     #[test]

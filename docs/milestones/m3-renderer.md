@@ -2,21 +2,36 @@
 
 Draw a map: terrain, water, models, lighting, and shadows, in a window and headlessly.
 
-**Status:** Charter complete **except for terrain level of detail**, plus the atmosphere and weather that
-were not in it. One qualification remains, and it is that a visible terrain chunk still draws at full
-density — though it is now only drawn when visible at all. That charter line used to read "with level of
-detail", which was simply untrue, and the frustum culling that has since landed is the first half of
-closing it.
+**Status:** Charter complete, plus the atmosphere and weather that were not in it.
 
-The other qualification is closed. CI had no GPU, so the regression harness ran on a developer machine
-and not on a runner; it now runs on Mesa's lavapipe with its own committed reference set, and a rendering
-regression fails the build. See [Exit condition](#exit-condition) and the remaining item below.
+The last open line was terrain level of detail, and it is now **closed by amendment rather than by
+implementation** — see the charter's first item for the measurement and the decision. Both earlier
+qualifications are closed too: CI had no GPU, so the regression harness ran on a developer machine and not
+on a runner; it now runs on Mesa's lavapipe with its own committed reference set, and a rendering
+regression fails the build. See [Exit condition](#exit-condition).
 
 ## Charter
 
 - Terrain rendering from a heightfield, with level of detail that holds up at both a tactical zoom and
-  a strategic one. **The heightfield renders and is frustum-culled; the level of detail does not exist
-  yet** — see [Remaining](#remaining).
+  a strategic one. **Met by frustum culling, and the vertex-density half is deliberately not built** — see
+  the amendment below.
+  - This line used to read as though LOD existed, which was untrue, and the honest options were to build it
+    or to record why not. It is the second, and the measurement is the reason. Per-pass timing refuted the
+    premise: at 1920x1200 the four shadow cascades are 7% of the frame and the G-buffer 6%, while ambient
+    occlusion is 56% — the frame is fragment-bound in one screen-space pass and barely troubled by two
+    million vertices. Then culling made map size stop mattering at all: a **1025x1025** terrain costs the
+    same **0.692 ms** as a 257x257 one, sixteen times the ground for the same frame. A per-chunk stride would
+    remove triangles from a pass that is not the bottleneck, and would cost skirts or edge stitching, a
+    second density decision per chunk, and a class of crack between neighbouring densities that no
+    assertion catches and only a capture shows.
+  - **Denys's decision, taken on 2026-07-29**, with the reasoning stated as: terrain is already cheap to
+    draw and maps are not yet large enough for the density to matter. It is a decision that can be revisited
+    against a weaker GPU or a much larger map, and what it is not is a line left reading as though it were
+    done — which is what it did before.
+  - Note what this does *not* close. [`terrain_virtual`](../../crates/cic-render/src/terrain_virtual.rs) and
+    [`detail`](../../crates/cic-render/src/detail.rs) are texture-page residency, decided in texels per
+    cell, and they are now wired and drawing — see the virtual-texture entry under Landed. They were never
+    LOD, and wiring them removed no triangle.
 - Static and instanced model rendering from imported geometry.
 - Directional lighting with cascaded shadows, and ambient occlusion.
 - Water surfaces.
@@ -281,10 +296,11 @@ regression fails the build. See [Exit condition](#exit-condition) and the remain
     edge clamps, which puts a seam along every page boundary — and boundaries are fixed to the ground rather
     than to the screen, so the seams would crawl as the camera moved. A test reads a page back and checks
     that a page straddling a colour boundary carries the far side in its border: interior red 89 against
-    border red 144, where a clamped border would read 89.
-  - **The G-buffer samples it**, and the two paths agree: a mean channel difference of **0.001** over the
-    whole frame with a worst case of **2** eight-bit steps, which is the quantisation a page store costs and
-    nothing else. The direct blend stays in the shader as the fallback, and that is not belt-and-braces — a
+    border red 184, where a clamped border would read 89.
+  - **The G-buffer samples it**, and the two paths agree: a mean channel difference of **0.004** over the
+    whole frame with a worst case of **5** eight-bit steps, which is the quantisation a page store costs plus
+    the mip level the G-buffer picks for itself — it was 0.001 and 2 while a page had one level. The direct
+    blend stays in the shader as the fallback, and that is not belt-and-braces — a
     cache is allowed to run out of slots, so a frame that depended on it having won would turn a memory
     budget into a correctness requirement. A one-slot cache renders 99.9% of the frame from the fallback and
     the rest from its single page, which is the assertion.
@@ -295,6 +311,50 @@ regression fails the build. See [Exit condition](#exit-condition) and the remain
   - The forward pass has no page lookup, deliberately: it draws terrain alone in one pass, which is the case
     a cache has nothing to offer. The first draft of the agreement test used it and reported the two frames
     as identical for exactly that reason.
+  - **Page mip chains**, which is what took the path from correct to better. A page held one density, so
+    ground under heavy minification read one texel out of the many it covered — while the fallback beside it
+    samples an albedo array that *has* a chain. The cache was therefore worse than not using it on exactly
+    the ground a virtual texture exists for. Each update now reduces the pages it composed, one compute pass
+    per level, and the G-buffer picks a level from screen-space derivatives.
+    - **The border is the chain's budget, and that is why it widened from four texels to eight.** Every
+      reduction halves the border along with everything else, and a filtered tap needs a whole texel of it
+      outside the interior — so a border of `2^n` buys `n + 1` levels and nothing buys more. Four levels take
+      a page's density down by eight, which is past the factor of two between the cache's own two densities.
+      Get this wrong and the seam the border exists to prevent returns at *every level below the base*, on
+      ground the base level looks perfect on: a failure no frame at close range would show, so it is read
+      back instead — the straddling page's border reads 184, 180, 170 and 149 against an interior of 89 as
+      the chain deepens, narrowing as a deep level averages more of the border gradient and never
+      approaching the 0 a clamp would give.
+    - **The reduction averages in linear light**, for the reason the CPU mip generation does: the sRGB curve
+      is concave, so the mean of two encoded values sits above the encoding of their mean and a
+      high-contrast page would pale as it receded. Every level matches a linear-light prediction of the 2x2
+      beneath it to **0.54** of an eight-bit step, and the fixture proves it can tell the difference — a
+      byte-space average would be out by **26** over 7480 high-contrast channels. The first fixture could
+      not: a flat-coloured page's only contrast is the weight blend across a layer boundary, spread over a
+      whole cell, and the two averages agreed there to 2. It took a striped albedo to make the claim
+      falsifiable, which is the fourth time in this crate a fixture has been the thing at fault.
+    - **The level is computed rather than sampled for.** `textureSample` takes its level from derivatives,
+      which are defined only in uniform control flow, and page residency varies per fragment — so the
+      derivatives are taken once at the top of the fragment and the level is passed down to
+      `textureSampleLevel`. That is the same constraint the fallback blend already lives under, one step
+      earlier.
+    - **Measured against the direct blend at a grazing angle**, on a flat striped plain, as the energy
+      between adjacent pixels — because a mean or a luminance spread reports nothing about aliasing. Where
+      the chain reaches, the paged frame is *smoother* than the blend it replaces: **238 against 386**, a
+      ratio of 0.62. Forcing the base level only takes the frame to 2.00 of the blend, which is how the
+      bound was set. The topmost thirty rows of ground still read 1.93, and that is a residency gap rather
+      than a filtering one — see [Remaining](#remaining).
+    - The first version of that metric measured horizontal adjacency only, and the fixture's stripes run
+      horizontally: it read 1.49 where the vertical axis read 158. A metric perpendicular to the only detail
+      in the frame is a metric that cannot fail.
+    - **The viewer can now switch the cache on**, on `V`, and that closes a gap of the same kind the weather
+      keys closed: the cache was reachable from a test capture and from nowhere a person could watch it. All
+      three of its interesting failures are motion artefacts — a seam crawling along a page boundary as the
+      camera pans, a step between mip levels, and a page arriving a frame after the ground it covers. Run,
+      256 pages compose on the frame the key is pressed and the window is indistinguishable from the direct
+      blend. The request it issues is a placeholder for the view-driven one under [Remaining](#remaining):
+      the whole map at the coarse density, with the residency map ranking what fits, which is also what makes
+      the cache visibly run out of slots on a large map.
 - **Temporal antialiasing** ([`deferred`](../../crates/cic-render/src/deferred.rs), `taa.wgsl`), the last
   tier of [ADR 0005](../adr/0005-antialiasing-strategy.md) and the last item on its list: a jittered
   projection on an eight-phase Halton sequence, a motion-vector target, a ping-ponged float history, and a
@@ -319,21 +379,14 @@ regression fails the build. See [Exit condition](#exit-condition) and the remain
 
 ## Remaining
 
-- **Terrain level of detail.** Frustum culling has landed and is half the charter item — see Landed — but
-  a chunk that *is* visible still draws every cell it has, whether it fills forty pixels or four. The chunk
-  decomposition culling introduced is what LOD needs: a per-chunk stride chosen from distance, and either
-  skirts or edge stitching so neighbouring densities do not crack.
-  - Note what this is *not*. [`terrain_virtual`](../../crates/cic-render/src/terrain_virtual.rs) and
-    [`detail`](../../crates/cic-render/src/detail.rs) are residency bookkeeping for terrain *texture*
-    pages, decided in texels per cell. They are unwired, and wiring them would not remove a triangle.
-- **Page mip chains**, which is what stands between the virtual-texture path being *correct* and being
-  *better*. A page has one level, so a page sampled at a shallow angle aliases where the direct blend does
-  not — the terrain would look worse on exactly the ground a virtual texture is for. The fix is a second
-  compute pass reducing each resident page, and the reduction has to respect the border or the seam the
-  border exists to prevent returns at every level below the base.
 - **A view-driven detail request.** Nothing derives a `TerrainDetailRequest` from a camera yet, so a caller
   states which cells it wants at which density. The residency map already ranks pages by projected size, so
   this is a small function over the frustum rather than a design.
+  - It matters more than it did, and the mip chain is what showed why. A page's chain is four levels deep,
+    which covers a minification of eight; past that a page saturates at its deepest level while the direct
+    blend's albedo chain keeps going. Ground that far should not have a page resident at all, and *which
+    ground has a page* is this item's decision — so the residual aliasing at the horizon measured below is a
+    residency gap rather than a filtering one.
 
 ## Exit condition
 
@@ -535,11 +588,17 @@ ratio: the cascades draw into fixed-resolution shadow maps and so cost the same 
 at 720x480 there was nothing else large enough to compare against. **A profile taken at a resolution nobody
 plays at ranks passes in an order nobody experiences.**
 
-That does not retire terrain LOD — it is a charter item, it matters more on a larger map and a weaker GPU,
-and two million unculled vertices is not a thing to leave standing. It does move it behind the occlusion
-pass, and it settles the depth pre-pass question outright: a pre-pass buys back fragment work in the
-G-buffer, which is 6% of the frame, by paying for a second full geometry submission. There is nothing there
-to win.
+That measurement, plus culling making map size stop mattering, is what eventually retired terrain LOD as a
+piece of work — see the charter's first item for the amendment and whose decision it was. It settles the
+depth pre-pass question by the same arithmetic: a pre-pass buys back fragment work in the G-buffer, which is
+6% of the frame, by paying for a second full geometry submission. There is nothing there to win.
+
+**What the profile could not say, and the charter needed anyway.** A measurement on one GPU at one
+resolution is an argument for a decision, not the decision itself: the same numbers on a weaker adapter
+would rank the passes differently, which is exactly what the 720x480 figures above demonstrate about
+resolution. So the amendment is recorded as a decision with a date and a rationale rather than as a
+conclusion the timing forced, and it is revisitable on either of the two axes that would change it — a much
+larger map, or a much weaker GPU.
 
 **A frame cannot carry a size the targets already decide.** `DeferredFrame` used to hold a viewport, and
 the reason it did was itself a fix — the figure had previously been passed twice and nothing checked the two
@@ -587,9 +646,10 @@ several times the cost of the displacement itself.
 - No particle system; it belongs with the gameplay that spawns effects.
 - No level-of-detail generation for models, and none for terrain either. A heightfield's regularity makes
   terrain LOD *cheap to build*, which is why the format is shaped to permit it — see
-  [the terrain format](../formats/terrain.md) — but nothing has been built. This entry used to read
-  "Terrain has it", which was simply false, and it is the reason the charter above is not complete. Both
-  now want the same thing first: measurement.
+  [the terrain format](../formats/terrain.md) — but nothing has been built and, for terrain, nothing will be
+  in this milestone: the charter's first item records that decision, its measurement, and whose it was.
+  This entry used to read "Terrain has it", which was simply false. Models have had no measurement at all,
+  so theirs is still an open question rather than a settled one.
 - **MSAA is declined outright**, rather than pending. Multisampling a deferred G-buffer means four times
   the memory on every target *and* per-sample lighting behind a stencil pass, because averaging normals
   or depths across a silhouette yields values describing no surface that exists — and having paid for all

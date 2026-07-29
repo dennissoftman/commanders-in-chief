@@ -115,8 +115,8 @@ struct GridSample {
 ///
 /// `inside` is false for a vertex past the terrain's edge, which happens in the last chunk of a row or
 /// column whenever the cell count is not a multiple of the chunk size. The caller collapses those to a
-/// degenerate triangle. Clamping them instead — which is what `elevation` does to a coordinate it is
-/// handed — would stretch the final row of cells across the ground that is not there.
+/// degenerate triangle. Clamping them instead -- which is what `elevation` does to a coordinate it is
+/// handed -- would stretch the final row of cells across the ground that is not there.
 fn grid_sample(vertex_index: u32, chunk_index: u32) -> GridSample {
     let samples = sample_count();
     let cells = vec2<u32>(u32(max(samples.x - 1, 1)), u32(max(samples.y - 1, 1)));
@@ -222,8 +222,10 @@ fn surface(uv: vec2<f32>) -> vec4<f32> {
 
 // Page geometry, duplicated across the language boundary from `terrain_virtual.rs`. A test pins each pair,
 // because a disagreement here does not fail to compile -- it samples the right page at the wrong place.
-const PAGE_BORDER: f32 = 4.0;
-const PAGE_EXTENT: f32 = 264.0;
+const PAGE_BORDER: f32 = 8.0;
+const PAGE_EXTENT: f32 = 272.0;
+// Levels a page carries, which the border fixes rather than the interior -- see `VIRTUAL_PAGE_BORDER`.
+const PAGE_MIPS: f32 = 4.0;
 // Cells a page spans, and texels it holds per cell, at each level. Their product is the page interior, which
 // is what makes the two levels the same memory at different densities: 8 cells at 32 texels and 16 at 16.
 const PAGE_FINE_CELLS: f32 = 8.0;
@@ -237,21 +239,48 @@ struct PageSample {
     resident: bool,
 }
 
-/// Linear light from the sRGB-encoded colour a page stores. See `terrain_virtual.wgsl` for why the transfer
-/// function is in the shaders rather than in the sampler.
-fn page_linear(value: vec3<f32>) -> vec3<f32> {
-    let low = value / 12.92;
-    let high = pow((value + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
-    return select(high, low, value <= vec3<f32>(0.04045));
+/// The mip level to read a page at, from the screen footprint of one of its texels.
+///
+/// A page has a chain now, and something has to pick a level from it. The sampler cannot: `textureSample`
+/// takes its level from screen-space derivatives, which are defined only in uniform control flow, and page
+/// residency varies per fragment -- so the derivatives are taken once at the top of the fragment, where the
+/// control flow *is* uniform, and the level is computed here and passed to `textureSampleLevel`.
+///
+/// `derivative` is how far the terrain coordinate moves across one pixel. Multiplying by the cell count and
+/// the page's density converts that to page texels, and the base-two logarithm of the longer of the two axes
+/// is the level at which one page texel covers one pixel -- which is the point past which the base level
+/// aliases. `max` of the two axes rather than a per-axis level, because that is what the hardware does for the
+/// direct blend this path has to agree with: an anisotropic footprint is resolved by blurring along its short
+/// axis, and doing anything better needs a device capability the headless suite cannot rely on.
+fn page_level(derivative_x: vec2<f32>, derivative_y: vec2<f32>, density: f32) -> f32 {
+    let cells = max(
+        vec2<f32>(uniforms.terrain.z, uniforms.terrain.w) - vec2<f32>(1.0),
+        vec2<f32>(1.0),
+    );
+    let texels = cells * density;
+    let footprint = max(
+        length(derivative_x * texels),
+        length(derivative_y * texels),
+    );
+    // Floored at the base rather than allowed negative: magnification has no level above zero to come from.
+    // Capped at the last level the chain holds, because `textureSampleLevel` would clamp there anyway and a
+    // stated bound is what makes the depth's disagreement with `VIRTUAL_PAGE_MIPS` a test rather than a guess.
+    return clamp(log2(max(footprint, 0.0001)), 0.0, PAGE_MIPS - 1.0);
 }
 
 /// Reads one page, given the table entry for the page containing `cell`.
 ///
-/// `entry` is the physical layer plus one, so zero means not resident — which is what a cleared table reads
+/// `entry` is the physical layer plus one, so zero means not resident -- which is what a cleared table reads
 /// as, and what the one-by-one placeholder reads as when no cache is attached. One code path for "the cache
 /// has not staged this yet", "the cache evicted it", and "there is no cache", because the fragment wants the
 /// same answer in all three.
-fn page_lookup(entry: u32, cell: vec2<f32>, cells_per_page: f32, density: f32) -> PageSample {
+fn page_lookup(
+    entry: u32,
+    cell: vec2<f32>,
+    cells_per_page: f32,
+    density: f32,
+    level: f32,
+) -> PageSample {
     var output: PageSample;
     output.surface = vec4<f32>(0.0);
     output.resident = entry != 0u;
@@ -269,11 +298,11 @@ fn page_lookup(entry: u32, cell: vec2<f32>, cells_per_page: f32, density: f32) -
         weight_sampler,
         page_uv,
         i32(entry - 1u),
-        0.0,
+        level,
     );
     // Colour is sRGB-encoded and roughness is not, which is the same split the G-buffer's own albedo target
     // has.
-    output.surface = vec4<f32>(page_linear(stored.rgb), stored.a);
+    output.surface = vec4<f32>(linear_from_srgb(stored.rgb), stored.a);
     return output;
 }
 
@@ -282,7 +311,9 @@ fn page_lookup(entry: u32, cell: vec2<f32>, cells_per_page: f32, density: f32) -
 /// Finer first because that is the whole point of two levels: a page at 32 texels per cell is the one staged
 /// for ground near the camera, and falling back to the coarse level where it is absent is a graceful
 /// degradation rather than a compromise.
-fn page_surface(uv: vec2<f32>) -> PageSample {
+///
+/// The two derivatives are the caller's, taken where the control flow is uniform -- see `page_level`.
+fn page_surface(uv: vec2<f32>, derivative_x: vec2<f32>, derivative_y: vec2<f32>) -> PageSample {
     var output: PageSample;
     output.surface = vec4<f32>(0.0);
     output.resident = false;
@@ -296,7 +327,7 @@ fn page_surface(uv: vec2<f32>) -> PageSample {
     let cell = clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)) * cells;
 
     // Clamped to the table rather than tested against it. A coordinate exactly at the terrain's far edge
-    // lands one page past the end, and clamping there reads the last page — whose border covers that very
+    // lands one page past the end, and clamping there reads the last page -- whose border covers that very
     // edge, because the compose pass composed it from the same clamped ground.
     let fine_page = vec2<i32>(min(
         cell / PAGE_FINE_CELLS,
@@ -307,6 +338,7 @@ fn page_surface(uv: vec2<f32>) -> PageSample {
         cell,
         PAGE_FINE_CELLS,
         PAGE_FINE_DENSITY,
+        page_level(derivative_x, derivative_y, PAGE_FINE_DENSITY),
     );
     if (fine.resident) {
         return fine;
@@ -320,6 +352,7 @@ fn page_surface(uv: vec2<f32>) -> PageSample {
         cell,
         PAGE_COARSE_CELLS,
         PAGE_COARSE_DENSITY,
+        page_level(derivative_x, derivative_y, PAGE_COARSE_DENSITY),
     );
 }
 
@@ -337,7 +370,14 @@ fn gbuffer_fragment(input: VertexOutput) -> GBufferOutput {
     // comes from screen-space derivatives, which are undefined in non-uniform control flow, and page
     // residency varies per fragment. Guarding the blend would leave the mip level of every fragment that
     // *does* fall back undefined.
-    let page = page_surface(input.uv);
+    //
+    // The page path's derivatives are taken *here*, for the same reason and one step earlier: residency is
+    // decided inside `page_surface`, so by the time a page is known to exist the control flow is no longer
+    // uniform and a derivative taken there would be undefined. Taken at the top they are a plain value the
+    // lookup can carry down.
+    let derivative_x = dpdx(input.uv);
+    let derivative_y = dpdy(input.uv);
+    let page = page_surface(input.uv, derivative_x, derivative_y);
     let blended = surface(input.uv);
     let surface_value = select(blended, page.surface, page.resident);
     var output: GBufferOutput;

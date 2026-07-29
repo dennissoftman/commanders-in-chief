@@ -22,6 +22,7 @@
 //! | `G` | Cycle weather: clear, rain, thunderstorm, snowfall |
 //! | `,` `.` | Step the time of day, held to scrub the sun |
 //! | `P` | Toggle the per-pass GPU timing printout |
+//! | `V` | Toggle the virtual-texture page cache |
 //! | `Esc` | Quit |
 //!
 //! Antialiasing, the resolution scale, the weather and the hour are all here for one reason: each is a
@@ -38,6 +39,13 @@
 //! The weather keys close a gap of the same kind. Cloud shadows, wetness and lying snow reach the shaders
 //! only through an environment, and this viewer set none — so those three terms were reachable from a
 //! test capture and from nowhere a person could look at them moving.
+//!
+//! `V` closes the last one. The virtual-texture cache is a filter with a residency policy attached, and all
+//! three of its interesting failures are motion artefacts: a seam crawling along a page boundary as the
+//! camera pans, a visible step between mip levels, and a page arriving a frame after the ground it covers.
+//! None of them is in a still. It also shows the cache running out of slots on a large map, which is the
+//! honest state of the residency request today — the ground it loses falls back to the direct blend, and
+//! where that boundary sits is what a view-driven request has to fix.
 
 // The generator clamps before converting and its inputs are bounded constants, so the width casts
 // below cannot lose anything.
@@ -57,11 +65,14 @@ use std::time::Instant;
 use cic_assets::model::{Model, ModelImage, ModelMaterial, ModelPrimitive, ModelVertex};
 use cic_assets::{MapPackage, PackageLimits, Terrain, TerrainLayer};
 use cic_camera::{RtsCamera, RtsCameraProfile};
+use cic_render::detail::TerrainDetailRequest;
 use cic_render::display::{MAX_RESOLUTION_SCALE, MIN_RESOLUTION_SCALE};
+use cic_render::terrain_virtual::{VIRTUAL_PAGE_LAYERS, VirtualPageView};
+use cic_render::view::Projection;
 use cic_render::{
     Action, Antialiasing, DeferredFrame, DisplaySettings, Environment, GpuContext, InputState,
-    LayerMaterial, ModelBatch, ModelInstance, SurfaceRenderer, TerrainGround, TerrainRenderer,
-    TextureImage, WaterBody, WaterSurface, Weather,
+    LayerMaterial, ModelBatch, ModelInstance, SurfaceRenderer, TerrainGround, TerrainPageCache,
+    TerrainRenderer, TextureImage, WaterBody, WaterSurface, Weather,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -135,12 +146,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         terrain.width(),
         terrain.height(),
         terrain.world_extent(),
-        terrain
-            .elevations()
-            .iter()
-            .copied()
-            .max()
-            .map_or(0.0, |peak| f32::from(peak) * terrain.vertical_scale()),
+        highest_elevation(&terrain),
     );
 
     let event_loop = EventLoop::new()?;
@@ -544,6 +550,12 @@ struct Active {
     surface: SurfaceRenderer,
     models: Vec<ModelBatch>,
     water: Vec<WaterBody>,
+    /// The virtual-texture cache, when `V` has switched it on.
+    ///
+    /// Off by default, for the reason the environment starts at its own default: the first frame in the
+    /// window is the frame the committed references were captured from, and a key press is the only way out
+    /// of it.
+    pages: Option<TerrainPageCache>,
 }
 
 struct Viewer {
@@ -676,6 +688,95 @@ impl Viewer {
         true
     }
 
+    /// Switches the virtual-texture cache on or off, rebuilding the terrain's bindings either way.
+    ///
+    /// # Why the cache needs a key rather than being always on
+    ///
+    /// Two reasons, and the first is the standing rule: what a *filter* does as the camera moves is not
+    /// something a still capture reports, and a page cache is a filter with a residency policy attached. A
+    /// crawling seam at a page boundary, a visible step between mip levels, and a page arriving a frame late
+    /// are all motion artefacts — the same argument the antialiasing key exists for. Comparing the two paths
+    /// live is the only way to see them, and off-by-default keeps the window's first frame identical to the
+    /// captures.
+    ///
+    /// The second is that the request below is a placeholder for a decision that does not exist yet: nothing
+    /// derives a [`TerrainDetailRequest`] from a camera, so this asks for the whole map at the coarse density
+    /// and lets the residency map rank what fits. On a large map that is far more pages than the budget
+    /// holds, which is not a flaw to hide — the ground the cache loses falls back to the direct blend, and
+    /// watching where that boundary sits as the camera moves is exactly what a view-driven request has to fix.
+    fn toggle_pages(&mut self) {
+        let Some(active) = &mut self.active else {
+            return;
+        };
+        if active.pages.take().is_some() {
+            active.terrain_renderer.detach_pages(&active.context);
+            eprintln!("pages: off, terrain is blending layers per fragment");
+            active.window.request_redraw();
+            return;
+        }
+        let budget = u32::try_from(VIRTUAL_PAGE_LAYERS).unwrap_or(u32::MAX);
+        match TerrainPageCache::new(&active.context, &active.terrain_renderer, budget) {
+            Ok(cache) => {
+                active
+                    .terrain_renderer
+                    .attach_pages(&active.context, &cache);
+                let (cells_x, cells_y) = active.terrain_renderer.cell_size();
+                eprintln!(
+                    "pages: on, {budget} slots over {cells_x}x{cells_y} cells at 16 texels per cell"
+                );
+                active.pages = Some(cache);
+                active.window.request_redraw();
+            }
+            Err(error) => eprintln!("pages: could not allocate the cache: {error}"),
+        }
+    }
+
+    /// Stages the pages this frame's camera wants, if the cache is on.
+    ///
+    /// The view is built from the camera's own pose and the projection the frame renders with, so the
+    /// residency ranking and the image agree about where the camera is looking. `right` and `up` are derived
+    /// from `forward` against world up, which is what the view matrix does with the same inputs.
+    fn stage_pages(&mut self) {
+        let Some(active) = &mut self.active else {
+            return;
+        };
+        let Some(cache) = &mut active.pages else {
+            return;
+        };
+        let pose = self.camera.pose();
+        let (width, height) = active.surface.size();
+        let projection = Projection::for_viewport(width, height);
+        let forward = pose.forward;
+        let right = normalise(cross(forward, [0.0, 0.0, 1.0]));
+        let up = cross(right, forward);
+        let [extent_x, extent_y] = self.terrain.world_extent();
+        let (cells_x, cells_y) = active.terrain_renderer.cell_size();
+        let view = VirtualPageView::new(
+            pose.eye,
+            forward,
+            right,
+            up,
+            (
+                [0.0, 0.0, 0.0],
+                [extent_x, extent_y, highest_elevation(&self.terrain)],
+            ),
+            (projection.vertical_fov * 0.5).tan(),
+            projection.aspect_ratio,
+            self.terrain.horizontal_scale(),
+        );
+        let requests: [TerrainDetailRequest; 1] = [TerrainDetailRequest::uniform(
+            [0, 0],
+            [cells_x, cells_y],
+            16,
+        )];
+        let composed = cache.update(&active.context, &requests, view);
+        // Only when it did something, so the steady state — a camera that has not moved far — prints nothing
+        // and the line means "the cache is working" rather than "the cache is here".
+        if composed > 0 {
+            eprintln!("pages: composed {composed}");
+        }
+    }
+
     /// Applies a change to the display settings and reports what took effect.
     ///
     /// Reported rather than assumed: the resolution scale is clamped and rounded on its way to a target
@@ -794,6 +895,7 @@ impl ApplicationHandler for Viewer {
             surface,
             models,
             water,
+            pages: None,
         });
     }
 
@@ -824,6 +926,10 @@ impl ApplicationHandler for Viewer {
                     // would rebuild the chain dozens of times a second.
                     if pressed && code == KeyCode::KeyP {
                         self.toggle_timing();
+                        return;
+                    }
+                    if pressed && code == KeyCode::KeyV {
+                        self.toggle_pages();
                         return;
                     }
                     if pressed && let Some(display) = display_change(code, self.display) {
@@ -889,9 +995,11 @@ impl ApplicationHandler for Viewer {
 
 impl Viewer {
     fn draw(&mut self) -> Result<(), String> {
-        let Some(active) = &mut self.active else {
+        // Nothing to draw into, and the check is here rather than at the call site because the borrow is
+        // taken again after the camera has moved — staging pages needs the camera *and* the device.
+        if self.active.is_none() {
             return Ok(());
-        };
+        }
         let now = Instant::now();
         let delta = self
             .last_frame
@@ -910,6 +1018,14 @@ impl Viewer {
         // over. Counted here rather than inside the renderer so a capture of the same sequence is
         // reproducible -- see `DeferredFrame::jitter`.
         self.frame_ordinal = self.frame_ordinal.wrapping_add(1);
+
+        // Before the frame, so a page this camera wants is composed in time to be sampled by it. The compose
+        // and reduce passes are their own submission, so this costs a submit on the frames that miss and
+        // nothing at all on the frames that do not.
+        self.stage_pages();
+        let Some(active) = &mut self.active else {
+            return Ok(());
+        };
 
         let (width, height) = active.surface.size();
         // `in_environment` re-derives the light, so the time-of-day keys move the sun rather than only
@@ -935,6 +1051,36 @@ impl Viewer {
         self.report_timings(delta);
         Ok(())
     }
+}
+
+/// The tallest point on a terrain, in world units.
+///
+/// The page residency map wants the terrain's bounding box, and the *top* of it has to come from the
+/// heightfield: a box that stops below the ground would project every page as though it were flat, ranking a
+/// hilltop under the camera as though it were far away.
+fn highest_elevation(terrain: &Terrain) -> f32 {
+    terrain
+        .elevations()
+        .iter()
+        .copied()
+        .max()
+        .map_or(0.0, |peak| f32::from(peak) * terrain.vertical_scale())
+}
+
+fn cross(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {
+    [
+        left[1] * right[2] - left[2] * right[1],
+        left[2] * right[0] - left[0] * right[2],
+        left[0] * right[1] - left[1] * right[0],
+    ]
+}
+
+fn normalise(vector: [f32; 3]) -> [f32; 3] {
+    let length = (vector[0] * vector[0] + vector[1] * vector[1] + vector[2] * vector[2]).sqrt();
+    if length <= f32::EPSILON {
+        return [1.0, 0.0, 0.0];
+    }
+    vector.map(|component| component / length)
 }
 
 /// Maps a physical key to a change of display settings, or `None` if it is not one.

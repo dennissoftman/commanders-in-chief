@@ -4,11 +4,40 @@ use std::collections::BTreeSet;
 
 use crate::detail::TerrainDetailRequest;
 
+/// Texels of composed ground a page holds, before its border.
 pub const VIRTUAL_PAGE_INTERIOR: u32 = 256;
-pub const VIRTUAL_PAGE_BORDER: u32 = 4;
+
+/// Texels of the *neighbouring* ground a page carries on each side.
+///
+/// A filtered tap at a page's edge reads across it, so without a margin those taps clamp and every page
+/// boundary shows a seam — one that crawls, because boundaries are fixed to the ground rather than to the
+/// screen.
+///
+/// # The border is also the page's mip budget
+///
+/// Each reduction halves the border along with everything else, and a bilinear tap needs a whole texel of
+/// margin outside the interior. So the deepest level a page can carry is the last one whose border is still
+/// a whole texel: a border of `2^n` buys `n + 1` levels, and the exchange rate for a deeper chain is a
+/// doubling of the border. Eight texels buys four levels, which is [`VIRTUAL_PAGE_MIPS`].
+pub const VIRTUAL_PAGE_BORDER: u32 = 8;
+
+/// A page's stored extent on each axis, border included.
 pub const VIRTUAL_PAGE_EXTENT: u32 = VIRTUAL_PAGE_INTERIOR + 2 * VIRTUAL_PAGE_BORDER;
+
+/// How many pages the full cache budget holds.
 pub const VIRTUAL_PAGE_LAYERS: usize = 256;
-pub const VIRTUAL_PAGE_MIPS: u32 = 9;
+
+/// Levels in a page's mip chain, the base included.
+///
+/// Bounded by the border rather than by the interior — see [`VIRTUAL_PAGE_BORDER`]. Four levels take a
+/// page's density down by a factor of eight, which is more than the factor of two between the cache's own
+/// two page densities: past that the residency map would rather stage a coarser page, and past *that* the
+/// direct blend in the G-buffer is the fallback and needs no page at all.
+///
+/// Without a chain the cache is correct and not yet better: a page has one density, so ground sampled at a
+/// shallow angle aliases where the direct blend — which samples an albedo array that *has* a chain — does
+/// not. That would make the terrain look worse on exactly the ground a virtual texture is for.
+pub const VIRTUAL_PAGE_MIPS: u32 = 4;
 
 #[derive(Debug, Clone, Copy)]
 pub struct VirtualPageView {
@@ -398,6 +427,45 @@ mod tests {
             16.0 / 9.0,
             10.0,
         )
+    }
+
+    #[test]
+    fn the_mip_depth_is_the_one_the_border_permits() {
+        // The arithmetic the reduce pass depends on, and the one place it is stated as a bound rather than
+        // as a number. Two things have to hold at every level the chain carries: the border has to still be
+        // a whole texel, or a tap near a page edge reads inside the neighbouring page's own border and the
+        // seam the border exists to prevent comes back below the base; and the level being reduced *from*
+        // has to have an even extent, or a 2x2 box lands astride the interior boundary and shifts the page
+        // by half a texel per level.
+        let mut border = super::VIRTUAL_PAGE_BORDER;
+        let mut extent = super::VIRTUAL_PAGE_EXTENT;
+        for level in 0..super::VIRTUAL_PAGE_MIPS {
+            assert!(
+                border >= 1,
+                "level {level} has no border left: {extent} texels"
+            );
+            if level + 1 < super::VIRTUAL_PAGE_MIPS {
+                assert_eq!(
+                    extent % 2,
+                    0,
+                    "level {level} cannot be halved: {extent} texels"
+                );
+                assert_eq!(
+                    border % 2,
+                    0,
+                    "level {level}'s border cannot be halved: {border} texels"
+                );
+            }
+            border /= 2;
+            extent /= 2;
+        }
+        // And the chain is as deep as the border allows rather than one short of it, so widening the border
+        // without deepening the chain shows up here as waste.
+        assert_eq!(
+            super::VIRTUAL_PAGE_BORDER,
+            1 << (super::VIRTUAL_PAGE_MIPS - 1),
+            "the border buys log2(border) + 1 levels; spend them or narrow it"
+        );
     }
 
     #[test]

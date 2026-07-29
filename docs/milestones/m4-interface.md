@@ -3,19 +3,20 @@
 A retained user-interface layer: layout, widgets, input routing, and the screen stack the game is
 navigated through.
 
-**Status:** Exit condition met. The layout foundation, widget behaviour, the screen stack with
-transactional settings, drawing, and animated screen changes have all landed — and the four authored
-screens are covered by the M3 capture harness.
+**Status:** Exit condition met, and the charter is now complete. The layout foundation, widget behaviour,
+the screen stack with transactional settings, drawing, and animated screen changes have all landed, the four
+authored screens are covered by the M3 capture harness, and **tabs switch pages** — the one widget that was
+half a widget.
 
 ## Charter
 
 - A layout model of the project's own design, defined in a text format that is authored and reviewed
   like the scenario format is. **Done** — see [Landed](#landed).
 - A widget set covering what an RTS shell actually needs: buttons, labels, lists, sliders, checkboxes,
-  text entry, tabs, and a scrollable container. **Eight of nine done**, behaviour and drawing both.
-  **`tabs` is the exception** and it is half a widget — see [Remaining](#remaining). It selects, highlights
-  the chosen tab, and switches nothing, which is the failure mode this format's validation exists to
-  prevent everywhere else. Found by auditing the charter rather than by anything failing.
+  text entry, tabs, and a scrollable container. **Done**, behaviour and drawing both. `tabs` was the
+  exception for a while and was half a widget: it selected, highlighted the chosen tab, and switched
+  nothing, which is the failure mode this format's validation exists to prevent everywhere else. Found by
+  auditing the charter rather than by anything failing, and now closed — see [Landed](#landed).
 - Retained state across frames, so a scroll position or a text cursor survives a redraw. **Done**, keyed
   by node id, which is why the format requires one on every widget that holds state.
 - Input routing with focus, hover, and keyboard navigation, expressed as semantic events rather than
@@ -77,6 +78,41 @@ screens are covered by the M3 capture harness.
   - **Everything adjustable is bounded by the layout**: a slider by its own range, a list or tab strip by
     the children it actually has, typed text by `max_length`. Clamped rather than wrapped, because a list
     jumping from its last row to its first on one key press reads as a lost keystroke.
+- **Tabs that switch pages.** A `tabs` node's children are its *headers*; its `pages` field names the
+  container holding the bodies. Before this, `Widget::Tabs` tracked a number and nothing acted on it — the
+  format's own comment said "switches between sibling pages" and nothing did.
+  - **The two readings of this were genuinely unsettled, and the one not taken is worth stating.** Either a
+    strip's children are the headers and a new field links the pages, or a strip's children are the *pages*
+    and the strip is drawn from them — which costs no format field but makes `Tabs` a switcher rather than a
+    strip, and would mean the highlight the paint layer draws was highlighting the wrong node. The first was
+    taken because a header and a page want different boxes and the format should say which is which.
+  - **The pages cannot be the strip's children**, because a header sits in a strip and a page fills the
+    body, and no single container arranges both. So the strip names what it switches, and validation checks
+    the two agree: three headers over two pages is a screen whose third tab shows nothing, and neither node
+    is wrong on its own. The container must also `stack` its pages, since one shows and the rest must
+    neither take space nor leave a gap.
+  - **Visibility is decided in the solver**, which is the one place state flows *into* layout — through a
+    `Selections` trait, so the solver stays testable against a stub exactly as text measurement is. The
+    alternative was leaving each consumer to filter, and hit testing, keyboard navigation and drawing all
+    read the same solved sequence: one of the three forgetting is a control the user cannot see taking a
+    click. A hidden page is still solved, because its rectangles are correct for when its tab is chosen.
+  - **So a tab change is a relayout**, exactly as a resize is, and the shell does it: `Shell::handle`
+    compares each strip's chosen page before and after an event and re-solves when one moved. That check
+    earns its place — a tab strip usually carries no action, so the routing would otherwise have returned
+    idle and left the cached layout showing the page the user had just navigated away from. Compared rather
+    than done unconditionally, because solving every open screen on every pointer move is what the cached
+    layout exists to avoid.
+  - **The paint layer skips a page that is not showing** by the same flag, which is what keeps "on screen"
+    one answer rather than three. It had to: all the pages overlap, so a walk that drew every node would
+    paint the last-authored page over the chosen one.
+  - **A pointer names a tab and the keyboard steps it.** A strip is one focusable control, so a release
+    inside it is resolved against its own children — without that, a tab strip could only be driven from the
+    keyboard and clicking the third tab would select whatever the arrow keys had last left behind. A release
+    in the strip's padding or gaps leaves the selection alone rather than jumping.
+  - Deliberately *not* extended to a `list`, though the two share the same stored value and the same bound.
+    A list scrolls, and its scroll offset is retained state the solved rectangles do not yet carry — so
+    hit-testing a scrolled list's rows against unscrolled rectangles would pick the wrong row, confidently.
+    A tab strip does not scroll.
 - **Input-method composition**, so Chinese, Japanese and Korean text can be typed at all.
   - A single character per keystroke is the *Latin* case. Under an input method a user types keys that
     produce no text, an uncommitted composition appears and changes as they continue, and only then is text
@@ -185,22 +221,10 @@ screens are covered by the M3 capture harness.
 
 ## Remaining
 
-- **`tabs` does not switch pages.** Its own documentation says it does. What exists is the selecting half:
-  a tab strip takes focus, `Adjust` moves the selection within the children it has, and the paint layer
-  highlights the chosen one. Nothing hides the pages that were not chosen, and there is nothing in the
-  format that says which node is a page of which strip.
-  - **It is unused by all four authored screens**, which is why nothing caught it: no capture shows a tab
-    strip, and every test asserts only on the selecting half.
-  - **The design is genuinely unsettled, which is why it is not quietly picked here.** Two readings, and
-    they differ in the format: either a strip's children are the *tabs* and pages are linked to it by a new
-    field, or a strip's children are the *pages* and the strip is drawn from them, in which case the
-    highlight the paint layer currently draws is highlighting the wrong thing. The first costs a format
-    field; the second costs no format change and makes `Tabs` a switcher rather than a strip.
-  - Until it is settled, a layout naming `tabs` gets a control that looks right and does less than it
-    says. That is the one thing this format is built to refuse, so it is recorded here rather than left
-    for somebody to discover.
-  - `scroll` is *also* unused by the four screens, and is deliberately not on this list: it is complete —
-    an offset, a clip, a proportional indicator — and it has a capture of its own.
+- Nothing. The charter's last open line was `tabs`, and it is closed — see [Landed](#landed).
+  - `scroll` is unused by the four authored screens and is deliberately not listed as a gap: it is
+    complete — an offset, a clip, a proportional indicator — and it has a capture of its own. Being unused
+    is not the same as being unfinished, which is exactly the distinction `tabs` failed for a while.
 
 Two further things noted for later, neither of them M4's:
 
@@ -215,9 +239,9 @@ A navigable shell: main menu, settings with transactional apply-and-rollback, an
 screen that can launch a map. Layout and widget behaviour covered by tests; the rendered result covered
 by the M3 capture harness.
 
-**Met.** 172 tests in `cic-ui` cover the format, the solver, retained state, input routing, composition,
-the string table, the action set, the screen stack, the settings transaction, the paint layer, screen
-transitions, and the routing between them; 36 in `cic-render` cover the typeface, the rasteriser, the
+**Met.** 185 tests in `cic-ui` cover the format, the solver, retained state, input routing, composition,
+tab pages, the string table, the action set, the screen stack, the settings transaction, the paint layer,
+screen transitions, and the routing between them; 36 in `cic-render` cover the typeface, the rasteriser, the
 atlas, the draw list, and the authored screens' own strings and geometry;
 and six committed reference images cover the rendered result — the main menu, the settings screen with
 every widget kind it has, that same screen at one and a half times the pixel density, a modal over the
@@ -228,6 +252,10 @@ screens drawn.
 --example shell`. The window opened at a scale of 1.5, which is what prompted the density reference — a
 capture at 1.0 cannot show that a theme's sizes were multiplied, an atlas rebuilt, and every quad still
 landed on whole pixels.
+
+No authored screen uses a tab strip yet, so nothing in the six references moved when tabs learned to switch
+pages. That is worth stating rather than leaving to inference: it is the reason this change is covered by
+unit tests and by no new capture.
 
 ## Design notes
 

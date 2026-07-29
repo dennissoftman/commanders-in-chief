@@ -33,7 +33,7 @@ use crate::geometry::{Rect, Viewport};
 use crate::layout::Layout;
 use crate::screen::{Screen, ScreenStack, Screens, Transition};
 use crate::settings::{Probation, Transaction};
-use crate::solve::{Measure, Solved, solve};
+use crate::solve::{Measure, Solved, solve, solve_selected};
 use crate::state::Interface;
 use crate::transition::{Motion, Reveal};
 use crate::{Action, StringTable, UiEvent};
@@ -322,10 +322,20 @@ impl<T: Clone + PartialEq> Shell<T> {
         let Some((_, solved)) = self.drawn.last() else {
             return Outcome::IDLE;
         };
-        let Some(action) = self.stack.interface_mut().handle(solved, event) else {
-            return Outcome::IDLE;
-        };
-        self.act(action, measure)
+        // A tab strip's chosen page is decided when the layout is *solved*, so an event that moves one has
+        // to be followed by a re-solve or the new page never appears. Compared rather than assumed, because
+        // solving every screen on every pointer move is what the cached layout exists to avoid — and an
+        // event that switches a tab usually raises no action at all, so `act` below would not have run.
+        let before = page_selections(solved, self.stack.interface());
+        let action = self.stack.interface_mut().handle(solved, event);
+        let switched = page_selections(solved, self.stack.interface()) != before;
+        if switched {
+            self.resolve(measure);
+        }
+        match action {
+            Some(action) => self.act(action, measure),
+            None => Outcome::IDLE,
+        }
     }
 
     /// Runs one action as though a control had raised it.
@@ -394,11 +404,33 @@ impl<T: Clone + PartialEq> Shell<T> {
         let mut drawn = Vec::with_capacity(screens.len());
         for screen in screens {
             if let Some(layout) = self.screens.get(screen) {
-                drawn.push((screen, solve(layout, self.viewport, measure)));
+                // Against *that screen's own* interface, because a tab strip's chosen page decides which
+                // nodes are on screen at all and each open screen remembers its own selections. A screen
+                // with no interface yet — which the stack does not currently produce — solves as though
+                // nothing had been chosen, which shows every strip's first page.
+                let solved = match self.stack.interface_for(screen) {
+                    Some(interface) => solve_selected(layout, self.viewport, measure, interface),
+                    None => solve(layout, self.viewport, measure),
+                };
+                drawn.push((screen, solved));
             }
         }
         self.drawn = drawn;
     }
+}
+
+/// The chosen tab of every strip that switches pages, in sequence order.
+///
+/// A signature rather than a set of ids: what matters is only whether any of them moved, and a strip whose
+/// selection has not been touched answers for its first page — the same default the solver uses.
+fn page_selections(solved: &Solved, interface: &Interface) -> Vec<usize> {
+    solved
+        .nodes()
+        .iter()
+        .filter(|node| node.pages.is_some())
+        .filter_map(|node| node.id.as_deref())
+        .map(|id| interface.selection(id).unwrap_or(0))
+        .collect()
 }
 
 #[cfg(test)]
@@ -407,7 +439,7 @@ mod tests {
     #![allow(clippy::float_cmp)]
 
     use super::{Outcome, Request, Shell, ShellError};
-    use crate::layout::{FORMAT_VERSION, Layout, Node, Sizing, Widget};
+    use crate::layout::{Direction, FORMAT_VERSION, Layout, Node, Sizing, Widget};
     use crate::screen::{Screen, Screens, Transition};
     use crate::settings::{Probation, REVERT_WINDOW};
     use crate::solve::NoContent;
@@ -466,6 +498,106 @@ mod tests {
     fn click(shell: &mut Shell<Display>, x: f32, y: f32) -> Outcome {
         shell.handle(UiEvent::PointerPressed { x, y }, &NoContent);
         shell.handle(UiEvent::PointerReleased { x, y }, &NoContent)
+    }
+
+    /// A screen whose whole surface is a two-tab strip over two stacked pages.
+    ///
+    /// The strip is the top 40 pixels and each header half of it, so a click at x = 300 is the first tab and
+    /// one at x = 500 the second. Each page holds a button, both filling the body, so which one a click in
+    /// the body reaches is decided by the selection and nothing else.
+    fn tabbed_layout() -> Layout {
+        let page = |id: &str| Node {
+            width: Sizing::Fill(1),
+            height: Sizing::Fill(1),
+            children: vec![Node {
+                id: Some(id.to_owned()),
+                widget: Widget::Button,
+                width: Sizing::Fill(1),
+                height: Sizing::Fill(1),
+                ..Node::default()
+            }],
+            ..Node::default()
+        };
+        Layout {
+            format_version: FORMAT_VERSION,
+            root: Node {
+                width: Sizing::Fill(1),
+                height: Sizing::Fill(1),
+                children: vec![
+                    Node {
+                        id: Some("strip".to_owned()),
+                        widget: Widget::Tabs,
+                        direction: Direction::Row,
+                        height: Sizing::Fixed(40.0),
+                        pages: Some("pages".to_owned()),
+                        children: vec![
+                            Node {
+                                width: Sizing::Fill(1),
+                                ..Node::default()
+                            },
+                            Node {
+                                width: Sizing::Fill(1),
+                                ..Node::default()
+                            },
+                        ],
+                        ..Node::default()
+                    },
+                    Node {
+                        id: Some("pages".to_owned()),
+                        direction: Direction::Stack,
+                        width: Sizing::Fill(1),
+                        height: Sizing::Fill(1),
+                        children: vec![page("first"), page("second")],
+                        ..Node::default()
+                    },
+                ],
+                ..Node::default()
+            },
+        }
+    }
+
+    #[test]
+    fn clicking_a_tab_re_solves_the_screen_so_the_new_page_is_on_it() {
+        // The integration this feature stands or falls on, and the reason it needs a test of its own rather
+        // than resting on the two below it. Which page is on screen is decided when the layout is *solved*,
+        // and a tab strip carrying no action raises none — so the shell's own routing would have returned
+        // idle and left the cached layout showing the page the user just navigated away from.
+        let mut screens = Screens::new();
+        screens.insert(Screen::MainMenu, tabbed_layout());
+        for (screen, id, action) in [
+            (Screen::Settings, "apply", Action::ApplySettings),
+            (Screen::SkirmishSetup, "launch", Action::LaunchSkirmish),
+            (Screen::QuitConfirm, "yes", Action::Quit),
+        ] {
+            screens.insert(screen, screen_layout(id, action));
+        }
+        let mut shell = Shell::new(
+            screens,
+            StringTable::new(),
+            Display { scale: 100 },
+            Viewport::new(800, 600, 1.0).expect("viewport"),
+            &NoContent,
+        )
+        .expect("every screen has a layout");
+
+        let body = |shell: &Shell<Display>| {
+            shell
+                .solved()
+                .and_then(|solved| solved.hit(400.0, 300.0))
+                .and_then(|node| node.id.clone())
+        };
+        assert_eq!(body(&shell).as_deref(), Some("first"));
+
+        // The second header, which raises no action at all — so this also pins that an idle outcome does not
+        // mean an idle shell.
+        let outcome = click(&mut shell, 500.0, 20.0);
+        assert!(outcome.is_idle());
+        assert_eq!(shell.interface().selection("strip"), Some(1));
+        assert_eq!(body(&shell).as_deref(), Some("second"));
+
+        // And back, so this is the pointer choosing rather than the selection only ever rising.
+        click(&mut shell, 300.0, 20.0);
+        assert_eq!(body(&shell).as_deref(), Some("first"));
     }
 
     #[test]

@@ -34,7 +34,7 @@
 //! leave the bound unstated and untested — so [`MAX_DEPTH`] and [`MAX_NODES`] are checked here and
 //! have their own tests.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -143,13 +143,11 @@ pub enum Widget {
     TextEntry,
     /// A scrollable set of selectable rows.
     List,
-    /// Selects one of a set. **Does not yet switch pages** — see `docs/milestones/m4-interface.md`.
+    /// A strip of headers that switches between the pages of another container.
     ///
-    /// The selecting half works: it takes focus, `Adjust` moves within the children it has, and the paint
-    /// layer highlights the chosen one. What is missing is hiding the pages that were not chosen, and the
-    /// format has no way to say which node is a page of which strip. Documented here rather than left
-    /// implied, because a control that looks right and does less than it says is what the rest of this
-    /// format's validation exists to refuse.
+    /// Its own children are the headers, one per tab. The pages live in the container its `pages` field
+    /// names, and only the chosen one is on screen — see [`Node::pages`]. Without `pages` it is a segmented
+    /// picker whose selection some other screen reads.
     Tabs,
     /// Clips its child and holds a scroll offset.
     Scroll,
@@ -378,6 +376,18 @@ pub struct Node {
     /// Longest text a `text_entry` accepts. Only meaningful on one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_length: Option<usize>,
+    /// The id of the container holding this tab strip's pages. Only meaningful on a `tabs`.
+    ///
+    /// A `tabs` node's own children are the *headers* — one per tab, in order. The pages are elsewhere in
+    /// the tree, because a header sits in a strip and a page fills the body, and no single container
+    /// arranges both. So the strip names what it switches, and validation checks that the two agree about
+    /// how many tabs there are: three headers over two pages is a layout whose third tab shows nothing,
+    /// which is exactly the class of mistake this format refuses at load rather than in front of a player.
+    ///
+    /// Optional, because a tab strip with no pages is a useful control in its own right — a segmented
+    /// picker whose selection some other screen reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pages: Option<String>,
     /// Children, in drawing and navigation order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<Node>,
@@ -439,8 +449,9 @@ impl Layout {
     /// # Errors
     ///
     /// Returns [`LayoutError`] for a version mismatch, a duplicate or blank id, a nesting depth or
-    /// node count past the bound, a non-finite or negative measurement, a zero fill weight, or an
-    /// action on a widget that cannot be activated.
+    /// node count past the bound, a non-finite or negative measurement, a zero fill weight, an
+    /// action on a widget that cannot be activated, or a tab strip whose pages container is missing,
+    /// wrongly arranged, or a different length from the strip.
     pub fn validate(&self) -> Result<(), LayoutError> {
         if self.format_version != FORMAT_VERSION {
             return Err(LayoutError::Version {
@@ -448,9 +459,35 @@ impl Layout {
                 expected: FORMAT_VERSION,
             });
         }
-        let mut seen = BTreeSet::new();
+        let mut seen = BTreeMap::new();
         let mut counted = 0usize;
-        validate_node(&self.root, 1, &mut seen, &mut counted)
+        let mut links = Vec::new();
+        validate_node(&self.root, 1, &mut seen, &mut counted, &mut links)?;
+        // Every tab link is checked *after* the walk, because a strip may name a container that appears
+        // later in the tree — which is the ordinary case, since a strip is authored above its own pages.
+        for link in links {
+            let Some(target) = seen.get(link.pages) else {
+                return Err(LayoutError::UnknownPages {
+                    id: link.pages.to_owned(),
+                });
+            };
+            // Pages occupy the same box as each other: only one is shown, and the others must not take
+            // space or leave a gap where they would have been. `Stack` is the arrangement that says so,
+            // and requiring it here means a layout cannot look right in the file and wrong on screen.
+            if target.direction != Direction::Stack {
+                return Err(LayoutError::PagesNotStacked {
+                    id: link.pages.to_owned(),
+                });
+            }
+            if target.children.len() != link.headers {
+                return Err(LayoutError::PageCountMismatch {
+                    id: link.pages.to_owned(),
+                    headers: link.headers,
+                    pages: target.children.len(),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Every `text_key` the tree names, in tree order and with duplicates kept.
@@ -474,11 +511,18 @@ fn collect_keys<'a>(node: &'a Node, keys: &mut Vec<&'a str>) {
     }
 }
 
+/// One tab strip's claim about its pages, checked once the whole tree has been walked.
+struct TabLink<'a> {
+    pages: &'a str,
+    headers: usize,
+}
+
 fn validate_node<'a>(
     node: &'a Node,
     depth: usize,
-    seen: &mut BTreeSet<&'a str>,
+    seen: &mut BTreeMap<&'a str, &'a Node>,
     counted: &mut usize,
+    links: &mut Vec<TabLink<'a>>,
 ) -> Result<(), LayoutError> {
     if depth > MAX_DEPTH {
         return Err(LayoutError::TooDeep { limit: MAX_DEPTH });
@@ -492,7 +536,7 @@ fn validate_node<'a>(
         if id.trim().is_empty() {
             return Err(LayoutError::BlankId);
         }
-        if !seen.insert(id) {
+        if seen.insert(id, node).is_some() {
             return Err(LayoutError::DuplicateId { id: id.to_owned() });
         }
     } else if node.widget.needs_id() {
@@ -554,10 +598,40 @@ fn validate_node<'a>(
         return Err(LayoutError::ZeroMaxLength);
     }
 
+    match (node.widget, node.pages.as_deref()) {
+        (Widget::Tabs, Some(pages)) => {
+            // A strip cannot hold its own pages, and the check is a subtree search rather than an equality
+            // test because the paradox is the same one level down: a page inside the strip would be one of
+            // the strip's own headers, so selecting it would change what "it" is. The search is over the
+            // strip's subtree only, and there are few tab strips in a layout.
+            if names_within(node, pages) {
+                return Err(LayoutError::PagesInsideTabs {
+                    id: pages.to_owned(),
+                });
+            }
+            links.push(TabLink {
+                pages,
+                headers: node.children.len(),
+            });
+        }
+        (widget, Some(_)) => {
+            return Err(LayoutError::FieldOnWrongWidget {
+                field: "pages",
+                widget,
+            });
+        }
+        (_, None) => {}
+    }
+
     for child in &node.children {
-        validate_node(child, depth + 1, seen, counted)?;
+        validate_node(child, depth + 1, seen, counted, links)?;
     }
     Ok(())
+}
+
+/// Whether `id` names this node or anything beneath it.
+fn names_within(node: &Node, id: &str) -> bool {
+    node.id.as_deref() == Some(id) || node.children.iter().any(|child| names_within(child, id))
 }
 
 fn check_range(range: Range) -> Result<(), LayoutError> {
@@ -663,6 +737,30 @@ pub enum LayoutError {
     },
     /// A text entry accepted no characters at all.
     ZeroMaxLength,
+    /// A tab strip named a pages container no node carries.
+    UnknownPages {
+        /// The identifier it named.
+        id: String,
+    },
+    /// A tab strip's pages container did not stack its children.
+    PagesNotStacked {
+        /// The container's identifier.
+        id: String,
+    },
+    /// A tab strip and its pages container disagreed about how many tabs there are.
+    PageCountMismatch {
+        /// The container's identifier.
+        id: String,
+        /// Headers in the strip.
+        headers: usize,
+        /// Pages in the container.
+        pages: usize,
+    },
+    /// A tab strip named a pages container inside itself.
+    PagesInsideTabs {
+        /// The container's identifier.
+        id: String,
+    },
     /// A style role appeared on a widget kind it means nothing to.
     StyleOnWrongWidget {
         /// The role that was named.
@@ -726,6 +824,22 @@ impl std::fmt::Display for LayoutError {
                     "a TextEntry accepting no characters is not usable"
                 )
             }
+            Self::UnknownPages { id } => write!(
+                formatter,
+                "a Tabs names {id:?} as its pages, and no node carries that id"
+            ),
+            Self::PagesNotStacked { id } => write!(
+                formatter,
+                "the pages container {id:?} must stack its children, since only one page is shown at a time"
+            ),
+            Self::PageCountMismatch { id, headers, pages } => write!(
+                formatter,
+                "a Tabs has {headers} headers and its pages container {id:?} has {pages}, so at least one                  tab would show nothing"
+            ),
+            Self::PagesInsideTabs { id } => write!(
+                formatter,
+                "a Tabs names {id:?} as its pages, and that node is inside the strip itself"
+            ),
             Self::StyleOnWrongWidget { style, widget } => write!(
                 formatter,
                 "the {style:?} role means nothing on a {widget:?} and would draw nothing"
@@ -994,6 +1108,138 @@ mod tests {
                 widget: Widget::Checkbox
             })
         );
+    }
+
+    /// A tab strip over a pages container, with whatever is being varied applied by the caller.
+    fn tabbed(headers: usize, pages: Vec<Node>, direction: Direction) -> Layout {
+        wrap(Node {
+            children: vec![
+                Node {
+                    id: Some("tabs".to_owned()),
+                    widget: Widget::Tabs,
+                    pages: Some("pages".to_owned()),
+                    children: (0..headers).map(|_| Node::default()).collect(),
+                    ..Node::default()
+                },
+                Node {
+                    id: Some("pages".to_owned()),
+                    direction,
+                    children: pages,
+                    ..Node::default()
+                },
+            ],
+            ..Node::default()
+        })
+    }
+
+    #[test]
+    fn a_tab_strip_and_its_pages_container_must_agree_about_how_many_tabs_there_are() {
+        // The check that earns the linkage its place in the format. Three headers over two pages is a screen
+        // whose third tab shows nothing — and it is a mistake that looks entirely correct in the file,
+        // because neither node is wrong on its own.
+        let refused =
+            tabbed(3, vec![Node::default(), Node::default()], Direction::Stack).validate();
+        assert_eq!(
+            refused,
+            Err(LayoutError::PageCountMismatch {
+                id: "pages".to_owned(),
+                headers: 3,
+                pages: 2,
+            })
+        );
+        // And the matching case loads, so this is a bound rather than a refusal of tabs generally.
+        assert!(
+            tabbed(2, vec![Node::default(), Node::default()], Direction::Stack)
+                .validate()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_pages_container_must_stack_its_pages() {
+        // Pages occupy the same box: only one shows, and the others must not take space or leave a gap where
+        // they would have been. A column of pages lays out without error and is visibly wrong, which is
+        // exactly the class of mistake this format refuses at load.
+        let refused =
+            tabbed(2, vec![Node::default(), Node::default()], Direction::Column).validate();
+        assert_eq!(
+            refused,
+            Err(LayoutError::PagesNotStacked {
+                id: "pages".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn a_tab_strip_cannot_name_pages_that_are_absent_itself_or_inside_itself() {
+        let absent = wrap(Node {
+            id: Some("tabs".to_owned()),
+            widget: Widget::Tabs,
+            pages: Some("nowhere".to_owned()),
+            children: vec![Node::default()],
+            ..Node::default()
+        })
+        .validate();
+        assert_eq!(
+            absent,
+            Err(LayoutError::UnknownPages {
+                id: "nowhere".to_owned()
+            })
+        );
+
+        // Its own pages would make each page one of its own headers, so selecting a page would change what
+        // "it" is. Caught by a subtree search rather than an equality test, because the paradox is the same
+        // one level down.
+        let inside = wrap(Node {
+            id: Some("tabs".to_owned()),
+            widget: Widget::Tabs,
+            pages: Some("inner".to_owned()),
+            children: vec![Node {
+                id: Some("inner".to_owned()),
+                direction: Direction::Stack,
+                children: vec![Node::default()],
+                ..Node::default()
+            }],
+            ..Node::default()
+        })
+        .validate();
+        assert_eq!(
+            inside,
+            Err(LayoutError::PagesInsideTabs {
+                id: "inner".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn pages_named_by_anything_but_a_tab_strip_is_refused() {
+        let refused = wrap(Node {
+            widget: Widget::Panel,
+            pages: Some("pages".to_owned()),
+            ..Node::default()
+        })
+        .validate();
+        assert_eq!(
+            refused,
+            Err(LayoutError::FieldOnWrongWidget {
+                field: "pages",
+                widget: Widget::Panel,
+            })
+        );
+    }
+
+    #[test]
+    fn a_tab_strip_without_pages_is_a_selector_and_still_loads() {
+        // A strip that switches nothing is a segmented picker whose selection some other screen reads, so
+        // `pages` is optional rather than required on a `tabs`.
+        let accepted = wrap(Node {
+            id: Some("difficulty".to_owned()),
+            widget: Widget::Tabs,
+            children: vec![Node::default(), Node::default(), Node::default()],
+            ..Node::default()
+        })
+        .validate();
+        assert_eq!(accepted, Ok(()));
     }
 
     #[test]
