@@ -67,6 +67,10 @@ thing that decides.
 
 `panel`, `label`, `button`, `checkbox`, `slider`, `text_entry`, `list`, `tabs`, `scroll`.
 
+**`tabs` is incomplete.** It selects and highlights; it does not switch pages, and the format has no way
+yet to say which node is a page of which strip. Do not author one expecting it to hide anything. See
+[M4](../milestones/m4-interface.md#remaining).
+
 A kind decides three things beyond how it draws, and the layout is validated against all three:
 
 | Kind | May carry an `action` | Takes focus | Holds state | Needs an `id` |

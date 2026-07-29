@@ -12,7 +12,10 @@ screens are covered by the M3 capture harness.
 - A layout model of the project's own design, defined in a text format that is authored and reviewed
   like the scenario format is. **Done** — see [Landed](#landed).
 - A widget set covering what an RTS shell actually needs: buttons, labels, lists, sliders, checkboxes,
-  text entry, tabs, and a scrollable container. **Done**, behaviour and drawing both.
+  text entry, tabs, and a scrollable container. **Eight of nine done**, behaviour and drawing both.
+  **`tabs` is the exception** and it is half a widget — see [Remaining](#remaining). It selects, highlights
+  the chosen tab, and switches nothing, which is the failure mode this format's validation exists to
+  prevent everywhere else. Found by auditing the charter rather than by anything failing.
 - Retained state across frames, so a scroll position or a text cursor survives a redraw. **Done**, keyed
   by node id, which is why the format requires one on every widget that holds state.
 - Input routing with focus, hover, and keyboard navigation, expressed as semantic events rather than
@@ -182,7 +185,24 @@ screens are covered by the M3 capture harness.
 
 ## Remaining
 
-Nothing for the milestone. Two things noted for later, neither of them M4's:
+- **`tabs` does not switch pages.** Its own documentation says it does. What exists is the selecting half:
+  a tab strip takes focus, `Adjust` moves the selection within the children it has, and the paint layer
+  highlights the chosen one. Nothing hides the pages that were not chosen, and there is nothing in the
+  format that says which node is a page of which strip.
+  - **It is unused by all four authored screens**, which is why nothing caught it: no capture shows a tab
+    strip, and every test asserts only on the selecting half.
+  - **The design is genuinely unsettled, which is why it is not quietly picked here.** Two readings, and
+    they differ in the format: either a strip's children are the *tabs* and pages are linked to it by a new
+    field, or a strip's children are the *pages* and the strip is drawn from them, in which case the
+    highlight the paint layer currently draws is highlighting the wrong thing. The first costs a format
+    field; the second costs no format change and makes `Tabs` a switcher rather than a strip.
+  - Until it is settled, a layout naming `tabs` gets a control that looks right and does less than it
+    says. That is the one thing this format is built to refuse, so it is recorded here rather than left
+    for somebody to discover.
+  - `scroll` is *also* unused by the four screens, and is deliberately not on this list: it is complete —
+    an offset, a clip, a proportional indicator — and it has a capture of its own.
+
+Two further things noted for later, neither of them M4's:
 
 - **A loaded-font path**, whenever text beyond Latin is needed. The seam is [`Font`], and the licence
   question is answered in [LICENSING.md](../../LICENSING.md).

@@ -185,8 +185,8 @@ What works:
 - **A navigable shell** ([`cic-ui`](crates/cic-ui), drawn by [`ui`](crates/cic-render/src/ui.rs)): a main
   menu, a settings screen, skirmish setup, and a quit modal, authored as
   [layout files](content/ui) and drawn through one pipeline and one draw call per screen. Buttons,
-  labels, checkboxes, sliders, text entry with a caret and an input-method composition, lists, tabs and a
-  scrollable container all behave and all draw. Settings are **applied then confirmed**, with a 15-second
+  labels, checkboxes, sliders, text entry with a caret and an input-method composition, lists and a
+  scrollable container all behave and all draw; a tab strip selects but does not yet switch pages. Settings are **applied then confirmed**, with a 15-second
   window after which the change takes itself back — because a display change can leave the person who made
   it unable to see the screen well enough to undo it. Screens **fade and slide** as they change, over a
   duration a host chooses and which defaults to none: the departing screen stays alive until the change
@@ -206,10 +206,17 @@ per-pass breakdown once a second, which is where the figures above came from.
 
 ## Next verified step
 
-**M4 is complete — see [M4](docs/milestones/m4-interface.md) — so the next milestone is
-[M5, the simulation](docs/milestones/m5-simulation.md).** Two items are outstanding from M3 and are
-described below: **page mip chains**, without which the virtual-texture cache is correct but not yet
-better, and **terrain level of detail**, which is a decision rather than a queue position.
+**M4 is complete bar one item — see [M4](docs/milestones/m4-interface.md) — so the next milestone is
+[M5, the simulation](docs/milestones/m5-simulation.md).** The exception is **`tabs`**, which selects and
+highlights and switches no pages: half a widget, unused by all four authored screens, and found by
+auditing the charter rather than by anything failing. Settling it needs a design decision about whether a
+strip's children are its tabs or its pages, and the two answers differ in the *format*, so it is recorded
+rather than guessed at. This is the second time a milestone's charter claimed something was done until it
+was checked.
+
+Two more items are outstanding from M3 and are described below: **page mip chains**, without which the
+virtual-texture cache is correct but not yet better, and **terrain level of detail**, which is a decision
+rather than a queue position.
 
 **The shell runs in a window**, which this project treats as a separate obligation from a green capture
 suite — the one bug the headless suite structurally could not catch appeared the first time a window
