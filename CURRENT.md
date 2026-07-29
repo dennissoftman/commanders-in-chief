@@ -207,9 +207,9 @@ per-pass breakdown once a second, which is where the figures above came from.
 ## Next verified step
 
 **M4 is complete — see [M4](docs/milestones/m4-interface.md) — so the next milestone is
-[M5, the simulation](docs/milestones/m5-simulation.md).** Two items are outstanding from earlier
-milestones and are described below: terrain level of detail, which is a decision rather than a queue
-position, and the temporal antialiasing tier ADR 0005 plans.
+[M5, the simulation](docs/milestones/m5-simulation.md).** Two items are outstanding from M3 and are
+described below: **page mip chains**, without which the virtual-texture cache is correct but not yet
+better, and **terrain level of detail**, which is a decision rather than a queue position.
 
 **The shell runs in a window**, which this project treats as a separate obligation from a green capture
 suite — the one bug the headless suite structurally could not catch appeared the first time a window
@@ -221,8 +221,9 @@ cargo run -p cic-render --example shell --release
 ```
 
 Change the resolution scale, press Apply, and do nothing: fifteen seconds later the setting comes back on
-its own. The window also exercised what a capture at scale 1.0 could not — it opened at **1.5**, which is
-what prompted the fifth reference.
+its own. Screens fade and slide as they change, which is the other thing no still image can judge. The
+window also exercised what a capture at scale 1.0 could not — it opened at **1.5**, which is what prompted
+the density reference.
 
 **Drawing landed in three parts, split where the mistakes are.** A **paint layer with no GPU in it**
 decides how the interface looks — which colour a focused button takes, where a checkbox's indicator sits,

@@ -213,10 +213,14 @@ impl<T: Clone + PartialEq> Shell<T> {
         self.viewport
     }
 
-    /// Every screen to draw with its solved layout, outermost first.
+    /// The solved layout of every screen currently involved in drawing, outermost first.
     ///
-    /// More than one entry exactly when a modal is open, since a modal covers only part of the surface
-    /// and the screen behind it has to still be there.
+    /// The cache [`Self::frames`] reads from, rebuilt only when the viewport or the stack changes — a
+    /// reveal changes every frame and a solved layout does not. More than one entry when a modal is open
+    /// or a screen change is in flight, since both mean two screens are on screen at once.
+    ///
+    /// A host draws from [`Self::frames`] rather than this, because this says nothing about how much of
+    /// each screen is showing.
     #[must_use]
     pub fn drawn(&self) -> &[(Screen, Solved)] {
         &self.drawn
