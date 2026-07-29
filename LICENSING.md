@@ -37,6 +37,37 @@ re-explain every time someone asks.
 A permissive licence was available here at all only because a derivation was removed. That is what the
 rest of this document records.
 
+## A licence choice that changed an engineering one: the audio backend
+
+Worth recording because it is the first time the licence drove a design decision rather than merely being
+satisfied by one, and because the reasoning generalises to anything else this engine might want to depend
+on for a whole subsystem.
+
+The requirement for audio was a *switchable* backend — FMOD, OpenAL, or another established library. Both
+obvious candidates carry terms this project cannot require:
+
+| Library | Terms | Consequence here |
+|---|---|---|
+| **FMOD** | Proprietary. Licensed per title, free only below a revenue threshold, attribution required in the shipped product. | Cannot be a dependency of an Apache-2.0 engine that anyone may fork and ship. |
+| **OpenAL Soft** | LGPL-2.1. | Comfortable dynamically linked with a relinking path preserved; a real constraint statically, which is how a Rust binary would ordinarily want it. |
+
+Either would be defensible as an *option*. Neither can be what the engine **requires** in order to make a
+sound, because the README's licence claim has to hold for the person who clones the repository and builds
+it — and "Apache-2.0, except you also need a per-title commercial licence before anything is audible" is
+not that claim.
+
+So the default implementation is a software mixer written from scratch, in
+[`cic-audio`](crates/cic-audio/src/mixer.rs), depending on no audio library at all. It is about 700 lines
+and it is the reason `NOTICES.md` did not change when audio landed. FMOD and OpenAL remain available behind
+the same trait, as separate crates a project opts into — which also puts them outside the workspace's
+`unsafe_code = "forbid"`, since either binding is FFI.
+
+The engineering argument for the boundary is [ADR 6001](docs/adr/6001-audio-backend-boundary.md), and it
+happens to reach the same place from a different direction: a sample-sink boundary would have made every
+backend interchangeable and worthless, while a command boundary makes the from-scratch mixer a real
+implementation rather than a fallback. The licence constraint and the design constraint agreed, which is
+not always how this goes and is worth noting when it happens.
+
 ## Why the audit section exists
 
 A permissive licence was not a default. It was made available by deliberately removing a derivation, and

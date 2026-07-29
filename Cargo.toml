@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/cic-assets",
+    "crates/cic-audio",
     "crates/cic-camera",
     "crates/cic-core",
     "crates/cic-render",
@@ -40,6 +41,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 cic-assets = { path = "crates/cic-assets" }
+cic-audio = { path = "crates/cic-audio" }
 cic-camera = { path = "crates/cic-camera" }
 cic-core = { path = "crates/cic-core" }
 cic-ui = { path = "crates/cic-ui" }

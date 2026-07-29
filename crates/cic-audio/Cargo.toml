@@ -1,0 +1,21 @@
+[package]
+name = "cic-audio"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+# `cic-core` for the same reason every other decoder takes it: the WAV reader treats its input as
+# hostile and wants the bounded reader rather than its own bounds checks. `serde` for the bank format.
+#
+# There is deliberately no audio dependency here at all -- no device library, no decoder crate, no
+# mixer. See ADR 0007: the backend boundary is a trait, the in-tree implementation of it is a software
+# mixer written from scratch, and a device is something a host attaches.
+cic-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
