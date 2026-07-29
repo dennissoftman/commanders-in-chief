@@ -324,6 +324,7 @@ version = "0.1.0"
 dependencies = [
  "cic-assets",
  "cic-camera",
+ "cic-sim",
  "cic-ui",
  "naga 27.0.3",
  "png",

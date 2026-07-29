@@ -58,11 +58,14 @@
     clippy::too_many_lines
 )]
 
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::sync::Arc;
 use std::time::Instant;
 
 use cic_assets::model::{Model, ModelImage, ModelMaterial, ModelPrimitive, ModelVertex};
+use cic_assets::scenario::{ObjectPlacement, PlayerSlot, Position, Scenario, TerrainReference};
+use cic_assets::templates::{Template, TemplateKind, TemplateSet};
 use cic_assets::{MapPackage, PackageLimits, Terrain, TerrainLayer};
 use cic_camera::{RtsCamera, RtsCameraProfile};
 use cic_render::detail::TerrainDetailRequest;
@@ -74,6 +77,8 @@ use cic_render::{
     LayerMaterial, ModelBatch, ModelInstance, SurfaceRenderer, TerrainGround, TerrainPageCache,
     TerrainRenderer, TextureImage, WaterBody, WaterSurface, Weather,
 };
+use cic_sim::activation::FORCES;
+use cic_sim::{Forces, Kernel, KernelConfig, activate};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -135,11 +140,15 @@ const RESOLUTION_SCALE_STEP: f32 = 0.25;
 const TIMING_REPORT_SECONDS: f32 = 1.0;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let terrain = if let Some(path) = std::env::args().nth(1) {
-        load_package(&path)?
+    let (terrain, activation) = if let Some(path) = std::env::args().nth(1) {
+        // A loaded package carries a scenario but no template set yet, so its placements stay
+        // undrawn until packages do — the demo path below is what that will reuse when they do.
+        (load_package(&path)?, None)
     } else {
-        eprintln!("no map given; generating a terrain");
-        generated_terrain()
+        eprintln!("no map given; generating a terrain and a scenario to activate on it");
+        let terrain = generated_terrain();
+        let activation = demo_scenario(&terrain);
+        (terrain, Some(activation))
     };
     eprintln!(
         "terrain {}x{} samples, {:?} world units, peak {:.0}",
@@ -151,7 +160,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = Viewer::new(terrain);
+    let mut app = Viewer::new(terrain, activation);
     event_loop.run_app(&mut app)?;
     if let Some(error) = app.failure {
         return Err(error.into());
@@ -520,6 +529,203 @@ fn building_placements(terrain: &Terrain) -> Vec<ModelInstance> {
     placed
 }
 
+/// A pine stand-in: a tall thin box in one green material.
+///
+/// Built in Rust for the same reason the building is — the viewer runs with no asset files — and it
+/// is a placeholder shape by design: the template's `model` names a `.glb`, and a real tree replaces
+/// this the day one exists in content.
+fn pine_model() -> Model {
+    let half = 4.5f32;
+    let height = 34.0f32;
+    let faces: [([f32; 3], [[f32; 3]; 4]); 5] = [
+        (
+            [0.0, 0.0, 1.0],
+            [
+                [-half, -half, height],
+                [half, -half, height],
+                [half, half, height],
+                [-half, half, height],
+            ],
+        ),
+        (
+            [0.0, -1.0, 0.0],
+            [
+                [-half, -half, 0.0],
+                [half, -half, 0.0],
+                [half, -half, height],
+                [-half, -half, height],
+            ],
+        ),
+        (
+            [0.0, 1.0, 0.0],
+            [
+                [half, half, 0.0],
+                [-half, half, 0.0],
+                [-half, half, height],
+                [half, half, height],
+            ],
+        ),
+        (
+            [1.0, 0.0, 0.0],
+            [
+                [half, -half, 0.0],
+                [half, half, 0.0],
+                [half, half, height],
+                [half, -half, height],
+            ],
+        ),
+        (
+            [-1.0, 0.0, 0.0],
+            [
+                [-half, half, 0.0],
+                [-half, -half, 0.0],
+                [-half, -half, height],
+                [-half, half, height],
+            ],
+        ),
+    ];
+    let primitives = faces
+        .into_iter()
+        .map(|(normal, corners)| {
+            ModelPrimitive {
+                vertices: corners
+                    .into_iter()
+                    .enumerate()
+                    .map(|(corner, position)| ModelVertex {
+                        position,
+                        normal,
+                        uv: quad_uv(corner),
+                        ..ModelVertex::default()
+                    })
+                    .collect(),
+                indices: vec![0, 1, 2, 0, 2, 3],
+                material: Some(0),
+            }
+            .with_generated_tangents()
+        })
+        .collect();
+    Model {
+        name: "pine".to_owned(),
+        primitives,
+        materials: vec![ModelMaterial {
+            name: "canopy".to_owned(),
+            base_color: [0.18, 0.34, 0.16, 1.0],
+            metallic: 0.0,
+            roughness: 0.95,
+            ..ModelMaterial::default()
+        }],
+        images: Vec::new(),
+        has_skin: false,
+        has_animation: false,
+    }
+}
+
+/// The demo map the generated mode activates: two players, a depot each, and neutral pines.
+///
+/// The same shape a `.cicmap` will carry once packages hold a template set: a scenario with owned and
+/// neutral placements, and the set their `template:` names resolve against.
+fn demo_scenario(terrain: &Terrain) -> (Scenario, TemplateSet) {
+    let [extent_x, extent_y] = terrain.world_extent();
+    let position = |fx: f32, fy: f32| Position {
+        x: extent_x * fx,
+        y: extent_y * fy,
+        z: 0.0,
+    };
+    let player = |id: &str, team: u32, fx: f32, fy: f32| PlayerSlot {
+        id: id.to_owned(),
+        name: id.to_owned(),
+        faction: "faction/vanguard".to_owned(),
+        start: position(fx, fy),
+        team,
+    };
+    let place =
+        |template: &str, owner: Option<&str>, fx: f32, fy: f32, rotation: f32| ObjectPlacement {
+            template: template.to_owned(),
+            position: position(fx, fy),
+            rotation,
+            scale: 1.0,
+            owner: owner.map(str::to_owned),
+        };
+    let mut objects = vec![
+        place("structure/depot", Some("north"), 0.24, 0.70, 0.0),
+        place("structure/depot", Some("north"), 0.31, 0.76, 30.0),
+        place("structure/depot", Some("south"), 0.76, 0.26, 45.0),
+        place("structure/depot", Some("south"), 0.69, 0.20, 75.0),
+    ];
+    for step in 0..14u16 {
+        let along = f32::from(step) / 13.0;
+        objects.push(place(
+            "prop/pine",
+            None,
+            0.30 + 0.40 * along,
+            0.68 - 0.40 * along + 0.06 * (f32::from(step % 3) - 1.0),
+            27.0 * f32::from(step),
+        ));
+    }
+    let scenario = Scenario {
+        format_version: 1,
+        name: "Activation demo".to_owned(),
+        description: String::new(),
+        terrain: TerrainReference {
+            path: "terrain/generated.cict".to_owned(),
+        },
+        players: vec![
+            player("north", 1, 0.27, 0.73),
+            player("south", 2, 0.73, 0.23),
+        ],
+        objects,
+        waypoints: Vec::new(),
+    };
+    let template = |id: &str, kind, model: Option<&str>| Template {
+        id: id.to_owned(),
+        kind,
+        model: model.map(str::to_owned),
+        name: None,
+    };
+    let templates = TemplateSet {
+        format_version: 1,
+        templates: vec![
+            template(
+                "structure/depot",
+                TemplateKind::Structure,
+                Some("models/depot.glb"),
+            ),
+            template("prop/pine", TemplateKind::Prop, Some("models/pine.glb")),
+            template("faction/vanguard", TemplateKind::Faction, None),
+        ],
+    };
+    (scenario, templates)
+}
+
+/// The snapshot-to-instances translation: group the forces by template, ground each object on the
+/// terrain, and tint by owner. Presentation narrows simulation state freely — nothing feeds back.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "presentation narrows simulation state freely; nothing feeds back"
+)]
+fn activated_instances(forces: &Forces, terrain: &Terrain) -> BTreeMap<String, Vec<ModelInstance>> {
+    /// Seat colours: north cool, south warm, in team order.
+    const TEAM_TINTS: [[f32; 4]; 2] = [[0.55, 0.70, 1.0, 1.0], [1.0, 0.62, 0.42, 1.0]];
+    let mut grouped: BTreeMap<String, Vec<ModelInstance>> = BTreeMap::new();
+    for placed in forces.objects().values() {
+        let [x, y] = [placed.position[0] as f32, placed.position[1] as f32];
+        let Some(ground) = terrain.elevation_at_world(x, y) else {
+            continue;
+        };
+        let radians = (f64::from(placed.rotation) / 4_294_967_296.0 * std::f64::consts::TAU) as f32;
+        let instance = ModelInstance::placed([x, y, ground], radians, placed.scale as f32);
+        let tinted = match placed.owner {
+            Some(owner) => instance.with_tint(TEAM_TINTS[usize::from(owner.0) % TEAM_TINTS.len()]),
+            None => instance,
+        };
+        grouped
+            .entry(placed.template.clone())
+            .or_default()
+            .push(tinted);
+    }
+    grouped
+}
+
 /// A water table just above the terrain's low point, spanning the whole map.
 ///
 /// Derived from the heightfield rather than authored, so the viewer floods a loaded `.cicmap` and the
@@ -581,11 +787,16 @@ struct Viewer {
     weather: usize,
     /// Seconds since the last per-pass breakdown was printed, or `None` when timing is off.
     timing_countdown: Option<f32>,
+    /// A scenario to activate into a kernel and draw, in place of the building scatter.
+    ///
+    /// `Some` for the generated map, `None` for a loaded package — packages do not carry a template
+    /// set yet, so their placements have nothing to resolve against.
+    activation: Option<(Scenario, TemplateSet)>,
     failure: Option<String>,
 }
 
 impl Viewer {
-    fn new(terrain: Terrain) -> Self {
+    fn new(terrain: Terrain, activation: Option<(Scenario, TemplateSet)>) -> Self {
         let [extent_x, extent_y] = terrain.world_extent();
         let camera = RtsCamera::new(
             RtsCameraProfile::default(),
@@ -608,6 +819,7 @@ impl Viewer {
             environment: Environment::default(),
             weather: 0,
             timing_countdown: None,
+            activation,
             failure: None,
         }
     }
@@ -852,24 +1064,68 @@ impl ApplicationHandler for Viewer {
         eprintln!("surface: {:?} at {:?}", surface.format(), surface.size());
         report_display(&surface);
 
-        // A scattering of buildings, so the scene has something with a silhouette in it and the
-        // shadow pass has a caster that is not terrain.
-        let placements = building_placements(&self.terrain);
-        let models = match ModelBatch::new(
-            &context,
-            &building_model(),
-            &placements,
-            surface.material_layout(),
-        ) {
-            Ok(batch) => {
-                eprintln!(
-                    "models: {} instances of {} triangles",
-                    batch.instance_count(),
-                    batch.triangle_count()
-                );
-                vec![batch]
+        // What stands on the terrain. With a scenario present this is kernel state made visible:
+        // activate, read the `Forces` snapshot, and build one batch per template — owners as tints,
+        // binary turns as poses. Without one (a loaded package, until packages carry a template
+        // set), the old building scatter keeps the shadow pass a caster that is not terrain.
+        let models = if let Some((scenario, templates)) = &self.activation {
+            let mut kernel = Kernel::new(KernelConfig {
+                seed: 0xC1C_DE30,
+                ticks_per_second: 30,
+            });
+            if let Err(error) = activate(&mut kernel, scenario, templates) {
+                return self.fail(event_loop, error.to_string());
             }
-            Err(error) => return self.fail(event_loop, error.to_string()),
+            let Some(forces) = kernel
+                .subsystem(FORCES)
+                .and_then(|subsystem| subsystem.as_any().downcast_ref::<Forces>())
+            else {
+                return self.fail(event_loop, "activation registered no forces".to_owned());
+            };
+            eprintln!(
+                "kernel: {} players, {} objects at tick {}",
+                forces.players().len(),
+                forces.objects().len(),
+                kernel.tick(),
+            );
+            let grouped = activated_instances(forces, &self.terrain);
+            let mut batches = Vec::new();
+            for (template, instances) in &grouped {
+                let model = match template.as_str() {
+                    "structure/depot" => building_model(),
+                    _ => pine_model(),
+                };
+                match ModelBatch::new(&context, &model, instances, surface.material_layout()) {
+                    Ok(batch) => {
+                        eprintln!(
+                            "models: {} instances of `{template}`, {} triangles",
+                            batch.instance_count(),
+                            batch.triangle_count()
+                        );
+                        batches.push(batch);
+                    }
+                    Err(error) => return self.fail(event_loop, error.to_string()),
+                }
+            }
+            batches
+        } else {
+            let placements = building_placements(&self.terrain);
+            match ModelBatch::new(
+                &context,
+                &building_model(),
+                &placements,
+                surface.material_layout(),
+            ) {
+                Ok(batch) => {
+                    eprintln!(
+                        "models: {} instances of {} triangles",
+                        batch.instance_count(),
+                        batch.triangle_count()
+                    );
+                    vec![batch]
+                }
+                Err(error) => return self.fail(event_loop, error.to_string()),
+            }
         };
 
         // One water table across the whole map. The shader clips it wherever the bed rises through

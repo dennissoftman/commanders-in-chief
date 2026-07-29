@@ -23,6 +23,9 @@ wgpu = { version = "30", default-features = false, features = [
 ] }
 
 [dev-dependencies]
+# Tests and examples only: the render *library* knows nothing about simulation. A host composes the
+# two, and the terrain viewer and the scenario capture test are hosts.
+cic-sim.workspace = true
 # The interface capture tests load the shell's own authored screens and build them into a shell.
 cic-ui.workspace = true
 # The same WGSL front end `wgpu` uses, so validating with it means the shaders really compile.

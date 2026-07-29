@@ -7,7 +7,8 @@ cic-core          (no dependencies)
    ├── cic-vfs    (+ flate2)
    │      └── cic-assets   (+ gltf, serde, serde_json)
    │             ├── cic-render   (+ cic-camera, cic-ui, wgpu, png, sha2;
-   │             │                   naga for shader validation in tests)
+   │             │                   naga for shader validation in tests,
+   │             │                   cic-sim in examples and tests only)
    │             └── cic-sim
    └── cic-audio  (+ serde, serde_json)
 
