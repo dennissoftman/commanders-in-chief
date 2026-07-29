@@ -1,17 +1,24 @@
-//! The arithmetic a script is allowed to do, and the transcendentals written to stay inside it.
+//! The simulation's arithmetic: the operations [ADR 0007] permits, and the transcendentals written to
+//! stay inside them.
+//!
+//! # One implementation, below every consumer
+//!
+//! This crate exists so that the things running inside the simulation — the script VM today, the
+//! kernel next — share one `sin` rather than owning one each. Two implementations inside one lockstep
+//! simulation is two answers to the same question waiting to be compared, which is the same class of
+//! bug as the two arithmetics [ADR 7001] records removing. M10 flagged the hazard while the kernel was
+//! still unbuilt, and the crate was created then (2026-07-29, Denys's decision on the name) precisely
+//! because whichever implementation existed first was going to be the one everything used.
+//!
+//! It depends on nothing, including nothing of this project's: the arithmetic has to sit below every
+//! crate that could otherwise disagree about it, and a maths crate with no I/O is nothing a sandboxed
+//! script can escape through.
 //!
 //! # This implements ADR 0007 rather than deciding anything
 //!
-//! [ADR 0007](../../../docs/adr/0007-simulation-arithmetic.md) settled simulation arithmetic for the
-//! whole engine: `f64`, restricted to the operations IEEE-754 requires to be correctly rounded, with no
-//! platform transcendental anywhere near simulation state. A script runs inside the simulation, so it
-//! inherits all of it.
-//!
-//! An earlier draft of this crate used fixed point. That was wrong, and ADR 0007 says why in one line:
-//! fixed point *"buys determinism that IEEE-754 already guarantees, and charges for it everywhere"* —
-//! a conversion at every boundary, and a hand-rolled `sin` still to write at the end of it. Two
-//! arithmetics inside one lockstep simulation is worse again, because a script and the kernel could
-//! then disagree about a comparison on the same two values.
+//! [ADR 0007] settled simulation arithmetic for the whole engine: `f64`, restricted to the operations
+//! IEEE-754 requires to be correctly rounded, with no platform transcendental anywhere near simulation
+//! state — because what differs between platforms is the C library, not the arithmetic.
 //!
 //! # The permitted set
 //!
@@ -23,15 +30,10 @@
 //! *recommends* correct rounding for those and in Rust they call the platform's C library. That is the
 //! entire divergence risk, and it is narrower than "floating point is not deterministic" suggests.
 //!
-//! # Two enforcement mechanisms, and the second is the stronger one
-//!
-//! ADR 0007 decision 8 needs a **textual test** scanning for the forbidden names, because `cargo build`
-//! will not enforce this. That test exists for this crate too, in `tests/arithmetic_restriction.rs`.
-//!
-//! But a *script* cannot reach a forbidden function at all, whatever anyone writes, because the
-//! bytecode has no instruction for one and the host surface is a closed set. The restriction is
-//! structural on the language side and textual only on the Rust side — which is a better position than
-//! the kernel itself can occupy, and is worth noting as an argument for putting content behind a VM.
+//! ADR 0007 decision 8 requires a textual test scanning simulation code for the forbidden names, since
+//! `cargo build` will not enforce this. This crate carries its own, in
+//! `tests/arithmetic_restriction.rs`, exactly as its consumers do — the guard travels with the code it
+//! guards.
 //!
 //! # Angles are turns, not radians
 //!
@@ -45,8 +47,21 @@
 //! So the delicate part of the problem is removed rather than solved, and what is left is a polynomial
 //! over a bounded interval.
 //!
-//! A script therefore writes `sys.sin(0.25)` for a quarter turn. That reads better than radians for the
-//! things game logic actually does with angles, which is mostly fractions of a circle.
+//! ```
+//! use cic_math::{cos_turns, sin_turns};
+//!
+//! // A quarter turn is exactly one, and a full turn ahead is the identical bit pattern:
+//! // reducing a turn count is a subtraction that cannot round.
+//! assert_eq!(sin_turns(0.25), 1.0);
+//! assert_eq!(
+//!     sin_turns(1_000_000.125).to_bits(),
+//!     sin_turns(0.125).to_bits(),
+//! );
+//! assert_eq!(cos_turns(0.0), 1.0);
+//! ```
+//!
+//! [ADR 0007]: ../../../docs/adr/0007-simulation-arithmetic.md
+//! [ADR 7001]: ../../../docs/adr/7001-scripting-language.md
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -54,7 +69,7 @@ use std::fmt::{self, Display, Formatter};
 /// Radians in one full turn.
 ///
 /// Not `std::f64::consts::TAU` by a different name — it is the same value, named here because it is the
-/// one place this module leaves the turn domain, and a reader checking the reduction needs to see it.
+/// one place this crate leaves the turn domain, and a reader checking the reduction needs to see it.
 const TAU: f64 = std::f64::consts::TAU;
 
 /// What went wrong in an arithmetic operation.
@@ -90,10 +105,10 @@ impl Error for ArithmeticError {}
 /// It is: IEEE-754 pins infinity and NaN as exactly as it pins any other result, so allowing them would
 /// not break lockstep. They are refused for a different reason. **Every comparison against a NaN is
 /// false**, so a condition involving one silently takes its else branch rather than reporting anything,
-/// and the script author sees a rule that did not fire rather than an error. An infinity does the same
+/// and the author sees a rule that did not fire rather than an error. An infinity does the same
 /// thing one step later, when it becomes a NaN by subtraction.
 ///
-/// So the fault is a script diagnostic rather than a determinism measure — and it is itself deterministic,
+/// So the fault is a diagnostic rather than a determinism measure — and it is itself deterministic,
 /// since every machine refuses at the same operation.
 ///
 /// # Errors
@@ -115,7 +130,7 @@ pub fn finite(value: f64) -> Result<f64, ArithmeticError> {
 ///
 /// # Errors
 ///
-/// Returns [`ArithmeticError::NegativeRoot`] for a negative argument, so a script gets a diagnostic
+/// Returns [`ArithmeticError::NegativeRoot`] for a negative argument, so a caller gets a diagnostic
 /// rather than a NaN that disappears into a comparison.
 pub fn sqrt(value: f64) -> Result<f64, ArithmeticError> {
     if value < 0.0 {
@@ -127,7 +142,7 @@ pub fn sqrt(value: f64) -> Result<f64, ArithmeticError> {
 /// The sine of an angle measured in turns, so one full revolution is `1.0`.
 ///
 /// Written in the permitted operation set only — additions, multiplications, one `floor`, and one
-/// comparison — so it computes the same bits on every platform. See the module documentation for why
+/// comparison — so it computes the same bits on every platform. See the crate documentation for why
 /// turns rather than radians.
 #[must_use]
 pub fn sin_turns(turns: f64) -> f64 {
@@ -168,7 +183,7 @@ pub fn cos_turns(turns: f64) -> f64 {
 /// Eleven terms, through `x^21`. That is more than a minimax polynomial would need for the same
 /// accuracy, and it is used anyway because every coefficient is a *stated* reciprocal factorial that a
 /// reader can verify from the series — where minimax coefficients are the output of a fitting tool and
-/// have to be trusted. The cost is ten multiplications in a function scripts call rarely.
+/// have to be trusted. The cost is ten multiplications in a function callers reach for rarely.
 ///
 /// Truncation error at the interval's end is about `x^23 / 23!`, which is 3e-19 — below what an `f64`
 /// distinguishes near 1.0, so the accumulated rounding of the Horner evaluation dominates it.
@@ -360,8 +375,9 @@ mod tests {
 
     #[test]
     fn a_non_finite_angle_produces_a_nan_rather_than_looping_or_panicking() {
-        // Reached only through `finite` at the call site, but the reduction must not misbehave if it
-        // ever is: `INFINITY.floor()` is infinity and the subtraction would be NaN anyway.
+        // Callers are expected to reject non-finite values before this point, but the reduction must
+        // not misbehave if one arrives: `INFINITY.floor()` is infinity and the subtraction would be
+        // NaN anyway.
         assert!(sin_turns(f64::INFINITY).is_nan());
         assert!(sin_turns(f64::NAN).is_nan());
     }

@@ -11,15 +11,19 @@ cic-core          (no dependencies)
    └── cic-audio  (+ serde, serde_json)
 
 cic-camera        (no dependencies)
-cic-script        (no dependencies)
+cic-math          (no dependencies)
+   └── cic-script
 cic-ui            (+ serde, serde_json)
 ```
 
 Four crates deliberately depend on nothing of this project's: `cic-core`, because bounded reading is a
 primitive; `cic-camera`, because the same camera must drive the game, the editor, and any debug viewer
-without dragging a window system into each of them; and `cic-ui`, for the same reason one step further
-out; and `cic-script`, because a language that could reach the engine would be one whose sandbox was a
-matter of what it happened not to call. A layout solver that pulled in a graphics stack would make every tool that wants to position a box
+without dragging a window system into each of them; `cic-ui`, for the same reason one step further
+out; and `cic-math`, because it holds the arithmetic everything inside the simulation must share — the
+script VM today, the kernel next — and one answer can only sit below every crate that could otherwise
+disagree about it. `cic-script` depends on exactly that crate and nothing else: a language that could
+reach the engine would be one whose sandbox was a matter of what it happened not to call, and a maths
+crate with no I/O is nothing a script can escape through. A layout solver that pulled in a graphics stack would make every tool that wants to position a box
 depend on one, so the two facts it cannot derive — how large a piece of text is, and what the display
 scale is — arrive from the caller instead.
 
@@ -98,7 +102,9 @@ The simulation kernel, once it exists, for the reasons in
 **The scripting language**, which inherits ADR 0007 rather than restating it: scripts run inside the
 simulation, so the same restricted operation set binds them. Two mechanisms enforce it — the textual scan
 decision 8 requires, and the stronger structural one that the bytecode has no instruction for a forbidden
-operation. See [ADR 7001](docs/adr/7001-scripting-language.md).
+operation. See [ADR 7001](docs/adr/7001-scripting-language.md). The transcendentals themselves live in
+`cic-math`, one crate below every simulation-side consumer, so the script VM and the kernel cannot end up
+holding two implementations that disagree in the last bit.
 
 Everything between is presentation and is free to be as machine-dependent as it likes, which
 [ADR 0007](docs/adr/0007-simulation-arithmetic.md) decision 9 states explicitly. `cic-audio` uses floating

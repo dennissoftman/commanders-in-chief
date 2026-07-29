@@ -171,3 +171,13 @@ revisited then.
   switching to it is a one-line change plus keeping the same exact-bit tests. That is worth recording
   because it means this decision is not a bet: the fallback is better than the alternative it replaced,
   and the tests that would catch a problem are written either way.
+
+## What implementing it established
+
+Decision 4 says "the simulation crate supplies its own transcendentals", and implementation order made
+that phrasing obsolete before the simulation crate existed: M10's script VM needed the same `sin` first,
+which is exactly the two-implementations hazard its milestone flagged. So the transcendentals live in
+**`cic-math`** — extracted from `cic-script` on 2026-07-29, a crate below every simulation-side consumer
+and depending on nothing — and "supplies its own" now means "consumes the shared crate's". The exact-bit
+pins and the platform-oracle comparison moved with the code, and decision 8's textual scan is carried by
+`cic-math` and by each consumer separately, so the guard travels with the code it guards.

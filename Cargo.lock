@@ -315,6 +315,10 @@ name = "cic-core"
 version = "0.1.0"
 
 [[package]]
+name = "cic-math"
+version = "0.1.0"
+
+[[package]]
 name = "cic-render"
 version = "0.1.0"
 dependencies = [
@@ -332,6 +336,9 @@ dependencies = [
 [[package]]
 name = "cic-script"
 version = "0.1.0"
+dependencies = [
+ "cic-math",
+]
 
 [[package]]
 name = "cic-ui"

@@ -101,7 +101,8 @@ back, because a display change can leave the person who made it unable to see we
 | `cic-ui` | Interface layout and its format, the two-pass solver, widgets and retained state, input routing with input-method composition, the screen stack, transactional settings, screen transitions, and the paint layer. Free of window, GPU and font dependencies. |
 | `cic-render` | Deferred chain, terrain, instanced models, physically-based texturing, scenery sway, antialiasing to a temporal tier, interface drawing with an authored typeface, windowed presentation, the WGSL shader set. |
 | `cic-audio` | Mixer behind a replaceable backend, spatialisation, DSP, layered music, sound banks. No audio dependency at all. |
-| `cic-script` | A deterministic sandboxed language for scenario logic: ADR 0007 arithmetic, no heap, fuel-metered. No dependencies. |
+| `cic-math` | ADR 0007's simulation arithmetic: the permitted operations and the turn-based transcendentals, shared by everything that runs inside the simulation. No dependencies. |
+| `cic-script` | A deterministic sandboxed language for scenario logic: `cic-math` arithmetic, no heap, fuel-metered. |
 
 ## Asset formats
 

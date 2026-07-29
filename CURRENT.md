@@ -283,6 +283,11 @@ What works:
     range reduction, which is the problem turns remove.
   - **Fuel bounds time and the absent heap bounds space**, which between them are what "safe to run
     untrusted content inside a tick" has to mean. `while true {}` is an error naming the line.
+- **One arithmetic in one crate** ([`cic-math`](crates/cic-math/src/lib.rs)), extracted from the script
+  VM before the kernel exists to want it: ADR 0007's permitted operations and the turn-based
+  transcendentals, depending on nothing, with the exact-bit pins and the platform-oracle comparison moved
+  alongside. `cic-math` and each consumer carry decision 8's textual scan separately, so the guard
+  travels with the code it guards.
 - Windowed presentation, driven by the reusable camera:
 
 ```bash
@@ -408,10 +413,10 @@ design.
 
 **Scripting needs host verbs, and they are blocked rather than deferred.** Spawn, order, count, query a
 zone, set an objective: every one is a call into a simulation kernel, so M10's remaining half waits on M5.
-The seam is ready — a kernel declares them on an `Interface` and implements one trait. The one thing that
-must not be got wrong is the transcendentals: ADR 0007 decision 4 says the kernel supplies its own `sin`,
-and `cic-script` already has one. Two implementations that can disagree would be the same class of bug as
-the two arithmetics this milestone just removed.
+The seam is ready — a kernel declares them on an `Interface` and implements one trait. The transcendentals
+trap ahead of it is already closed: the implementation moved to **`cic-math`**, one crate below both the
+VM and the kernel to come, so decision 4's `sin` has exactly one home and two implementations that could
+disagree can no longer exist.
 
 **Audio needs a device, and that is the one thing about it a green suite cannot establish.** The mixer
 produces correct frames and nothing hands them to hardware. This is the same lesson the standing constraint
@@ -423,10 +428,10 @@ having to pretend.
 ## Gate status
 
 Formatting, strict lints (`clippy::all` and `clippy::pedantic` as errors, plus `-D warnings` as CI runs
-it), and the full test suite all passes on the pinned toolchain: **782 tests across eight crates**, up from
-669 across seven. `cic-script` accounts for 98 of the difference, counting one documentation test and the four
-that enforce ADR 0007's operation restriction textually; the interface layer's dropdown, settings dialog and
-scroll-aware hit testing account for the rest. The CI
+it), and the full test suite all passes on the pinned toolchain: **787 tests across nine crates**, up from
+782 across eight. The ninth crate is `cic-math` — ADR 0007's arithmetic, extracted from `cic-script` so the
+kernel can share it — and the five new tests are its own copy of the decision-8 restriction scan plus a
+documentation example; the ten series tests moved with the code rather than being duplicated. The CI
 runner runs the same suite against Mesa's lavapipe.
 
 **No reference moved for the page mip chain, which was not the expectation.** Every committed NVIDIA

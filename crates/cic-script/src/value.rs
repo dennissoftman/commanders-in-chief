@@ -22,7 +22,7 @@
 //!
 //! # Numbers follow ADR 0007
 //!
-//! [`Value::Real`] is an `f64` and every operation on it is in the permitted set — see [`crate::real`].
+//! [`Value::Real`] is an `f64` and every operation on it is in the permitted set — see [`cic_math`].
 //! Mixed arithmetic promotes toward it: `2 * 1.5` is `3.0`, because truncating the other way would
 //! discard a fraction an author wrote deliberately.
 //!
@@ -31,7 +31,7 @@
 //! arithmetic that reports its own overflow than by one that silently loses the low bit at nine
 //! quadrillion.
 
-use crate::real::{ArithmeticError, finite};
+use cic_math::{ArithmeticError, finite};
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -316,7 +316,7 @@ mod tests {
     #![allow(clippy::float_cmp)]
 
     use super::{Value, ValueError, arithmetic, compare, display, equals, negate, same_constant};
-    use crate::real::ArithmeticError;
+    use cic_math::ArithmeticError;
 
     #[test]
     fn two_integers_stay_an_integer() {
