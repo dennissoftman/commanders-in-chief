@@ -7,6 +7,7 @@ game's format, because nothing here reads one.
 |---|---|---|
 | `.cict` | Terrain heightfield and layer weights | [terrain.md](terrain.md) |
 | `map.json` | Scenario: players, placements, waypoints | [scenario.md](scenario.md) |
+| `templates.json` | Template set: what a unit, structure, prop, or faction is | [templates.md](templates.md) |
 | `.cicmap` | Map package | [package.md](package.md) |
 | `*.ciclayout.json` | Interface layout: one screen's structure | [ui-layout.md](ui-layout.md) |
 | `strings.<language>.json` | Display text, keyed, so no layout holds a literal | [ui-layout.md](ui-layout.md) |

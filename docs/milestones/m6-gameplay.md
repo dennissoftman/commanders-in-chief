@@ -2,12 +2,17 @@
 
 One playable skirmish: build a base, produce units, fight, win or lose.
 
-**Status:** Planned.
+**Status:** In progress — the template set is the first slice landed, written against its first real
+consumers exactly as the deferral intended.
 
 ## Charter
 
 - Object templates: the data format defining what a unit or structure is. Deferred to here from M2 on
-  purpose, because the format should be written once its consumers are known.
+  purpose, because the format should be written once its consumers are known. **First slice done** —
+  see [the specification](../formats/templates.md): identifier, kind, model, display-name key, with
+  scenario activation resolving every placement and faction against the set. Health, speed, cost,
+  weapons and footprints arrive with the mechanics that read them, for the same reason the format
+  itself waited.
 - Selection and orders: move, attack, attack-move, stop, hold, patrol, and formation movement.
 - Pathfinding over the heightfield, with terrain passability, dynamic obstruction from structures, and
   local avoidance between units.
