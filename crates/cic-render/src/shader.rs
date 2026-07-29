@@ -38,6 +38,7 @@ const CHUNKS: &[(&str, &str)] = &[
     ("lighting", include_str!("shaders/lighting.wgsl")),
     ("model_gbuffer", include_str!("shaders/model_gbuffer.wgsl")),
     ("motion", include_str!("shaders/motion.wgsl")),
+    ("reflection", include_str!("shaders/reflection.wgsl")),
     ("road_viewer", include_str!("shaders/road_viewer.wgsl")),
     ("scene", include_str!("shaders/scene.wgsl")),
     ("scenery", include_str!("shaders/scenery.wgsl")),
@@ -103,7 +104,9 @@ pub const PROGRAMS: &[Program] = &[
     },
     Program {
         name: "water",
-        chunks: &["scene", "shadow", "atmosphere", "water"],
+        // `reflection` after `atmosphere`, because it calls `sky_colour` from it, and before `water`,
+        // which calls `reflection_colour`.
+        chunks: &["scene", "shadow", "atmosphere", "reflection", "water"],
         staged: false,
     },
     Program {
@@ -238,7 +241,7 @@ mod tests {
         let staged = PROGRAMS.iter().filter(|entry| entry.staged).count();
         assert_eq!(live, 10, "live programs");
         assert_eq!(staged, 4, "staged programs");
-        assert_eq!(CHUNKS.len(), 19);
+        assert_eq!(CHUNKS.len(), 20);
     }
 
     #[test]
