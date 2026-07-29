@@ -177,7 +177,8 @@ by the M3 capture harness.
 
 **Met.** 149 tests in `cic-ui` cover the format, the solver, retained state, input routing, composition,
 the string table, the action set, the screen stack, the settings transaction, the paint layer and the
-routing between them; 33 in `cic-render` cover the typeface, the rasteriser, the atlas and the draw list;
+routing between them; 35 in `cic-render` cover the typeface, the rasteriser, the atlas, the draw list, and
+the authored screens' own strings and geometry;
 and five committed reference images cover the rendered result — the main menu, the settings screen with
 every widget kind it has, that same screen at one and a half times the pixel density, a modal over the
 screen it covers, and a scrolled container clipped to itself.

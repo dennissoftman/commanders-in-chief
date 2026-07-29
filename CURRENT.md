@@ -220,7 +220,7 @@ Also outstanding from M3, in rough order:
 
 Formatting, strict lints (`clippy::all` and `clippy::pedantic` as errors, plus `-D warnings` as CI runs
 it), and the full test suite all pass on the pinned toolchain — **and now on the CI runner too**, where the
-same **455 tests across six crates** pass against Mesa's lavapipe. The rendering ones take about eleven
+same **456 tests across six crates** pass against Mesa's lavapipe. The rendering ones take about eleven
 seconds there, which is what makes this affordable on every pull request. Captures go to `target/tmp/` and
 upload as an artifact on every outcome, so a harness failure's capture and amplified difference image can
 be looked at rather than being stranded on the runner.
