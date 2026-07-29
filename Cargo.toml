@@ -6,6 +6,7 @@ members = [
     "crates/cic-camera",
     "crates/cic-core",
     "crates/cic-render",
+    "crates/cic-script",
     "crates/cic-ui",
     "crates/cic-vfs",
 ]
@@ -44,6 +45,7 @@ cic-assets = { path = "crates/cic-assets" }
 cic-audio = { path = "crates/cic-audio" }
 cic-camera = { path = "crates/cic-camera" }
 cic-core = { path = "crates/cic-core" }
+cic-script = { path = "crates/cic-script" }
 cic-ui = { path = "crates/cic-ui" }
 cic-vfs = { path = "crates/cic-vfs" }
 

@@ -19,6 +19,7 @@ mechanism and it is explained below; adding a record without touching this table
 | [0007](0007-simulation-arithmetic.md) | Simulation arithmetic: `f64` and a restricted operation set | accepted |
 | [0008](0008-physics-engine.md) | Physics is cosmetic, and Rapier rather than Jolt | accepted |
 | [6001](6001-audio-backend-boundary.md) | Where the audio backend boundary goes | accepted, implemented |
+| [7001](7001-scripting-language.md) | A scripting language of this project's own | accepted, implemented |
 
 ## Numbering
 
@@ -40,7 +41,7 @@ docs/adr/<F><NNN>-<slug>.md
 | `4xxx` | Rendering — `cic-render`, `cic-camera` |
 | `5xxx` | Interface — `cic-ui` |
 | `6xxx` | Audio — `cic-audio` |
-| `7xxx` | Scripting and content behaviour |
+| `7xxx` | Scripting and content behaviour — `cic-script` |
 | `8xxx` | Tooling and pipeline |
 
 The existing records are not renumbered. They are referenced from commit messages, from merged pull
