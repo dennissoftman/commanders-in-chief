@@ -13,7 +13,9 @@ half a widget.
 - A layout model of the project's own design, defined in a text format that is authored and reviewed
   like the scenario format is. **Done** — see [Landed](#landed).
 - A widget set covering what an RTS shell actually needs: buttons, labels, lists, sliders, checkboxes,
-  text entry, tabs, and a scrollable container. **Done**, behaviour and drawing both. `tabs` was the
+  text entry, tabs, a dropdown, and a scrollable container. **Done**, behaviour and drawing both. The
+  dropdown is past what the charter asked for and was added because a settings screen needs one — see
+  [Landed](#landed). `tabs` was the
   exception for a while and was half a widget: it selected, highlighted the chosen tab, and switched
   nothing, which is the failure mode this format's validation exists to prevent everywhere else. Found by
   auditing the charter rather than by anything failing, and now closed — see [Landed](#landed).
@@ -78,6 +80,68 @@ half a widget.
   - **Everything adjustable is bounded by the layout**: a slider by its own range, a list or tab strip by
     the children it actually has, typed text by `max_length`. Clamped rather than wrapped, because a list
     jumping from its last row to its first on one key press reads as a lost keystroke.
+- **A `combo`: a real dropdown**, which is the control a resolution list, a quality preset and a
+  level-of-detail choice all want. A closed box showing one of a set, opening a list over whatever is beneath
+  it. Its options cost one row of screen whatever their number, where a `tabs` strip costs a row each.
+  - **It breaks the one assumption the flat solved sequence rests on**, which is why it is a widget kind and
+    not a convention over panels: a node's place in the sequence is its place in the stacking order. A combo
+    early in a screen opens a list over siblings authored *after* it, so drawing in sequence order paints the
+    list behind them and hit-testing in reverse hands a click on the list to whatever is behind it. The open
+    combo's subtree is therefore named as an **overlay** — drawn last, searched first, clipped to the viewport
+    rather than to whatever encloses the control. One name, so the two orderings cannot disagree.
+  - **The solver places the options**, below the control and at its width. That is the one arrangement no
+    `direction` can express, because the list belongs outside the box that owns it. `padding` is ignored on a
+    combo for the same reason — it would inset the list from the control it hangs off.
+  - **Whether the list exists at all is state**, so it arrives through the same `Selections` trait a tab
+    strip's chosen page does, and a closed combo's options are invisible by the same flag. That is why the
+    trait has two methods rather than there being two mechanisms: a third piece of state that decides what is
+    on screen would be added in one place, not three.
+  - **A click outside dismisses it and reaches nothing beneath.** A dropdown that closed *and* passed the
+    click through is the behaviour people complain about. Escape closes the list rather than leaving the
+    screen, for the same reason: innermost first.
+  - **The wedge is three rectangles.** The primitive set has no triangle and the font this layer cannot reach
+    is where an arrow glyph would have come from. It reads as a caret and costs three fills.
+  - The chosen option's text is drawn from the option's own node, inset exactly as a text entry's contents
+    are — so the value does not appear to move sideways when the list opens under it. Getting that wrong was
+    visible immediately and only in a capture.
+  - **The row under the pointer is marked, and the chosen row still wins where they are the same.** Two facts
+    rather than one: somebody moving down a list has chosen nothing yet, so a control marking only the choice
+    looked inert until they clicked. It cannot reuse `hover`, which holds an *id* — a dropdown's rows have
+    none, being the combo's own children — so an index into those children is what names one, and it is
+    cleared everywhere the list closes, which is five different places.
+- **A hit test now agrees with where things are drawn**, which is what made a `list` selectable by pointer.
+  It was previously arrow-keys-only, and the reason was recorded as a limitation rather than fixed: a list
+  scrolls, so its rows are *drawn* somewhere other than where the layout placed them, and hit-testing the
+  placement selects the wrong row.
+  - **The limitation was wider than the widget.** Every control inside a scrolled container was hit-tested
+    where it was not drawn — a button in a scrolled panel would have been clickable at the wrong place. The
+    fix is one field: `SolvedNode::scroll_offset`, the accumulated offset of a node's *enclosing* scrollable
+    containers, and `visual_rect()` for the rectangle that follows from it. A container's own offset is
+    excluded, because a scrollable box stays where the layout put it and moves its contents.
+  - Which makes three pieces of state that decide where a node is on screen rather than how it looks — the
+    chosen tab page, the open dropdown, and now the scroll offset — and all three arrive through the same
+    `Selections` trait. That is the point of routing them together: the fourth gets added in one place.
+  - Verified by breaking it on purpose. With the hit test back on the placed rectangle, a click on the fifth
+    row of a list scrolled by two rows reports the third.
+- **Applying settings asks in a dialog**, rather than leaving a Keep and a Revert button on the settings
+  screen. The screen has Back and Apply; applying puts the change in force and pushes
+  `Screen::SettingsConfirm` over it, with the countdown on it.
+  - **The question only exists while a change is unconfirmed**, and a button that is inert most of the time
+    teaches people to ignore it. A dialog also makes the countdown unmissable and puts the decision in front
+    of the user rather than beside the control they were adjusting.
+  - **The window running out closes the dialog**, which is not a convenience: this is the case the whole
+    mechanism exists for, and somebody who cannot see the screen cannot dismiss a dialog either. So
+    `Shell::tick` now takes a `Measure` — a tick can change the stack, and a stack change is a re-solve.
+  - **Dismissing the dialog is not answering it.** Escape leaves the change in force with its window still
+    running, and the clock decides. Reverting there instead would take a setting away from somebody who was
+    still looking at it; refusing to close would trap them in a dialog.
+- **The settings screen no longer has a "Profile name" field.** It was a `text_entry` nothing read — there so
+  that one screen exercised every widget kind — and a control that does nothing on a player-facing screen is
+  exactly what this format's validation refuses everywhere else. The widget kind is still covered by a
+  capture, because the skirmish screen's commander field is a real one.
+  - If quality *profiles* arrive — low, medium, high — they are **data, not a typed name**: a list of named
+    presets in a JSON file, chosen through a `combo`. A player naming their own profile is a different and
+    much later feature, and it was never what that field was.
 - **Tabs that switch pages.** A `tabs` node's children are its *headers*; its `pages` field names the
   container holding the bodies. Before this, `Widget::Tabs` tracked a number and nothing acted on it — the
   format's own comment said "switches between sibling pages" and nothing did.
@@ -239,14 +303,15 @@ A navigable shell: main menu, settings with transactional apply-and-rollback, an
 screen that can launch a map. Layout and widget behaviour covered by tests; the rendered result covered
 by the M3 capture harness.
 
-**Met.** 185 tests in `cic-ui` cover the format, the solver, retained state, input routing, composition,
-tab pages, the string table, the action set, the screen stack, the settings transaction, the paint layer,
-screen transitions, and the routing between them; 36 in `cic-render` cover the typeface, the rasteriser, the
-atlas, the draw list, and the authored screens' own strings and geometry;
-and six committed reference images cover the rendered result — the main menu, the settings screen with
+**Met.** 198 tests in `cic-ui` cover the format, the solver, retained state, input routing, composition,
+tab pages, dropdowns, the string table, the action set, the screen stack, the settings transaction, the paint
+layer, screen transitions, and the routing between them; 38 in `cic-render` cover the typeface, the
+rasteriser, the atlas, the draw list, and the authored screens' own strings and geometry;
+and eight committed reference images cover the rendered result — the main menu, the settings screen with
 every widget kind it has, that same screen at one and a half times the pixel density, a modal over the
-screen it covers, a scrolled container clipped to itself, and a screen change partway through with both
-screens drawn.
+screen it covers, a scrolled container clipped to itself, a screen change partway through with both screens
+drawn, an open dropdown over the rows it covers, and the keep-or-revert dialog over the screen that applied
+it.
 
 **And it runs in a window**, which this project treats as a separate obligation: `cargo run -p cic-render
 --example shell`. The window opened at a scale of 1.5, which is what prompted the density reference — a

@@ -53,6 +53,14 @@ pub enum Screen {
     SkirmishSetup,
     /// A modal asking whether to leave the game.
     QuitConfirm,
+    /// A modal asking whether to keep an applied settings change, or take it back.
+    ///
+    /// Pushed by the shell when a change is applied rather than reached by an action, for the reason
+    /// [`crate::settings`] exists at all: the question is asked *because* something was applied, and a
+    /// layout that could open it without applying anything would be a dialog about nothing. It closes when
+    /// either button answers it, and also when the revert window runs out — which is the case the whole
+    /// mechanism is built for, since a user who cannot see the screen cannot close a dialog either.
+    SettingsConfirm,
 }
 
 impl Screen {
@@ -65,6 +73,7 @@ impl Screen {
         Self::Settings,
         Self::SkirmishSetup,
         Self::QuitConfirm,
+        Self::SettingsConfirm,
     ];
 
     /// The screen an action navigates to, or nothing when the action is not navigation.
@@ -90,6 +99,7 @@ impl Screen {
             Self::Settings => "settings",
             Self::SkirmishSetup => "skirmish_setup",
             Self::QuitConfirm => "quit_confirm",
+            Self::SettingsConfirm => "settings_confirm",
         }
     }
 
@@ -101,7 +111,7 @@ impl Screen {
     /// viewport is still a modal if it is one.
     #[must_use]
     pub const fn is_modal(self) -> bool {
-        matches!(self, Self::QuitConfirm)
+        matches!(self, Self::QuitConfirm | Self::SettingsConfirm)
     }
 }
 

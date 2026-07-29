@@ -18,8 +18,21 @@ document twice, is a line reading as though something were done.
 solver, a string table, the closed action set, widget behaviour with retained state and input-method
 composition, the screen stack with transactional settings, animated screen changes, and a paint layer;
 `cic-render` draws it, with a typeface authored in this tree. **The shell navigates and it is on screen** —
-four authored screens, covered by six committed reference captures and driven by hand in a window. Its last
+four authored screens, covered by eight committed reference captures and driven by hand in a window. Its last
 open charter line was `tabs`, which selected and switched nothing, and **tabs now switch pages**.
+
+Two things have since landed past the charter, both because a settings screen needed them. A **`combo`** — a
+real dropdown, which is the control a resolution list, a quality preset and a level-of-detail choice all want
+— and it is the first widget here that breaks the assumption the flat solved sequence rests on, since an open
+list is drawn over siblings authored after it. And the **keep-or-revert question is now a dialog** raised by
+applying, rather than two buttons sitting inert on the screen: the settings screen has Back and Apply, and the
+revert window running out closes the dialog itself, which is the case the whole mechanism exists for.
+
+Adding the dropdown turned up something wider: **a hit test was comparing against where the layout placed a
+node rather than where it is drawn**, so every control inside a scrolled container was clickable in the wrong
+place. That is why a `list` could only be driven with the arrow keys. One field —
+`SolvedNode::scroll_offset` — and the rule that a hit test uses `visual_rect()` while a scroll limit uses
+`rect` closes it, and a list row is now chosen by pointing at it however far the list has scrolled.
 
 **M9 and M10 have landed, and both were chartered late for capabilities that sit early in the dependency
 order.**
@@ -410,16 +423,19 @@ having to pretend.
 ## Gate status
 
 Formatting, strict lints (`clippy::all` and `clippy::pedantic` as errors, plus `-D warnings` as CI runs
-it), and the full test suite all passes on the pinned toolchain: **767 tests across eight crates**, up from
-669 across seven. `cic-script` accounts for the whole difference — 98 tests counting one documentation test
-and the four that enforce ADR 0007's operation restriction textually. The CI
+it), and the full test suite all passes on the pinned toolchain: **782 tests across eight crates**, up from
+669 across seven. `cic-script` accounts for 98 of the difference, counting one documentation test and the four
+that enforce ADR 0007's operation restriction textually; the interface layer's dropdown, settings dialog and
+scroll-aware hit testing account for the rest. The CI
 runner runs the same suite against Mesa's lavapipe.
 
 **No reference moved for the page mip chain, which was not the expectation.** Every committed NVIDIA
 reference still matches within tolerance, including `terrain-from-pages.png` — the paged frame changed by a
 mean of 0.004 and a worst case of 5, which is inside what the comparison allows in a small region while still
-failing on four steps across most of a frame. No authored screen uses a tab strip either, so none of the six
-interface references moved when tabs learned to switch pages. The grazing-angle scene the chain is verified
+failing on four steps across most of a frame. No authored screen uses a tab strip either, so none of the
+interface references moved when tabs learned to switch pages. Two of them *did* move when the settings screen
+changed — a dropdown replacing its antialiasing checkbox, two buttons instead of four, and the demonstration
+text entry nobody read removed — and two more were added, for an open dropdown and for the dialog. The grazing-angle scene the chain is verified
 on deliberately has **no committed reference**: its claim is a statistic about adjacent-pixel energy rather
 than an image, and a new reference scene would force a lavapipe capture from the runner for nothing the
 numbers do not already say. **Lavapipe agreed**, which could only be established on the runner: the branch

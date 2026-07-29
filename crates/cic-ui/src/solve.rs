@@ -108,6 +108,25 @@ impl Measure for NoContent {
 pub trait Selections {
     /// The chosen entry for a control, or `None` when nothing has chosen yet.
     fn selection(&self, id: &str) -> Option<usize>;
+
+    /// Whether this control's dropdown is open.
+    ///
+    /// Only a [`Widget::Combo`] answers true, and at most one at a time. A closed combo's options are not on
+    /// screen at all, which is the same mechanism a tab page that is not chosen uses — so both arrive here
+    /// rather than one being visibility and the other being a special case in three consumers.
+    fn is_open(&self, id: &str) -> bool;
+
+    /// How far a scrollable container has been scrolled, in physical pixels.
+    ///
+    /// The third piece of state that decides *where a node is on screen* rather than merely how it looks, and
+    /// it arrives here for the same reason the other two do. A solved rectangle says where a node was placed;
+    /// a node inside a scrolled container is drawn somewhere else, and a hit test against the placement rather
+    /// than the drawing hands a click to a control the user is not pointing at.
+    ///
+    /// Zero by default, so a layout with nothing scrollable and a stub in a test need not answer.
+    fn scroll(&self, _id: &str) -> f32 {
+        0.0
+    }
 }
 
 /// A [`Selections`] where nothing has been chosen, so every tab strip shows its first page.
@@ -121,7 +140,18 @@ impl Selections for NoSelection {
     fn selection(&self, _id: &str) -> Option<usize> {
         None
     }
+
+    fn is_open(&self, _id: &str) -> bool {
+        false
+    }
 }
+
+/// How tall a combo's option row is when nothing measured it, in logical units.
+///
+/// A floor rather than a size: an option normally takes the height its text measured to. This exists because
+/// a [`Measure`] that reports nothing — [`NoContent`], or a host whose font is not loaded yet — would
+/// otherwise produce a list of zero-height rows, which is a dropdown that opens and appears not to.
+const DEFAULT_OPTION_HEIGHT: f32 = 24.0;
 
 /// One node's intrinsic size, with the size of the subtree it heads.
 #[derive(Debug, Clone, Copy)]
@@ -164,6 +194,11 @@ pub struct SolvedNode {
     /// still *solved* — its rectangle is correct for when its tab is chosen — but every consumer here skips
     /// it, so it takes no clicks, holds no tab stop, and is not drawn.
     pub visible: bool,
+    /// How far this node's *enclosing* scrollable containers have shifted it, in physical pixels.
+    ///
+    /// Its own scroll offset is not in this, because a scrollable container does not move itself -- it moves
+    /// what is inside it. See [`Self::visual_rect`], which is what a hit test has to use.
+    pub scroll_offset: f32,
     /// How many direct children it has, which is what bounds a list's or a tab strip's selection.
     pub children: usize,
     /// This node plus every descendant.
@@ -178,6 +213,17 @@ pub struct SolvedNode {
 }
 
 impl SolvedNode {
+    /// Where this node actually is on screen: its solved rectangle, moved by whatever scrolled it.
+    ///
+    /// [`Self::rect`] is where the *layout* put it, which is what a scroll limit is measured from and what
+    /// stays fixed while the contents move under a clip. This is where a person pointing at it is pointing, so
+    /// it is what a hit test compares against -- the two differ by exactly the offset the drawing layer
+    /// applies, which is what keeps a click and the pixel it landed on talking about the same control.
+    #[must_use]
+    pub fn visual_rect(&self) -> Rect {
+        self.rect.translated(0.0, -self.scroll_offset)
+    }
+
     /// The longest text this node accepts, defaulted when the layout did not say.
     #[must_use]
     pub fn text_limit(&self) -> usize {
@@ -189,6 +235,19 @@ impl SolvedNode {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Solved {
     nodes: Vec<SolvedNode>,
+    /// The open combo and its options, as a half-open range of sequence indices.
+    ///
+    /// # Why an overlay needs to be named rather than inferred
+    ///
+    /// A dropdown breaks the one assumption the flat pre-order sequence rests on: that a node's position in
+    /// the sequence is its position in the stacking order. A combo early in a screen opens a list over
+    /// siblings that come *later*, so drawing in sequence order paints the list under them and hit testing in
+    /// reverse sequence order hands a click on the list to whatever is behind it.
+    ///
+    /// Naming the range fixes both from one place: it is drawn last and searched first. The alternative —
+    /// having each consumer notice the combo for itself — is three chances to get the ordering wrong, and two
+    /// of them are only visible in motion.
+    overlay: Option<std::ops::Range<usize>>,
 }
 
 impl Solved {
@@ -204,6 +263,93 @@ impl Solved {
     /// Every node that is on screen, in pre-order, which is back-to-front drawing order.
     pub fn visible_nodes(&self) -> impl Iterator<Item = &SolvedNode> {
         self.nodes.iter().filter(|node| node.visible)
+    }
+
+    /// The open dropdown's own subtree, drawn last and searched first.
+    ///
+    /// Empty when no combo is open, which is the ordinary case.
+    #[must_use]
+    pub fn overlay(&self) -> std::ops::Range<usize> {
+        self.overlay.clone().unwrap_or(0..0)
+    }
+
+    /// Whether a point lands anywhere the open dropdown covers.
+    ///
+    /// What a caller dismissing a dropdown on an outside press asks. The control itself counts as covered:
+    /// pressing it again is how a user closes the list they just opened.
+    #[must_use]
+    pub fn covers_overlay(&self, x: f32, y: f32) -> bool {
+        self.overlay().any(|index| {
+            self.nodes
+                .get(index)
+                .is_some_and(|node| node.visual_rect().contains(x, y))
+        })
+    }
+
+    /// Whether an index is part of the open dropdown.
+    #[must_use]
+    pub fn is_overlay(&self, index: usize) -> bool {
+        self.overlay
+            .as_ref()
+            .is_some_and(|range| range.contains(&index))
+    }
+
+    /// Records how far each node's enclosing scrollable containers have shifted it.
+    ///
+    /// A stack of `(end, offset)` over the pre-order sequence, which is the same shape the drawing layer's
+    /// frame stack has and for the same reason: a node's descendants are the entries after it, so the end of a
+    /// container's influence is arithmetic rather than another traversal.
+    ///
+    /// A container's *own* offset does not apply to itself. A scrollable box stays where the layout put it and
+    /// moves its contents, so including it would slide the container out from under its own scrollbar.
+    fn apply_scroll_offsets(&mut self, selections: &impl Selections) {
+        let mut frames: Vec<(usize, f32)> = Vec::new();
+        for index in 0..self.nodes.len() {
+            while frames.last().is_some_and(|(end, _)| index >= *end) {
+                frames.pop();
+            }
+            let inherited = frames.last().map_or(0.0, |(_, offset)| *offset);
+            let Some(node) = self.nodes.get_mut(index) else {
+                continue;
+            };
+            node.scroll_offset = inherited;
+            if node.widget == Widget::Scroll {
+                let own = node.id.as_deref().map_or(0.0, |id| selections.scroll(id));
+                let end = index + node.subtree;
+                frames.push((end, inherited + own));
+            }
+        }
+    }
+
+    /// Hides every closed combo's options, and names the open one's subtree as the overlay.
+    ///
+    /// Where the options *are* was decided in the arrange pass, which is the only place their measured
+    /// heights exist. What is decided here is whether they are on screen, because that is state — the same
+    /// split, and the same flag, that a tab page not currently chosen uses.
+    fn resolve_open_combos(&mut self, selections: &impl Selections) {
+        let combos: Vec<usize> = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| node.widget == Widget::Combo)
+            .map(|(index, _)| index)
+            .collect();
+        for combo in combos {
+            let Some(node) = self.nodes.get(combo) else {
+                continue;
+            };
+            let span = node.subtree;
+            let open = node.id.as_deref().is_some_and(|id| selections.is_open(id));
+            for index in (combo + 1)..(combo + span).min(self.nodes.len()) {
+                self.nodes[index].visible = open;
+            }
+            // At most one combo is open at a time — [`crate::Interface`] holds one id — so the last one to
+            // answer true wins rather than the overlay being a set. A second open dropdown is not a state
+            // this can reach.
+            if open {
+                self.overlay = Some(combo..(combo + span).min(self.nodes.len()));
+            }
+        }
     }
 
     /// Marks every tab page except the chosen one — and everything inside it — as not visible.
@@ -242,15 +388,16 @@ impl Solved {
         }
     }
 
-    /// The rectangles of a node's direct children, in authored order.
+    /// Where a node's direct children are on screen, in authored order.
     ///
-    /// What a tab strip's headers are: the strip is one control, and which of its children a click landed in
-    /// is what says which tab was chosen.
+    /// What a tab strip's headers, a list's rows and a dropdown's options all are: one control holding
+    /// several of them, where which one a click landed in is the answer. [`SolvedNode::visual_rect`] rather
+    /// than the solved rectangle, so a scrolled list's rows are tested where they are drawn.
     #[must_use]
     pub fn child_rects(&self, index: usize) -> Vec<Rect> {
         self.children_of(index)
             .into_iter()
-            .filter_map(|child| self.nodes.get(child).map(|node| node.rect))
+            .filter_map(|child| self.nodes.get(child).map(SolvedNode::visual_rect))
             .collect()
     }
 
@@ -304,10 +451,8 @@ impl Solved {
     /// top — the one a click has to reach. Searching forward would hand every click to the backdrop.
     #[must_use]
     pub fn hit(&self, x: f32, y: f32) -> Option<&SolvedNode> {
-        self.nodes
-            .iter()
-            .rev()
-            .find(|node| node.visible && node.rect.contains(x, y))
+        self.hit_where(x, y, |_| true)
+            .and_then(|index| self.nodes.get(index))
     }
 
     /// The topmost visible activatable node containing a physical point.
@@ -316,10 +461,8 @@ impl Solved {
     /// would swallow the press.
     #[must_use]
     pub fn hit_activatable(&self, x: f32, y: f32) -> Option<&SolvedNode> {
-        self.nodes
-            .iter()
-            .rev()
-            .find(|node| node.visible && node.widget.activatable() && node.rect.contains(x, y))
+        self.hit_where(x, y, |node| node.widget.activatable())
+            .and_then(|index| self.nodes.get(index))
     }
 
     /// The index of the node carrying an id.
@@ -336,9 +479,42 @@ impl Solved {
     /// its ancestors next — a scroll wheel acts on the enclosing container, not on what is under it.
     #[must_use]
     pub fn hit_focusable(&self, x: f32, y: f32) -> Option<usize> {
-        self.nodes
-            .iter()
-            .rposition(|node| node.visible && node.widget.focusable() && node.rect.contains(x, y))
+        self.hit_where(x, y, |node| node.widget.focusable())
+    }
+
+    /// The topmost visible node satisfying a test, the open dropdown searched first.
+    ///
+    /// Sequence order is stacking order for everything except an overlay, and an open dropdown is drawn over
+    /// siblings that come *after* it — so a plain reverse scan would hand a click on the list to whatever is
+    /// behind it. Searching the overlay first is the same rule as drawing it last, stated once.
+    /// Anything an open dropdown *covers* belongs to the dropdown, even where the point lands on a row that
+    /// is not itself a control: a click on an option is a click on the combo that owns it, so the search
+    /// falls back to the owner rather than passing the point through to whatever is behind the list.
+    fn hit_where(&self, x: f32, y: f32, wanted: impl Fn(&SolvedNode) -> bool) -> Option<usize> {
+        let ok = |index: usize| {
+            self.nodes
+                .get(index)
+                .is_some_and(|node| node.visible && wanted(node))
+        };
+        let inside = |index: usize| {
+            self.nodes
+                .get(index)
+                .is_some_and(|node| node.visible && node.visual_rect().contains(x, y))
+        };
+        if let Some(range) = self
+            .overlay
+            .clone()
+            .filter(|range| range.clone().any(inside))
+        {
+            return range
+                .clone()
+                .rev()
+                .find(|index| ok(*index) && inside(*index))
+                .or_else(|| Some(range.start).filter(|index| ok(*index)));
+        }
+        (0..self.nodes.len())
+            .rev()
+            .find(|index| !self.is_overlay(*index) && ok(*index) && inside(*index))
     }
 
     /// The index of a node's nth direct child.
@@ -465,8 +641,11 @@ pub fn solve_selected(
     arrange.node(&layout.root, root, None, 1, 0);
     let mut solved = Solved {
         nodes: arrange.nodes,
+        overlay: None,
     };
     solved.hide_unselected_pages(selections);
+    solved.resolve_open_combos(selections);
+    solved.apply_scroll_offsets(selections);
     solved
 }
 
@@ -555,6 +734,13 @@ fn combine(node: &Node, sizes: &[[f32; 2]]) -> [f32; 2] {
     let gaps = node.gap * sizes.len().saturating_sub(1) as f32;
     let sum = |axis: usize| sizes.iter().map(|size| size[axis]).sum::<f32>();
     let largest = |axis: usize| sizes.iter().map(|size| size[axis]).fold(0.0f32, f32::max);
+    // A combo is one row high whatever its options number, because its options are not *in* it — an `Auto`
+    // combo that summed them would be as tall as its own open list, which is the one size it must never be.
+    // Wide enough for the widest option, though, so opening it does not reveal text the closed control
+    // could not have shown.
+    if node.widget == Widget::Combo {
+        return [largest(0), largest(1)];
+    }
     match node.direction {
         Direction::Row => [sum(0) + gaps, largest(1)],
         Direction::Column => [largest(0), sum(1) + gaps],
@@ -580,6 +766,8 @@ impl Arrange<'_> {
             // Everything is visible until the visibility pass says otherwise, which it can only do once
             // the whole sequence exists: a strip's pages container may be anywhere in the tree.
             visible: true,
+            // Likewise: a scroll offset is state, and it is applied once the sequence exists.
+            scroll_offset: 0.0,
             children: node.children.len(),
             // The measure pass counted this already, and it counted it over the same tree in the same
             // order, so taking it from there beats walking the children again.
@@ -595,11 +783,48 @@ impl Arrange<'_> {
             return;
         }
 
-        let content = rect.inset(node.padding.scaled(self.scale));
         let slots = child_slots(node, self.intrinsics, slot);
+        if node.widget == Widget::Combo {
+            self.options(node, rect, index, depth, &slots);
+            return;
+        }
+
+        let content = rect.inset(node.padding.scaled(self.scale));
         let rects = child_rects(node, content, self.scale, self.intrinsics, &slots);
         for ((child, child_slot), child_rect) in node.children.iter().zip(&slots).zip(rects) {
             self.node(child, child_rect, Some(index), depth + 1, *child_slot);
+        }
+    }
+
+    /// Places a combo's options as a list hanging below the control.
+    ///
+    /// The one arrangement no author could have written, and the reason a combo is a widget kind rather than
+    /// a `Panel` with a convention: the options belong *outside* the box that owns them, at that box's width,
+    /// over whatever happens to be beneath. Every other node here is positioned by its parent's arrangement
+    /// within its parent's content box, and a dropdown is precisely the case that does not fit.
+    ///
+    /// Padding is deliberately not applied. On every other container it insets the children; here it would
+    /// inset the list from the control it hangs off, so the two edges would not line up — and a dropdown
+    /// whose list is narrower than its control reads as a rendering fault.
+    fn options(&mut self, node: &Node, rect: Rect, index: usize, depth: usize, slots: &[usize]) {
+        let mut top = rect.bottom();
+        for (child, child_slot) in node.children.iter().zip(slots) {
+            let natural = self
+                .intrinsics
+                .get(*child_slot)
+                .map_or([0.0, 0.0], |entry| entry.size);
+            // A row is as tall as it asked to be, or as tall as its text measured, floored so that a
+            // measurer with nothing to say cannot produce a list of invisible rows. `Fill` means nothing
+            // here — there is no leftover to share, since the list's height *is* the sum of its rows.
+            let height = match child.height {
+                Sizing::Fixed(amount) => amount * self.scale,
+                Sizing::Auto | Sizing::Fill(_) => {
+                    (natural[1] * self.scale).max(DEFAULT_OPTION_HEIGHT * self.scale)
+                }
+            };
+            let placed = Rect::new(rect.x, top, rect.width, height);
+            top = placed.snapped().bottom();
+            self.node(child, placed, Some(index), depth + 1, *child_slot);
         }
     }
 }
@@ -1073,6 +1298,10 @@ mod tests {
         fn selection(&self, _id: &str) -> Option<usize> {
             Some(self.0)
         }
+
+        fn is_open(&self, _id: &str) -> bool {
+            false
+        }
     }
 
     /// A strip of two headers over a stack of two pages, each page holding one child.
@@ -1117,6 +1346,138 @@ mod tests {
         layout.validate().expect("the fixture must be valid");
         let viewport = Viewport::new(200, 100, 1.0).expect("valid viewport");
         solve_selected(&layout, viewport, &NoContent, selections)
+    }
+
+    /// A [`Selections`] whose one combo is open on the given option.
+    struct Opened(usize);
+
+    impl Selections for Opened {
+        fn selection(&self, _id: &str) -> Option<usize> {
+            Some(self.0)
+        }
+
+        fn is_open(&self, _id: &str) -> bool {
+            true
+        }
+    }
+
+    /// A row holding a combo of three options, followed by a panel the list would cover.
+    ///
+    /// The trailing panel is the point: it comes *after* the combo in the sequence, so it is what a naive
+    /// drawing order paints over the list and what a naive hit test hands a click on the list to.
+    fn with_combo() -> Layout {
+        let option = || Node {
+            widget: Widget::Label,
+            height: Sizing::Fixed(20.0),
+            ..Node::default()
+        };
+        wrap(Node {
+            width: Sizing::Fill(1),
+            height: Sizing::Fill(1),
+            children: vec![
+                Node {
+                    id: Some("pick".to_owned()),
+                    widget: Widget::Combo,
+                    width: Sizing::Fixed(120.0),
+                    height: Sizing::Fixed(30.0),
+                    children: vec![option(), option(), option()],
+                    ..Node::default()
+                },
+                Node {
+                    id: Some("beneath".to_owned()),
+                    widget: Widget::Button,
+                    width: Sizing::Fill(1),
+                    height: Sizing::Fill(1),
+                    ..Node::default()
+                },
+            ],
+            ..Node::default()
+        })
+    }
+
+    fn combo_with(selections: &impl Selections) -> Solved {
+        let layout = with_combo();
+        layout.validate().expect("the fixture must be valid");
+        let viewport = Viewport::new(200, 200, 1.0).expect("valid viewport");
+        solve_selected(&layout, viewport, &NoContent, selections)
+    }
+
+    #[test]
+    fn a_combo_hangs_its_options_below_itself_at_its_own_width() {
+        // The arrangement no author could have written, which is the whole reason a dropdown is a widget kind
+        // rather than a convention over panels. The control is one row tall whatever its options number —
+        // summing them, which is what a column would do, would make an `Auto` combo as tall as its own list.
+        let solved = combo_with(&Opened(0));
+        let control = solved.by_id("pick").expect("the combo").rect;
+        assert_eq!(control, Rect::new(0.0, 0.0, 120.0, 30.0));
+        let rows = solved.child_rects(solved.index_of("pick").expect("the combo"));
+        assert_eq!(
+            rows,
+            vec![
+                Rect::new(0.0, 30.0, 120.0, 20.0),
+                Rect::new(0.0, 50.0, 120.0, 20.0),
+                Rect::new(0.0, 70.0, 120.0, 20.0),
+            ],
+            "the options must stack downward from the control's bottom edge, at its width"
+        );
+    }
+
+    #[test]
+    fn a_closed_combo_has_no_options_on_screen_and_an_open_one_is_the_overlay() {
+        let closed = combo_with(&NoSelection);
+        assert!(
+            closed.visible_nodes().count() == closed.len() - 3,
+            "a closed dropdown's three options must not be on screen"
+        );
+        assert!(closed.overlay().is_empty(), "nothing is open");
+        // Its own control still is, and still takes a tab stop: what is hidden is the list, not the widget.
+        assert_eq!(closed.focus_order(), vec!["pick", "beneath"]);
+
+        let open = combo_with(&Opened(0));
+        assert_eq!(open.visible_nodes().count(), open.len());
+        let combo = open.index_of("pick").expect("the combo");
+        assert_eq!(
+            open.overlay(),
+            combo..combo + 4,
+            "the combo and its options"
+        );
+    }
+
+    #[test]
+    fn an_open_dropdown_takes_a_click_that_lands_over_a_later_sibling() {
+        // The hit-test half of "an overlay is drawn last and searched first". The panel beneath fills the
+        // whole viewport and comes after the combo in the sequence, so a plain reverse scan would report it
+        // for every point — including the ones the list is covering.
+        let open = combo_with(&Opened(0));
+        let combo = open.index_of("pick").expect("the combo");
+
+        // The middle option's row, which overlaps the panel.
+        assert_eq!(
+            open.hit(60.0, 60.0).and_then(|node| node.id.as_deref()),
+            None,
+            "an option row carries no id of its own"
+        );
+        assert_eq!(
+            open.hit_focusable(60.0, 60.0),
+            Some(combo),
+            "a click on a row belongs to the combo that owns it, not to the panel behind the list"
+        );
+        // And a point the list does not cover still reaches what is beneath.
+        assert_eq!(
+            open.hit_focusable(60.0, 150.0)
+                .and_then(|index| open.get(index))
+                .and_then(|node| node.id.as_deref()),
+            Some("beneath")
+        );
+        // Closed, the same point over the list's former position reaches the panel.
+        let closed = combo_with(&NoSelection);
+        assert_eq!(
+            closed
+                .hit_focusable(60.0, 60.0)
+                .and_then(|index| closed.get(index))
+                .and_then(|node| node.id.as_deref()),
+            Some("beneath")
+        );
     }
 
     #[test]
