@@ -1,8 +1,9 @@
 // The water surface: a bounded plane with procedural waves.
 //
-// A composition chunk. Requires `scene.wgsl`, `shadow.wgsl` and `atmosphere.wgsl` -- which is the whole
-// reason composition exists. Before it, water had to share one file with the lighting and composite
-// passes to reach `shadow_visibility` and `world_from_depth`, because WGSL has no include mechanism.
+// A composition chunk. Requires `scene.wgsl`, `shadow.wgsl`, `atmosphere.wgsl` and `reflection.wgsl` --
+// which is the whole reason composition exists. Before it, water had to share one file with the lighting
+// and composite passes to reach `shadow_visibility` and `world_from_depth`, because WGSL has no include
+// mechanism.
 //
 // Drawn between lighting and the composite and blended into the HDR target, so it tone maps with
 // everything else rather than being composited over an already-curved image -- which is what would make
@@ -219,7 +220,7 @@ fn water_fragment(input: WaterVertexOutput) -> @location(0) vec4<f32> {
     // dark hole in the terrain.
     let incidence = clamp(dot(normal, view_direction), 0.0, 1.0);
     let fresnel = WATER_F0 + (1.0 - WATER_F0) * pow(1.0 - incidence, 5.0);
-    let reflected = sky_colour(reflect(-view_direction, normal));
+    let reflected = reflection_colour(input.world_position, normal, view_direction);
 
     // Fogged like any other surface, and before the alpha is decided. Water that ignores fog while the
     // shore beside it fades out is the most conspicuous way to break a foggy scene.
