@@ -34,12 +34,20 @@ place. That is why a `list` could only be driven with the arrow keys. One field 
 `SolvedNode::scroll_offset` — and the rule that a hit test uses `visual_rect()` while a scroll limit uses
 `rect` closes it, and a list row is now chosen by pointing at it however far the list has scrolled.
 
-**M9 has landed, and it was chartered late for a capability that sits early in the dependency order.**
+**M9 and M10 have landed, and both were chartered late for capabilities that sit early in the dependency
+order.**
 Audio was simply missing — not deferred, not recorded anywhere as absent. `cic-audio`
 ([M9](docs/milestones/m9-audio.md)) is a mixer behind a replaceable backend, with positional audio, DSP,
 layered music, and a [sound bank format](docs/formats/sound-bank.md), depending on no audio library of any
 kind. The one thing it does not do is reach a speaker. The roadmap gained a *depends on* column, because
-appending M9 at the end contradicted its own claim to be ordered by dependency.
+appending them at the end contradicted its own claim to be ordered by dependency.
+
+`cic-script` ([M10](docs/milestones/m10-scripting.md)) puts scenario behaviour in data: a small language
+compiled to bytecode, with a closed host surface resolved at compile time, no heap, and fuel-metered
+execution. **Its arithmetic is [ADR 0007](docs/adr/0007-simulation-arithmetic.md)'s, unchanged** — an
+earlier draft gave it a fixed-point arithmetic of its own, which was a mistake and is written up as one
+in [ADR 7001](docs/adr/7001-scripting-language.md). The game verbs a scenario would call are blocked on a
+simulation kernel that does not exist yet.
 
 Landing M3's last five renderer items turned up a defect every committed reference had been rendered
 through, so **ten of the twenty-two references changed** — see the antialiasing entry below.
@@ -256,6 +264,25 @@ What works:
   duration a host chooses and which defaults to none: the departing screen stays alive until the change
   ends because it is still being drawn, and input reaches the arriving one immediately and the departing
   one never.
+- **A scripting language** ([`cic-script`](crates/cic-script/src/lib.rs)) whose arithmetic is not its own
+  decision. A script runs inside the simulation, so it inherits ADR 0007 exactly: `f64`, only the
+  operations IEEE-754 requires to be correctly rounded, no platform transcendental, angles as turns.
+  - **What makes it a language of this project's own is not determinism.** Lua, Rhai and WebAssembly all
+    have correctly-rounded `f64` arithmetic; what they do not have is *load-time* closure. All three
+    resolve calls at run time, so a mod naming a verb the engine lacks fails when a player triggers it.
+    Here it fails to compile, naming the file and the line and listing what was available.
+  - **The restriction is enforced twice, and the structural one is stronger than the kernel's own.** ADR
+    0007 decision 8's textual scan is here too — and **caught a real violation on its first run**, a
+    `powi` in the interpreter's bounds check, which is forbidden not for being inexact but for having an
+    unspecified lowering. Above that, a script cannot reach a forbidden operation whatever anybody
+    writes, because the bytecode has no instruction for one.
+  - **Angles are turns, and the reduction is exact.** `sys.sin(1000000.125)` returns the *identical bit
+    pattern* as `sys.sin(0.125)`, because reducing a turn count is a subtraction that cannot round. The
+    series agrees with the platform's `sin` to the last bit on the same first-quadrant argument across
+    257 points; the few units in the last place against a whole-angle reference are the *reference's*
+    range reduction, which is the problem turns remove.
+  - **Fuel bounds time and the absent heap bounds space**, which between them are what "safe to run
+    untrusted content inside a tick" has to mean. `while true {}` is an error naming the line.
 - Windowed presentation, driven by the reusable camera:
 
 ```bash
@@ -379,6 +406,13 @@ at all, and *which ground has a page* is the residency decision nothing derives 
 residency map already ranks by projected size, so this is a small function over the frustum rather than a
 design.
 
+**Scripting needs host verbs, and they are blocked rather than deferred.** Spawn, order, count, query a
+zone, set an objective: every one is a call into a simulation kernel, so M10's remaining half waits on M5.
+The seam is ready — a kernel declares them on an `Interface` and implements one trait. The one thing that
+must not be got wrong is the transcendentals: ADR 0007 decision 4 says the kernel supplies its own `sin`,
+and `cic-script` already has one. Two implementations that can disagree would be the same class of bug as
+the two arithmetics this milestone just removed.
+
 **Audio needs a device, and that is the one thing about it a green suite cannot establish.** The mixer
 produces correct frames and nothing hands them to hardware. This is the same lesson the standing constraint
 below records for presentation: the one bug the headless renderer suite structurally could not catch
@@ -389,10 +423,10 @@ having to pretend.
 ## Gate status
 
 Formatting, strict lints (`clippy::all` and `clippy::pedantic` as errors, plus `-D warnings` as CI runs
-it), and the full test suite all passes on the pinned toolchain: **684 tests across seven crates**, up from
-543 across six. `cic-audio` accounts for 126 of the difference, counting one documentation test, and every one
-of those runs headless with no audio device present; the interface layer's dropdown and settings dialog
-account for the rest. The CI
+it), and the full test suite all passes on the pinned toolchain: **782 tests across eight crates**, up from
+669 across seven. `cic-script` accounts for 98 of the difference, counting one documentation test and the four
+that enforce ADR 0007's operation restriction textually; the interface layer's dropdown, settings dialog and
+scroll-aware hit testing account for the rest. The CI
 runner runs the same suite against Mesa's lavapipe.
 
 **No reference moved for the page mip chain, which was not the expectation.** Every committed NVIDIA
@@ -449,6 +483,12 @@ present.
   `cic-audio` carries its own stream, seeded separately, so it never has to.
 - Anything that will reach simulation state follows [determinism](docs/invariants/determinism.md) from
   the start, because it cannot be retrofitted.
+- **Only [ADR 0007](docs/adr/0007-simulation-arithmetic.md)'s operation set may touch simulation state**,
+  and a subsystem that runs inside the simulation does not get an arithmetic of its own. `cic-script`
+  learned this the expensive way: it was built on fixed point, on an argument ADR 0007 shows is false,
+  and two arithmetics inside one lockstep simulation is a script and a kernel able to disagree about a
+  comparison. Decision 8's textual guard is not bookkeeping — its first run on that crate found a `powi`
+  nothing in the build would have objected to.
 - **A rendering change is not verified by a green test suite. Look at the capture.** Every rendering bug
   so far passed its own assertions and was caught by opening the PNG: reversed layer ramps, two separate
   tone-mapping mistakes, a shadow camera on the wrong side of the scene, an occlusion blur whose

@@ -50,8 +50,9 @@ colour. Both were nearly free to design for and expensive to retrofit.
 ## Status
 
 Early. The foundation, resource layer, asset formats, and interface are complete, the renderer meets its
-exit condition, and the audio layer mixes. There is no playable game yet — nothing simulates, and the
-audio does not yet reach a speaker. See [ROADMAP.md](ROADMAP.md) for the milestone ladder and
+exit condition, the audio layer mixes, and scenario behaviour can be written in a script. There is no
+playable game yet — nothing simulates, the audio does not yet reach a speaker, and the verbs a script
+would call wait on a simulation kernel. See [ROADMAP.md](ROADMAP.md) for the milestone ladder and
 [CURRENT.md](CURRENT.md) for what is being worked on now.
 
 ## Building
@@ -100,6 +101,7 @@ back, because a display change can leave the person who made it unable to see we
 | `cic-ui` | Interface layout and its format, the two-pass solver, widgets and retained state, input routing with input-method composition, the screen stack, transactional settings, screen transitions, and the paint layer. Free of window, GPU and font dependencies. |
 | `cic-render` | Deferred chain, terrain, instanced models, physically-based texturing, scenery sway, antialiasing to a temporal tier, interface drawing with an authored typeface, windowed presentation, the WGSL shader set. |
 | `cic-audio` | Mixer behind a replaceable backend, spatialisation, DSP, layered music, sound banks. No audio dependency at all. |
+| `cic-script` | A deterministic sandboxed language for scenario logic: ADR 0007 arithmetic, no heap, fuel-metered. No dependencies. |
 
 ## Asset formats
 
@@ -113,6 +115,7 @@ back, because a display change can leave the person who made it unable to see we
 | Display text | JSON, keyed (`strings.<language>.json`) |
 | Sound events | JSON (`*.cicbank.json`) |
 | Audio clips | RIFF/WAVE (`.wav`) |
+| Scenario behaviour | A small language of the project's own (`*.cics`) |
 
 Specifications are in [docs/formats/](docs/formats/README.md), and the reasoning is in
 [docs/milestones/m2-assets.md](docs/milestones/m2-assets.md). The short version: authored data a human
@@ -131,6 +134,21 @@ dependency at all, which is what keeps the licence claim below true for anyone w
 proprietary and per-title licensed, and OpenAL Soft is LGPL. It also makes the whole system testable
 headlessly, since a mixer is a pure function from voices and a listener to frames. See
 [ADR 6001](docs/adr/6001-audio-backend-boundary.md).
+
+## Scripting
+
+[`cic-script`](crates/cic-script/) puts scenario behaviour in data: a small language compiled to
+bytecode and run by an interpreter that cannot allocate, cannot hang, and cannot reach anything the
+engine did not offer it.
+
+Its arithmetic is not its own — it inherits
+[ADR 0007](docs/adr/0007-simulation-arithmetic.md)'s exactly, because a script and the simulation kernel
+have to reach the same answer on the same two numbers. What makes it a language of this project's own
+rather than Lua or Rhai is that those resolve calls at *run* time, so a mod naming a verb the engine
+lacks fails when a player triggers it; here it fails to compile, naming the file and the line. Fuel
+bounds its time and the absence of a heap bounds its space, which between them are what "safe to run
+untrusted content inside a tick" has to mean. See
+[ADR 7001](docs/adr/7001-scripting-language.md) and [the specification](docs/formats/script.md).
 
 ## Engineering standards
 
