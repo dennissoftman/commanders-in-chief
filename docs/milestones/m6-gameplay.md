@@ -37,6 +37,19 @@ kernel: ordered containers, pinned arithmetic, stable tie-breaking by object ide
 The AI is scoped as a test harness rather than as a good opponent. Being able to run a full match
 unattended, repeatably, is worth more at this stage than being challenging.
 
+## Physics
+
+Not in this charter, and [ADR 0008](../adr/0008-physics-engine.md) proposes why: an RTS resolves gameplay
+through steering, ranges and seeded rolls rather than through rigid bodies, so physics is *spectacle* — the
+destroyed tank that tumbles rather than vanishing. Spectacle may differ between two clients without either
+being wrong, which is what puts it in presentation.
+
+The consequence for this milestone is that no gameplay result may come out of a physics engine. Anything
+authoritative — a projectile's impact point, whether a collapse kills — is integrated in the kernel under
+[ADR 0007](../adr/0007-simulation-arithmetic.md)'s arithmetic, and the engine is *told* the answer rather
+than asked for it. That ADR is `proposed` rather than accepted, and settling it is a decision for whoever
+writes this charter's detail.
+
 ## Explicitly not done
 
 - No campaign, no scripted missions, no cutscenes. A scripting layer is a milestone of its own and wants
