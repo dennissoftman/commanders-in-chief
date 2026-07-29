@@ -306,6 +306,12 @@ What works:
   - **Floats hash by bit pattern**, so `0.0` and `-0.0` are diverged, and they should be: they divide
     differently. The one `f64` the kernel itself owns is the tick length — one division, fixed at
     construction.
+  - **A scenario activates into it** ([`activation`](crates/cic-sim/src/activation.rs)): players take
+    seats in authored order, every placement becomes an object with an authored-order identifier, and
+    the pose crosses into simulation units exactly once — `f32` widening exactly, degrees becoming an
+    integer binary fraction of a revolution, per ADR 0007's "angles are integers in simulation state".
+    Activation is inside the determinism claim: one moved placement diverges on tick zero, attributed
+    to `forces`.
 - Windowed presentation, driven by the reusable camera:
 
 ```bash
@@ -325,13 +331,13 @@ minified.
 
 ## Next verified step
 
-**[M5, the simulation](docs/milestones/m5-simulation.md), is underway: every charter line's mechanics
-have landed as `cic-sim`, and the remaining half is scenario activation** — reading a map's players,
-starts, and placements into a running kernel, so a scenario's declared starts produce the objects they
-claim. That is the half the exit condition still wants, and it is where the kernel meets `cic-assets`
-for the first time. After it, the path to something playable runs through M6's first verbs — spawn,
-move, order — which are also what [ADR 7002](docs/adr/7002-script-events.md)'s host verbs and first
-real events hang off.
+**[M5, the simulation](docs/milestones/m5-simulation.md), is complete: the kernel mechanics and now
+scenario activation, so a map's declared players and placements construct into hashed, replayable
+kernel state.** The next milestone on the path to something playable is
+[M6, gameplay](docs/milestones/m6-gameplay.md) — its dependencies (M5, M9, M10) are all standing, and
+its first slice is the template set and the first verbs: spawn, move, order. Those verbs are also what
+[ADR 7002](docs/adr/7002-script-events.md)'s host surface and first real events hang off, so M6's
+opening work and the script-event implementation meet in the same place once that record is accepted.
 
 The prerequisite decision earned its keep: [ADR 0007](docs/adr/0007-simulation-arithmetic.md) was
 settled before the kernel was written, so the kernel was written *inside* it — almost entirely integer,
@@ -451,12 +457,13 @@ having to pretend.
 ## Gate status
 
 Formatting, strict lints (`clippy::all` and `clippy::pedantic` as errors, plus `-D warnings` as CI runs
-it), and the full test suite all passes on the pinned toolchain: **820 tests across ten crates**, up from
+it), and the full test suite all passes on the pinned toolchain: **827 tests across ten crates**, up from
 782 across eight. The ninth crate is `cic-math` — ADR 0007's arithmetic, extracted from `cic-script` so the
 kernel can share it — and its five new tests are its own copy of the decision-8 restriction scan plus a
 documentation example; the ten series tests moved with the code rather than being duplicated. The tenth is
-`cic-sim` at 33: the kernel mechanics' unit tests, another copy of the scan, and the replay suite whose
-headline test is the milestone's exit condition run twice. The CI
+`cic-sim` at 40: the kernel mechanics' unit tests, another copy of the scan, the replay suite whose
+headline test is the milestone's exit condition run twice, and seven activation tests including the
+one-moved-placement divergence. The CI
 runner runs the same suite against Mesa's lavapipe.
 
 **No reference moved for the page mip chain, which was not the expectation.** Every committed NVIDIA

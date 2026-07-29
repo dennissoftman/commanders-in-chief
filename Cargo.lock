@@ -343,6 +343,9 @@ dependencies = [
 [[package]]
 name = "cic-sim"
 version = "0.1.0"
+dependencies = [
+ "cic-assets",
+]
 
 [[package]]
 name = "cic-ui"

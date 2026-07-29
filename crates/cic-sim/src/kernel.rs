@@ -7,7 +7,7 @@
 
 use crate::command::Command;
 use crate::hash::StateHasher;
-use crate::id::IdAllocator;
+use crate::id::{IdAllocator, ObjectId};
 use crate::random::Streams;
 use crate::subsystem::{Subsystem, TickContext};
 
@@ -111,6 +111,15 @@ impl Kernel {
     /// Registers a random stream. See [`Streams::register`] for the panics and the reasoning.
     pub fn register_stream(&mut self, name: &'static str, version: u32) {
         self.streams.register(name, version);
+    }
+
+    /// Allocates an identifier outside a tick, for construction-time spawning.
+    ///
+    /// Crate-private on purpose: during a run, identifiers come from the `TickContext` so that
+    /// allocation is part of the tick it happens in. The one legitimate out-of-tick allocator is
+    /// scenario activation, which lives in this crate.
+    pub(crate) fn allocate_id(&mut self) -> ObjectId {
+        self.ids.allocate()
     }
 
     /// Adds a subsystem. **Registration order is execution order**, and it is part of the

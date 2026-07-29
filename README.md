@@ -103,7 +103,7 @@ back, because a display change can leave the person who made it unable to see we
 | `cic-audio` | Mixer behind a replaceable backend, spatialisation, DSP, layered music, sound banks. No audio dependency at all. |
 | `cic-math` | ADR 0007's simulation arithmetic: the permitted operations and the turn-based transcendentals, shared by everything that runs inside the simulation. No dependencies. |
 | `cic-script` | A deterministic sandboxed language for scenario logic: `cic-math` arithmetic, no heap, fuel-metered. |
-| `cic-sim` | The deterministic fixed-tick kernel: ordered subsystems, stable ids, named random streams, command recording, replay, per-tick state hashes. No dependencies yet. |
+| `cic-sim` | The deterministic fixed-tick kernel: ordered subsystems, stable ids, named random streams, command recording, replay, per-tick state hashes, scenario activation. |
 
 ## Asset formats
 
