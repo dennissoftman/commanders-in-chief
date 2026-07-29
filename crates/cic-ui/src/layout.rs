@@ -143,7 +143,13 @@ pub enum Widget {
     TextEntry,
     /// A scrollable set of selectable rows.
     List,
-    /// Switches between sibling pages.
+    /// Selects one of a set. **Does not yet switch pages** — see `docs/milestones/m4-interface.md`.
+    ///
+    /// The selecting half works: it takes focus, `Adjust` moves within the children it has, and the paint
+    /// layer highlights the chosen one. What is missing is hiding the pages that were not chosen, and the
+    /// format has no way to say which node is a page of which strip. Documented here rather than left
+    /// implied, because a control that looks right and does less than it says is what the rest of this
+    /// format's validation exists to refuse.
     Tabs,
     /// Clips its child and holds a scroll offset.
     Scroll,
@@ -205,6 +211,66 @@ impl Widget {
     #[must_use]
     pub const fn needs_id(self) -> bool {
         self.focusable() || self.retains_state()
+    }
+}
+
+/// What a node is *for*, when its widget kind does not already say.
+///
+/// # Why roles rather than appearances
+///
+/// A layout must not name a colour. The same argument as `text_key`: an authored colour is a decision
+/// about how the interface looks spread across every screen file, and changing it later means finding
+/// every literal. So a node names what it *is* — a card, a caption, a warning — and a
+/// [`Theme`](crate::paint::Theme) decides what that looks like.
+///
+/// # Why most nodes have none
+///
+/// A layout tree is mostly structure: rows and columns whose job is to place their children and which
+/// must draw nothing at all. A `Panel` with no style is exactly that, which is why the field is optional
+/// and why the absence means "invisible" rather than "default appearance". Giving every panel a
+/// background would paint over the whole screen in nested rectangles.
+///
+/// A widget kind that already looks like something — a button, a slider, a checkbox — takes no style,
+/// because how a button looks is not a per-node decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum Style {
+    /// A translucent wash over everything beneath, for a modal's backdrop.
+    Scrim,
+    /// A raised surface with a border: a modal's body, or a settings page.
+    Card,
+    /// A hairline rule.
+    Divider,
+    /// Larger text: a screen's heading.
+    Title,
+    /// Smaller, dimmer text: an explanation beneath a control.
+    Caption,
+    /// Text that wants attention, such as a countdown that is about to expire.
+    Warning,
+}
+
+impl Style {
+    /// Whether this role describes a surface, which only a `Panel` can be.
+    #[must_use]
+    pub const fn is_surface(self) -> bool {
+        matches!(self, Self::Scrim | Self::Card | Self::Divider)
+    }
+
+    /// Whether this role describes text, which only a `Label` can carry.
+    #[must_use]
+    pub const fn is_text(self) -> bool {
+        !self.is_surface()
+    }
+
+    /// Whether this role means anything on a given widget kind.
+    #[must_use]
+    pub const fn suits(self, widget: Widget) -> bool {
+        match widget {
+            Widget::Panel => self.is_surface(),
+            Widget::Label => self.is_text(),
+            _ => false,
+        }
     }
 }
 
@@ -274,6 +340,11 @@ pub struct Node {
     /// What kind of control this is.
     #[serde(default)]
     pub widget: Widget,
+    /// What this node is for, when its widget kind does not already say.
+    ///
+    /// Absent means invisible structure on a `Panel` and body text on a `Label`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<Style>,
     /// How children are arranged. Ignored by a node with none.
     #[serde(default)]
     pub direction: Direction,
@@ -494,6 +565,17 @@ fn validate_node<'a>(
         });
     }
 
+    // A surface role on a label or a text role on a panel would draw nothing, which is the same class of
+    // mistake as an action on a panel: the file looks right and the node silently does not.
+    if let Some(style) = node.style
+        && !style.suits(node.widget)
+    {
+        return Err(LayoutError::StyleOnWrongWidget {
+            style,
+            widget: node.widget,
+        });
+    }
+
     // A `range` or a `max_length` on the wrong widget is inert, and inert authoring is the class of
     // mistake this format refuses everywhere else. A slider *without* a range is refused too, because
     // there is no defensible default span for a value the layout knows nothing about.
@@ -681,6 +763,13 @@ pub enum LayoutError {
         /// The container's identifier.
         id: String,
     },
+    /// A style role appeared on a widget kind it means nothing to.
+    StyleOnWrongWidget {
+        /// The role that was named.
+        style: Style,
+        /// The widget that carried it.
+        widget: Widget,
+    },
 }
 
 impl std::fmt::Display for LayoutError {
@@ -747,12 +836,15 @@ impl std::fmt::Display for LayoutError {
             ),
             Self::PageCountMismatch { id, headers, pages } => write!(
                 formatter,
-                "a Tabs has {headers} headers and its pages container {id:?} has {pages}, so at least one \
-                 tab would show nothing"
+                "a Tabs has {headers} headers and its pages container {id:?} has {pages}, so at least one                  tab would show nothing"
             ),
             Self::PagesInsideTabs { id } => write!(
                 formatter,
                 "a Tabs names {id:?} as its pages, and that node is inside the strip itself"
+            ),
+            Self::StyleOnWrongWidget { style, widget } => write!(
+                formatter,
+                "the {style:?} role means nothing on a {widget:?} and would draw nothing"
             ),
         }
     }
@@ -768,7 +860,7 @@ mod tests {
 
     use super::{
         Align, Direction, Justify, Layout, LayoutError, MAX_DEPTH, MAX_NODES, Node, Range, Sizing,
-        Widget,
+        Style, Widget,
     };
     use crate::Action;
     use crate::geometry::Insets;
@@ -1150,6 +1242,59 @@ mod tests {
         })
         .validate();
         assert_eq!(accepted, Ok(()));
+    }
+
+    #[test]
+    fn a_style_role_must_suit_the_widget_that_carries_it() {
+        // Same posture as an action on a panel: a surface role on a label or a text role on a panel
+        // would draw nothing, and the file would look correct.
+        let styled = |widget: Widget, style: Style| {
+            wrap(Node {
+                id: widget.needs_id().then(|| format!("{widget:?}")),
+                widget,
+                style: Some(style),
+                range: (widget == Widget::Slider).then_some(Range {
+                    min: 0.0,
+                    max: 1.0,
+                    step: 0.1,
+                }),
+                ..Node::default()
+            })
+            .validate()
+        };
+        for style in [Style::Scrim, Style::Card, Style::Divider] {
+            assert!(
+                styled(Widget::Panel, style).is_ok(),
+                "{style:?} suits a panel"
+            );
+            assert_eq!(
+                styled(Widget::Label, style),
+                Err(LayoutError::StyleOnWrongWidget {
+                    style,
+                    widget: Widget::Label
+                })
+            );
+        }
+        for style in [Style::Title, Style::Caption, Style::Warning] {
+            assert!(
+                styled(Widget::Label, style).is_ok(),
+                "{style:?} suits a label"
+            );
+            assert_eq!(
+                styled(Widget::Panel, style),
+                Err(LayoutError::StyleOnWrongWidget {
+                    style,
+                    widget: Widget::Panel
+                })
+            );
+        }
+        // How a button looks is not a per-node decision, so no role suits one.
+        for widget in [Widget::Button, Widget::Slider, Widget::TextEntry] {
+            assert!(
+                styled(widget, Style::Card).is_err(),
+                "{widget:?} must take no role"
+            );
+        }
     }
 
     #[test]

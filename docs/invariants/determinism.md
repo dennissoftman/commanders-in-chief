@@ -33,7 +33,17 @@ the same requirement: the same inputs must produce the same state on every machi
 - Subsystem state hashes are computed per tick and versioned, so a desync reports *which* subsystem
   diverged and on which tick rather than only that one did.
 - Floating-point behaviour is pinned where it reaches simulation state. Anything that cannot be
-  pinned across platforms stays in presentation.
+  pinned across platforms stays in presentation. **How** it is pinned is
+  [ADR 0007](../adr/0007-simulation-arithmetic.md): simulation state is `f64`, only correctly-rounded
+  operations may touch it, and the transcendentals are the project's own rather than the platform's —
+  because what differs between platforms is the library, not the arithmetic.
+
+## What is deliberately outside this
+
+Presentation. A frame may compute anything it likes, in any precision, with any library, because nothing it
+produces reaches simulation state — which is what the rule above about randomness is protecting. A physics
+engine is the clearest case and the most tempting one to get wrong:
+[ADR 0008](../adr/0008-physics-engine.md) keeps it there.
 
 ## Testing
 

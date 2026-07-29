@@ -14,10 +14,12 @@ The measurement is the reason and the decision is recorded with a date and an ow
 [M3's charter](docs/milestones/m3-renderer.md#charter). What is *not* acceptable, and was true of this
 document twice, is a line reading as though something were done.
 
-**M4 is under way.** A `cic-ui` crate holds the [layout format](docs/formats/ui-layout.md), a two-pass
-solver, a string table, the closed action set, and widget behaviour: retained state keyed by node id,
-semantic input routing with focus and keyboard navigation, input-method composition, and now **tabs that
-switch pages** rather than merely holding a number. Nothing draws it yet, and there is no screen stack.
+**M4 is complete too.** A `cic-ui` crate holds the [layout format](docs/formats/ui-layout.md), a two-pass
+solver, a string table, the closed action set, widget behaviour with retained state and input-method
+composition, the screen stack with transactional settings, animated screen changes, and a paint layer;
+`cic-render` draws it, with a typeface authored in this tree. **The shell navigates and it is on screen** —
+four authored screens, covered by six committed reference captures and driven by hand in a window. Its last
+open charter line was `tabs`, which selected and switched nothing, and **tabs now switch pages**.
 
 Landing M3's last five renderer items turned up a defect every committed reference had been rendered
 through, so **ten of the twenty-two references changed** — see the antialiasing entry below.
@@ -44,8 +46,10 @@ What works:
 - **Shaders compose from named chunks** ([`shader`](crates/cic-render/src/shader.rs)). WGSL has no include
   mechanism, and without composition every pass needing the cascade selection had to share one file with
   it — which is how a single shader reached 620 lines. Thirteen programs are assembled from sixteen chunks;
-  a test fails if any chunk is named by no program, and five programs are marked `staged` so work held for
-  a later milestone is distinguishable from dead code.
+  a test fails if any chunk is named by no program, and four programs are marked `staged` so work held for
+  a later milestone is distinguishable from dead code. The mechanism has now done its job once in the
+  intended direction: `ui` was staged for M4 and went live when that milestone bound it, with nothing to
+  clean up because it had never rotted.
 - **An atmosphere** ([`environment`](crates/cic-render/src/environment.rs)) derived from two authored
   numbers, an hour and a weather state: the sun's direction and colour, ambient, sky, fog, and cloud
   coverage all follow from them. Weather is blendable scalars rather than an enum of presets.
@@ -192,6 +196,16 @@ What works:
   - Its blur radius came *down* rather than up, against expectation — a wider kernel over coarser noise was
     the guess, and the captures said 3x3 half-resolution taps show no more noise than the old 5x5 while
     landing closer to the frame they replace.
+- **A navigable shell** ([`cic-ui`](crates/cic-ui), drawn by [`ui`](crates/cic-render/src/ui.rs)): a main
+  menu, a settings screen, skirmish setup, and a quit modal, authored as
+  [layout files](content/ui) and drawn through one pipeline and one draw call per screen. Buttons,
+  labels, checkboxes, sliders, text entry with a caret and an input-method composition, lists and a
+  scrollable container all behave and all draw; a tab strip selects but does not yet switch pages. Settings are **applied then confirmed**, with a 15-second
+  window after which the change takes itself back — because a display change can leave the person who made
+  it unable to see the screen well enough to undo it. Screens **fade and slide** as they change, over a
+  duration a host chooses and which defaults to none: the departing screen stays alive until the change
+  ends because it is still being drawn, and input reaches the arriving one immediately and the departing
+  one never.
 - Windowed presentation, driven by the reusable camera:
 
 ```bash
@@ -211,21 +225,88 @@ minified.
 
 ## Next verified step
 
-**M4's interface layer, continued.** Its foundation has landed — see
-[M4](docs/milestones/m4-interface.md) — as a `cic-ui` crate depending on nothing but `serde`: the
-[layout format](docs/formats/ui-layout.md), a two-pass solver producing pixel-snapped rectangles, a
-string table, the closed action set, widget behaviour, and tab pages. What is next, in order:
+**M3 and M4 are both complete, so the next milestone is
+[M5, the simulation](docs/milestones/m5-simulation.md).** The two lines that were open in this document are
+closed: `tabs` switched no pages and now does, and terrain level of detail is closed by amendment with the
+measurement as its reason. Both had been recorded here as outstanding rather than left reading as done,
+which is the second and third time a charter claimed something until it was checked.
 
-1. **The screen stack**, and the transactional settings apply the milestone's design notes require: a
-   display change has to survive a revert timer rather than depend on the user being able to see well
-   enough to click undo.
-2. **Drawing it.** `ui.wgsl` is already in the shader set marked `staged` for this, and the capture
-   harness that will cover the result now runs in CI — which is what makes it worth covering. Text
-   rendering is the substantial part.
+M5's one prerequisite decision is made: [ADR 0007](docs/adr/0007-simulation-arithmetic.md) settles how
+floating point is pinned where it reaches simulation state, which had to be answered before any gameplay
+maths was written rather than after a desync appeared. Simulation state is `f64`, only correctly-rounded
+operations may touch it, and the transcendentals are the project's own — because the thing that differs
+between platforms is the C library, not the arithmetic. Fixed-point was rejected: it charges for
+determinism IEEE-754 already provides and still leaves the trigonometry to be written. `f64` over `f32` is
+for accumulation headroom and explicitly not for determinism, since the two are equally reproducible.
 
-**Widget behaviour and input routing have landed**, including input-method composition — because a single
-character per keystroke is the Latin case, and assuming it is the only one is how an engine ends up unable
-to accept CJK text without being rebuilt. Retained state keys off node ids, which is why the format now
+One item is still outstanding from M3 and is described below: **a view-driven detail request**, which is
+what decides *which* ground gets a page. It is not a charter line, and the page mip chain is what showed it
+matters — a page's chain is four levels deep and past that a page saturates, so ground the residency map
+should never have staged is the only ground where the cache still aliases.
+
+**The shell runs in a window**, which this project treats as a separate obligation from a green capture
+suite — the one bug the headless suite structurally could not catch appeared the first time a window
+opened, and none of hover following a pointer, focus moving under Tab, a caret advancing as somebody
+types, or a countdown actually counting is reachable from a capture:
+
+```bash
+cargo run -p cic-render --example shell --release
+```
+
+Change the resolution scale, press Apply, and do nothing: fifteen seconds later the setting comes back on
+its own. Screens fade and slide as they change, which is the other thing no still image can judge. The
+window also exercised what a capture at scale 1.0 could not — it opened at **1.5**, which is what prompted
+the density reference.
+
+**Drawing landed in three parts, split where the mistakes are.** A **paint layer with no GPU in it**
+decides how the interface looks — which colour a focused button takes, where a checkbox's indicator sits,
+how far along its track a slider's knob is — so all of that is testable by asserting on a list rather than
+by capturing an image. A layout names a **role** and never a colour, the same argument the string table
+makes about text. Colours are authored as sRGB bytes and leave as **linear** floats, because a shader
+writing to an sRGB target must emit linear values and passing the bytes through is what makes every
+surface too bright — invisible in a test that compares numbers to themselves.
+
+**The typeface is authored in this tree**, and the licence is the reason. A font file is a binary asset
+with its own obligations and this repository exists to have one set; a *system* font makes the rendered
+result depend on which machine drew it, which a byte-comparison harness cannot tolerate. So
+`cic-render/src/text.rs` holds ninety-five glyphs as lines and elliptical arcs on one integer grid, given
+width by measuring each pixel's distance to the nearest stroke — a stroke has no inside, so there is no
+scanline pass and no winding rule, and coverage falling to zero across the last pixel of the half-width
+*is* the antialiasing. It reads as drafting lettering, which suits the subject. It covers Latin only: a
+character with no glyph draws as a hollow box, which is visible rather than silent, and a loaded-font path
+can go behind the same type later. See [LICENSING.md](LICENSING.md) for why that seam exists.
+
+Text metrics also close a loop the solver left open. An `Auto`-sized label is now as wide as its own text,
+and `ime_cursor_area` narrows from **the whole field to the caret** — on a wide field those are a long way
+apart, and the candidate window appearing beside the box rather than beside the character is what the
+milestone flagged.
+
+Two findings came out of drawing it. The **specimen sheet** caught two letterforms that were wrong — an
+`e` with its aperture at the top, because an arc authored against the mathematical convention comes out
+mirrored on a Y-down grid — and no assertion over coverage bytes would have shown either. And running four
+capture tests in parallel **crashed the driver**: four devices on one adapter, created and destroyed
+concurrently, gave an access violation rather than a failed test, so the run reported nothing at all about
+the images. The existing capture targets already shared one device through a `OnceLock`; this one now does
+too.
+
+**The screen stack and transactional settings landed before it.** A settings apply is undone by a machine
+rather than by a user: a change goes in force, a 15-second window opens, and the *absence* of a
+confirmation is what brings the previous settings back. That inversion is the whole point — a display
+change can leave the person who made it unable to see the screen well enough to click undo, so an undo
+that depends on them clicking is not an undo. Three consequences, all of them about leaving: applying
+must not move the stack, since the revert window is only useful while the confirm button is reachable;
+closing the settings screen with a change unconfirmed reverts it, since nobody will confirm on a screen
+that is not open; and a second apply inside the window keeps the *first* restore point, because what is
+worth returning to is the last state somebody confirmed and not the previous attempt at replacing it.
+
+Each open screen keeps its own retained state, which is what a stack buys over one current screen, and a
+screen appears at most once — navigation is by destination, so asking for one already open unwinds to it.
+That also removes a bound that would otherwise have to be invented: input can push screens, and with no
+duplicates the depth cannot exceed the number of screens the engine defines.
+
+**Widget behaviour and input routing landed before it**, including input-method composition — because a
+single character per keystroke is the Latin case, and assuming it is the only one is how an engine ends up
+unable to accept CJK text without being rebuilt. Retained state keys off node ids, which is why the format
 *requires* one on any widget holding state or taking focus rather than treating it as optional.
 
 **Tabs switch pages**, which they did not before: `Widget::Tabs` tracked a number and nothing acted on it,
@@ -251,32 +332,37 @@ design.
 ## Gate status
 
 Formatting, strict lints (`clippy::all` and `clippy::pedantic` as errors, plus `-D warnings` as CI runs
-it), and the full test suite all passes on the pinned toolchain: **418 tests across six crates**. The CI
+it), and the full test suite all passes on the pinned toolchain: **543 tests across six crates**. The CI
 runner runs the same suite against Mesa's lavapipe.
 
-**No reference moved for the mip chain, which was not the expectation.** Every committed NVIDIA reference
-still matches byte-for-byte within tolerance, including `terrain-from-pages.png` — the paged frame changed by
-a mean of 0.004 and a worst case of 5, which is inside what the comparison allows in a small region while
-still failing on four steps across most of a frame. The grazing-angle scene the chain is verified on
-deliberately has **no committed reference**: its claim is a statistic about adjacent-pixel energy rather than
-an image, and adding a reference scene would force a lavapipe capture from the runner for nothing the numbers
-do not already say. Whether lavapipe's own filtering keeps `terrain-from-pages.png` inside tolerance is the
-one thing this branch cannot check locally.
+**No reference moved for the page mip chain, which was not the expectation.** Every committed NVIDIA
+reference still matches within tolerance, including `terrain-from-pages.png` — the paged frame changed by a
+mean of 0.004 and a worst case of 5, which is inside what the comparison allows in a small region while still
+failing on four steps across most of a frame. No authored screen uses a tab strip either, so none of the six
+interface references moved when tabs learned to switch pages. The grazing-angle scene the chain is verified
+on deliberately has **no committed reference**: its claim is a statistic about adjacent-pixel energy rather
+than an image, and a new reference scene would force a lavapipe capture from the runner for nothing the
+numbers do not already say. Whether lavapipe's own filtering keeps `terrain-from-pages.png` inside tolerance
+is the one thing that cannot be checked off the runner.
 
-**The lavapipe reference set still has to be regenerated on the runner before CI can pass.** The half-pixel
-fix above changed ten of the eleven scenes, and those images can only be rendered where lavapipe is — so a
-branch carrying that fix fails CI once, with the captures and difference images uploaded as an artifact for
-review, which is the flow the harness is built around for a deliberate rendering change. The NVIDIA set is
-regenerated and each image was opened and checked. The rendering ones take about eleven
-seconds there, which is what makes this affordable on every pull request. Captures go to `target/tmp/` and
+The rendering tests take about eleven seconds there, which is what makes this affordable on every pull
+request. Captures go to `target/tmp/` and
 upload as an artifact on every outcome, so a harness failure's capture and amplified difference image can
 be looked at rather than being stranded on the runner.
 
-Sixteen references per adapter cover terrain layers, instanced models, the deferred chain, water, water
+**A new interface reference has to be generated on the runner before CI can pass.** They can only be
+rendered where lavapipe is, so a branch adding a scene fails CI once with the captures uploaded as an
+artifact for review — the flow the harness is built around for a deliberate rendering change, and the same
+one the half-pixel fix and the five model captures went through. A missing reference is deliberately a
+failure rather than a skip, because a silent pass would remove the coverage it was providing.
+
+Sixteen references cover the scene: terrain layers, instanced models, the deferred chain, water, water
 under a glancing sun, cloud shadows, fog, wet ground, snow, an antialiased frame, a supersampled one, a
 temporally accumulated one, a normal-mapped model, a metallic one, alpha-tested foliage, and a swaying
-canopy — one set for an NVIDIA RTX 4080 SUPER and one for lavapipe, each generated on its own machine and
-looked at before being committed.
+canopy. **Six more cover the interface**: the main menu, the settings screen with every widget kind it
+has, that same screen at one and a half times the pixel density, a modal over the screen it covers, a
+scrolled container clipped to itself, and a screen change partway through with both screens drawn. Each was generated on its own machine and looked at before being
+committed — one set for an NVIDIA RTX 4080 SUPER, and one for lavapipe complete but for the interface five.
 
 The render tests still skip rather than fail when no adapter is available, so a developer machine with no
 GPU reports honestly instead of red. **CI sets `CIC_REQUIRE_ADAPTER`, which makes the same situation a

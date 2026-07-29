@@ -3,23 +3,26 @@
 A retained user-interface layer: layout, widgets, input routing, and the screen stack the game is
 navigated through.
 
-**Status:** In progress. The layout foundation and widget behaviour have landed — the format, the solver,
-the string table, the action set, retained state, and input routing including input-method composition —
-and **tabs now switch pages** rather than merely holding a number. The screen stack and drawing are still
-ahead.
+**Status:** Exit condition met, and the charter is now complete. The layout foundation, widget behaviour,
+the screen stack with transactional settings, drawing, and animated screen changes have all landed, the four
+authored screens are covered by the M3 capture harness, and **tabs switch pages** — the one widget that was
+half a widget.
 
 ## Charter
 
 - A layout model of the project's own design, defined in a text format that is authored and reviewed
   like the scenario format is. **Done** — see [Landed](#landed).
 - A widget set covering what an RTS shell actually needs: buttons, labels, lists, sliders, checkboxes,
-  text entry, tabs, and a scrollable container. **Behaviour done; none of them draws yet.** Tabs
-  switch pages as well as track a selection — see [Landed](#landed).
+  text entry, tabs, and a scrollable container. **Done**, behaviour and drawing both. `tabs` was the
+  exception for a while and was half a widget: it selected, highlighted the chosen tab, and switched
+  nothing, which is the failure mode this format's validation exists to prevent everywhere else. Found by
+  auditing the charter rather than by anything failing, and now closed — see [Landed](#landed).
 - Retained state across frames, so a scroll position or a text cursor survives a redraw. **Done**, keyed
   by node id, which is why the format requires one on every widget that holds state.
 - Input routing with focus, hover, and keyboard navigation, expressed as semantic events rather than
   raw key codes — the same separation the camera uses. **Done**, including input-method composition.
-- A screen stack: push a modal, pop back, and have the screen underneath still be there.
+- A screen stack: push a modal, pop back, and have the screen underneath still be there. **Done** — see
+  [Landed](#landed).
 - Resolution and DPI independence, because a fixed-pixel layout is a bug on every display that is not
   the developer's. **Done**, and structural rather than added: a layout is authored in logical units and
   physical pixels exist only on the way out of the solver.
@@ -78,6 +81,11 @@ ahead.
 - **Tabs that switch pages.** A `tabs` node's children are its *headers*; its `pages` field names the
   container holding the bodies. Before this, `Widget::Tabs` tracked a number and nothing acted on it — the
   format's own comment said "switches between sibling pages" and nothing did.
+  - **The two readings of this were genuinely unsettled, and the one not taken is worth stating.** Either a
+    strip's children are the headers and a new field links the pages, or a strip's children are the *pages*
+    and the strip is drawn from them — which costs no format field but makes `Tabs` a switcher rather than a
+    strip, and would mean the highlight the paint layer draws was highlighting the wrong node. The first was
+    taken because a header and a page want different boxes and the format should say which is which.
   - **The pages cannot be the strip's children**, because a header sits in a strip and a page fills the
     body, and no single container arranges both. So the strip names what it switches, and validation checks
     the two agree: three headers over two pages is a screen whose third tab shows nothing, and neither node
@@ -88,8 +96,15 @@ ahead.
     alternative was leaving each consumer to filter, and hit testing, keyboard navigation and drawing all
     read the same solved sequence: one of the three forgetting is a control the user cannot see taking a
     click. A hidden page is still solved, because its rectangles are correct for when its tab is chosen.
-  - **So a tab change is a relayout**, exactly as a resize is. That is the cost of the decision and it is
-    the right way round: solving is cheap and already happens per frame.
+  - **So a tab change is a relayout**, exactly as a resize is, and the shell does it: `Shell::handle`
+    compares each strip's chosen page before and after an event and re-solves when one moved. That check
+    earns its place — a tab strip usually carries no action, so the routing would otherwise have returned
+    idle and left the cached layout showing the page the user had just navigated away from. Compared rather
+    than done unconditionally, because solving every open screen on every pointer move is what the cached
+    layout exists to avoid.
+  - **The paint layer skips a page that is not showing** by the same flag, which is what keeps "on screen"
+    one answer rather than three. It had to: all the pages overlap, so a walk that drew every node would
+    paint the last-authored page over the chosen one.
   - **A pointer names a tab and the keyboard steps it.** A strip is one focusable control, so a release
     inside it is resolved against its own children — without that, a tab strip could only be driven from the
     keyboard and clicking the third tab would select whatever the arrow keys had last left behind. A release
@@ -116,13 +131,107 @@ ahead.
     naive implementation reaches for, and they land inside a multi-byte character the first time somebody
     types one — which panics rather than merely looking wrong.
 
+- **The screen stack and the transactional settings** the design notes below call for, plus the shell
+  that routes between them.
+  - **Each open screen keeps its own retained state**, which is what a stack buys over one current
+    screen: closing a modal leaves the menu underneath exactly as it was, and a single current screen
+    means rebuilding it from nothing. Rebuilding is not merely wasteful, it is *visible* — everything
+    the user had done that the host does not separately own is gone.
+  - **A screen appears at most once.** Navigation is by destination, so asking for one already open
+    unwinds to it rather than stacking a duplicate nobody can reach. That also removes a bound that
+    would otherwise have to be invented: input can push screens, and anything input can grow without a
+    limit is a leak reachable from a keyboard. With no duplicates the depth cannot exceed the number of
+    screens the engine defines, so the limit is structural rather than a number somebody chose.
+  - **A settings apply is undone by a machine, not by a user.** A change goes in force and a 15-second
+    window opens; the *absence* of a confirmation is what brings the previous settings back. Confirming
+    is one interaction, failing to confirm needs none — which is the only shape of undo that works when
+    the user cannot see the screen.
+  - **A second apply inside the window keeps the first restore point.** The subtle one: what is worth
+    returning to is the last state somebody confirmed, not the previous attempt at replacing it.
+    Overwriting it leaves two bad display modes in a row with a restore point holding the first bad one.
+  - **Confirming confirms what is in force, not what is staged.** A user can go on editing while the
+    countdown runs, and confirming their unapplied edits would put settings into force that nobody had
+    seen the effect of — the exact failure this mechanism exists to prevent.
+  - **Three rules about leaving**, which is where all the interesting routing turned out to be:
+    applying must not move the stack, since the revert window is only useful while the confirm button is
+    reachable; closing the settings screen with a change unconfirmed reverts it, since nobody will
+    confirm on a screen that is not open; and going back at the root asks whether to leave rather than
+    doing nothing, because Escape on the main menu meaning nothing at all reads as a broken key.
+  - **Time arrives as an argument.** Nothing here reads a clock, so the whole window is exercised in
+    microseconds. Which clock a host passes matters, and it is the one countdown in the engine that must
+    **not** be scene time: a display mode producing no frames advances no frame counter, and a revert
+    that depends on rendering succeeding cannot fire in the case it exists for.
+  - **The outcome of an event is a struct, not an enum.** One action can genuinely do two things a host
+    must react to — going back from settings both navigates *and* changes what is in force — and an enum
+    would force dropping one of them.
+
+- **Drawing**, in three parts, split where the mistakes are.
+  - **A paint layer with no GPU in it** (`cic_ui::paint`). Which colour a focused button takes, where a
+    checkbox's indicator sits, how far along its track a slider's knob is, how a scroll offset moves a
+    container's contents — all arithmetic over a solved layout, and all of it testable by asserting on a
+    list rather than by capturing an image.
+  - **A layout names a role, never a colour.** The same argument the string table makes about text: an
+    authored colour is a decision about appearance spread across every screen file. Six roles, three for
+    a panel and three for a label, and a role that does not suit its widget is refused.
+  - **Colours are sRGB bytes in and linear floats out.** A shader writing to an sRGB target must emit
+    linear values; passing `byte / 255` through is what makes every surface too bright, and it is
+    invisible in a test that compares numbers to themselves.
+  - **The clip travels with every primitive** rather than as a push-and-pop marker, so no consumer has to
+    replay a state machine and leak a scissor into the rest of the frame.
+- **An authored typeface** (`cic_render::text`), which is the substantial part.
+  - **Written here rather than loaded**, and the licence is the reason. A font file is a binary asset with
+    its own obligations, and this tree exists to have one set; a *system* font makes the rendered result
+    depend on which machine drew it, which a byte-comparison harness cannot tolerate. See
+    [LICENSING.md](../../LICENSING.md).
+  - **Stroked rather than filled.** Ninety-five glyphs as lines and elliptical arcs on one integer grid,
+    given width by measuring each pixel's distance to the nearest stroke. A stroke has no inside, so no
+    scanline pass and no winding rule — coverage falling to zero across the last pixel of the half-width
+    *is* the antialiasing.
+  - **Its limitation is stated, not discovered.** No CJK glyphs, and a character without one draws as a
+    hollow box. The composition model in `cic-ui` is unaffected and not wasted: that is the expensive
+    thing to retrofit, and a loaded font can go behind the same type.
+  - **The atlas declares its sizes.** A lazily-grown one re-uploads its texture mid-frame; declared up
+    front, the drawing path only reads.
+- **A caret-tight IME cursor area.** `Interface::ime_cursor_area` reports the field because that module
+  cannot measure text; `Painter::ime_cursor_area` knows the caret's offset along the string, and on a wide
+  field those are a long way apart.
+- **The four authored screens**, in `content/ui/`, and the capture tests load *those* rather than fixtures
+  — because a fixture can be the bug, twice already in this tree, and a layout written to be photographed
+  would go on passing while the screens the game navigates rotted.
+
+- **Animated screen changes** (`cic_ui::transition`), which the charter does not ask for and which the
+  screen stack could not have been given from outside.
+  - **The stack keeps the departing screen alive**, because `pop` otherwise drops its state the instant
+    navigation happens and there would be nothing left to draw on the way out. A host keeping its own copy
+    would be duplicating what the stack had just discarded, and that copy goes stale.
+  - **The curve eases out, not in and out.** A symmetric curve barely moves for the frames a user is
+    deciding whether the interface responded, so it reads as latency even though it finishes at the same
+    moment.
+  - **A duration of zero is an ordinary case**, and it is two things at once: the default, and what a
+    reduce-motion preference maps to. A special path for it would be one nobody exercises.
+  - **Input reaches the arriving screen at once and the departing one never**, which falls out of routing
+    to the top of the stack. Getting either wrong is a click landing on something fading out, or the
+    animation's duration added to the latency of every navigation.
+  - **A transition is an opacity and an offset over a primitive list**, applied by the paint layer, so the
+    renderer needed no change at all. That was the test of whether it was in the right layer.
+  - **A non-finite clock reading completes the change**, which is the *opposite* of the choice the settings
+    revert window makes on the same input — because the hazards are opposite. There, never firing leaves
+    somebody unable to see; here, never finishing leaves the interface stuck half-faded between two
+    screens. Both resolve toward the state the user is not trapped in.
+
 ## Remaining
 
-- **The screen stack**, and the transactional settings apply the design notes below require.
-- **Drawing.** `ui.wgsl` is already in the shader set marked `staged`, and the M3 capture harness is what
-  will cover the rendered result — which is now worth having, since it runs in CI. Text rendering is the
-  substantial part, and it is also what would let `ime_cursor_area` narrow from the field to the caret.
-- **A caret-tight IME cursor area**, which needs the text metrics drawing will bring.
+- Nothing. The charter's last open line was `tabs`, and it is closed — see [Landed](#landed).
+  - `scroll` is unused by the four authored screens and is deliberately not listed as a gap: it is
+    complete — an offset, a clip, a proportional indicator — and it has a capture of its own. Being unused
+    is not the same as being unfinished, which is exactly the distinction `tabs` failed for a while.
+
+Two further things noted for later, neither of them M4's:
+
+- **A loaded-font path**, whenever text beyond Latin is needed. The seam is [`Font`], and the licence
+  question is answered in [LICENSING.md](../../LICENSING.md).
+- **A themed file.** The theme is a struct with a default; making it authored data is a small change and
+  nothing yet needs it.
 
 ## Exit condition
 
@@ -130,9 +239,23 @@ A navigable shell: main menu, settings with transactional apply-and-rollback, an
 screen that can launch a map. Layout and widget behaviour covered by tests; the rendered result covered
 by the M3 capture harness.
 
-**Not met.** Layout and widget behaviour are covered — 96 tests across the format, the solver, retained
-state, input routing, composition, tab pages, the string table and the action set — but there is no shell
-yet, so nothing is navigable and nothing is drawn.
+**Met.** 185 tests in `cic-ui` cover the format, the solver, retained state, input routing, composition,
+tab pages, the string table, the action set, the screen stack, the settings transaction, the paint layer,
+screen transitions, and the routing between them; 36 in `cic-render` cover the typeface, the rasteriser, the
+atlas, the draw list, and the authored screens' own strings and geometry;
+and six committed reference images cover the rendered result — the main menu, the settings screen with
+every widget kind it has, that same screen at one and a half times the pixel density, a modal over the
+screen it covers, a scrolled container clipped to itself, and a screen change partway through with both
+screens drawn.
+
+**And it runs in a window**, which this project treats as a separate obligation: `cargo run -p cic-render
+--example shell`. The window opened at a scale of 1.5, which is what prompted the density reference — a
+capture at 1.0 cannot show that a theme's sizes were multiplied, an atlas rebuilt, and every quad still
+landed on whole pixels.
+
+No authored screen uses a tab strip yet, so nothing in the six references moved when tabs learned to switch
+pages. That is worth stating rather than leaving to inference: it is the reason this change is covered by
+unit tests and by no new capture.
 
 ## Design notes
 

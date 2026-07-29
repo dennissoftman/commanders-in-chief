@@ -1,0 +1,55 @@
+{
+  "format_version": 1,
+  "root": {
+    "style": "card",
+    "width": { "fill": 1 },
+    "height": { "fill": 1 },
+    "direction": "column",
+    "justify": "center",
+    "align": "center",
+    "gap": 14.0,
+    "padding": { "left": 48.0, "top": 48.0, "right": 48.0, "bottom": 48.0 },
+    "children": [
+      {
+        "widget": "label",
+        "style": "title",
+        "text_key": "menu.title",
+        "width": { "fixed": 320.0 },
+        "height": { "fixed": 44.0 }
+      },
+      {
+        "widget": "label",
+        "style": "caption",
+        "text_key": "menu.subtitle",
+        "width": { "fixed": 320.0 },
+        "height": { "fixed": 20.0 },
+        "align": "center"
+      },
+      { "style": "divider", "width": { "fixed": 320.0 }, "height": { "fixed": 1.0 } },
+      {
+        "id": "menu_skirmish",
+        "widget": "button",
+        "text_key": "menu.skirmish",
+        "width": { "fixed": 240.0 },
+        "height": { "fixed": 38.0 },
+        "action": "open_skirmish_setup"
+      },
+      {
+        "id": "menu_settings",
+        "widget": "button",
+        "text_key": "menu.settings",
+        "width": { "fixed": 240.0 },
+        "height": { "fixed": 38.0 },
+        "action": "open_settings"
+      },
+      {
+        "id": "menu_quit",
+        "widget": "button",
+        "text_key": "menu.quit",
+        "width": { "fixed": 240.0 },
+        "height": { "fixed": 38.0 },
+        "action": "open_quit_confirm"
+      }
+    ]
+  }
+}

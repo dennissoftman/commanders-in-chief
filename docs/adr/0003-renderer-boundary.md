@@ -10,12 +10,18 @@ all four.
 
 ## Decision
 
-Three boundaries, and one testing rule.
+Four boundaries, and one testing rule.
 
 1. **The renderer consumes assets; assets never know about rendering.** The dependency runs
    `cic-assets → cic-render` and never back.
 2. **The camera is a standalone model with no window, input, or GPU dependency.** Callers translate their
    own bindings into semantic intents and supply ground heights through a trait.
+2b. **The renderer draws the interface; the interface model never knows how.** Added in M4. The dependency
+   runs `cic-ui → cic-render`, the same direction and for the same reason as the asset one, and the split
+   inside it follows where the mistakes are rather than the crate boundary: which colour a focused button
+   takes, where a checkbox's indicator sits and how far along its track a slider's knob is are all
+   arithmetic over a solved layout, so they live in `cic-ui` where they can be asserted on rather than
+   photographed. What is left in `cic-render` is a glyph rasteriser, a vertex buffer and a draw call.
 3. **GPU-independent bookkeeping is separated from GPU work.** Deciding which terrain pages to stage and
    evict for a given view is arithmetic, and lives in a module that can be tested without a device.
 4. **Shaders are validated in tests, by the same WGSL front end the GPU backend uses.**
@@ -38,6 +44,9 @@ frame. Parsing and validating every shader in a test moves that failure to where
 
 - Shaders are compiled into the binary with `include_str!` rather than loaded from disk, so a build cannot
   disagree with the files next to it.
+- **The interface font is compiled in too, and authored here.** A font file carries a licence of its own,
+  and a *system* font would make a captured frame depend on which machine drew it — which is the one thing
+  the capture harness below cannot tolerate. See [LICENSING.md](../../LICENSING.md).
 - The shader front end is a dev-dependency: nothing at runtime needs to parse WGSL, since the GPU backend
   does that itself.
 - Residency logic exposes types that no pipeline consumes yet. They are public API rather than

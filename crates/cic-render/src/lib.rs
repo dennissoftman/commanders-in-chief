@@ -48,6 +48,13 @@
 //!   per page instead of once per fragment per frame.
 //! - **Texture resources** ([`resource`]), which deduplicate decoded images by content hash under
 //!   explicit byte budgets.
+//! - **The interface font** ([`text`]): a stroked typeface authored in this tree, a coverage rasteriser,
+//!   and a glyph atlas. Written here rather than loaded because a font file carries a licence of its own
+//!   and a *system* font would make a captured frame depend on which machine drew it — see
+//!   [LICENSING.md](../../../LICENSING.md).
+//! - **Interface drawing** ([`ui`]): `cic_ui`'s paint primitives turned into vertices, and the text
+//!   measurement the layout solver takes through a trait. Everything about how the interface *looks* is
+//!   in `cic_ui::paint`, which needs no GPU; what is here is a vertex buffer and a draw call.
 //!
 //! # What is next
 //!
@@ -71,8 +78,10 @@ pub mod shadow;
 pub mod terrain;
 pub mod terrain_page;
 pub mod terrain_virtual;
+pub mod text;
 pub mod texture;
 pub mod timing;
+pub mod ui;
 pub mod view;
 pub mod water;
 
@@ -94,8 +103,10 @@ pub use shader::{PROGRAMS, Program, compose};
 pub use shadow::{CASCADE_COUNT, Cascade, fit_cascades};
 pub use terrain::{Animation, DirectionalLight, LayerColour, LayerMaterial, TerrainRenderer};
 pub use terrain_page::TerrainPageCache;
+pub use text::{Coverage, Font, Glyph, GlyphAtlas, Placed};
 pub use texture::{ColourSpace, TextureArray, TextureImage};
 pub use timing::{FrameTimings, PassTimer, TimedPass};
+pub use ui::{DrawList, UiMetrics, UiRenderer, atlas_sizes};
 pub use view::{Projection, view_projection};
 pub use water::{WaterBody, WaterMaterial, WaterSurface};
 

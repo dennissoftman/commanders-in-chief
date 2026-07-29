@@ -1,0 +1,57 @@
+{
+  "format_version": 1,
+  "root": {
+    "style": "scrim",
+    "width": { "fill": 1 },
+    "height": { "fill": 1 },
+    "direction": "stack",
+    "align": "center",
+    "children": [
+      {
+        "style": "card",
+        "width": { "fixed": 340.0 },
+        "height": { "fixed": 150.0 },
+        "direction": "column",
+        "gap": 14.0,
+        "padding": { "left": 24.0, "top": 24.0, "right": 24.0, "bottom": 24.0 },
+        "children": [
+          {
+            "widget": "label",
+            "text_key": "quit.question",
+            "height": { "fixed": 24.0 },
+            "align": "center"
+          },
+          {
+            "widget": "label",
+            "style": "caption",
+            "text_key": "quit.note",
+            "height": { "fixed": 18.0 },
+            "align": "center"
+          },
+          { "height": { "fill": 1 } },
+          {
+            "direction": "row",
+            "height": { "fixed": 34.0 },
+            "gap": 12.0,
+            "children": [
+              {
+                "id": "quit_cancel",
+                "widget": "button",
+                "text_key": "quit.stay",
+                "width": { "fill": 1 },
+                "action": "back"
+              },
+              {
+                "id": "quit_confirm",
+                "widget": "button",
+                "text_key": "quit.leave",
+                "width": { "fill": 1 },
+                "action": "quit"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

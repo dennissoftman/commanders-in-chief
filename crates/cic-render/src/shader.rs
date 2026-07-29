@@ -16,12 +16,15 @@
 //!
 //! # Why `staged` is a field and not a comment
 //!
-//! Four programs are wired to no pipeline. They are real work held for a milestone that has not started
-//! — `ui` for M4's interface, and three viewer passes for M8's tooling — and they
-//! were previously indistinguishable from dead code, which is how six *genuinely* dead shaders survived
-//! in the set with comments describing a uniform layout that no longer existed. Marking them makes the
-//! live set countable, and [`Program::staged`] means a reader never has to grep the pipelines to find
-//! out whether a file does anything.
+//! Three programs are wired to no pipeline: the terrain, road and boundary viewer passes, held for the
+//! map editor M8 plans. They were previously indistinguishable from dead code, which is how six
+//! *genuinely* dead shaders survived in the set with comments describing a uniform layout that no longer
+//! existed. Marking them makes the live set countable, and [`Program::staged`] means a reader never has to
+//! grep the pipelines to find out whether a file does anything.
+//!
+//! The mechanism has now done its job twice in the intended direction: `terrain_virtual` was staged for
+//! the page cache and `ui` for M4's interface, and each went live when the work that needed it landed,
+//! with nothing to clean up because neither had rotted.
 
 /// Every chunk of WGSL in the crate, as `(name, source)`.
 ///
@@ -137,12 +140,6 @@ pub const PROGRAMS: &[Program] = &[
         chunks: &["terrain_forward"],
         staged: false,
     },
-    // Staged: real work held for a milestone that has not started.
-    Program {
-        name: "ui",
-        chunks: &["ui"],
-        staged: true,
-    },
     Program {
         name: "terrain_virtual",
         chunks: &["transfer", "terrain_virtual"],
@@ -153,6 +150,12 @@ pub const PROGRAMS: &[Program] = &[
         chunks: &["transfer", "terrain_reduce"],
         staged: false,
     },
+    Program {
+        name: "ui",
+        chunks: &["ui"],
+        staged: false,
+    },
+    // Staged: real work held for a milestone that has not started.
     Program {
         name: "terrain_viewer",
         chunks: &["terrain_viewer"],
@@ -247,11 +250,13 @@ mod tests {
     #[test]
     fn the_live_and_staged_split_is_what_is_declared() {
         // Stated as a number so adding a program without wiring it is a deliberate act rather than an
-        // oversight. The staged four are `ui` and the three viewer passes.
+        // oversight. Two have left the staged set since it was introduced -- `terrain_virtual` when the
+        // page cache bound it and `ui` when M4's interface did -- and the three remaining are the viewer
+        // passes M8's map editor wants.
         let live = PROGRAMS.iter().filter(|entry| !entry.staged).count();
         let staged = PROGRAMS.iter().filter(|entry| entry.staged).count();
-        assert_eq!(live, 11, "live programs");
-        assert_eq!(staged, 4, "staged programs");
+        assert_eq!(live, 12, "live programs");
+        assert_eq!(staged, 3, "staged programs");
         assert_eq!(CHUNKS.len(), 22);
     }
 

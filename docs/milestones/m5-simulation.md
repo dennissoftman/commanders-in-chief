@@ -3,7 +3,8 @@
 A deterministic fixed-tick simulation kernel: the thing everything about gameplay and multiplayer
 rests on.
 
-**Status:** Planned.
+**Status:** Planned. The one decision that had to be made before any of it — how floating point is pinned
+where it reaches simulation state — is settled in [ADR 0007](../adr/0007-simulation-arithmetic.md).
 
 ## Charter
 
@@ -36,7 +37,21 @@ stream desyncs any client that renders a different number of frames — which is
 
 Floating-point behaviour is pinned wherever it reaches simulation state. Anything that cannot be
 pinned across platforms stays in presentation. This constrains how gameplay maths is written, which is
-why it is settled here rather than discovered in M7 when a desync appears.
+why it is settled here rather than discovered in M7 when a desync appears — and it now is, in
+[ADR 0007](../adr/0007-simulation-arithmetic.md).
+
+The short version of that ADR, because it is the constraint M6 is written under: simulation state is
+`f64`; only correctly-rounded operations may touch it, which is `+ - * /`, `sqrt`, comparison and rounding;
+no platform transcendental appears in simulation code, because `sin` and its family come from the operating
+system's C library and differ in the last bits between them; the project supplies its own instead, pinned
+by exact-value tests, with angles stored as integer turns so range reduction is exact. Fixed-point was
+rejected because it charges for determinism that IEEE-754 already provides and still leaves the
+trigonometry to be written — though `cordic` is where to start if that is ever revisited. The `libm` crate
+was evaluated as the implementation and is used as the *oracle* instead: it is already vendored here and
+its code contains no architecture-gated path, but it promises nothing about reproducibility and has been
+archived, and this needs a guarantee rather than a likelihood. `f64` over `f32` is for accumulation headroom and **not** for determinism —
+the two widths are equally deterministic, and reaching for a wider type to fix a divergence treats a
+reproducibility problem as an accuracy problem.
 
 ## Explicitly not done
 

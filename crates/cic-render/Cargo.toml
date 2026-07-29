@@ -9,6 +9,9 @@ license.workspace = true
 [dependencies]
 cic-assets.workspace = true
 cic-camera.workspace = true
+# The interface model, for the pass that draws it. The dependency runs this way and never back, the same
+# rule ADR 0003 sets for assets: a layout solver must not inherit a graphics stack.
+cic-ui.workspace = true
 png = "0.18"
 sha2 = "0.10"
 wgpu = { version = "30", default-features = false, features = [
@@ -20,6 +23,8 @@ wgpu = { version = "30", default-features = false, features = [
 ] }
 
 [dev-dependencies]
+# The interface capture tests load the shell's own authored screens and build them into a shell.
+cic-ui.workspace = true
 # The same WGSL front end `wgpu` uses, so validating with it means the shaders really compile.
 naga = { version = "27", features = ["wgsl-in"] }
 pollster = "0.4"

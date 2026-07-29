@@ -15,6 +15,19 @@
 //! - [`state`] — what the interface remembers between frames, and what input does to it.
 //! - [`strings`] — display text, behind a key rather than written into a layout.
 //! - [`action`] — the closed set of effects a layout may attach to a control.
+//! - [`paint`] — what to draw, as rectangles and text runs, and the theme that decides how.
+//! - [`screen`] — which screens are open, in what order, and what each remembers.
+//! - [`settings`] — an apply that must be confirmed, and a revert that need not be reached.
+//! - [`shell`] — the navigable whole, and the routing between the two above.
+//! - [`transition`] — what a screen change looks like while it is happening.
+//!
+//! # A settings apply is undone by a machine, not by a user
+//!
+//! The other rule worth stating at the top. A display change can leave the person who made it unable
+//! to see the screen well enough to undo it, so an undo that depends on them clicking is not an undo.
+//! [`settings::Transaction`] inverts it: a change is applied, a window opens, and the *absence* of a
+//! confirmation is what brings the previous settings back. See that module for the three values a
+//! setting has at once and why a second apply inside the window keeps the first restore point.
 //!
 //! # Text input is not one character per keystroke
 //!
@@ -69,19 +82,29 @@ pub mod action;
 pub mod geometry;
 pub mod input;
 pub mod layout;
+pub mod paint;
+pub mod screen;
+pub mod settings;
+pub mod shell;
 pub mod solve;
 pub mod state;
 pub mod strings;
+pub mod transition;
 
 pub use action::Action;
 pub use geometry::{Insets, Rect, Viewport, ViewportError};
 pub use input::{Adjust, Edit, FocusMove, UiEvent};
 pub use layout::{
     Align, DEFAULT_MAX_LENGTH, Direction, FORMAT_VERSION, Justify, Layout, LayoutError, Node,
-    Range, Sizing, Widget,
+    Range, Sizing, Style, Widget,
 };
+pub use paint::{Colour, Content, Painter, Primitive, TextAlign, Theme};
+pub use screen::{Screen, ScreenStack, Screens, Transition};
+pub use settings::{Probation, REVERT_WINDOW, Transaction};
+pub use shell::{Outcome, Request, Shell, ShellError};
 pub use solve::{
     Measure, NoContent, NoSelection, Selections, Solved, SolvedNode, solve, solve_selected,
 };
 pub use state::{Interface, TextField, Value};
 pub use strings::StringTable;
+pub use transition::{Change, Heading, Motion, Reveal};

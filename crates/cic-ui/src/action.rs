@@ -38,6 +38,12 @@ pub enum Action {
     OpenSettings,
     /// Show skirmish setup.
     OpenSkirmishSetup,
+    /// Ask whether to leave the game.
+    ///
+    /// Distinct from [`Self::Quit`] so a main menu's exit button can be the question and the modal's
+    /// button can be the answer. One action meaning "ask" on one screen and "do it" on another is
+    /// exactly the context-dependence this set exists to avoid.
+    OpenQuitConfirm,
     /// Commit the settings currently staged.
     ///
     /// Distinct from [`Self::ConfirmSettings`] because a display change is applied first and
@@ -65,6 +71,7 @@ impl Action {
                 | Self::OpenMainMenu
                 | Self::OpenSettings
                 | Self::OpenSkirmishSetup
+                | Self::OpenQuitConfirm
                 | Self::LaunchSkirmish
         )
     }

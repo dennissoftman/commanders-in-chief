@@ -103,6 +103,47 @@ impl Rect {
         }
     }
 
+    /// Whether this rectangle covers no pixels at all.
+    ///
+    /// What a consumer checks before drawing: a clip that has shrunk to nothing means everything inside
+    /// it is off screen, and issuing the draw anyway is work with no result.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.width <= 0.0 || self.height <= 0.0
+    }
+
+    /// Moves the rectangle without changing its extent.
+    ///
+    /// What a scroll offset does to everything inside a scrollable container.
+    #[must_use]
+    pub fn translated(&self, x: f32, y: f32) -> Self {
+        Self {
+            x: self.x + x,
+            y: self.y + y,
+            width: self.width,
+            height: self.height,
+        }
+    }
+
+    /// The overlap with another rectangle, collapsed to zero extent when they do not overlap.
+    ///
+    /// Zero rather than negative for the reason [`Self::inset`] clamps: a negative extent propagates
+    /// into whatever consumes it as a nonsense size, a long way from the disjoint pair that caused it.
+    /// Nested clips compose by intersection, so this has to stay total.
+    #[must_use]
+    pub fn intersection(&self, other: Self) -> Self {
+        let left = self.x.max(other.x);
+        let top = self.y.max(other.y);
+        let right = self.right().min(other.right());
+        let bottom = self.bottom().min(other.bottom());
+        Self {
+            x: left,
+            y: top,
+            width: (right - left).max(0.0),
+            height: (bottom - top).max(0.0),
+        }
+    }
+
     /// Rounds every edge to a whole pixel, keeping shared edges shared.
     ///
     /// See the module documentation for why this rounds edges rather than position and size.
@@ -401,6 +442,40 @@ mod tests {
             Viewport::new(100, 100, -1.0),
             Err(ViewportError::Scale { .. })
         ));
+    }
+
+    #[test]
+    fn an_intersection_collapses_rather_than_inverting_when_there_is_no_overlap() {
+        // Nested clips compose by intersection, so a disjoint pair has to yield "nothing" and not a
+        // negative extent that reaches a consumer as a nonsense size.
+        let left = Rect::new(0.0, 0.0, 10.0, 10.0);
+        let right = Rect::new(20.0, 0.0, 10.0, 10.0);
+        let empty = left.intersection(right);
+        // The axis that does not overlap collapses; the other keeps its span, which is why a consumer
+        // asks `is_empty` rather than comparing an extent to zero itself.
+        assert_eq!(empty.width, 0.0);
+        assert_eq!(empty.height, 10.0);
+        assert!(empty.is_empty());
+        assert!(
+            Rect::new(20.0, 20.0, 10.0, 10.0)
+                .intersection(left)
+                .is_empty(),
+            "disjoint on both axes is empty too"
+        );
+        // Overlapping keeps the shared region, whichever way round it is asked.
+        let overlap = Rect::new(5.0, 5.0, 10.0, 10.0);
+        assert_eq!(left.intersection(overlap), Rect::new(5.0, 5.0, 5.0, 5.0));
+        assert_eq!(overlap.intersection(left), Rect::new(5.0, 5.0, 5.0, 5.0));
+        assert!(!left.intersection(overlap).is_empty());
+    }
+
+    #[test]
+    fn translating_moves_a_rectangle_without_resizing_it() {
+        let rect = Rect::new(10.0, 20.0, 30.0, 40.0);
+        assert_eq!(
+            rect.translated(0.0, -5.0),
+            Rect::new(10.0, 15.0, 30.0, 40.0)
+        );
     }
 
     #[test]
