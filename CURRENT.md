@@ -342,8 +342,9 @@ failing on four steps across most of a frame. No authored screen uses a tab stri
 interface references moved when tabs learned to switch pages. The grazing-angle scene the chain is verified
 on deliberately has **no committed reference**: its claim is a statistic about adjacent-pixel energy rather
 than an image, and a new reference scene would force a lavapipe capture from the runner for nothing the
-numbers do not already say. Whether lavapipe's own filtering keeps `terrain-from-pages.png` inside tolerance
-is the one thing that cannot be checked off the runner.
+numbers do not already say. **Lavapipe agreed**, which could only be established on the runner: the branch
+passed CI without a reference being regenerated, so the page path's change is inside tolerance on a software
+rasteriser as well as on the NVIDIA set.
 
 The rendering tests take about eleven seconds there, which is what makes this affordable on every pull
 request. Captures go to `target/tmp/` and
