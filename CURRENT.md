@@ -326,12 +326,14 @@ cargo run -p cic-render --example terrain_viewer --release
 ```
 
 Pass a `.cicmap` path to view a real map; with no argument it generates terrain, a water table derived
-from the heightfield's own low point, their surfaces — and now **a scenario, activated through the
-kernel and drawn from its snapshot**: two players' depots tinted by seat, neutral pines between them,
-poses from the binary turns activation stored. The stderr line `kernel: 2 players, 18 objects at
-tick 0` is simulation state on screen for the first time. A loaded package still shows the building
-scatter, because packages do not carry a template set yet — the demo path is exactly what they will
-reuse when they do. `T` toggles antialiasing and the bracket keys step the resolution scale, because what an
+from the heightfield's own low point, their surfaces — and **a scenario, activated through the kernel
+and running live**: two players' depots tinted by seat, neutral pines between them, and six scouts
+that spawn by command on tick zero and patrol a square around the map's middle on standing orders,
+crossing each other's paths. The kernel advances at its fixed 30 Hz from the accumulator whatever the
+frame rate does, the orders are host-side inputs of exactly the shape a network session would feed,
+and presentation derives each scout's facing from its motion — the simulation stores no heading. A
+loaded package still shows the building scatter, because packages do not carry a template set yet —
+the demo path is exactly what they will reuse when they do. `T` toggles antialiasing and the bracket keys step the resolution scale, because what an
 edge does *as the camera moves* is the whole subject and no still capture reports it; `P` prints the
 per-pass breakdown once a second, which is where the figures above came from; and **`V` toggles the
 virtual-texture cache**, for the same reason as `T` — a crawling page seam, a step between mip levels, and a
@@ -349,8 +351,10 @@ kernel state.** The next milestone on the path to something playable is
 its first slice, **the template set, has landed**: what a `template:` id resolves to, with activation
 resolving every placement and faction against it — **the activated scenario is drawn**, headlessly
 in a capture test and live in the viewer — **and the first verbs work**: spawn, move, and stop, in
-`cic_sim::units`, replay-identical over ninety ticks. Next: the kernel ticking live in the viewer with
-units visibly moving, then pathfinding or combat as the following M6 line. Those verbs are also what
+`cic_sim::units`, replay-identical over ninety ticks — **and the kernel ticks live in the viewer**,
+scouts patrolling on standing orders. Next M6 lines to choose from: pathfinding over the heightfield,
+or combat's first pass; and packages gaining a `templates.json` member so a real `.cicmap` runs the
+same way the generated demo does. Those verbs are also what
 [ADR 7002](docs/adr/7002-script-events.md)'s host surface and first real events hang off, so M6's
 opening work and the script-event implementation meet in the same place once that record is accepted.
 
