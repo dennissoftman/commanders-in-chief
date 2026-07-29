@@ -78,7 +78,11 @@ use cic_render::{
     TerrainRenderer, TextureImage, WaterBody, WaterSurface, Weather,
 };
 use cic_sim::activation::FORCES;
-use cic_sim::{Forces, Kernel, KernelConfig, activate};
+use cic_sim::units::UNITS;
+use cic_sim::{
+    Command, Forces, Kernel, KernelConfig, PlayerId, TickAccumulator, Units, activate,
+    move_command, spawn_command,
+};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -683,6 +687,8 @@ fn demo_scenario(terrain: &Terrain) -> (Scenario, TemplateSet) {
         name: None,
         speed: None,
     };
+    let mut scout = template("unit/scout", TemplateKind::Unit, Some("models/scout.glb"));
+    scout.speed = Some(26.0);
     let templates = TemplateSet {
         format_version: 1,
         templates: vec![
@@ -693,6 +699,7 @@ fn demo_scenario(terrain: &Terrain) -> (Scenario, TemplateSet) {
             ),
             template("prop/pine", TemplateKind::Prop, Some("models/pine.glb")),
             template("faction/vanguard", TemplateKind::Faction, None),
+            scout,
         ],
     };
     (scenario, templates)
@@ -727,6 +734,174 @@ fn activated_instances(forces: &Forces, terrain: &Terrain) -> BTreeMap<String, V
     grouped
 }
 
+/// A scout stand-in: a low box in one pale material, tinted by its owner when drawn.
+fn scout_model() -> Model {
+    let half = 3.4f32;
+    let height = 6.5f32;
+    let faces: [([f32; 3], [[f32; 3]; 4]); 5] = [
+        (
+            [0.0, 0.0, 1.0],
+            [
+                [-half, -half, height],
+                [half, -half, height],
+                [half, half, height],
+                [-half, half, height],
+            ],
+        ),
+        (
+            [0.0, -1.0, 0.0],
+            [
+                [-half, -half, 0.0],
+                [half, -half, 0.0],
+                [half, -half, height],
+                [-half, -half, height],
+            ],
+        ),
+        (
+            [0.0, 1.0, 0.0],
+            [
+                [half, half, 0.0],
+                [-half, half, 0.0],
+                [-half, half, height],
+                [half, half, height],
+            ],
+        ),
+        (
+            [1.0, 0.0, 0.0],
+            [
+                [half, -half, 0.0],
+                [half, half, 0.0],
+                [half, half, height],
+                [half, -half, height],
+            ],
+        ),
+        (
+            [-1.0, 0.0, 0.0],
+            [
+                [-half, half, 0.0],
+                [-half, -half, 0.0],
+                [-half, -half, height],
+                [-half, half, height],
+            ],
+        ),
+    ];
+    let primitives = faces
+        .into_iter()
+        .map(|(normal, corners)| {
+            ModelPrimitive {
+                vertices: corners
+                    .into_iter()
+                    .enumerate()
+                    .map(|(corner, position)| ModelVertex {
+                        position,
+                        normal,
+                        uv: quad_uv(corner),
+                        ..ModelVertex::default()
+                    })
+                    .collect(),
+                indices: vec![0, 1, 2, 0, 2, 3],
+                material: Some(0),
+            }
+            .with_generated_tangents()
+        })
+        .collect();
+    Model {
+        name: "scout".to_owned(),
+        primitives,
+        materials: vec![ModelMaterial {
+            name: "hull".to_owned(),
+            base_color: [0.80, 0.80, 0.78, 1.0],
+            metallic: 0.1,
+            roughness: 0.55,
+            ..ModelMaterial::default()
+        }],
+        images: Vec::new(),
+        has_skin: false,
+        has_animation: false,
+    }
+}
+
+/// The demo's opening inputs: each player spawns three scouts beside their start.
+fn demo_spawns(scenario: &Scenario) -> Vec<Command> {
+    let mut commands = Vec::new();
+    for (seat, slot) in scenario.players.iter().enumerate() {
+        for spread in 0..3i16 {
+            let offset = f64::from(spread - 1) * 24.0;
+            commands.push(Command {
+                tick: 0,
+                player: PlayerId(u8::try_from(seat).expect("the demo has two seats")),
+                payload: spawn_command(
+                    "unit/scout",
+                    f64::from(slot.start.x) + offset,
+                    f64::from(slot.start.y) - 40.0,
+                ),
+            });
+        }
+    }
+    commands
+}
+
+/// The demo's standing orders: every five seconds, every scout is sent to the next corner of a
+/// square around the map's middle, staggered by identifier so the two sides' patrols interleave.
+///
+/// This is host-side input generation, not simulation: the commands it produces are ordinary
+/// tick-stamped inputs, exactly what a lobby's network session or a player's clicks would feed in.
+fn demo_orders(kernel: &Kernel, extent: [f32; 2]) -> Vec<Command> {
+    let tick = kernel.tick();
+    if tick % 150 != 30 {
+        return Vec::new();
+    }
+    let Some(units) = kernel
+        .subsystem(UNITS)
+        .and_then(|subsystem| subsystem.as_any().downcast_ref::<Units>())
+    else {
+        return Vec::new();
+    };
+    let corners: [[f64; 2]; 4] = [
+        [f64::from(extent[0]) * 0.35, f64::from(extent[1]) * 0.35],
+        [f64::from(extent[0]) * 0.65, f64::from(extent[1]) * 0.35],
+        [f64::from(extent[0]) * 0.65, f64::from(extent[1]) * 0.65],
+        [f64::from(extent[0]) * 0.35, f64::from(extent[1]) * 0.65],
+    ];
+    let phase = tick / 150;
+    units
+        .units()
+        .iter()
+        .map(|(id, unit)| {
+            let corner = corners[usize::try_from((phase + id.0) % 4).expect("index below four")];
+            Command {
+                tick,
+                player: unit.owner,
+                payload: move_command(*id, corner[0], corner[1]),
+            }
+        })
+        .collect()
+}
+
+/// The units snapshot as instances: grounded on the terrain, tinted by owner, facing where they are
+/// going. The facing uses `atan2` freely — this is presentation, which ADR 0007 decision 9 leaves
+/// unrestricted, and nothing here feeds back into the simulation.
+fn unit_instances(units: &Units, terrain: &Terrain) -> Vec<ModelInstance> {
+    const TEAM_TINTS: [[f32; 4]; 2] = [[0.55, 0.70, 1.0, 1.0], [1.0, 0.62, 0.42, 1.0]];
+    units
+        .units()
+        .values()
+        .filter_map(|unit| {
+            let [x, y] = [unit.position[0] as f32, unit.position[1] as f32];
+            let ground = terrain.elevation_at_world(x, y)?;
+            let facing = unit.target.map_or(0.0, |target| {
+                let dy = (target[1] - unit.position[1]) as f32;
+                let dx = (target[0] - unit.position[0]) as f32;
+                dy.atan2(dx)
+            });
+            Some(
+                ModelInstance::placed([x, y, ground], facing, 1.0)
+                    .with_tint(TEAM_TINTS[usize::from(unit.owner.0) % TEAM_TINTS.len()]),
+            )
+        })
+        .collect()
+}
+
 /// A water table just above the terrain's low point, spanning the whole map.
 ///
 /// Derived from the heightfield rather than authored, so the viewer floods a loaded `.cicmap` and the
@@ -750,12 +925,24 @@ fn water_table(terrain: &Terrain) -> WaterSurface {
 }
 
 /// Everything created once a window exists.
+/// The simulation the viewer runs when it generated its own scenario: the kernel, the fixed-timestep
+/// accumulator that drives it from frame time, and the model its units wear.
+struct Simulation {
+    kernel: Kernel,
+    accumulator: TickAccumulator,
+    scout: Model,
+}
+
 struct Active {
     window: Arc<Window>,
     context: GpuContext,
     terrain_renderer: TerrainRenderer,
     surface: SurfaceRenderer,
     models: Vec<ModelBatch>,
+    /// How many of `models` are static scenery. Everything past this index is rebuilt per frame
+    /// from the units snapshot, so the vector is truncated back to it before each rebuild.
+    static_models: usize,
+    simulation: Option<Simulation>,
     water: Vec<WaterBody>,
     /// The virtual-texture cache, when `V` has switched it on.
     ///
@@ -1069,12 +1256,19 @@ impl ApplicationHandler for Viewer {
         // activate, read the `Forces` snapshot, and build one batch per template — owners as tints,
         // binary turns as poses. Without one (a loaded package, until packages carry a template
         // set), the old building scatter keeps the shadow pass a caster that is not terrain.
+        let mut simulation = None;
         let models = if let Some((scenario, templates)) = &self.activation {
             let mut kernel = Kernel::new(KernelConfig {
                 seed: 0xC1C_DE30,
                 ticks_per_second: 30,
             });
             if let Err(error) = activate(&mut kernel, scenario, templates) {
+                return self.fail(event_loop, error.to_string());
+            }
+            kernel.add_subsystem(Box::new(Units::new(templates)));
+            // Tick zero carries the opening inputs: each seat spawns its scouts. From here on the
+            // draw loop advances the kernel at its fixed rate, whatever the frame rate does.
+            if let Err(error) = kernel.advance(&demo_spawns(scenario)) {
                 return self.fail(event_loop, error.to_string());
             }
             let Some(forces) = kernel
@@ -1084,7 +1278,7 @@ impl ApplicationHandler for Viewer {
                 return self.fail(event_loop, "activation registered no forces".to_owned());
             };
             eprintln!(
-                "kernel: {} players, {} objects at tick {}",
+                "kernel: {} players, {} objects, ticking at 30 Hz from tick {}",
                 forces.players().len(),
                 forces.objects().len(),
                 kernel.tick(),
@@ -1108,6 +1302,12 @@ impl ApplicationHandler for Viewer {
                     Err(error) => return self.fail(event_loop, error.to_string()),
                 }
             }
+            let accumulator = TickAccumulator::new(kernel.tick_seconds(), 8);
+            simulation = Some(Simulation {
+                kernel,
+                accumulator,
+                scout: scout_model(),
+            });
             batches
         } else {
             let placements = building_placements(&self.terrain);
@@ -1145,12 +1345,15 @@ impl ApplicationHandler for Viewer {
             Err(error) => return self.fail(event_loop, error.to_string()),
         };
 
+        let static_models = models.len();
         self.active = Some(Active {
             window,
             context,
             terrain_renderer,
             surface,
             models,
+            static_models,
+            simulation,
             water,
             pages: None,
         });
@@ -1283,6 +1486,42 @@ impl Viewer {
         let Some(active) = &mut self.active else {
             return Ok(());
         };
+
+        // The simulation advances at its fixed rate however fast frames come: the accumulator turns
+        // frame time into whole ticks, and presentation may interpolate but never advance. Standing
+        // orders are host-side input generation — the same shape a lobby's network session would be.
+        if let Some(simulation) = &mut active.simulation {
+            let extent = self.terrain.world_extent();
+            let ticks = simulation.accumulator.frame(f64::from(delta));
+            for _ in 0..ticks {
+                let orders = demo_orders(&simulation.kernel, extent);
+                simulation
+                    .kernel
+                    .advance(&orders)
+                    .map_err(|error| error.to_string())?;
+            }
+            if ticks > 0 {
+                let Some(units) = simulation
+                    .kernel
+                    .subsystem(UNITS)
+                    .and_then(|subsystem| subsystem.as_any().downcast_ref::<Units>())
+                else {
+                    return Err("the simulation lost its units".to_owned());
+                };
+                let instances = unit_instances(units, &self.terrain);
+                active.models.truncate(active.static_models);
+                if !instances.is_empty() {
+                    let batch = ModelBatch::new(
+                        &active.context,
+                        &simulation.scout,
+                        &instances,
+                        active.surface.material_layout(),
+                    )
+                    .map_err(|error| error.to_string())?;
+                    active.models.push(batch);
+                }
+            }
+        }
 
         let (width, height) = active.surface.size();
         // `in_environment` re-derives the light, so the time-of-day keys move the sun rather than only
