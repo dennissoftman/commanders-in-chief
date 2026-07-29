@@ -38,6 +38,13 @@ the same requirement: the same inputs must produce the same state on every machi
   operations may touch it, and the transcendentals are the project's own rather than the platform's —
   because what differs between platforms is the library, not the arithmetic.
 
+## What is deliberately outside this
+
+Presentation. A frame may compute anything it likes, in any precision, with any library, because nothing it
+produces reaches simulation state — which is what the rule above about randomness is protecting. A physics
+engine is the clearest case and the most tempting one to get wrong:
+[ADR 0008](../adr/0008-physics-engine.md) keeps it there.
+
 ## Testing
 
 A determinism claim is only as good as its test. The standard here is that a recorded command stream
