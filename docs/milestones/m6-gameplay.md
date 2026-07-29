@@ -39,16 +39,25 @@ unattended, repeatably, is worth more at this stage than being challenging.
 
 ## Physics
 
-Not in this charter, and [ADR 0008](../adr/0008-physics-engine.md) proposes why: an RTS resolves gameplay
+Not in this charter, and [ADR 0008](../adr/0008-physics-engine.md) settles why: an RTS resolves gameplay
 through steering, ranges and seeded rolls rather than through rigid bodies, so physics is *spectacle* — the
 destroyed tank that tumbles rather than vanishing. Spectacle may differ between two clients without either
 being wrong, which is what puts it in presentation.
 
-The consequence for this milestone is that no gameplay result may come out of a physics engine. Anything
-authoritative — a projectile's impact point, whether a collapse kills — is integrated in the kernel under
+**No gameplay result may come out of a physics engine.** Anything authoritative — a projectile's impact
+point, whether a collapse kills — is integrated in the kernel under
 [ADR 0007](../adr/0007-simulation-arithmetic.md)'s arithmetic, and the engine is *told* the answer rather
-than asked for it. That ADR is `proposed` rather than accepted, and settling it is a decision for whoever
-writes this charter's detail.
+than asked for it.
+
+The gain is worth stating as plainly as the constraint: because physics decides nothing, it does not have to
+be *right*. A wreck may tumble further than its mass allows and a hit may throw debris harder than the round
+carried, and neither is a bug. An RTS is played at a distance that rewards legibility over plausibility, and
+this is what buys the freedom to choose the first.
+
+The engine will be [Rapier](https://rapier.rs/) rather than Jolt, and that too follows from physics being
+cosmetic: Jolt led on a determinism guarantee that is worth nothing once nothing needs guaranteeing, so what
+was left to compare was cost, and Rapier is pure Rust. See the ADR for the full comparison and for what would
+invert it.
 
 ## Explicitly not done
 

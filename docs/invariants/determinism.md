@@ -42,8 +42,8 @@ the same requirement: the same inputs must produce the same state on every machi
 
 Presentation. A frame may compute anything it likes, in any precision, with any library, because nothing it
 produces reaches simulation state — which is what the rule above about randomness is protecting. A physics
-engine is the clearest case and the most tempting one to get wrong: see
-[ADR 0008](../adr/0008-physics-engine.md), which proposes keeping it there.
+engine is the clearest case and the most tempting one to get wrong:
+[ADR 0008](../adr/0008-physics-engine.md) keeps it there.
 
 ## Testing
 
