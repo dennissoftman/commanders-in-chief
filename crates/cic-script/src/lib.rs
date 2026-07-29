@@ -2,7 +2,9 @@
 //!
 //! # What is here
 //!
-//! - [`real`] — the arithmetic ADR 0007 permits, and the transcendentals written to stay inside it.
+//! - The arithmetic comes from [`cic_math`] — ADR 0007's permitted operations and the turn-based
+//!   transcendentals, one crate below both this VM and the simulation kernel so the two cannot
+//!   disagree in the last bit. Its entry points are re-exported here.
 //! - [`value`] — what a script can hold, and why there is no heap.
 //! - [`parse`] — source to a syntax tree, with every limit caller-supplied.
 //! - [`compile`](mod@compile) — syntax tree to bytecode, where every name is resolved.
@@ -13,7 +15,8 @@
 //!
 //! [ADR 0007](../../../docs/adr/0007-simulation-arithmetic.md) settled it for the whole engine: `f64`,
 //! restricted to the operations IEEE-754 requires to be correctly rounded, no platform transcendental,
-//! angles as turns. A script runs inside the simulation, so it inherits all of it — see [`real`].
+//! angles as turns. A script runs inside the simulation, so it inherits all of it — see [`cic_math`],
+//! which holds the implementation precisely so that this crate and the kernel share one.
 //!
 //! A script and the simulation kernel have to reach the same answer on the same two numbers. That is
 //! why this crate does not get to have an arithmetic of its own, and an earlier draft that gave it one
@@ -106,13 +109,12 @@
 pub mod compile;
 pub mod host;
 pub mod parse;
-pub mod real;
 pub mod value;
 pub mod vm;
 
+pub use cic_math::{ArithmeticError, cos_turns, sin_turns};
 pub use compile::{Program, compile, compile_ast};
 pub use host::{Host, HostCall, HostError, Interface, InterfaceError, Signature, StandardHost};
 pub use parse::{Ast, CompileError, Limits};
-pub use real::{ArithmeticError, cos_turns, sin_turns};
 pub use value::{Value, ValueError};
 pub use vm::{RuntimeError, RuntimeFault, RuntimeLimits, Vm};

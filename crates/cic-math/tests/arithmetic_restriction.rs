@@ -3,10 +3,11 @@
 //! > A test enforces the restriction textually, because `cargo build` will not. It scans the
 //! > simulation crate for the forbidden names and fails naming the file and the call.
 //!
-//! A script runs inside the simulation, so the interpreter evaluating it is simulation code and the
-//! restriction binds it. Nothing in the compiler will catch a `.sin()` that creeps into the evaluator,
-//! and the cost of one is a desync on the first frame anything turns — the most expensive class of bug
-//! this project has, and the least visible.
+//! This crate *is* the permitted arithmetic, so the restriction binds it more directly than it binds
+//! anything else: a platform transcendental slipping into `sin_turns` would hand every consumer —
+//! the script VM today, the kernel next — a value the other side of the match may not reproduce. The
+//! guard travels with the code it guards, so extracting the arithmetic into its own crate moved the
+//! scan here with it.
 //!
 //! # This lives in `tests/` deliberately
 //!
@@ -17,10 +18,10 @@
 //! # And it only scans shipped code
 //!
 //! Everything above the first `#[cfg(test)]` in a file. A test module is entitled to call the
-//! platform's `sin` as an **oracle** — ADR 0007 does exactly that with `libm`, and `cic-math` (which
-//! now holds the series this crate calls, guarded by its own copy of this scan) compares against the
-//! platform's `sin` the same way. The rule is that an oracle may be measured against and may not be
-//! shipped.
+//! platform's `sin` as an **oracle** — ADR 0007 does exactly that with `libm`, and
+//! `tests::the_polynomial_agrees_with_the_platform_to_the_last_bit_on_the_same_argument` in `lib.rs`
+//! is the comparison that gives this crate's series any credibility. The rule is that an oracle may be
+//! measured against and may not be shipped.
 
 use std::fs;
 use std::path::Path;
@@ -62,9 +63,9 @@ fn offences(source: &str) -> Vec<(usize, String)> {
 
     let mut found = Vec::new();
     for (index, full_line) in shipped.lines().enumerate() {
-        // A comment is not a call. Documentation here routinely writes `sys.sin(0.25)` while
-        // explaining the very rule this enforces, and flagging that would train people to ignore the
-        // test -- which is the only way a tripwire actually fails.
+        // A comment is not a call. Documentation here routinely writes `sin(0.25)` while explaining
+        // the very rule this enforces, and flagging that would train people to ignore the test --
+        // which is the only way a tripwire actually fails.
         let line = full_line.split("//").next().unwrap_or(full_line);
         for name in FORBIDDEN {
             // A call rather than a mention: the name must be reached through `.` or `::` and be
@@ -102,7 +103,7 @@ fn no_shipped_code_calls_a_platform_transcendental() {
         }
     }
 
-    assert!(scanned >= 6, "only {scanned} source files were scanned");
+    assert!(scanned >= 1, "no source files were scanned");
     assert!(
         failures.is_empty(),
         "ADR 0007 forbids a platform transcendental in simulation code, and these are calls to one:\n{}",
@@ -135,7 +136,7 @@ fn the_scanner_does_not_fire_on_what_is_permitted() {
     // The permitted set, and the near-misses that a looser pattern would flag. `sqrt` is permitted
     // because IEEE-754 requires it to be correctly rounded; `sin_turns` is this crate's own.
     for permitted in [
-        "//! A script writes `sys.sin(0.25)` for a quarter turn.",
+        "//! A quarter turn is `sin(0.25)` in prose, and prose is not a call.",
         "/// Delegates to `f64::atan2` -- no it does not, this is prose.",
         "let root = value.sqrt();",
         "let whole = value.floor();",

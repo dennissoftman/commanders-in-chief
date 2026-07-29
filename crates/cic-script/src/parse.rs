@@ -472,7 +472,7 @@ fn tokenize(source: &str, limits: Limits) -> Result<Vec<Spanned>, CompileError> 
 /// literal safe to write in a script that runs inside a lockstep simulation.
 ///
 /// A literal too large to represent is refused rather than becoming an infinity, for the reason
-/// [`crate::real::finite`] gives: an infinity turns into a NaN one subtraction later, and every
+/// [`cic_math::finite`] gives: an infinity turns into a NaN one subtraction later, and every
 /// comparison against a NaN is false, so the rule that used it silently does not fire.
 fn decimal(text: &str, line: u32) -> Result<f64, CompileError> {
     let value = text

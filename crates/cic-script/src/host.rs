@@ -20,7 +20,7 @@
 //! # The standard functions are here rather than in the language
 //!
 //! `sqrt`, `sin` and the rest are host functions, not operators, so a host that has no business
-//! offering trigonometry can decline to. They are implemented in [`crate::real`] rather than by calling
+//! offering trigonometry can decline to. They are implemented in [`cic_math`] rather than by calling
 //! the platform's, which is the whole point: [ADR
 //! 0007](../../../docs/adr/0007-simulation-arithmetic.md) forbids a platform transcendental anywhere
 //! near simulation state, because the standard only *recommends* correct rounding for those and two
@@ -30,8 +30,8 @@
 //! revolution is `1.0`, so `sys.sin(0.25)` is one. The reduction of a large angle then becomes an exact
 //! subtraction instead of the most delicate part of a libm.
 
-use crate::real::{ArithmeticError, cos_turns, sin_turns, sqrt};
 use crate::value::{Value, type_name};
+use cic_math::{ArithmeticError, cos_turns, sin_turns, sqrt};
 
 use std::collections::BTreeMap;
 use std::error::Error;

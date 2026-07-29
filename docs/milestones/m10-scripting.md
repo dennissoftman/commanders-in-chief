@@ -93,11 +93,11 @@ yet — the host verbs a simulation kernel would supply, since [M5](m5-simulatio
   on an `Interface` and implements one trait.
 - **Scripts in the map package.** The [package format](../formats/package.md) has no entry for them yet,
   and adding one is a format change rather than a language one.
-- **One implementation of the transcendentals, not two.** ADR 0007 decision 4 says the simulation crate
-  supplies its own `sin`; this crate already has one. When M5 lands they must not become two
-  implementations that can disagree — which would be the same class of bug as the two arithmetics this
-  milestone just finished removing. Whichever exists first is the one both use, and the natural home is
-  a crate below both.
+- **One implementation of the transcendentals, not two.** **Done, ahead of M5.** The implementation
+  moved to `cic-math` — Denys's choice of home, 2026-07-29 — a crate below both this one and the kernel
+  to come, and this crate now consumes it rather than owning it. The bit-pinning tests moved with the
+  code, and both crates carry the decision-8 textual scan, so the property this item guarded — a script
+  and the kernel cannot disagree about `sys.sin` — is now structural rather than a warning in a list.
 - **A determinism test across platforms.** The property is argued from the standard — only permitted
   operations are used, and the guard proves it — and pinned locally by exact-bit assertions on the
   series and on a whole computed script result. What would settle it is the standard the determinism
