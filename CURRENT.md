@@ -214,6 +214,14 @@ strip's children are its tabs or its pages, and the two answers differ in the *f
 rather than guessed at. This is the second time a milestone's charter claimed something was done until it
 was checked.
 
+M5's one prerequisite decision is made: [ADR 0007](docs/adr/0007-simulation-arithmetic.md) settles how
+floating point is pinned where it reaches simulation state, which had to be answered before any gameplay
+maths was written rather than after a desync appeared. Simulation state is `f64`, only correctly-rounded
+operations may touch it, and the transcendentals are the project's own — because the thing that differs
+between platforms is the C library, not the arithmetic. Fixed-point was rejected: it charges for
+determinism IEEE-754 already provides and still leaves the trigonometry to be written. `f64` over `f32` is
+for accumulation headroom and explicitly not for determinism, since the two are equally reproducible.
+
 Two more items are outstanding from M3 and are described below: **page mip chains**, without which the
 virtual-texture cache is correct but not yet better, and **terrain level of detail**, which is a decision
 rather than a queue position.
