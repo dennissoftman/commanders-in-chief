@@ -1,0 +1,116 @@
+{
+  "format_version": 1,
+  "root": {
+    "style": "card",
+    "width": { "fill": 1 },
+    "height": { "fill": 1 },
+    "direction": "column",
+    "gap": 12.0,
+    "padding": { "left": 40.0, "top": 32.0, "right": 40.0, "bottom": 32.0 },
+    "children": [
+      {
+        "widget": "label",
+        "style": "title",
+        "text_key": "settings.title",
+        "height": { "fixed": 40.0 },
+        "align": "start"
+      },
+      { "style": "divider", "height": { "fixed": 1.0 } },
+      {
+        "direction": "row",
+        "height": { "fixed": 32.0 },
+        "gap": 16.0,
+        "children": [
+          {
+            "widget": "label",
+            "text_key": "settings.resolution_scale",
+            "width": { "fixed": 200.0 }
+          },
+          {
+            "id": "settings_scale",
+            "widget": "slider",
+            "width": { "fill": 1 },
+            "range": { "min": 0.5, "max": 2.0, "step": 0.25 }
+          },
+          {
+            "id": "settings_scale_value",
+            "widget": "label",
+            "width": { "fixed": 60.0 },
+            "text_key": "settings.unset",
+            "align": "end"
+          }
+        ]
+      },
+      {
+        "id": "settings_antialias",
+        "widget": "checkbox",
+        "text_key": "settings.antialiasing",
+        "height": { "fixed": 28.0 }
+      },
+      {
+        "widget": "label",
+        "style": "caption",
+        "text_key": "settings.antialiasing_note",
+        "height": { "fixed": 18.0 }
+      },
+      {
+        "direction": "row",
+        "height": { "fixed": 32.0 },
+        "gap": 16.0,
+        "children": [
+          { "widget": "label", "text_key": "settings.profile", "width": { "fixed": 200.0 } },
+          {
+            "id": "settings_profile",
+            "widget": "text_entry",
+            "width": { "fill": 1 },
+            "max_length": 24
+          }
+        ]
+      },
+      { "height": { "fill": 1 } },
+      {
+        "id": "settings_countdown",
+        "widget": "label",
+        "style": "warning",
+        "text_key": "settings.confirm_prompt",
+        "height": { "fixed": 20.0 }
+      },
+      {
+        "direction": "row",
+        "height": { "fixed": 36.0 },
+        "gap": 12.0,
+        "justify": "end",
+        "children": [
+          {
+            "id": "settings_back",
+            "widget": "button",
+            "text_key": "settings.back",
+            "width": { "fixed": 120.0 },
+            "action": "back"
+          },
+          {
+            "id": "settings_revert",
+            "widget": "button",
+            "text_key": "settings.revert",
+            "width": { "fixed": 120.0 },
+            "action": "revert_settings"
+          },
+          {
+            "id": "settings_apply",
+            "widget": "button",
+            "text_key": "settings.apply",
+            "width": { "fixed": 120.0 },
+            "action": "apply_settings"
+          },
+          {
+            "id": "settings_confirm",
+            "widget": "button",
+            "text_key": "settings.confirm",
+            "width": { "fixed": 120.0 },
+            "action": "confirm_settings"
+          }
+        ]
+      }
+    ]
+  }
+}

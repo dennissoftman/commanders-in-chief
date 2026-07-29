@@ -33,7 +33,10 @@ the same requirement: the same inputs must produce the same state on every machi
 - Subsystem state hashes are computed per tick and versioned, so a desync reports *which* subsystem
   diverged and on which tick rather than only that one did.
 - Floating-point behaviour is pinned where it reaches simulation state. Anything that cannot be
-  pinned across platforms stays in presentation.
+  pinned across platforms stays in presentation. **How** it is pinned is
+  [ADR 0007](../adr/0007-simulation-arithmetic.md): simulation state is `f64`, only correctly-rounded
+  operations may touch it, and the transcendentals are the project's own rather than the platform's —
+  because what differs between platforms is the library, not the arithmetic.
 
 ## Testing
 

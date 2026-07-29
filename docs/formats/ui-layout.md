@@ -50,6 +50,7 @@ thing that decides.
 |---|---|---|---|
 | `id` | **sometimes** | absent | Unique within a layout. **Required** on any widget that takes focus or holds state — see below. |
 | `widget` | no | `"panel"` | One of the widget kinds below. |
+| `style` | no | absent | A role, not an appearance — see *Style roles*. Only on a `panel` or a `label`. |
 | `direction` | no | `"column"` | `row`, `column`, or `stack`. Ignored by a node with no children. |
 | `width`, `height` | no | `"auto"` | See *Sizing*. |
 | `padding` | no | all zero | `{ "left", "top", "right", "bottom" }`, logical units. |
@@ -65,6 +66,10 @@ thing that decides.
 ## Widget kinds
 
 `panel`, `label`, `button`, `checkbox`, `slider`, `text_entry`, `list`, `tabs`, `scroll`.
+
+**`tabs` is incomplete.** It selects and highlights; it does not switch pages, and the format has no way
+yet to say which node is a page of which strip. Do not author one expecting it to hide anything. See
+[M4](../milestones/m4-interface.md#remaining).
 
 A kind decides three things beyond how it draws, and the layout is validated against all three:
 
@@ -86,6 +91,142 @@ it is checked, so the file is refused at load rather than silently forgetting at
 **Why `scroll` takes no focus.** It holds an offset, but nothing inside it *is* it, so landing keyboard
 focus on the container would give the user a tab stop where no key does anything. Scrolling follows the
 pointer.
+
+## Style roles
+
+`style` says what a node **is**, never what it looks like. A theme decides the second, for the same
+reason text lives in a string table: an authored colour is a decision about the interface's appearance
+spread across every screen file, and changing it means finding every literal.
+
+| Role | On | Draws |
+|---|---|---|
+| `scrim` | `panel` | A translucent wash over everything beneath, for a modal's backdrop. |
+| `card` | `panel` | A raised surface with a border: a modal's body, or a settings page. |
+| `divider` | `panel` | A hairline rule. |
+| `title` | `label` | Larger text, centred unless `align` says otherwise. |
+| `caption` | `label` | Smaller, dimmer text. |
+| `warning` | `label` | Text that wants attention, such as a countdown about to expire. |
+
+**A node with no role draws nothing.** That is the common case and it is deliberate: a layout tree is
+mostly structure — rows and columns whose job is to place their children — and giving every panel a
+background would paint the screen over in nested rectangles.
+
+**A widget kind that already looks like something takes no role.** How a button, a slider or a checkbox
+looks is not a per-node decision, so a role on one is refused: a surface role on a label or a text role on
+a panel would draw nothing, which is the same class of mistake as an action on a panel.
+
+**Text alignment comes from `align` on a childless node.** `align` defaults to `"stretch"`, and a node
+with no children has nothing to stretch — so `"center"` on a label can only mean the text, while a
+defaulted `"stretch"` leaves the widget kind to decide. That is what centres a button's label without
+every button having to say so.
+
+**Dynamic text is a stored value, not a layout field.** A label with an `id` draws whatever the host
+stored against that id, falling back to its `text_key`. That is the channel for text no string table can
+hold — a countdown, a chosen map's name — and it keeps per-frame values out of the table.
+
+## Actions
+
+`action` names one of a closed set. A layout naming anything else fails to load, so a typo is a load
+error rather than a control that silently never fires.
+
+| Action | What it does |
+|---|---|
+| `quit` | Leave the game. |
+| `back` | Close the top screen. At the root, the shell asks whether to leave instead. |
+| `open_main_menu` | Show the main menu. |
+| `open_settings` | Show settings. |
+| `open_skirmish_setup` | Show skirmish setup. |
+| `open_quit_confirm` | Ask whether to leave the game. |
+| `apply_settings` | Put the staged settings in force and start the revert countdown. |
+| `confirm_settings` | Keep what is in force, ending the countdown. |
+| `revert_settings` | Discard staged edits, and take back an applied change that is still unconfirmed. |
+| `launch_skirmish` | Start the configured skirmish. |
+
+**Why `open_quit_confirm` and `quit` are both here.** A main menu's exit button carries the first and the
+modal's confirm button carries the second. One action meaning "ask" on one screen and "do it" on another
+is exactly the context-dependence a closed set exists to avoid.
+
+**The four navigation actions correspond one-to-one with the screens**, which is what lets `Screen`
+be derived from an action rather than mapped by a table somebody has to keep in step.
+
+## Screens and the stack
+
+Each screen is one layout file, named after the screen: `main_menu.ciclayout.json`,
+`settings.ciclayout.json`, `skirmish_setup.ciclayout.json`, `quit_confirm.ciclayout.json`. A catalogue
+missing any of them is refused when the shell is built, because a screen with no layout is a button that
+navigates to a blank surface — which reads as an unfinished screen rather than as a missing file.
+
+Open screens form a stack, and each one keeps its own retained state while something sits on top of it.
+That is the point of a stack rather than one current screen: closing a modal has to leave the screen
+underneath exactly as it was, and a single current screen means rebuilding it from nothing.
+
+**A screen appears at most once.** Navigation is by destination, so asking for a screen that is already
+open unwinds to it rather than stacking a second copy — main menu → settings → main menu returns to the
+menu that was already there. That also removes a bound that would otherwise have to be invented: input
+can push screens, and with no duplicates the depth cannot exceed the number of screens the engine
+defines.
+
+Closing a screen discards what it held, which is why reopening settings shows what is in force rather
+than the edits somebody walked away from.
+
+## Screens change over time, or instantly
+
+A screen change is animated by a **motion**: a duration and a slide distance. Both are a host's choice
+rather than a layout's, so no screen file mentions either.
+
+- The arriving screen fades in and slides from the trailing edge going forward, from the leading edge
+  coming back. The departing one fades out and slides the other way.
+- **A modal only fades.** It does not displace what it covers, and sliding would make it look like it was
+  shoving the screen aside rather than appearing over it.
+- **Only the topmost screen animates.** Anything beneath it was already visible and is staying, so a modal
+  fades in over a backdrop that does not move.
+- **A duration of zero is the default and an ordinary case**, not a special path. It is also what a
+  reduce-motion preference maps to.
+
+**The departing screen stays alive until the change ends**, with everything it remembered, because it is
+still being drawn. It is released when the change finishes, which is why a host has to advance the clock
+rather than merely read it.
+
+**Input goes to the arriving screen immediately and to the departing one never.** A click during a change
+must not land on something fading out; and making the arriving screen wait would add the animation's
+duration to the latency of every navigation. Both follow from routing input to the top of the stack, since
+the departing screen is not on it.
+
+**A second navigation replaces a change rather than queueing one.** A queue of departing screens is depth
+in flight with no bound, which is the same leak the no-duplicates rule closes for the stack.
+
+The curve is a quadratic **ease-out** rather than an ease-in-out. A symmetric curve barely moves for the
+first few frames, and those are the frames a user is deciding whether the interface responded at all — so
+it reads as latency even though it finishes at the same moment.
+
+## Settings are applied, then confirmed
+
+A display change can leave the person who made it unable to see the screen well enough to undo it — a
+resolution the monitor cannot sync to, a scale that puts the buttons off the panel, a full-screen mode
+that comes up black. In all of those the interface is still there, still listening, and unreachable. So
+an undo that depends on the user clicking is not an undo.
+
+`apply_settings` therefore puts the change in force and opens a **15-second window**. Confirming closes
+it and keeps the change; doing nothing closes it and takes the change back. Three rules follow, and each
+one is a way of getting *leaving* right:
+
+- **Applying does not move the stack.** The revert window is only useful while the confirm button is
+  somewhere the user can reach.
+- **A second apply inside the window keeps the first restore point.** What is worth returning to is the
+  last state somebody confirmed, not the previous attempt at replacing it — otherwise two bad display
+  modes in a row leave the restore point holding the first bad one.
+- **Closing the settings screen with a change unconfirmed reverts it.** Nobody is going to confirm a
+  change on a screen that is no longer open, and a user who navigated away already said what they meant.
+
+`confirm_settings` confirms what is **in force**, not what is staged. A user can go on editing while the
+countdown runs, and confirming their unapplied edits would put settings into force that nobody had seen
+the effect of — the exact failure the mechanism exists to prevent.
+
+The countdown is advanced by the host, in seconds, through `Shell::tick`. Nothing here reads a clock:
+a countdown that read one could not be tested without waiting, and a test that waits is flaky. Which
+clock a host passes matters — this is the one countdown in the engine that must **not** come from scene
+time, because a display mode that produces no frames also advances no frame counter, and a revert that
+depends on rendering succeeding cannot fire in the case it exists for.
 
 ## Sizing
 
@@ -120,6 +261,8 @@ Beyond what the shape enforces:
   one arithmetic step away.
 - `range` on anything but a slider, or `max_length` on anything but a text entry, is refused — the same
   posture as an action on a panel, since inert authoring is a mistake that looks correct.
+- A `style` role must suit its widget: a surface role only on a `panel`, a text role only on a `label`,
+  and neither on a kind that already looks like something.
 - `max_length` may not be zero.
 - Nesting is limited to 64 levels and a layout to 4096 nodes. The tree is walked recursively by
   decoding, validation, and solving alike, so unbounded nesting is a stack overflow reachable from a

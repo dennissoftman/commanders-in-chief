@@ -286,6 +286,25 @@ Similar names, opposite directions, and worth keeping straight:
   redistributing the engine must carry its contents.
 - **`NOTICES.md`** is the *third-party* listing: what this project owes everyone else. Generated.
 
+## The interface typeface is authored here, and that is why
+
+The one place a permissive tree usually acquires an obligation it did not intend is a font. A typeface is
+a **binary asset with a licence of its own** — most of the good free ones are under the SIL Open Font
+License, which is permissive but not the licence this project declares, and which carries reserved-font-name
+and bundling terms that a packager has to satisfy separately. Vendoring one would mean this repository had
+two sets of redistribution obligations instead of one, for the sake of drawing menu labels.
+
+The alternative usually reached for — load whatever the operating system provides — is worse for a
+different reason. It makes the rendered result depend on which machine drew it, and this project's
+rendering verification is a byte comparison against committed reference images.
+
+So `cic-render/src/text.rs` holds a typeface authored in this tree: ninety-five glyphs as line and arc
+strokes on one integer grid, with a rasteriser that gives them width by distance. It is not derived from
+any font, digitised from any specimen, or traced from any outline. Its limitation is stated in the module
+and worth repeating here: it covers Latin, and a character with no glyph draws as a hollow box. Adding a
+loaded-font path later is a change behind one type, and whoever does it inherits the licence question this
+section exists to answer.
+
 ## Two obligations unrelated to code
 
 - No Electronic Arts trademark or publicity rights are claimed. This project is independent and not
