@@ -132,11 +132,18 @@ per-pass breakdown once a second, which is where the figures above came from.
 milestones and are described below: terrain level of detail, which is a decision rather than a queue
 position, and the temporal antialiasing tier ADR 0005 plans.
 
-**One thing the interface has not been through: a window.** The capture harness covers the four screens
-headlessly and in CI, and this project has a standing rule that presentation needs running rather than
-only testing — the one bug the headless suite structurally could not catch appeared the first time a
-window opened. So the shell should be driven interactively before the milestone is treated as closed in
-practice: hover, focus, typing, an input method, a real revert countdown.
+**The shell runs in a window**, which this project treats as a separate obligation from a green capture
+suite — the one bug the headless suite structurally could not catch appeared the first time a window
+opened, and none of hover following a pointer, focus moving under Tab, a caret advancing as somebody
+types, or a countdown actually counting is reachable from a capture:
+
+```bash
+cargo run -p cic-render --example shell --release
+```
+
+Change the resolution scale, press Apply, and do nothing: fifteen seconds later the setting comes back on
+its own. The window also exercised what a capture at scale 1.0 could not — it opened at **1.5**, which is
+what prompted the fifth reference.
 
 **Drawing landed in three parts, split where the mistakes are.** A **paint layer with no GPU in it**
 decides how the interface looks — which colour a focused button takes, where a checkbox's indicator sits,
@@ -220,12 +227,13 @@ be looked at rather than being stranded on the runner.
 
 Eleven references per adapter cover terrain layers, instanced models, the deferred chain, water, water
 under a glancing sun, cloud shadows, fog, wet ground, snow, an antialiased frame, and a supersampled one,
-and **four more cover the interface**: the main menu, the settings screen with every widget kind it has, a
-modal over the screen it covers, and a scrolled container clipped to itself. One set per adapter, each
-generated on its own machine and looked at before being committed.
+and **five more cover the interface**: the main menu, the settings screen with every widget kind it has,
+that same screen at one and a half times the pixel density, a modal over the screen it covers, and a
+scrolled container clipped to itself. One set per adapter, each generated on its own machine and looked at
+before being committed.
 
 **The interface references exist for the NVIDIA adapter only.** The lavapipe set has to be generated on the
-runner, exactly as M3's was in three separate commits — until it is, those four tests will write a
+runner, exactly as M3's was in three separate commits — until it is, those five tests will write a
 reference and fail there rather than passing silently, which is the harness working as designed.
 
 The render tests still skip rather than fail when no adapter is available, so a developer machine with no

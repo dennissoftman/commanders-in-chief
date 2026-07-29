@@ -178,8 +178,14 @@ by the M3 capture harness.
 **Met.** 149 tests in `cic-ui` cover the format, the solver, retained state, input routing, composition,
 the string table, the action set, the screen stack, the settings transaction, the paint layer and the
 routing between them; 33 in `cic-render` cover the typeface, the rasteriser, the atlas and the draw list;
-and four committed reference images cover the rendered result — the main menu, the settings screen with
-every widget kind it has, a modal over the screen it covers, and a scrolled container clipped to itself.
+and five committed reference images cover the rendered result — the main menu, the settings screen with
+every widget kind it has, that same screen at one and a half times the pixel density, a modal over the
+screen it covers, and a scrolled container clipped to itself.
+
+**And it runs in a window**, which this project treats as a separate obligation: `cargo run -p cic-render
+--example shell`. The window opened at a scale of 1.5, which is what prompted the density reference — a
+capture at 1.0 cannot show that a theme's sizes were multiplied, an atlas rebuilt, and every quad still
+landed on whole pixels.
 
 ## Design notes
 

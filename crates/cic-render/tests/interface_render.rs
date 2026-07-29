@@ -92,11 +92,17 @@ fn viewport() -> Viewport {
     Viewport::new(SIZE[0], SIZE[1], 1.0).expect("a valid viewport")
 }
 
-/// Builds the shell over the authored screens.
-fn shell() -> Shell<Display> {
+/// The same logical surface at one and a half times the pixel density.
+///
+/// 960x600 at 1.5 is 640x400 logical units, so this and [`SIZE`] describe the *same* layout and the
+/// capture shows only what the scale did to it.
+const DENSE: [u32; 2] = [960, 600];
+
+/// Builds the shell over the authored screens, at a surface size and display scale.
+fn shell_at(size: [u32; 2], scale: f32) -> Shell<Display> {
     let theme = Theme::default();
     let strings = strings();
-    let metrics = UiMetrics::new(&theme, &strings, 1.0);
+    let metrics = UiMetrics::new(&theme, &strings, scale);
     Shell::new(
         screens(),
         strings.clone(),
@@ -104,17 +110,23 @@ fn shell() -> Shell<Display> {
             scale: 1.0,
             antialiasing: false,
         },
-        viewport(),
+        Viewport::new(size[0], size[1], scale).expect("a valid viewport"),
         &metrics,
     )
     .expect("every screen has a layout")
 }
 
+fn shell() -> Shell<Display> {
+    shell_at(SIZE, 1.0)
+}
+
 /// Renders whatever the shell currently shows and reads it back.
 fn capture(context: &GpuContext, shell: &Shell<Display>) -> Capture {
     let theme = Theme::default();
-    let metrics = UiMetrics::new(&theme, shell.strings(), 1.0);
-    let atlas = GlyphAtlas::new(&Font::new(), &atlas_sizes(&theme, 1.0));
+    let scale = shell.viewport().scale();
+    let size = [shell.viewport().width(), shell.viewport().height()];
+    let metrics = UiMetrics::new(&theme, shell.strings(), scale);
+    let atlas = GlyphAtlas::new(&Font::new(), &atlas_sizes(&theme, scale));
     let painter = Painter::new(&theme, &metrics, shell.viewport());
 
     let mut list = DrawList::new();
@@ -127,7 +139,7 @@ fn capture(context: &GpuContext, shell: &Shell<Display>) -> Capture {
     }
     assert!(!list.is_empty(), "the shell drew nothing at all");
 
-    let target = CaptureTarget::new(context, SIZE[0], SIZE[1]).expect("a capture target");
+    let target = CaptureTarget::new(context, size[0], size[1]).expect("a capture target");
     let mut renderer = UiRenderer::new(context.device(), context.queue(), CAPTURE_FORMAT, &atlas);
     let mut encoder = context
         .device()
@@ -142,7 +154,7 @@ fn capture(context: &GpuContext, shell: &Shell<Display>) -> Capture {
         context.queue(),
         &mut encoder,
         target.colour_view(),
-        SIZE,
+        size,
         &list,
     );
     // `resolve` submits the encoder itself after appending the copy, so the pass above must not be
@@ -299,6 +311,39 @@ fn a_modal_draws_over_the_screen_it_covers() {
         "the modal must not replace the screen"
     );
     support::check_reference(context, "ui-modal.png", &capture(context, &shell));
+}
+
+/// Stages the settings screen so every widget kind it has is drawn in a distinguishable state.
+fn dressed_settings(shell: &mut Shell<Display>, metrics: &UiMetrics<'_>) {
+    shell.act(Action::OpenSettings, metrics);
+    shell.interface_mut().set_slide("settings_scale", 1.25);
+    shell
+        .interface_mut()
+        .set_text("settings_scale_value", "1.25x");
+    shell.interface_mut().set_toggle("settings_antialias", true);
+    shell
+        .interface_mut()
+        .set_text("settings_profile", "Ardennes");
+    shell.interface_mut().set_focus(Some("settings_profile"));
+}
+
+#[test]
+fn the_same_layout_at_one_and_a_half_times_the_density_is_the_same_layout() {
+    // The charter's named failure mode is a layout that is correct on exactly one monitor, and drawing is
+    // where that would finally show: a theme's sizes multiplied, a glyph atlas rebuilt, and every quad
+    // still landing on whole pixels. 960x600 at 1.5 is the same 640x400 logical surface as the capture
+    // above, so the two images differ only in resolution.
+    let Some(context) = context() else {
+        return;
+    };
+    let theme = Theme::default();
+    let strings = strings();
+    let metrics = UiMetrics::new(&theme, &strings, 1.5);
+    let mut shell = shell_at(DENSE, 1.5);
+    dressed_settings(&mut shell, &metrics);
+    let capture = capture(context, &shell);
+    assert_eq!(capture.width(), DENSE[0]);
+    support::check_reference(context, "ui-settings-dense.png", &capture);
 }
 
 #[test]
