@@ -20,6 +20,7 @@ mechanism and it is explained below; adding a record without touching this table
 | [0008](0008-physics-engine.md) | Physics is cosmetic, and Rapier rather than Jolt | accepted |
 | [6001](6001-audio-backend-boundary.md) | Where the audio backend boundary goes | accepted, implemented |
 | [7001](7001-scripting-language.md) | A scripting language of this project's own | accepted, implemented |
+| [7002](7002-script-events.md) | Script events: subscription is a handler, scripts arrive with the scenario | proposed |
 
 ## Numbering
 
