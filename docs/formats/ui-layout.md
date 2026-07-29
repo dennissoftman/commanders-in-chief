@@ -50,6 +50,7 @@ thing that decides.
 |---|---|---|---|
 | `id` | **sometimes** | absent | Unique within a layout. **Required** on any widget that takes focus or holds state — see below. |
 | `widget` | no | `"panel"` | One of the widget kinds below. |
+| `style` | no | absent | A role, not an appearance — see *Style roles*. Only on a `panel` or a `label`. |
 | `direction` | no | `"column"` | `row`, `column`, or `stack`. Ignored by a node with no children. |
 | `width`, `height` | no | `"auto"` | See *Sizing*. |
 | `padding` | no | all zero | `{ "left", "top", "right", "bottom" }`, logical units. |
@@ -86,6 +87,38 @@ it is checked, so the file is refused at load rather than silently forgetting at
 **Why `scroll` takes no focus.** It holds an offset, but nothing inside it *is* it, so landing keyboard
 focus on the container would give the user a tab stop where no key does anything. Scrolling follows the
 pointer.
+
+## Style roles
+
+`style` says what a node **is**, never what it looks like. A theme decides the second, for the same
+reason text lives in a string table: an authored colour is a decision about the interface's appearance
+spread across every screen file, and changing it means finding every literal.
+
+| Role | On | Draws |
+|---|---|---|
+| `scrim` | `panel` | A translucent wash over everything beneath, for a modal's backdrop. |
+| `card` | `panel` | A raised surface with a border: a modal's body, or a settings page. |
+| `divider` | `panel` | A hairline rule. |
+| `title` | `label` | Larger text, centred unless `align` says otherwise. |
+| `caption` | `label` | Smaller, dimmer text. |
+| `warning` | `label` | Text that wants attention, such as a countdown about to expire. |
+
+**A node with no role draws nothing.** That is the common case and it is deliberate: a layout tree is
+mostly structure — rows and columns whose job is to place their children — and giving every panel a
+background would paint the screen over in nested rectangles.
+
+**A widget kind that already looks like something takes no role.** How a button, a slider or a checkbox
+looks is not a per-node decision, so a role on one is refused: a surface role on a label or a text role on
+a panel would draw nothing, which is the same class of mistake as an action on a panel.
+
+**Text alignment comes from `align` on a childless node.** `align` defaults to `"stretch"`, and a node
+with no children has nothing to stretch — so `"center"` on a label can only mean the text, while a
+defaulted `"stretch"` leaves the widget kind to decide. That is what centres a button's label without
+every button having to say so.
+
+**Dynamic text is a stored value, not a layout field.** A label with an `id` draws whatever the host
+stored against that id, falling back to its `text_key`. That is the channel for text no string table can
+hold — a countdown, a chosen map's name — and it keeps per-frame values out of the table.
 
 ## Actions
 
@@ -194,6 +227,8 @@ Beyond what the shape enforces:
   one arithmetic step away.
 - `range` on anything but a slider, or `max_length` on anything but a text entry, is refused — the same
   posture as an action on a panel, since inert authoring is a mistake that looks correct.
+- A `style` role must suit its widget: a surface role only on a `panel`, a text role only on a `label`,
+  and neither on a kind that already looks like something.
 - `max_length` may not be zero.
 - Nesting is limited to 64 levels and a layout to 4096 nodes. The tree is walked recursively by
   decoding, validation, and solving alike, so unbounded nesting is a stack overflow reachable from a

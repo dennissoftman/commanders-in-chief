@@ -39,7 +39,7 @@
 
 use crate::geometry::{Rect, Viewport};
 use crate::layout::{
-    Align, DEFAULT_MAX_LENGTH, Direction, Justify, Layout, Node, Range, Sizing, Widget,
+    Align, DEFAULT_MAX_LENGTH, Direction, Justify, Layout, Node, Range, Sizing, Style, Widget,
 };
 use crate::{Action, StringTable};
 
@@ -53,6 +53,21 @@ pub trait Measure {
     /// `available` is advisory: it is what the parent could offer before this node was sized, which is
     /// what a wrapping implementation needs. Returning something larger is allowed, and overflows.
     fn measure(&self, node: &Node, available: [f32; 2]) -> [f32; 2];
+
+    /// The logical width of a string drawn at a logical text size.
+    ///
+    /// Separate from [`Self::measure`] because the two answer different questions. A node's size is
+    /// asked once, before anything is positioned; an *advance* is asked about a substring — how far
+    /// along the caret sits after three characters — and only the same implementation that will
+    /// rasterise the text can answer it. It is what narrows the input-method cursor area from the whole
+    /// field to the caret, and what lets a drawing layer place one.
+    ///
+    /// Zero by default, so a layout with nothing to measure and a stub in a test need not implement it.
+    /// A drawing layer that gets zero draws a caret at the start of the field, which is wrong but not
+    /// broken — the honest failure for a measurement nobody supplied.
+    fn advance(&self, _text: &str, _size: f32) -> f32 {
+        0.0
+    }
 }
 
 impl<F> Measure for F
@@ -96,6 +111,10 @@ pub struct SolvedNode {
     pub rect: Rect,
     /// What kind of control it is.
     pub widget: Widget,
+    /// What it is for, when its widget kind does not already say.
+    pub style: Option<Style>,
+    /// Where its own text sits, which on a childless node is what `align` selects.
+    pub align: Align,
     /// Its identifier, when it has one.
     pub id: Option<String>,
     /// Its text key, when it has one.
@@ -207,6 +226,28 @@ impl Solved {
         self.nodes
             .iter()
             .rposition(|node| node.widget.focusable() && node.rect.contains(x, y))
+    }
+
+    /// The index of a node's nth direct child.
+    ///
+    /// Stepping over whole subtrees rather than counting depths, which is what makes this arithmetic: in
+    /// pre-order a child's next sibling is `subtree` entries further on. What a list or a tab strip needs
+    /// to find the row its selection names, since a selection is an index among *direct* children and the
+    /// flat sequence holds every descendant.
+    #[must_use]
+    pub fn child(&self, index: usize, nth: usize) -> Option<usize> {
+        let parent = self.nodes.get(index)?;
+        let end = (index + parent.subtree).min(self.nodes.len());
+        let mut at = index + 1;
+        let mut counted = 0;
+        while at < end {
+            if counted == nth {
+                return Some(at);
+            }
+            counted += 1;
+            at += self.nodes.get(at).map_or(1, |node| node.subtree.max(1));
+        }
+        None
     }
 
     /// The nearest enclosing node of a given kind, starting with the node itself.
@@ -393,6 +434,8 @@ impl Arrange<'_> {
         self.nodes.push(SolvedNode {
             rect: rect.snapped(),
             widget: node.widget,
+            style: node.style,
+            align: node.align,
             id: node.id.clone(),
             text_key: node.text_key.clone(),
             action: node.action,
