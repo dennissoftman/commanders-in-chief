@@ -19,18 +19,25 @@
 //! | `F` | Reset rotation only |
 //! | `T` | Cycle antialiasing: none, post pass, temporal |
 //! | `[` `]` | Step the resolution scale |
+//! | `G` | Cycle weather: clear, rain, thunderstorm, snowfall |
+//! | `,` `.` | Step the time of day, held to scrub the sun |
 //! | `P` | Toggle the per-pass GPU timing printout |
 //! | `Esc` | Quit |
 //!
-//! The last two are here because antialiasing is the one rendering change a still capture reports
-//! badly. Its whole subject is what an edge does *as the camera moves*, and a resolution scale trades
-//! frame rate for sampling rate — neither of which a headless test can show anyone. Both print the
-//! settings and the size they took effect at, so a screenshot of the terminal says what the window is
+//! Antialiasing, the resolution scale, the weather and the hour are all here for one reason: each is a
+//! rendering change a still capture reports badly or not at all. Antialiasing's whole subject is what an
+//! edge does *as the camera moves*; a resolution scale trades frame rate for sampling rate; and the
+//! environment terms move on their own — cloud shadows drift at a rate the wind sets, and the sun
+//! travels. Each prints what it took effect as, so a screenshot of the terminal says what the window is
 //! showing.
 //!
 //! The temporal tier is the strongest case for that. A converged capture of it is a reference the harness
 //! can compare, and it says nothing at all about the two things that decide whether the setting is usable:
 //! whether a pan smears, and whether a stationary camera settles or shimmers.
+//!
+//! The weather keys close a gap of the same kind. Cloud shadows, wetness and lying snow reach the shaders
+//! only through an environment, and this viewer set none — so those three terms were reachable from a
+//! test capture and from nowhere a person could look at them moving.
 
 // The generator clamps before converting and its inputs are bounded constants, so the width casts
 // below cannot lose anything.
@@ -52,9 +59,9 @@ use cic_assets::{MapPackage, PackageLimits, Terrain, TerrainLayer};
 use cic_camera::{RtsCamera, RtsCameraProfile};
 use cic_render::display::{MAX_RESOLUTION_SCALE, MIN_RESOLUTION_SCALE};
 use cic_render::{
-    Action, Antialiasing, DeferredFrame, DisplaySettings, GpuContext, InputState, LayerMaterial,
-    ModelBatch, ModelInstance, SurfaceRenderer, TerrainGround, TerrainRenderer, TextureImage,
-    WaterBody, WaterSurface,
+    Action, Antialiasing, DeferredFrame, DisplaySettings, Environment, GpuContext, InputState,
+    LayerMaterial, ModelBatch, ModelInstance, SurfaceRenderer, TerrainGround, TerrainRenderer,
+    TextureImage, WaterBody, WaterSurface, Weather,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -62,6 +69,37 @@ use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
+
+/// The weather states `G` cycles, in the order it cycles them.
+///
+/// Presets rather than a slider per field, because the interesting thing about weather here is that its
+/// fields are *not* independent — [`Environment::with_weather`] derives fog density and cloud coverage
+/// from the overcast it is given, and a preset exercises that derivation the way a caller would. The
+/// clear state comes first so the viewer opens in the state every committed reference was captured in.
+const WEATHER_CYCLE: [WeatherPreset; 4] = [
+    WeatherPreset::new("clear", Weather::default),
+    WeatherPreset::new("rain", Weather::rain),
+    WeatherPreset::new("thunderstorm", Weather::thunderstorm),
+    WeatherPreset::new("snowfall", Weather::snowfall),
+];
+
+/// One entry of [`WEATHER_CYCLE`]: what to call it, and how to build it.
+struct WeatherPreset {
+    name: &'static str,
+    build: fn() -> Weather,
+}
+
+impl WeatherPreset {
+    const fn new(name: &'static str, build: fn() -> Weather) -> Self {
+        Self { name, build }
+    }
+}
+
+/// Hours the time-of-day keys step by.
+///
+/// A quarter hour, because the sun's elevation is what shadow length follows and near dawn or dusk a
+/// whole hour moves it far enough to skip the angles where cascade fitting is most strained.
+const HOUR_STEP: f32 = 0.25;
 
 /// World units a one-pixel drag pans at the default height.
 const DRAG_PIXELS_TO_UNITS: f32 = 0.05;
@@ -520,6 +558,15 @@ struct Viewer {
     frame_ordinal: u32,
     /// Held here rather than only inside the surface, so the setting survives the window being rebuilt.
     display: DisplaySettings,
+    /// The air and the light, which the time-of-day and weather keys drive.
+    ///
+    /// Held across frames because it is *state* a key mutates, not something derivable from the frame
+    /// ordinal. It starts at [`Environment::default`], whose every field is chosen so a frame rendered
+    /// through it is identical to one rendered before an environment existed — so the viewer still opens
+    /// in the state the committed captures were taken in, and a key press is the only way out of it.
+    environment: Environment,
+    /// Which entry of [`WEATHER_CYCLE`] is in force.
+    weather: usize,
     /// Seconds since the last per-pass breakdown was printed, or `None` when timing is off.
     timing_countdown: Option<f32>,
     failure: Option<String>,
@@ -544,6 +591,10 @@ impl Viewer {
             // Starts where the headless captures are, so the first frame in the window is the frame the
             // references were rendered from and pressing a key is the only difference from them.
             display: DisplaySettings::NATIVE,
+            // Same reasoning as the display above: the default environment is the one the references
+            // were captured through, so the window opens on the frame they pin.
+            environment: Environment::default(),
+            weather: 0,
             timing_countdown: None,
             failure: None,
         }
@@ -580,6 +631,49 @@ impl Viewer {
             Some(Err(error)) => eprintln!("timing: could not read the breakdown: {error}"),
             None => self.timing_countdown = None,
         }
+    }
+
+    /// Applies a weather or time-of-day key, returning whether the key was one.
+    ///
+    /// # Why the viewer needed this at all
+    ///
+    /// Cloud shadows, wetness and lying snow reach the shaders through the environment, and the viewer
+    /// set none — so it always ran the default, whose whole purpose is to change nothing. Every one of
+    /// those terms was therefore reachable only from a test capture, and two of them cannot be judged
+    /// from a still image at all: cloud shadows *drift*, at a rate the wind sets, and the sun *moves*.
+    /// That is the same argument the antialiasing key is there for — what something does as the frame
+    /// changes is not something a capture reports.
+    fn change_environment(&mut self, code: KeyCode, repeat: bool) -> bool {
+        match code {
+            KeyCode::KeyG if !repeat => {
+                self.weather = (self.weather + 1) % WEATHER_CYCLE.len();
+                let preset = &WEATHER_CYCLE[self.weather];
+                // Through `with_weather` rather than by assigning the field, because that is what
+                // derives the fog and cloud coverage the overcast implies. Assigning `weather` directly
+                // would set a storm's saturation and leave its sky clear.
+                //
+                // From a *fresh* environment rather than the one in force, keeping only the hour.
+                // `with_weather` raises fog and cloud coverage to what the overcast implies and never
+                // lowers them, deliberately, so a caller that set a foggy morning does not have it taken
+                // away by fair weather. Cycling on top of the accumulated value inherits every previous
+                // state's maximum instead, which the first run of this key showed: stepping thunderstorm
+                // to snowfall left the snowfall reporting the storm's 0.81 coverage rather than its own
+                // 0.60, and a full lap back to clear would have arrived at an overcast sky called clear.
+                self.environment = Environment {
+                    time_of_day: self.environment.time_of_day,
+                    ..Environment::default()
+                }
+                .with_weather((preset.build)());
+            }
+            KeyCode::Comma => self.environment.time_of_day -= HOUR_STEP,
+            KeyCode::Period => self.environment.time_of_day += HOUR_STEP,
+            _ => return false,
+        }
+        // Wrapped through the accessor rather than left to grow without bound, so the printed hour and
+        // the stored one agree after a few hundred presses.
+        self.environment.time_of_day = self.environment.hour();
+        report_environment(&self.environment, WEATHER_CYCLE[self.weather].name);
+        true
     }
 
     /// Applies a change to the display settings and reports what took effect.
@@ -736,6 +830,14 @@ impl ApplicationHandler for Viewer {
                         self.change_display(event_loop, display);
                         return;
                     }
+                    // Unlike a display change this reallocates nothing — an environment is uniform data
+                    // — so it applies in place rather than rebuilding the chain, and the time-of-day
+                    // keys deliberately act on key *repeat* too, because scrubbing the sun across the
+                    // sky is the point of having them. The weather cycle suppresses repeat, since
+                    // holding it would race through four presets faster than any of them could be seen.
+                    if pressed && self.change_environment(code, event.repeat) {
+                        return;
+                    }
                     if let Some(action) = action_for(code) {
                         self.input.set_action(action, pressed);
                     }
@@ -810,7 +912,11 @@ impl Viewer {
         self.frame_ordinal = self.frame_ordinal.wrapping_add(1);
 
         let (width, height) = active.surface.size();
+        // `in_environment` re-derives the light, so the time-of-day keys move the sun rather than only
+        // recolouring it. At the default environment this is the frame the references were captured
+        // from, which is what keeps a key press the only difference between the window and them.
         let frame = DeferredFrame::new(self.camera.pose(), width, height)
+            .in_environment(self.environment)
             .at_time(self.elapsed)
             .at_jitter(self.frame_ordinal);
         active
@@ -852,6 +958,26 @@ fn display_change(code: KeyCode, current: DisplaySettings) -> Option<DisplaySett
         }
         _ => return None,
     })
+}
+
+/// Prints the environment in force, and enough of what it derived to tell a key press worked.
+///
+/// The sun's elevation is included because it is the figure that explains the frame: a cloud shadow at
+/// a high sun lands nearly under its cloud and at a low one is thrown hundreds of units sideways, so an
+/// elevation is the difference between a dapple that looks wrong and one that is merely unfamiliar.
+fn report_environment(environment: &Environment, name: &str) {
+    let weather = environment.weather;
+    eprintln!(
+        "environment: {name} at {:04.1}h, sun elevation {:.1} degrees, \
+         overcast {:.2}, wetness {:.2}, snow {:.2}, cloud coverage {:.2}, fog {:.5}",
+        environment.hour(),
+        environment.sun_elevation().to_degrees(),
+        weather.overcast,
+        weather.wetness,
+        weather.snow,
+        environment.clouds.coverage,
+        environment.fog.density,
+    );
 }
 
 /// Prints the settings in force and the size they produced.
