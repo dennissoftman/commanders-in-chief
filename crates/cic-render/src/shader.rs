@@ -16,8 +16,8 @@
 //!
 //! # Why `staged` is a field and not a comment
 //!
-//! Five programs are wired to no pipeline. They are real work held for a milestone that has not started
-//! — `ui` for M4's interface, the virtual-texture pair for terrain detail past one texture — and they
+//! Four programs are wired to no pipeline. They are real work held for a milestone that has not started
+//! — `ui` for M4's interface, and three viewer passes for M8's tooling — and they
 //! were previously indistinguishable from dead code, which is how six *genuinely* dead shaders survived
 //! in the set with comments describing a uniform layout that no longer existed. Marking them makes the
 //! live set countable, and [`Program::staged`] means a reader never has to grep the pipelines to find
@@ -54,6 +54,10 @@ const CHUNKS: &[(&str, &str)] = &[
         include_str!("shaders/terrain_gbuffer.wgsl"),
     ),
     (
+        "terrain_reduce",
+        include_str!("shaders/terrain_reduce.wgsl"),
+    ),
+    (
         "terrain_viewer",
         include_str!("shaders/terrain_viewer.wgsl"),
     ),
@@ -61,6 +65,7 @@ const CHUNKS: &[(&str, &str)] = &[
         "terrain_virtual",
         include_str!("shaders/terrain_virtual.wgsl"),
     ),
+    ("transfer", include_str!("shaders/transfer.wgsl")),
     ("ui", include_str!("shaders/ui.wgsl")),
     ("water", include_str!("shaders/water.wgsl")),
 ];
@@ -111,7 +116,8 @@ pub const PROGRAMS: &[Program] = &[
     },
     Program {
         name: "terrain_gbuffer",
-        chunks: &["motion", "terrain_gbuffer"],
+        // `transfer` first: it declares the sRGB decode a page read goes through.
+        chunks: &["transfer", "motion", "terrain_gbuffer"],
         staged: false,
     },
     Program {
@@ -139,7 +145,12 @@ pub const PROGRAMS: &[Program] = &[
     },
     Program {
         name: "terrain_virtual",
-        chunks: &["terrain_virtual"],
+        chunks: &["transfer", "terrain_virtual"],
+        staged: false,
+    },
+    Program {
+        name: "terrain_reduce",
+        chunks: &["transfer", "terrain_reduce"],
         staged: false,
     },
     Program {
@@ -236,12 +247,12 @@ mod tests {
     #[test]
     fn the_live_and_staged_split_is_what_is_declared() {
         // Stated as a number so adding a program without wiring it is a deliberate act rather than an
-        // oversight. The staged five are `ui`, the virtual-texture pair, and the two viewer passes.
+        // oversight. The staged four are `ui` and the three viewer passes.
         let live = PROGRAMS.iter().filter(|entry| !entry.staged).count();
         let staged = PROGRAMS.iter().filter(|entry| entry.staged).count();
-        assert_eq!(live, 10, "live programs");
+        assert_eq!(live, 11, "live programs");
         assert_eq!(staged, 4, "staged programs");
-        assert_eq!(CHUNKS.len(), 20);
+        assert_eq!(CHUNKS.len(), 22);
     }
 
     #[test]

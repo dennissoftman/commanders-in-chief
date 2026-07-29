@@ -26,8 +26,8 @@ use cic_render::terrain::LayerColour;
 use cic_render::terrain_virtual::VirtualPageView;
 use cic_render::{
     Antialiasing, Capture, CaptureTarget, Clouds, DeferredFrame, DeferredRenderer, DeferredTargets,
-    DisplaySettings, Environment, Fog, GpuContext, TerrainRenderer, TimedPass, WaterBody,
-    WaterMaterial, WaterSurface, Weather,
+    DisplaySettings, Environment, Fog, GpuContext, LayerMaterial, TerrainRenderer, TextureImage,
+    TimedPass, WaterBody, WaterMaterial, WaterSurface, Weather,
 };
 
 const WIDTH: u32 = 720;
@@ -157,8 +157,19 @@ fn harness_for(context: &GpuContext, terrain: Terrain) -> Harness {
 }
 
 fn harness_with(context: &GpuContext, terrain: Terrain, display: DisplaySettings) -> Harness {
-    let renderer =
-        TerrainRenderer::new(context, &terrain, &palette()).expect("build terrain renderer");
+    let materials: Vec<LayerMaterial> =
+        palette().iter().copied().map(LayerMaterial::from).collect();
+    harness_from(context, terrain, display, &materials)
+}
+
+fn harness_from(
+    context: &GpuContext,
+    terrain: Terrain,
+    display: DisplaySettings,
+    materials: &[LayerMaterial],
+) -> Harness {
+    let renderer = TerrainRenderer::with_materials(context, &terrain, materials)
+        .expect("build terrain renderer");
     let targets = DeferredTargets::new(
         context,
         WIDTH,
@@ -2041,8 +2052,9 @@ fn terrain_sampled_from_pages_matches_the_direct_blend() {
     //
     // Not byte-identical, and every reason is in the design rather than in the arithmetic: a page stores eight
     // bits per channel where the blend keeps float precision, a page sample is filtered from page texels
-    // rather than from the layer weights, and a page picks its own mip level because a compute shader has no
-    // derivatives. So the assertion is a bound on the difference, in eight-bit steps.
+    // rather than from the layer weights, and a page picks its own mip level — twice over, once when the
+    // compose pass chooses which albedo level to bake and again when the G-buffer chooses which page level to
+    // read. So the assertion is a bound on the difference, in eight-bit steps.
     //
     // Drawn through the *deferred* chain, which is where the page lookup lives. The forward pass deliberately
     // has none: it draws terrain alone in one pass, which is the case a cache has nothing to offer — and the
@@ -2074,11 +2086,13 @@ fn terrain_sampled_from_pages_matches_the_direct_blend() {
 
     let (mean, worst) = channel_difference(&direct, &paged);
     eprintln!("direct against paged: mean channel difference {mean:.3}, worst {worst}");
-    // Both bounds are set from what was measured — 0.001 and 2 — with a wide margin rather than a generous
-    // guess, and the distinction is the point. A page resolved to the wrong layer, or a coordinate off by a
-    // border, differs by *tens to hundreds*; so a bound loose enough to be safe against adapter and filter
-    // variation is still two orders of magnitude tighter than any real fault. Choosing one without measuring
-    // first would have meant the looser number, which would have caught nothing.
+    // Both bounds are set from what was measured — 0.004 and 5, up from 0.001 and 2 before the page carried a
+    // mip chain, because at this view the page is very slightly minified and the level the G-buffer picks is
+    // no longer always the base — with a wide margin rather than a generous guess, and the distinction is the
+    // point. A page resolved to the wrong layer, or a coordinate off by a border, differs by *tens to
+    // hundreds*; so a bound loose enough to be safe against adapter and filter variation is still two orders
+    // of magnitude tighter than any real fault. Choosing one without measuring first would have meant the
+    // looser number, which would have caught nothing.
     assert!(
         mean < 0.5,
         "the two paths must agree on the surface: mean channel difference {mean:.3}"
@@ -2138,5 +2152,176 @@ fn a_cell_with_no_resident_page_falls_back_to_the_direct_blend() {
     assert!(
         share < 1.0,
         "the whole frame is the direct blend, so the one resident page is not being read"
+    );
+}
+
+/// A flat terrain whose two layers both carry a striped albedo.
+///
+/// Flat and striped for one reason: a mip chain is only worth anything where minification is severe and the
+/// content has high spatial frequency. A flat plane seen at a shallow angle compresses without limit toward
+/// the horizon, and a stripe at 16 world units per period goes sub-pixel there. A smooth heightfield in flat
+/// palette colours — which is what every other fixture in this file is — measures the same energy whether the
+/// chain exists or not, so it could not show this either way.
+fn striped_plain() -> Terrain {
+    split_terrain()
+}
+
+fn striped_materials() -> Vec<LayerMaterial> {
+    [[0.85, 0.80, 0.62], [0.55, 0.62, 0.45]]
+        .into_iter()
+        .map(|colour| LayerMaterial::colour(colour).with_albedo(stripes(64, 4), 64.0))
+        .collect()
+}
+
+/// A square image of horizontal stripes alternating between a quarter and full brightness.
+fn stripes(size: u32, count: u32) -> TextureImage {
+    let period = size.div_ceil(count.max(1));
+    let mut rgba = Vec::with_capacity((size * size * 4) as usize);
+    for y in 0..size {
+        let value = if (y / period).is_multiple_of(2) {
+            64
+        } else {
+            255
+        };
+        for _ in 0..size {
+            rgba.extend_from_slice(&[value, value, value, u8::MAX]);
+        }
+    }
+    TextureImage::new(size, size, rgba).expect("valid stripe image")
+}
+
+/// A camera a few units above a flat plain, looking almost along it.
+fn grazing_pose(terrain: &Terrain) -> CameraPose {
+    let [extent_x, extent_y] = terrain.world_extent();
+    let eye = [extent_x * 0.5, -extent_y * 0.1, 90.0];
+    let focus = [extent_x * 0.5, extent_y, 50.0];
+    let delta = [focus[0] - eye[0], focus[1] - eye[1], focus[2] - eye[2]];
+    let length = (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt();
+    CameraPose {
+        eye,
+        focus,
+        forward: delta.map(|component| component / length),
+    }
+}
+
+/// Mean squared difference between adjacent pixels along *both* axes, over the rows from `from_row` down.
+///
+/// The statistic aliasing shows up in. A minified pattern sampled at one level per page produces neighbouring
+/// pixels that disagree far more than the surface they came from does, so the *energy* between adjacent pixels
+/// rises even though the mean brightness does not move at all — which is why a mean or a luminance spread
+/// reports nothing here.
+///
+/// Both axes, and the first version of this measured only one. The fixture's stripes run horizontally, so
+/// along a row there is almost nothing to see and the figure came out at 1.49 where the vertical axis reads
+/// 158 — a metric that happened to be perpendicular to the only detail in the frame. A sum over both axes
+/// cannot be defeated by the orientation of the content.
+fn adjacent_energy(capture: &Capture, from_row: u32) -> f64 {
+    let width = capture.width();
+    let rgba = capture.rgba();
+    let luma = |x: u32, y: u32| {
+        let at = ((y * width + x) * 4) as usize;
+        0.2126 * f64::from(rgba[at])
+            + 0.7152 * f64::from(rgba[at + 1])
+            + 0.0722 * f64::from(rgba[at + 2])
+    };
+    let mut total = 0.0;
+    let mut counted = 0u64;
+    for y in from_row..capture.height() {
+        for x in 0..width {
+            if x > 0 {
+                let difference = luma(x, y) - luma(x - 1, y);
+                total += difference * difference;
+                counted += 1;
+            }
+            if y > from_row {
+                let difference = luma(x, y) - luma(x, y - 1);
+                total += difference * difference;
+                counted += 1;
+            }
+        }
+    }
+    total / counted.max(1) as f64
+}
+
+#[test]
+fn a_page_sampled_at_a_grazing_angle_does_not_alias_worse_than_the_direct_blend() {
+    // What the mip chain is *for*, and the one claim that decides whether the cache should be used at all. A
+    // page used to hold a single density, so ground sampled under heavy minification read one texel out of
+    // many it covered — while the fallback beside it, the direct layer blend, samples an albedo array that has
+    // a full chain and so minifies gracefully. That made the cache correct and *worse*, on exactly the ground
+    // a virtual texture exists for.
+    //
+    // Measured as the energy between adjacent pixels rather than as a difference from the direct frame,
+    // because the two frames are legitimately allowed to differ: the question is not whether they agree but
+    // whether the paged one is noisier.
+    let Some(context) = context() else { return };
+    let mut harness = harness_from(
+        context,
+        striped_plain(),
+        DisplaySettings::NATIVE,
+        &striped_materials(),
+    );
+    let frame = DeferredFrame::new(grazing_pose(&harness.terrain), WIDTH, HEIGHT);
+    let direct = render(context, &harness, frame);
+
+    let cache = warmed_cache(context, &harness, 16);
+    harness.renderer.attach_pages(context, &cache);
+    let paged = render(context, &harness, frame);
+
+    write_capture("terrain-grazing-direct.png", &direct);
+    write_capture("terrain-grazing-paged.png", &paged);
+    assert_ne!(
+        direct.rgba(),
+        paged.rgba(),
+        "the two frames are identical, so the cache is not being read and this measures nothing"
+    );
+
+    // Two regions, and the split is the finding rather than a convenience. The lower half of the frame is the
+    // plain — above it is sky, identical in both frames, and including it would dilute both figures by the
+    // same large constant. Within that, the *nearer* three fifths is ground whose minification is inside the
+    // factor of eight the chain reaches, and the band above it is not.
+    let plain = HEIGHT / 2;
+    let near = HEIGHT * 3 / 5;
+    let (direct_plain, paged_plain) = (
+        adjacent_energy(&direct, plain),
+        adjacent_energy(&paged, plain),
+    );
+    let (direct_near, paged_near) = (
+        adjacent_energy(&direct, near),
+        adjacent_energy(&paged, near),
+    );
+    eprintln!(
+        "adjacent-pixel energy — whole plain: direct {direct_plain:.2}, paged {paged_plain:.2}, ratio {:.2}; \
+         within the chain's reach: direct {direct_near:.2}, paged {paged_near:.2}, ratio {:.2}",
+        paged_plain / direct_plain.max(f64::EPSILON),
+        paged_near / direct_near.max(f64::EPSILON),
+    );
+
+    assert!(
+        direct_near > 1.0,
+        "the fixture shows no high-frequency detail at all ({direct_near:.4}), so it cannot say whether the \
+         page path aliases: the stripes are not reaching the frame"
+    );
+    // Where the chain reaches, the paged frame is *smoother* than the direct blend rather than merely no
+    // worse: 238 against 386, a ratio of 0.62, and the thirty-row bands within it read 0.47 to 0.89. The bound
+    // is 1.0 because the claim is a comparison and not a tuned figure.
+    assert!(
+        paged_near <= direct_near,
+        "within the chain's reach the page path aliases more than the direct blend it replaces \
+         ({paged_near:.2} against {direct_near:.2}), so the chain is absent, not being sampled, or built at \
+         the wrong level"
+    );
+    // And the whole plain, which is what stops the band above from being an exclusion nobody has to justify.
+    // The topmost thirty rows of ground read 1.93 rather than 0.46, and the reason is a real limit rather than
+    // a defect: four levels take a page's density down by eight, and a pixel at the horizon covers more ground
+    // than that — so there the page saturates at its deepest level while the direct blend's albedo chain keeps
+    // going. Ground that far should not have a page resident at all, which is the *residency* decision and so
+    // the view-driven `TerrainDetailRequest` that M3 still lists, not a deeper chain. Confirmed by breaking it
+    // on purpose: forcing `PAGE_MIPS` in `terrain_gbuffer.wgsl` to 1 takes this figure from 1.17 to 2.00 and
+    // the horizon band from 1.93 to 2.94.
+    assert!(
+        paged_plain <= direct_plain * 1.4,
+        "the page path aliases across the whole plain ({paged_plain:.2} against {direct_plain:.2}), which is \
+         more than the horizon band alone can account for"
     );
 }

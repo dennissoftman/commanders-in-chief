@@ -583,9 +583,31 @@ fn split_terrain() -> Terrain {
     .expect("valid split terrain")
 }
 
+/// One physical page read back from the GPU, at one mip level.
+///
+/// Carries its own extent because the levels are different sizes, which is the whole subject once a page has
+/// a chain: an indexing helper that assumed the base level would read the wrong texel at every other one.
+struct PageImage {
+    texels: Vec<u8>,
+    extent: u32,
+}
+
+impl PageImage {
+    /// One texel, as RGBA.
+    fn texel(&self, x: u32, y: u32) -> [u8; 4] {
+        let offset = ((y * self.extent + x) * 4) as usize;
+        [
+            self.texels[offset],
+            self.texels[offset + 1],
+            self.texels[offset + 2],
+            self.texels[offset + 3],
+        ]
+    }
+}
+
 /// Reads one physical page back as RGBA bytes, row-major from its top-left corner.
-fn read_page(context: &GpuContext, cache: &TerrainPageCache, layer: u32) -> Vec<u8> {
-    let extent = cic_render::terrain_virtual::VIRTUAL_PAGE_EXTENT;
+fn read_page(context: &GpuContext, cache: &TerrainPageCache, layer: u32, level: u32) -> PageImage {
+    let extent = cic_render::terrain_virtual::VIRTUAL_PAGE_EXTENT >> level;
     // A copy destination's row pitch has to be a multiple of 256 bytes, so the buffer is padded and the
     // padding is dropped on the way out. The same arithmetic the capture path uses, and for the same reason.
     let unpadded = extent * 4;
@@ -604,7 +626,7 @@ fn read_page(context: &GpuContext, cache: &TerrainPageCache, layer: u32) -> Vec<
     encoder.copy_texture_to_buffer(
         wgpu::TexelCopyTextureInfo {
             texture: cache.pages(),
-            mip_level: 0,
+            mip_level: level,
             origin: wgpu::Origin3d {
                 x: 0,
                 y: 0,
@@ -652,19 +674,30 @@ fn read_page(context: &GpuContext, cache: &TerrainPageCache, layer: u32) -> Vec<
     }
     drop(mapped);
     buffer.unmap();
-    rgba
+    PageImage {
+        texels: rgba,
+        extent,
+    }
 }
 
-/// One page texel, as RGBA.
-fn page_texel(page: &[u8], x: u32, y: u32) -> [u8; 4] {
-    let extent = cic_render::terrain_virtual::VIRTUAL_PAGE_EXTENT;
-    let offset = ((y * extent + x) * 4) as usize;
-    [
-        page[offset],
-        page[offset + 1],
-        page[offset + 2],
-        page[offset + 3],
-    ]
+/// Linear light from an sRGB-encoded byte, matching `transfer.wgsl`.
+fn linear_from_srgb(value: u8) -> f64 {
+    let value = f64::from(value) / 255.0;
+    if value <= 0.040_45 {
+        value / 12.92
+    } else {
+        ((value + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// An sRGB-encoded byte from linear light, matching `transfer.wgsl`.
+fn srgb_from_linear(value: f64) -> f64 {
+    let encoded = if value <= 0.003_130_8 {
+        value * 12.92
+    } else {
+        1.055 * value.powf(1.0 / 2.4) - 0.055
+    };
+    encoded.clamp(0.0, 1.0) * 255.0
 }
 
 /// A view looking down at the middle of a terrain, in the terms the residency map wants.
@@ -732,6 +765,64 @@ fn the_page_cache_composes_the_ground_a_view_asks_for() {
     let _ = resident;
 }
 
+/// The split terrain's two layers as flat colours: red on the left of the split, blue on the right.
+fn split_colours() -> Vec<LayerMaterial> {
+    vec![
+        LayerMaterial::colour([0.9, 0.1, 0.1]),
+        LayerMaterial::colour([0.1, 0.1, 0.9]),
+    ]
+}
+
+/// The same two layers, each carrying a striped albedo a page can resolve.
+///
+/// Sixty-four world units per repeat against a page texel of 0.625, so the compose pass reads the albedo's
+/// base level and the stripes reach the page intact. That matters for one test only, and the reason is the
+/// point: mip levels exist for content with high spatial frequency, and a flat-coloured page has none — its
+/// only contrast is the weight blend across the split, which is spread over a whole cell and so is far too
+/// smooth to tell a linear-light average from a byte-space one.
+fn split_stripes() -> Vec<LayerMaterial> {
+    split_colours()
+        .into_iter()
+        .map(|material| material.with_albedo(striped(64, 4), 64.0))
+        .collect()
+}
+
+/// A cache over the split terrain, warmed at the coarse level over the whole map.
+///
+/// One place for a setup four page tests share. It returns the renderer too, because the cache borrows
+/// nothing from it but the terrain's uniform buffer has to outlive both.
+fn warmed_split_cache(
+    context: &GpuContext,
+    terrain: &Terrain,
+    materials: &[LayerMaterial],
+) -> (TerrainRenderer, TerrainPageCache, u32) {
+    let renderer =
+        TerrainRenderer::with_materials(context, terrain, materials).expect("terrain renderer");
+    // The uniform block has to be uploaded before the compose pass reads it: the pass binds the terrain's own
+    // buffer, which is what stops it disagreeing with the G-buffer, and an unwritten buffer is zeroes.
+    renderer.set_frame(
+        context,
+        &view_projection(
+            TerrainFrame::overview(terrain, 64, 64).pose,
+            Projection::for_viewport(64, 64),
+        ),
+        [0.0; 3],
+        DirectionalLight::default(),
+    );
+    let mut cache = TerrainPageCache::new(context, &renderer, 16).expect("page cache");
+    let (cells_x, cells_y) = renderer.cell_size();
+    let composed = cache.update(
+        context,
+        &[TerrainDetailRequest::uniform(
+            [0, 0],
+            [cells_x, cells_y],
+            16,
+        )],
+        page_view(terrain),
+    );
+    (renderer, cache, composed)
+}
+
 #[test]
 fn a_composed_page_holds_the_surface_the_terrain_declares() {
     // What the compose pass is for, checked by reading the page rather than by rendering it. A page over the
@@ -739,31 +830,9 @@ fn a_composed_page_holds_the_surface_the_terrain_declares() {
     // coordinate off by a page, a transposed axis, or a page written to the wrong layer all fail here.
     let Some(context) = context() else { return };
     let terrain = split_terrain();
-    let renderer = TerrainRenderer::new(
-        context,
-        &terrain,
-        &[LayerColour([0.9, 0.1, 0.1]), LayerColour([0.1, 0.1, 0.9])],
-    )
-    .expect("terrain renderer");
-    renderer.set_frame(
-        context,
-        &view_projection(
-            TerrainFrame::overview(&terrain, 64, 64).pose,
-            Projection::for_viewport(64, 64),
-        ),
-        [0.0; 3],
-        DirectionalLight::default(),
-    );
-    let mut cache = TerrainPageCache::new(context, &renderer, 16).expect("page cache");
-
-    // Two pages, one wholly inside each half. The terrain is 64 cells across and a level-1 page spans 16, so
-    // page (0, 0) is entirely left and page (3, 0) entirely right.
-    let (_, cells_y) = renderer.cell_size();
-    let composed = cache.update(
-        context,
-        &[TerrainDetailRequest::uniform([0, 0], [64, cells_y], 16)],
-        page_view(&terrain),
-    );
+    // Two pages at least, one wholly inside each half. The terrain is 64 cells across and a level-1 page spans
+    // 16, so page (0, 0) is entirely left and page (3, 0) entirely right.
+    let (_renderer, cache, composed) = warmed_split_cache(context, &terrain, &split_colours());
     assert!(composed >= 2, "expected at least two pages, got {composed}");
 
     // The interior centre of each page, which is where a coordinate error is unambiguous: the border could be
@@ -777,8 +846,8 @@ fn a_composed_page_holds_the_surface_the_terrain_declares() {
     let mut saw_left = false;
     let mut saw_right = false;
     for layer in 0..cache.layer_count() {
-        let page = read_page(context, &cache, layer);
-        let texel = page_texel(&page, centre, centre);
+        let page = read_page(context, &cache, layer, 0);
+        let texel = page.texel(centre, centre);
         if texel[0] > texel[2].saturating_add(40) {
             saw_left = true;
         } else if texel[2] > texel[0].saturating_add(40) {
@@ -820,32 +889,7 @@ fn a_page_border_carries_the_neighbouring_ground_rather_than_a_clamped_edge() {
     // already carry as a standing warning.
     let Some(context) = context() else { return };
     let terrain = split_terrain();
-    let renderer = TerrainRenderer::new(
-        context,
-        &terrain,
-        &[LayerColour([0.9, 0.1, 0.1]), LayerColour([0.1, 0.1, 0.9])],
-    )
-    .expect("terrain renderer");
-    renderer.set_frame(
-        context,
-        &view_projection(
-            TerrainFrame::overview(&terrain, 64, 64).pose,
-            Projection::for_viewport(64, 64),
-        ),
-        [0.0; 3],
-        DirectionalLight::default(),
-    );
-    let mut cache = TerrainPageCache::new(context, &renderer, 16).expect("page cache");
-    let (cells_x, cells_y) = renderer.cell_size();
-    cache.update(
-        context,
-        &[TerrainDetailRequest::uniform(
-            [0, 0],
-            [cells_x, cells_y],
-            16,
-        )],
-        page_view(&terrain),
-    );
+    let (_renderer, cache, _) = warmed_split_cache(context, &terrain, &split_colours());
 
     let border = cic_render::terrain_virtual::VIRTUAL_PAGE_BORDER;
     let interior = cic_render::terrain_virtual::VIRTUAL_PAGE_INTERIOR;
@@ -856,9 +900,9 @@ fn a_page_border_carries_the_neighbouring_ground_rather_than_a_clamped_edge() {
     // carries more red.
     let mut found = false;
     for layer in 0..cache.layer_count() {
-        let page = read_page(context, &cache, layer);
-        let inside = page_texel(&page, border, middle);
-        let outside = page_texel(&page, 0, middle);
+        let page = read_page(context, &cache, layer, 0);
+        let inside = page.texel(border, middle);
+        let outside = page.texel(0, middle);
         // Only the page whose interior begins in the right half can say anything here.
         if inside[2] <= inside[0].saturating_add(40) {
             continue;
@@ -869,10 +913,10 @@ fn a_page_border_carries_the_neighbouring_ground_rather_than_a_clamped_edge() {
                 "layer {layer}: interior red {}, border red {} — the border is reading the left half",
                 inside[0], outside[0]
             );
-            // And the border is a *gradient* across its four columns rather than a step at its inner edge,
+            // And the border is a *gradient* across its columns rather than a step at its inner edge,
             // which is what a correctly composed border looks like when the ground beneath it is being
             // filtered: nearer the interior is nearer the interior's colour.
-            let nearer = page_texel(&page, border - 1, middle)[0];
+            let nearer = page.texel(border - 1, middle)[0];
             assert!(
                 nearer < outside[0],
                 "layer {layer}: the border's inner column ({nearer}) is not between the interior ({}) and \
@@ -887,4 +931,151 @@ fn a_page_border_carries_the_neighbouring_ground_rather_than_a_clamped_edge() {
         "no page carried the neighbouring half in its border, so either the border is clamped or no page \
          straddles the split"
     );
+}
+
+#[test]
+fn each_page_level_is_the_linear_light_average_of_the_one_above_it() {
+    // What the reduce pass is, stated as arithmetic over the bytes it wrote. A mip level *means* the average
+    // of the area its texel covers, so every texel of level 1 must be the mean of the 2x2 block beneath it —
+    // and a reduction that read the wrong footprint, or halved the wrong axis, or wrote to the wrong layer
+    // fails here rather than in a frame where it would read as slight blur.
+    //
+    // The average has to be taken in **linear light**, and this is the one place that is falsifiable rather
+    // than merely stated. The sRGB curve is concave, so the mean of two encoded values sits above the encoding
+    // of their mean: averaging stored bytes makes a high-contrast page pale as it recedes, which the eye reads
+    // as fog nobody added. So the test predicts each texel both ways and asserts not just that the linear
+    // prediction matches, but that the byte-space one *misses* — otherwise it would pass on a fixture flat
+    // enough for the two to agree, which is exactly how three fixtures in this file have already been the bug.
+    let Some(context) = context() else { return };
+    let terrain = split_terrain();
+    let (_renderer, cache, composed) = warmed_split_cache(context, &terrain, &split_stripes());
+    assert!(composed > 0, "no pages were composed, so none were reduced");
+
+    let mips = cic_render::terrain_virtual::VIRTUAL_PAGE_MIPS;
+    assert!(mips > 1, "a chain of one level has nothing to check");
+
+    let mut worst_linear = 0.0f64;
+    let mut worst_byte_at_a_contrast = 0.0f64;
+    let mut contrast_texels = 0usize;
+    for level in 1..mips {
+        let coarse = read_page(context, &cache, 0, level);
+        let fine = read_page(context, &cache, 0, level - 1);
+        for y in 0..coarse.extent {
+            for x in 0..coarse.extent {
+                let block = [
+                    fine.texel(x * 2, y * 2),
+                    fine.texel(x * 2 + 1, y * 2),
+                    fine.texel(x * 2, y * 2 + 1),
+                    fine.texel(x * 2 + 1, y * 2 + 1),
+                ];
+                let stored = coarse.texel(x, y);
+                for channel in 0..3 {
+                    let values = block.map(|texel| texel[channel]);
+                    let linear = srgb_from_linear(
+                        values
+                            .iter()
+                            .map(|value| linear_from_srgb(*value))
+                            .sum::<f64>()
+                            / 4.0,
+                    );
+                    worst_linear = worst_linear.max((linear - f64::from(stored[channel])).abs());
+
+                    let spread = f64::from(
+                        values.iter().max().copied().unwrap_or(0)
+                            - values.iter().min().copied().unwrap_or(0),
+                    );
+                    if spread >= 20.0 {
+                        let bytes = values.iter().map(|value| f64::from(*value)).sum::<f64>() / 4.0;
+                        contrast_texels += 1;
+                        worst_byte_at_a_contrast = worst_byte_at_a_contrast
+                            .max((bytes - f64::from(stored[channel])).abs());
+                    }
+                }
+                // Roughness is a linear measurement already, so it averages as stored rather than through a
+                // transfer function. Checked on the same block, because a channel silently left unwritten
+                // reads as zero and no colour assertion would notice.
+                let alpha = block.iter().map(|texel| f64::from(texel[3])).sum::<f64>() / 4.0;
+                assert!(
+                    (alpha - f64::from(stored[3])).abs() <= 1.5,
+                    "level {level} texel ({x}, {y}) alpha is {} where the mean of its block is {alpha:.1}",
+                    stored[3]
+                );
+            }
+        }
+    }
+
+    eprintln!(
+        "reduce against a linear-light prediction: worst channel error {worst_linear:.2}; a byte-space \
+         average would be out by {worst_byte_at_a_contrast:.2} over {contrast_texels} high-contrast channels"
+    );
+    // One eight-bit step, which is the rounding a store costs and nothing else. A footprint off by a texel
+    // shows up here in the tens.
+    assert!(
+        worst_linear <= 1.5,
+        "a level is not the linear-light average of the one above it: worst channel error {worst_linear:.2}"
+    );
+    // And the fixture can tell the two apart, which is what stops the assertion above from being vacuous.
+    assert!(
+        contrast_texels > 0 && worst_byte_at_a_contrast >= 3.0,
+        "this fixture cannot distinguish a linear average from a byte-space one ({contrast_texels} \
+         high-contrast channels, worst byte-space error {worst_byte_at_a_contrast:.2}), so it proves nothing \
+         about the transfer function"
+    );
+}
+
+#[test]
+fn a_page_border_survives_every_level_of_the_chain() {
+    // The failure mode that makes a mip chain over a bordered page different from a mip chain over a texture.
+    // The border exists so a filtered tap at a page edge reads the neighbouring ground; every reduction halves
+    // it, and if it ever stops being a whole texel the tap reads inside the *next* page's border and the seam
+    // the border prevents comes back — at every level below the base, on ground the base level looks perfect
+    // on. No frame at close range would show it, which is why it is read back instead.
+    //
+    // Measured on the same split terrain and on the same page: the one whose interior begins in the right half
+    // while its border lies over the left. The margin narrows with depth and must not vanish, because the
+    // border is a gradient over half a cell and a deep level averages more of it.
+    let Some(context) = context() else { return };
+    let terrain = split_terrain();
+    let (_renderer, cache, _) = warmed_split_cache(context, &terrain, &split_colours());
+
+    let base_border = cic_render::terrain_virtual::VIRTUAL_PAGE_BORDER;
+    let interior = cic_render::terrain_virtual::VIRTUAL_PAGE_INTERIOR;
+    let mips = cic_render::terrain_virtual::VIRTUAL_PAGE_MIPS;
+
+    // The straddling page is found by content at the base level, then followed down its own chain.
+    let mut straddling = None;
+    for layer in 0..cache.layer_count() {
+        let page = read_page(context, &cache, layer, 0);
+        let inside = page.texel(base_border, base_border + interior / 2);
+        let outside = page.texel(0, base_border + interior / 2);
+        if inside[2] > inside[0].saturating_add(40) && outside[0] > inside[0].saturating_add(30) {
+            straddling = Some(layer);
+            break;
+        }
+    }
+    let layer = straddling.expect("a page straddles the split at the base level");
+
+    for level in 0..mips {
+        let page = read_page(context, &cache, layer, level);
+        let border = base_border >> level;
+        let middle = (base_border + interior / 2) >> level;
+        let inside = page.texel(border, middle);
+        let outside = page.texel(0, middle);
+        eprintln!(
+            "layer {layer} level {level}: border is {border} texels, interior red {}, border red {}",
+            inside[0], outside[0]
+        );
+        assert!(border >= 1, "level {level} has no border left at all");
+        // The bound is set from the measurement rather than guessed, which is the same discipline the page
+        // agreement test uses. Against an interior red of 89 the border reads 184, 180, 170 and 149 as the
+        // chain deepens — narrowing, because the deepest level averages the whole border gradient into one
+        // texel, and still 60 clear at its narrowest where a clamped border would read 0 clear.
+        assert!(
+            outside[0] >= inside[0].saturating_add(40),
+            "at level {level} the border's red ({}) is not clear of the interior's ({}), so the reduction has \
+             mixed the border into the interior and the seam is back",
+            outside[0],
+            inside[0]
+        );
+    }
 }

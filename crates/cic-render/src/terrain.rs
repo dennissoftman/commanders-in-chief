@@ -1034,6 +1034,11 @@ fn build_bindings(
     // Two samplers, because the two arrays want opposite behaviour. Weights are a per-map field
     // addressed in normalized coordinates and must clamp at the edge; albedo is a detail texture
     // addressed in world units and must repeat, with the mip chain filtered between levels.
+    //
+    // The clamping one serves the composed pages too, and *that* is why it filters between mip levels: a page
+    // carries a chain, the G-buffer picks a level from screen-space derivatives, and a nearest mip filter
+    // would step visibly between levels as the camera moved. It changes nothing about the weights, which have
+    // one level for a sampler to choose from.
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
         label: Some("cic-render terrain weight sampler"),
         address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -1041,6 +1046,7 @@ fn build_bindings(
         address_mode_w: wgpu::AddressMode::ClampToEdge,
         mag_filter: wgpu::FilterMode::Linear,
         min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::MipmapFilterMode::Linear,
         ..Default::default()
     });
     let albedo_sampler = array_sampler(device, "cic-render terrain albedo sampler");
