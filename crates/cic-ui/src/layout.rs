@@ -143,13 +143,11 @@ pub enum Widget {
     TextEntry,
     /// A scrollable set of selectable rows.
     List,
-    /// Selects one of a set. **Does not yet switch pages** — see `docs/milestones/m4-interface.md`.
+    /// A strip of headers that switches between the pages of another container.
     ///
-    /// The selecting half works: it takes focus, `Adjust` moves within the children it has, and the paint
-    /// layer highlights the chosen one. What is missing is hiding the pages that were not chosen, and the
-    /// format has no way to say which node is a page of which strip. Documented here rather than left
-    /// implied, because a control that looks right and does less than it says is what the rest of this
-    /// format's validation exists to refuse.
+    /// Its own children are the headers, one per tab. The pages live in the container its `pages` field
+    /// names, and only the chosen one is on screen — see [`Node::pages`]. Without `pages` it is a segmented
+    /// picker whose selection some other screen reads.
     Tabs,
     /// Clips its child and holds a scroll offset.
     Scroll,
