@@ -3,9 +3,10 @@
 A retained user-interface layer: layout, widgets, input routing, and the screen stack the game is
 navigated through.
 
-**Status:** In progress. The layout foundation and widget behaviour have landed — the format, the solver,
-the string table, the action set, retained state, and input routing including input-method composition.
-The screen stack and drawing are still ahead.
+**Status:** In progress. The layout foundation, widget behaviour, and the screen stack with transactional
+settings have landed — the format, the solver, the string table, the action set, retained state, input
+routing including input-method composition, and a shell that is navigable in tests. Drawing is still
+ahead.
 
 ## Charter
 
@@ -17,7 +18,8 @@ The screen stack and drawing are still ahead.
   by node id, which is why the format requires one on every widget that holds state.
 - Input routing with focus, hover, and keyboard navigation, expressed as semantic events rather than
   raw key codes — the same separation the camera uses. **Done**, including input-method composition.
-- A screen stack: push a modal, pop back, and have the screen underneath still be there.
+- A screen stack: push a modal, pop back, and have the screen underneath still be there. **Done** — see
+  [Landed](#landed).
 - Resolution and DPI independence, because a fixed-pixel layout is a bug on every display that is not
   the developer's. **Done**, and structural rather than added: a layout is authored in logical units and
   physical pixels exist only on the way out of the solver.
@@ -91,13 +93,48 @@ The screen stack and drawing are still ahead.
     naive implementation reaches for, and they land inside a multi-byte character the first time somebody
     types one — which panics rather than merely looking wrong.
 
+- **The screen stack and the transactional settings** the design notes below call for, plus the shell
+  that routes between them.
+  - **Each open screen keeps its own retained state**, which is what a stack buys over one current
+    screen: closing a modal leaves the menu underneath exactly as it was, and a single current screen
+    means rebuilding it from nothing. Rebuilding is not merely wasteful, it is *visible* — everything
+    the user had done that the host does not separately own is gone.
+  - **A screen appears at most once.** Navigation is by destination, so asking for one already open
+    unwinds to it rather than stacking a duplicate nobody can reach. That also removes a bound that
+    would otherwise have to be invented: input can push screens, and anything input can grow without a
+    limit is a leak reachable from a keyboard. With no duplicates the depth cannot exceed the number of
+    screens the engine defines, so the limit is structural rather than a number somebody chose.
+  - **A settings apply is undone by a machine, not by a user.** A change goes in force and a 15-second
+    window opens; the *absence* of a confirmation is what brings the previous settings back. Confirming
+    is one interaction, failing to confirm needs none — which is the only shape of undo that works when
+    the user cannot see the screen.
+  - **A second apply inside the window keeps the first restore point.** The subtle one: what is worth
+    returning to is the last state somebody confirmed, not the previous attempt at replacing it.
+    Overwriting it leaves two bad display modes in a row with a restore point holding the first bad one.
+  - **Confirming confirms what is in force, not what is staged.** A user can go on editing while the
+    countdown runs, and confirming their unapplied edits would put settings into force that nobody had
+    seen the effect of — the exact failure this mechanism exists to prevent.
+  - **Three rules about leaving**, which is where all the interesting routing turned out to be:
+    applying must not move the stack, since the revert window is only useful while the confirm button is
+    reachable; closing the settings screen with a change unconfirmed reverts it, since nobody will
+    confirm on a screen that is not open; and going back at the root asks whether to leave rather than
+    doing nothing, because Escape on the main menu meaning nothing at all reads as a broken key.
+  - **Time arrives as an argument.** Nothing here reads a clock, so the whole window is exercised in
+    microseconds. Which clock a host passes matters, and it is the one countdown in the engine that must
+    **not** be scene time: a display mode producing no frames advances no frame counter, and a revert
+    that depends on rendering succeeding cannot fire in the case it exists for.
+  - **The outcome of an event is a struct, not an enum.** One action can genuinely do two things a host
+    must react to — going back from settings both navigates *and* changes what is in force — and an enum
+    would force dropping one of them.
+
 ## Remaining
 
-- **The screen stack**, and the transactional settings apply the design notes below require.
 - **Drawing.** `ui.wgsl` is already in the shader set marked `staged`, and the M3 capture harness is what
   will cover the rendered result — which is now worth having, since it runs in CI. Text rendering is the
   substantial part, and it is also what would let `ime_cursor_area` narrow from the field to the caret.
 - **A caret-tight IME cursor area**, which needs the text metrics drawing will bring.
+- **The layout files themselves.** The shell is navigable against layouts a test constructs; the four
+  authored `.ciclayout.json` screens come with drawing, since a screen nobody can see is not reviewable.
 
 ## Exit condition
 
@@ -105,9 +142,10 @@ A navigable shell: main menu, settings with transactional apply-and-rollback, an
 screen that can launch a map. Layout and widget behaviour covered by tests; the rendered result covered
 by the M3 capture harness.
 
-**Not met.** Layout and widget behaviour are covered — 85 tests across the format, the solver, retained
-state, input routing, composition, the string table and the action set — but there is no shell yet, so
-nothing is navigable and nothing is drawn.
+**Half met.** The shell is navigable and covered — 126 tests across the format, the solver, retained
+state, input routing, composition, the string table, the action set, the screen stack, the settings
+transaction, and the routing between them. Nothing is drawn yet, so the second half of the condition is
+open and so are the authored layouts.
 
 ## Design notes
 

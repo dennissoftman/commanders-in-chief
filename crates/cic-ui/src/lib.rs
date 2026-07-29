@@ -15,6 +15,17 @@
 //! - [`state`] — what the interface remembers between frames, and what input does to it.
 //! - [`strings`] — display text, behind a key rather than written into a layout.
 //! - [`action`] — the closed set of effects a layout may attach to a control.
+//! - [`screen`] — which screens are open, in what order, and what each remembers.
+//! - [`settings`] — an apply that must be confirmed, and a revert that need not be reached.
+//! - [`shell`] — the navigable whole, and the routing between the two above.
+//!
+//! # A settings apply is undone by a machine, not by a user
+//!
+//! The other rule worth stating at the top. A display change can leave the person who made it unable
+//! to see the screen well enough to undo it, so an undo that depends on them clicking is not an undo.
+//! [`settings::Transaction`] inverts it: a change is applied, a window opens, and the *absence* of a
+//! confirmation is what brings the previous settings back. See that module for the three values a
+//! setting has at once and why a second apply inside the window keeps the first restore point.
 //!
 //! # Text input is not one character per keystroke
 //!
@@ -69,6 +80,9 @@ pub mod action;
 pub mod geometry;
 pub mod input;
 pub mod layout;
+pub mod screen;
+pub mod settings;
+pub mod shell;
 pub mod solve;
 pub mod state;
 pub mod strings;
@@ -80,6 +94,9 @@ pub use layout::{
     Align, DEFAULT_MAX_LENGTH, Direction, FORMAT_VERSION, Justify, Layout, LayoutError, Node,
     Range, Sizing, Widget,
 };
+pub use screen::{Screen, ScreenStack, Screens, Transition};
+pub use settings::{Probation, REVERT_WINDOW, Transaction};
+pub use shell::{Outcome, Request, Shell, ShellError};
 pub use solve::{Measure, NoContent, Solved, SolvedNode, solve};
 pub use state::{Interface, TextField, Value};
 pub use strings::StringTable;

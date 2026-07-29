@@ -87,6 +87,80 @@ it is checked, so the file is refused at load rather than silently forgetting at
 focus on the container would give the user a tab stop where no key does anything. Scrolling follows the
 pointer.
 
+## Actions
+
+`action` names one of a closed set. A layout naming anything else fails to load, so a typo is a load
+error rather than a control that silently never fires.
+
+| Action | What it does |
+|---|---|
+| `quit` | Leave the game. |
+| `back` | Close the top screen. At the root, the shell asks whether to leave instead. |
+| `open_main_menu` | Show the main menu. |
+| `open_settings` | Show settings. |
+| `open_skirmish_setup` | Show skirmish setup. |
+| `open_quit_confirm` | Ask whether to leave the game. |
+| `apply_settings` | Put the staged settings in force and start the revert countdown. |
+| `confirm_settings` | Keep what is in force, ending the countdown. |
+| `revert_settings` | Discard staged edits, and take back an applied change that is still unconfirmed. |
+| `launch_skirmish` | Start the configured skirmish. |
+
+**Why `open_quit_confirm` and `quit` are both here.** A main menu's exit button carries the first and the
+modal's confirm button carries the second. One action meaning "ask" on one screen and "do it" on another
+is exactly the context-dependence a closed set exists to avoid.
+
+**The four navigation actions correspond one-to-one with the screens**, which is what lets `Screen`
+be derived from an action rather than mapped by a table somebody has to keep in step.
+
+## Screens and the stack
+
+Each screen is one layout file, named after the screen: `main_menu.ciclayout.json`,
+`settings.ciclayout.json`, `skirmish_setup.ciclayout.json`, `quit_confirm.ciclayout.json`. A catalogue
+missing any of them is refused when the shell is built, because a screen with no layout is a button that
+navigates to a blank surface — which reads as an unfinished screen rather than as a missing file.
+
+Open screens form a stack, and each one keeps its own retained state while something sits on top of it.
+That is the point of a stack rather than one current screen: closing a modal has to leave the screen
+underneath exactly as it was, and a single current screen means rebuilding it from nothing.
+
+**A screen appears at most once.** Navigation is by destination, so asking for a screen that is already
+open unwinds to it rather than stacking a second copy — main menu → settings → main menu returns to the
+menu that was already there. That also removes a bound that would otherwise have to be invented: input
+can push screens, and with no duplicates the depth cannot exceed the number of screens the engine
+defines.
+
+Closing a screen discards what it held, which is why reopening settings shows what is in force rather
+than the edits somebody walked away from.
+
+## Settings are applied, then confirmed
+
+A display change can leave the person who made it unable to see the screen well enough to undo it — a
+resolution the monitor cannot sync to, a scale that puts the buttons off the panel, a full-screen mode
+that comes up black. In all of those the interface is still there, still listening, and unreachable. So
+an undo that depends on the user clicking is not an undo.
+
+`apply_settings` therefore puts the change in force and opens a **15-second window**. Confirming closes
+it and keeps the change; doing nothing closes it and takes the change back. Three rules follow, and each
+one is a way of getting *leaving* right:
+
+- **Applying does not move the stack.** The revert window is only useful while the confirm button is
+  somewhere the user can reach.
+- **A second apply inside the window keeps the first restore point.** What is worth returning to is the
+  last state somebody confirmed, not the previous attempt at replacing it — otherwise two bad display
+  modes in a row leave the restore point holding the first bad one.
+- **Closing the settings screen with a change unconfirmed reverts it.** Nobody is going to confirm a
+  change on a screen that is no longer open, and a user who navigated away already said what they meant.
+
+`confirm_settings` confirms what is **in force**, not what is staged. A user can go on editing while the
+countdown runs, and confirming their unapplied edits would put settings into force that nobody had seen
+the effect of — the exact failure the mechanism exists to prevent.
+
+The countdown is advanced by the host, in seconds, through `Shell::tick`. Nothing here reads a clock:
+a countdown that read one could not be tested without waiting, and a test that waits is flaky. Which
+clock a host passes matters — this is the one countdown in the engine that must **not** come from scene
+time, because a display mode that produces no frames also advances no frame counter, and a revert that
+depends on rendering succeeding cannot fire in the case it exists for.
+
 ## Sizing
 
 Per axis, one of three:

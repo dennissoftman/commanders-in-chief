@@ -12,9 +12,10 @@ density whatever its size on screen. This document and the milestone both claime
 until it was checked.
 
 **M4 is under way.** A `cic-ui` crate holds the [layout format](docs/formats/ui-layout.md), a two-pass
-solver, a string table, the closed action set, and now widget behaviour: retained state keyed by node id,
-semantic input routing with focus and keyboard navigation, and input-method composition. Nothing draws it
-yet, and there is no screen stack.
+solver, a string table, the closed action set, widget behaviour — retained state keyed by node id,
+semantic input routing with focus and keyboard navigation, input-method composition — and now the screen
+stack with transactional settings, so the shell is navigable in tests. **Nothing draws it yet**, which is
+the one thing left before the milestone's exit condition is met.
 
 What works:
 
@@ -117,21 +118,36 @@ per-pass breakdown once a second, which is where the figures above came from.
 
 ## Next verified step
 
-**M4's interface layer, continued.** Its foundation has landed — see
-[M4](docs/milestones/m4-interface.md) — as a `cic-ui` crate depending on nothing but `serde`: the
+**M4's interface layer, continued — and drawing is the only item left.** Everything else the milestone
+asks for has landed in a `cic-ui` crate depending on nothing but `serde`: the
 [layout format](docs/formats/ui-layout.md), a two-pass solver producing pixel-snapped rectangles, a
-string table, and the closed action set. What is next, in order:
+string table, the closed action set, widget behaviour with retained state and input-method composition,
+and now the screen stack with transactional settings. See [M4](docs/milestones/m4-interface.md).
 
-1. **The screen stack**, and the transactional settings apply the milestone's design notes require: a
-   display change has to survive a revert timer rather than depend on the user being able to see well
-   enough to click undo.
-2. **Drawing it.** `ui.wgsl` is already in the shader set marked `staged` for this, and the capture
-   harness that will cover the result now runs in CI — which is what makes it worth covering. Text
-   rendering is the substantial part.
+**Drawing it.** `ui.wgsl` is already in the shader set marked `staged` for this, and the capture harness
+that will cover the result now runs in CI — which is what makes it worth covering. Text rendering is the
+substantial part, and it is also what would let `ime_cursor_area` narrow from the whole field to the
+caret. The four authored `.ciclayout.json` screens come with it, since a screen nobody can see is not
+reviewable.
 
-**Widget behaviour and input routing have landed**, including input-method composition — because a single
-character per keystroke is the Latin case, and assuming it is the only one is how an engine ends up unable
-to accept CJK text without being rebuilt. Retained state keys off node ids, which is why the format now
+**The screen stack and transactional settings have landed.** A settings apply is now undone by a machine
+rather than by a user: a change goes in force, a 15-second window opens, and the *absence* of a
+confirmation is what brings the previous settings back. That inversion is the whole point — a display
+change can leave the person who made it unable to see the screen well enough to click undo, so an undo
+that depends on them clicking is not an undo. Three consequences, all of them about leaving: applying
+must not move the stack, since the revert window is only useful while the confirm button is reachable;
+closing the settings screen with a change unconfirmed reverts it, since nobody will confirm on a screen
+that is not open; and a second apply inside the window keeps the *first* restore point, because what is
+worth returning to is the last state somebody confirmed and not the previous attempt at replacing it.
+
+Each open screen keeps its own retained state, which is what a stack buys over one current screen, and a
+screen appears at most once — navigation is by destination, so asking for one already open unwinds to it.
+That also removes a bound that would otherwise have to be invented: input can push screens, and with no
+duplicates the depth cannot exceed the number of screens the engine defines.
+
+**Widget behaviour and input routing landed before it**, including input-method composition — because a
+single character per keystroke is the Latin case, and assuming it is the only one is how an engine ends up
+unable to accept CJK text without being rebuilt. Retained state keys off node ids, which is why the format
 *requires* one on any widget holding state or taking focus rather than treating it as optional.
 
 The settings screen has real content waiting for it, since a display setting exists with more than one
@@ -158,7 +174,7 @@ Also outstanding from M3, in rough order:
 
 Formatting, strict lints (`clippy::all` and `clippy::pedantic` as errors, plus `-D warnings` as CI runs
 it), and the full test suite all pass on the pinned toolchain — **and now on the CI runner too**, where the
-same **357 tests across six crates** pass against Mesa's lavapipe. The rendering ones take about eleven
+same **398 tests across six crates** pass against Mesa's lavapipe. The rendering ones take about eleven
 seconds there, which is what makes this affordable on every pull request. Captures go to `target/tmp/` and
 upload as an artifact on every outcome, so a harness failure's capture and amplified difference image can
 be looked at rather than being stranded on the runner.
