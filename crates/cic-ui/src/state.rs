@@ -24,12 +24,20 @@
 //! One event is one intent. A release that both toggles a checkbox and reports its action has done one
 //! thing the host cares about, and returning a list would invite a caller to handle actions in an order
 //! this module never defined.
+//!
+//! # Why a tab strip's *effect* is not here
+//!
+//! A strip's chosen tab is state and lives here like any other value. What that choice does — which page is
+//! on screen, and therefore what can be clicked, focused or drawn — is decided in the solver, through
+//! [`Selections`]. Hit testing, keyboard navigation and drawing all read the same solved sequence, so
+//! answering it once there beats three consumers each remembering to ask; the cost is that a tab change is a
+//! relayout, exactly as a resize is.
 
 use std::collections::BTreeMap;
 
 use crate::input::{Adjust, Edit, FocusMove, UiEvent};
 use crate::layout::Widget;
-use crate::solve::{Solved, SolvedNode};
+use crate::solve::{Selections, Solved, SolvedNode};
 use crate::{Action, Rect};
 
 /// What one control remembers.
@@ -403,6 +411,9 @@ impl Interface {
                     return None;
                 }
                 let index = solved.index_of(&armed)?;
+                // A tab strip is one control holding several headers, so where inside it the release landed
+                // decides *which* tab — the keyboard's `Adjust` steps the selection and a pointer names it.
+                self.select_at(solved, index, x, y);
                 self.activate(solved.get(index)?)
             }
             UiEvent::PointerLeft => {
@@ -459,6 +470,40 @@ impl Interface {
             self.set(id.to_owned(), Value::Toggle(flipped));
         }
         node.action
+    }
+
+    /// Chooses the tab under a point, when the released control is a tab strip.
+    ///
+    /// A tab strip is a single focusable control whose children are its headers, so a release inside it has
+    /// to say which header it landed on — otherwise a tab strip could only be driven from the keyboard, and
+    /// clicking the third tab would select whatever the arrow keys had last left behind.
+    ///
+    /// Deliberately not extended to a [`Widget::List`], though the two share `Value::Select` and the same
+    /// bound. A list scrolls, and a scroll offset is retained state that the solved rectangles do not yet
+    /// carry — so hit-testing a scrolled list's rows against their unscrolled rectangles would select the
+    /// wrong row, confidently. A tab strip does not scroll, so it has no such gap.
+    fn select_at(&mut self, solved: &Solved, index: usize, x: f32, y: f32) {
+        let Some(node) = solved.get(index) else {
+            return;
+        };
+        if node.widget != Widget::Tabs {
+            return;
+        }
+        let Some(id) = node.id.clone() else {
+            return;
+        };
+        // The header under the pointer, by its position among the strip's own children rather than by
+        // geometry: a strip may be a row or a column, and the order in the file is the order of the tabs.
+        let Some(chosen) = solved
+            .child_rects(index)
+            .into_iter()
+            .position(|rect| rect.contains(x, y))
+        else {
+            // Landed in the strip's padding or its gaps, which is not a tab. Leaving the selection alone is
+            // the least surprising answer: the alternative is a click near an edge changing the screen.
+            return;
+        };
+        self.set(id, Value::Select(chosen));
     }
 
     /// Moves an armed slider to wherever the pointer is along its track.
@@ -618,6 +663,16 @@ impl Interface {
     }
 }
 
+/// What the solver reads to decide which tab page is showing.
+///
+/// The one place state flows *into* layout, and it goes through a trait rather than a dependency so the
+/// solver stays testable against a stub — the same device [`Measure`](crate::solve::Measure) uses for text.
+impl Selections for Interface {
+    fn selection(&self, id: &str) -> Option<usize> {
+        Self::selection(self, id)
+    }
+}
+
 /// How far along a rectangle's width a physical X sits, from zero to one.
 fn fraction_along(rect: Rect, x: f32) -> f32 {
     if rect.width <= 0.0 {
@@ -635,8 +690,8 @@ mod tests {
 
     use super::{Interface, TextField, Value};
     use crate::input::{Adjust, Edit, FocusMove, UiEvent};
-    use crate::layout::{Layout, Node, Range, Sizing, Widget};
-    use crate::solve::{NoContent, Solved, solve};
+    use crate::layout::{Direction, Layout, Node, Range, Sizing, Widget};
+    use crate::solve::{NoContent, Solved, solve, solve_selected};
     use crate::{Action, Viewport};
 
     fn band(id: &str, widget: Widget, height: f32) -> Node {
@@ -700,6 +755,149 @@ mod tests {
                 ..Node::default()
             },
         }
+    }
+
+    /// A tabbed screen: a strip of three headers 30 wide in a strip 100 wide, over a stack of three pages.
+    ///
+    /// Every page holds a button in the same place, and that is what makes visibility falsifiable rather
+    /// than merely plausible: the pages are all solved and all overlap, so a click in the body would reach
+    /// whichever was drawn last if the selection did not decide it. The strip is wider than its headers so
+    /// there is somewhere inside it that is not a tab.
+    fn tabbed() -> Layout {
+        let header = || Node {
+            width: Sizing::Fixed(30.0),
+            ..Node::default()
+        };
+        let page = |id: &str| Node {
+            width: Sizing::Fill(1),
+            height: Sizing::Fill(1),
+            children: vec![Node {
+                id: Some(id.to_owned()),
+                widget: Widget::Button,
+                width: Sizing::Fixed(40.0),
+                height: Sizing::Fixed(20.0),
+                ..Node::default()
+            }],
+            ..Node::default()
+        };
+        Layout {
+            format_version: crate::layout::FORMAT_VERSION,
+            root: Node {
+                width: Sizing::Fill(1),
+                height: Sizing::Fill(1),
+                children: vec![
+                    Node {
+                        direction: Direction::Row,
+                        width: Sizing::Fixed(100.0),
+                        height: Sizing::Fixed(30.0),
+                        pages: Some("pages".to_owned()),
+                        children: vec![header(), header(), header()],
+                        ..band("tabs", Widget::Tabs, 30.0)
+                    },
+                    Node {
+                        id: Some("pages".to_owned()),
+                        direction: Direction::Stack,
+                        width: Sizing::Fill(1),
+                        height: Sizing::Fill(1),
+                        children: vec![page("one"), page("two"), page("three")],
+                        ..Node::default()
+                    },
+                ],
+                ..Node::default()
+            },
+        }
+    }
+
+    /// The tabbed screen solved against an interface's own selections.
+    fn tabbed_solved(ui: &Interface) -> Solved {
+        let layout = tabbed();
+        layout.validate().expect("the fixture must be valid");
+        let viewport = Viewport::new(200, 400, 1.0).expect("valid viewport");
+        solve_selected(&layout, viewport, &NoContent, ui)
+    }
+
+    #[test]
+    fn clicking_a_tab_header_selects_the_tab_under_the_pointer() {
+        // Without this a tab strip is keyboard-only: the strip is one focusable control, so a press anywhere
+        // inside it arms the strip and a release would activate it without saying *which* tab was hit.
+        let mut ui = Interface::new();
+        let solved = tabbed_solved(&ui);
+        ui.handle(&solved, UiEvent::PointerPressed { x: 75.0, y: 15.0 });
+        ui.handle(&solved, UiEvent::PointerReleased { x: 75.0, y: 15.0 });
+        assert_eq!(ui.selection("tabs"), Some(2));
+
+        // And back to the first, so this is the pointer choosing rather than the selection only ever rising.
+        ui.handle(&solved, UiEvent::PointerPressed { x: 15.0, y: 15.0 });
+        ui.handle(&solved, UiEvent::PointerReleased { x: 15.0, y: 15.0 });
+        assert_eq!(ui.selection("tabs"), Some(0));
+    }
+
+    #[test]
+    fn a_release_inside_the_strip_but_on_no_header_leaves_the_selection_alone() {
+        // The strip is 100 wide and its three headers fill 90, so the last ten are the strip's own space. A
+        // click there changing the screen is the surprising answer, and the strip has still been armed and
+        // focused — so this is not the same as clicking nothing.
+        let mut ui = Interface::new();
+        let solved = tabbed_solved(&ui);
+        ui.set_selection("tabs", 1);
+        ui.handle(&solved, UiEvent::PointerPressed { x: 95.0, y: 15.0 });
+        ui.handle(&solved, UiEvent::PointerReleased { x: 95.0, y: 15.0 });
+        assert_eq!(ui.selection("tabs"), Some(1));
+        assert_eq!(ui.focus(), Some("tabs"));
+    }
+
+    #[test]
+    fn only_the_chosen_page_takes_a_click_or_a_tab_stop() {
+        // The point of the whole feature. All three pages are solved and all three overlap, so what decides
+        // which button a click in the body reaches is the selection and nothing else.
+        let mut ui = Interface::new();
+
+        // Nothing chosen yet is the first page, which is what a screen looks like before it is touched.
+        let solved = tabbed_solved(&ui);
+        assert_eq!(solved.focus_order(), vec!["tabs", "one"]);
+        assert_eq!(
+            solved.hit(20.0, 40.0).and_then(|node| node.id.as_deref()),
+            Some("one")
+        );
+
+        ui.set_selection("tabs", 1);
+        let solved = tabbed_solved(&ui);
+        assert_eq!(solved.focus_order(), vec!["tabs", "two"]);
+        assert_eq!(
+            solved.hit(20.0, 40.0).and_then(|node| node.id.as_deref()),
+            Some("two")
+        );
+
+        // And keyboard navigation cannot reach the pages that are not showing: two stops, not four.
+        ui.handle(&solved, UiEvent::Focus(FocusMove::Next));
+        assert_eq!(ui.focus(), Some("tabs"));
+        ui.handle(&solved, UiEvent::Focus(FocusMove::Next));
+        assert_eq!(ui.focus(), Some("two"));
+        ui.handle(&solved, UiEvent::Focus(FocusMove::Next));
+        assert_eq!(ui.focus(), Some("tabs"));
+    }
+
+    #[test]
+    fn stepping_the_strip_with_the_keyboard_changes_which_page_shows() {
+        // The two halves joined up: `Adjust` moves the selection, and the *next* solve is what makes the new
+        // page visible. That a tab change is a relayout is a real consequence of putting visibility in the
+        // solver, so it is worth a test rather than only a comment.
+        let mut ui = Interface::new();
+        let solved = tabbed_solved(&ui);
+        ui.set_focus(Some("tabs"));
+        ui.handle(&solved, UiEvent::Adjust(Adjust::Increase));
+        assert_eq!(ui.selection("tabs"), Some(1));
+        // The frame that was on screen when the key arrived still shows the old page, which is correct: it
+        // was solved before the change.
+        assert_eq!(
+            solved.hit(20.0, 40.0).and_then(|node| node.id.as_deref()),
+            Some("one")
+        );
+        let solved = tabbed_solved(&ui);
+        assert_eq!(
+            solved.hit(20.0, 40.0).and_then(|node| node.id.as_deref()),
+            Some("two")
+        );
     }
 
     fn solved_at(width: u32, height: u32, scale: f32) -> Solved {

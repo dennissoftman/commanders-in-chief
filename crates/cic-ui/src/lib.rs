@@ -102,7 +102,9 @@ pub use paint::{Colour, Content, Painter, Primitive, TextAlign, Theme};
 pub use screen::{Screen, ScreenStack, Screens, Transition};
 pub use settings::{Probation, REVERT_WINDOW, Transaction};
 pub use shell::{Outcome, Request, Shell, ShellError};
-pub use solve::{Measure, NoContent, Solved, SolvedNode, solve};
+pub use solve::{
+    Measure, NoContent, NoSelection, Selections, Solved, SolvedNode, solve, solve_selected,
+};
 pub use state::{Interface, TextField, Value};
 pub use strings::StringTable;
 pub use transition::{Change, Heading, Motion, Reveal};

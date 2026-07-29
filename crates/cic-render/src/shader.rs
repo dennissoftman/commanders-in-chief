@@ -57,6 +57,10 @@ const CHUNKS: &[(&str, &str)] = &[
         include_str!("shaders/terrain_gbuffer.wgsl"),
     ),
     (
+        "terrain_reduce",
+        include_str!("shaders/terrain_reduce.wgsl"),
+    ),
+    (
         "terrain_viewer",
         include_str!("shaders/terrain_viewer.wgsl"),
     ),
@@ -64,6 +68,7 @@ const CHUNKS: &[(&str, &str)] = &[
         "terrain_virtual",
         include_str!("shaders/terrain_virtual.wgsl"),
     ),
+    ("transfer", include_str!("shaders/transfer.wgsl")),
     ("ui", include_str!("shaders/ui.wgsl")),
     ("water", include_str!("shaders/water.wgsl")),
 ];
@@ -114,7 +119,8 @@ pub const PROGRAMS: &[Program] = &[
     },
     Program {
         name: "terrain_gbuffer",
-        chunks: &["motion", "terrain_gbuffer"],
+        // `transfer` first: it declares the sRGB decode a page read goes through.
+        chunks: &["transfer", "motion", "terrain_gbuffer"],
         staged: false,
     },
     Program {
@@ -136,7 +142,12 @@ pub const PROGRAMS: &[Program] = &[
     },
     Program {
         name: "terrain_virtual",
-        chunks: &["terrain_virtual"],
+        chunks: &["transfer", "terrain_virtual"],
+        staged: false,
+    },
+    Program {
+        name: "terrain_reduce",
+        chunks: &["transfer", "terrain_reduce"],
         staged: false,
     },
     Program {
@@ -244,9 +255,9 @@ mod tests {
         // passes M8's map editor wants.
         let live = PROGRAMS.iter().filter(|entry| !entry.staged).count();
         let staged = PROGRAMS.iter().filter(|entry| entry.staged).count();
-        assert_eq!(live, 11, "live programs");
+        assert_eq!(live, 12, "live programs");
         assert_eq!(staged, 3, "staged programs");
-        assert_eq!(CHUNKS.len(), 20);
+        assert_eq!(CHUNKS.len(), 22);
     }
 
     #[test]

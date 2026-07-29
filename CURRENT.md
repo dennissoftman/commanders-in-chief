@@ -3,19 +3,23 @@
 ## Where the project is
 
 M0 through M2 are complete: the workspace and its invariants, the resource layer, and the native asset
-formats. **M3's exit condition is met and its charter is complete bar one item** — the renderer draws a
-lit, shadowed, occluded, textured scene with water and weather, both headlessly and in a window, and a
-visual regression harness compares captures against committed references **on the CI runner**, so a
-rendering regression now fails a build rather than only a developer's machine. The exception is **terrain
-level of detail**: chunks are now frustum-culled per pass, but a chunk that is drawn is drawn at full
-density whatever its size on screen. This document and the milestone both claimed the whole item was done
-until it was checked.
+formats. **M3's charter and its exit condition are both met** — the renderer draws a lit, shadowed,
+occluded, textured scene with water and weather, both headlessly and in a window, and a visual regression
+harness compares captures against committed references **on the CI runner**, so a rendering regression now
+fails a build rather than only a developer's machine.
 
-**M4 is complete.** A `cic-ui` crate holds the [layout format](docs/formats/ui-layout.md), a two-pass
+The last open line was **terrain level of detail**, and it is closed by amendment rather than by
+implementation: frustum culling delivered what it was for, and the density half is deliberately not built.
+The measurement is the reason and the decision is recorded with a date and an owner — see
+[M3's charter](docs/milestones/m3-renderer.md#charter). What is *not* acceptable, and was true of this
+document twice, is a line reading as though something were done.
+
+**M4 is complete too.** A `cic-ui` crate holds the [layout format](docs/formats/ui-layout.md), a two-pass
 solver, a string table, the closed action set, widget behaviour with retained state and input-method
 composition, the screen stack with transactional settings, animated screen changes, and a paint layer;
 `cic-render` draws it, with a typeface authored in this tree. **The shell navigates and it is on screen** —
-four authored screens, covered by six committed reference captures and driven by hand in a window.
+four authored screens, covered by six committed reference captures and driven by hand in a window. Its last
+open charter line was `tabs`, which selected and switched nothing, and **tabs now switch pages**.
 
 **M9 has landed, and it was chartered late for a capability that sits early in the dependency order.**
 Audio was simply missing — not deferred, not recorded anywhere as absent. `cic-audio`
@@ -24,15 +28,8 @@ layered music, and a [sound bank format](docs/formats/sound-bank.md), depending 
 kind. The one thing it does not do is reach a speaker. The roadmap gained a *depends on* column, because
 appending M9 at the end contradicted its own claim to be ordered by dependency.
 
-**All five of M3's outstanding renderer items have landed** — temporal antialiasing, the physically-based
-map set, alpha-tested foliage, scenery sway (which was the last provenance case in
-[LICENSING.md](LICENSING.md)), and the virtual-texture cache, whose whole route from residency arithmetic to
-sampled fragment is now in. What the cache still lacks is page mip chains, which is the difference between
-correct and *better* — see the next verified step. Terrain level of detail is still the open charter line,
-and still a decision rather than a queue position.
-
-Landing them turned up a defect every committed reference had been rendered through, so **ten of the
-twenty-two references changed** — see the antialiasing entry below.
+Landing M3's last five renderer items turned up a defect every committed reference had been rendered
+through, so **ten of the twenty-two references changed** — see the antialiasing entry below.
 
 What works:
 
@@ -126,14 +123,31 @@ What works:
     reads across it — and a clamped border would put a seam on every boundary, crawling as the camera moves.
     Verified by reading a page back: a page straddling a colour boundary shows border red 144 against
     interior red 89, where a clamp would read 89.
-  - The G-buffer samples pages once a cache is attached, and the two paths agree to a **mean of 0.001** and
-    a worst case of **2** eight-bit steps. The direct blend stays as the fallback: a cache may run out of
+  - The G-buffer samples pages once a cache is attached, and the two paths agree to a **mean of 0.004** and
+    a worst case of **5** eight-bit steps. The direct blend stays as the fallback: a cache may run out of
     slots, and a frame must not depend on it having won — a one-slot cache draws 99.9% of the frame from the
     fallback.
+  - **Page mip chains**, which took the path from correct to *better*. A page held one density, so ground
+    under heavy minification aliased where the fallback — which samples an albedo array that has a chain —
+    did not, making the cache worse than not using it on exactly the ground it exists for. Each update now
+    reduces the pages it composed, one compute pass per level, and the G-buffer derives a level from
+    screen-space derivatives because a residency branch is not uniform control flow.
+    - **The border is the chain's budget**, which is why it went from four texels to eight: every reduction
+      halves it, a filtered tap needs a whole texel of it, so `2^n` buys `n + 1` levels and four levels cover
+      a minification of eight. Get it wrong and the seam the border prevents returns at every level *below*
+      the base, on ground the base looks perfect on — so it is read back rather than rendered: border red
+      184, 180, 170, 149 down the chain against an interior of 89, where a clamp would read 89.
+    - **The reduction averages in linear light**, matching a prediction to **0.54** of an eight-bit step,
+      where a byte-space average would be out by **26**. At a grazing angle the paged frame is now *smoother*
+      than the blend it replaces — **238 against 386** — where sampling the base level only reads 2.00 times
+      the blend.
   - Three fixtures in a row could not show what they measured before one did, which is the standing warning
     below earning its place a third time: `surface()` divides by the summed weight, so a single ramped layer
     normalizes to a constant. A fourth mistake of the same shape followed — the agreement test first drew
-    through the *forward* pass, which has no page lookup, and reported the two frames as identical.
+    through the *forward* pass, which has no page lookup, and reported the two frames as identical. The mip
+    chain made it five and six: a flat-coloured page cannot tell a linear-light average from a byte-space
+    one, and an aliasing metric measured across the axis the fixture's stripes run along reads 1.49 where the
+    other axis reads 158.
 - **A physically-based map set for models**: normal, roughness and metallic maps beside the base colour,
   with the tangent frame the first of them needs — read from glTF's `TANGENT` where a model supplies one and
   derived from the texture coordinates where it does not, which is the ordinary case rather than the
@@ -239,17 +253,20 @@ Pass a `.cicmap` path to view a real map; with no argument it generates terrain,
 table derived from the heightfield's own low point, and their surfaces, so the viewer runs before any
 content exists. `T` toggles antialiasing and the bracket keys step the resolution scale, because what an
 edge does *as the camera moves* is the whole subject and no still capture reports it; `P` prints the
-per-pass breakdown once a second, which is where the figures above came from.
+per-pass breakdown once a second, which is where the figures above came from; and **`V` toggles the
+virtual-texture cache**, for the same reason as `T` — a crawling page seam, a step between mip levels, and a
+page arriving a frame late are all motion artefacts, and until this key existed the cache was reachable only
+from a test. Verified by running it: 256 pages compose on the frame the key is pressed and the window is
+indistinguishable from the direct blend, which is what it should be at a camera height where no page is
+minified.
 
 ## Next verified step
 
-**M4 is complete bar one item — see [M4](docs/milestones/m4-interface.md) — so the next milestone is
-[M5, the simulation](docs/milestones/m5-simulation.md).** The exception is **`tabs`**, which selects and
-highlights and switches no pages: half a widget, unused by all four authored screens, and found by
-auditing the charter rather than by anything failing. Settling it needs a design decision about whether a
-strip's children are its tabs or its pages, and the two answers differ in the *format*, so it is recorded
-rather than guessed at. This is the second time a milestone's charter claimed something was done until it
-was checked.
+**M3 and M4 are both complete, so the next milestone is
+[M5, the simulation](docs/milestones/m5-simulation.md).** The two lines that were open in this document are
+closed: `tabs` switched no pages and now does, and terrain level of detail is closed by amendment with the
+measurement as its reason. Both had been recorded here as outstanding rather than left reading as done,
+which is the second and third time a charter claimed something until it was checked.
 
 M5's one prerequisite decision is made: [ADR 0007](docs/adr/0007-simulation-arithmetic.md) settles how
 floating point is pinned where it reaches simulation state, which had to be answered before any gameplay
@@ -259,9 +276,10 @@ between platforms is the C library, not the arithmetic. Fixed-point was rejected
 determinism IEEE-754 already provides and still leaves the trigonometry to be written. `f64` over `f32` is
 for accumulation headroom and explicitly not for determinism, since the two are equally reproducible.
 
-Two more items are outstanding from M3 and are described below: **page mip chains**, without which the
-virtual-texture cache is correct but not yet better, and **terrain level of detail**, which is a decision
-rather than a queue position.
+One item is still outstanding from M3 and is described below: **a view-driven detail request**, which is
+what decides *which* ground gets a page. It is not a charter line, and the page mip chain is what showed it
+matters — a page's chain is four levels deep and past that a page saturates, so ground the residency map
+should never have staged is the only ground where the cache still aliases.
 
 **The shell runs in a window**, which this project treats as a separate obligation from a green capture
 suite — the one bug the headless suite structurally could not catch appeared the first time a window
@@ -328,28 +346,25 @@ single character per keystroke is the Latin case, and assuming it is the only on
 unable to accept CJK text without being rebuilt. Retained state keys off node ids, which is why the format
 *requires* one on any widget holding state or taking focus rather than treating it as optional.
 
+**Tabs switch pages**, which they did not before: `Widget::Tabs` tracked a number and nothing acted on it,
+while the format's own comment claimed it switched between sibling pages. A strip's children are its headers
+and a `pages` field names the stacked container holding the bodies, checked against each other at load —
+three headers over two pages is a screen whose third tab shows nothing, and neither node is wrong on its own.
+Visibility is decided in the *solver*, which is the one place state flows into layout: hit testing, keyboard
+navigation and drawing all read the same solved sequence, so one of the three forgetting to filter is a
+control the user cannot see taking a click. The consequence is that a tab change is a relayout, exactly as a
+resize is.
+
 The settings screen has real content waiting for it, since a display setting exists with more than one
-option.
+option — and now a way to arrange it.
 
-**Terrain level of detail is the one M3 charter item still open**, and it is a decision rather than a
-queue position. Per-pass timing refuted its original premise: at 1920x1200 the four cascades are 7% of
-the frame and the G-buffer 6%, and since culling landed a 1025x1025 terrain costs the same 0.692 ms as a
-257x257 one, so two million unculled vertices barely register on this GPU. It still matters on a weaker
-one, and it is a charter line. So either it gets built — a per-chunk stride off the chunk decomposition
-that already exists, plus skirts or stitching so neighbouring densities do not crack — or the charter is
-amended to record that culling delivered what LOD was for, with the measurement as the reason. What is not
-acceptable is leaving the line reading as though it were done, which is what it did before.
-
-**The virtual-texture path is correct but not yet better, and the gap is page mip chains.** The whole route
-is in — physical pages, a page table per level, a compute pass composing this project's own layer blend, and
-a G-buffer that samples it with a fallback to the direct blend. The two paths agree to a mean of 0.001 and a
-worst case of 2 eight-bit steps. What is missing is that a page has one mip level, so a page sampled at a
-shallow angle aliases where the direct blend does not — which would make the terrain look *worse* on exactly
-the ground the cache is for. A second compute pass reducing each resident page closes it, and the reduction
-has to respect the border or the seam the border prevents comes back at every level below the base.
-
-After that: a `TerrainDetailRequest` derived from the camera, so a caller does not have to name cells and
-densities itself. The residency map already ranks by projected size.
+**The remaining renderer item is a view-driven detail request**, and the mip chain is what showed it
+matters. A page's chain is four levels, covering a minification of eight; past that a page saturates while
+the direct blend's albedo chain keeps going, which is why the grazing-angle capture still reads 1.93 in its
+topmost thirty rows of ground against 0.62 everywhere nearer. Ground that far should have no page resident
+at all, and *which ground has a page* is the residency decision nothing derives from a camera yet. The
+residency map already ranks by projected size, so this is a small function over the frustum rather than a
+design.
 
 **Audio needs a device, and that is the one thing about it a green suite cannot establish.** The mixer
 produces correct frames and nothing hands them to hardware. This is the same lesson the standing constraint
@@ -361,11 +376,24 @@ having to pretend.
 ## Gate status
 
 Formatting, strict lints (`clippy::all` and `clippy::pedantic` as errors, plus `-D warnings` as CI runs
-it), and the full test suite all passes on the pinned toolchain: **652 tests across seven crates**, up from
-526 across six. `cic-audio` accounts for the whole difference — 126 tests counting one documentation test,
+it), and the full test suite all passes on the pinned toolchain: **669 tests across seven crates**, up from
+543 across six. `cic-audio` accounts for the whole difference — 126 tests counting one documentation test,
 every one of which runs headless with no audio device present. The CI
-runner runs the same suite against Mesa's lavapipe. The rendering ones take about eleven
-seconds there, which is what makes this affordable on every pull request. Captures go to `target/tmp/` and
+runner runs the same suite against Mesa's lavapipe.
+
+**No reference moved for the page mip chain, which was not the expectation.** Every committed NVIDIA
+reference still matches within tolerance, including `terrain-from-pages.png` — the paged frame changed by a
+mean of 0.004 and a worst case of 5, which is inside what the comparison allows in a small region while still
+failing on four steps across most of a frame. No authored screen uses a tab strip either, so none of the six
+interface references moved when tabs learned to switch pages. The grazing-angle scene the chain is verified
+on deliberately has **no committed reference**: its claim is a statistic about adjacent-pixel energy rather
+than an image, and a new reference scene would force a lavapipe capture from the runner for nothing the
+numbers do not already say. **Lavapipe agreed**, which could only be established on the runner: the branch
+passed CI without a reference being regenerated, so the page path's change is inside tolerance on a software
+rasteriser as well as on the NVIDIA set.
+
+The rendering tests take about eleven seconds there, which is what makes this affordable on every pull
+request. Captures go to `target/tmp/` and
 upload as an artifact on every outcome, so a harness failure's capture and amplified difference image can
 be looked at rather than being stranded on the runner.
 
@@ -422,10 +450,15 @@ present.
   harness now catches this class automatically, and in CI rather than only locally — but only for the
   eleven scenes it has references for, and only once someone has looked at those references and confirmed
   they are right.
-- **A fixture can be the bug.** Twice now a correct implementation was tuned against a fixture that could
-  not show what was being measured: a shadow fixture whose ridge was wider than its own shadow, and a fog
-  fixture so flat and so distant that an integral along the ray smoothed away everything the density did.
-  Four rounds of tuning went into the second before the fixture was suspected.
+- **A fixture can be the bug.** Repeatedly now a correct implementation has been measured against a fixture
+  that could not show what was being measured: a shadow fixture whose ridge was wider than its own shadow, a
+  fog fixture so flat and so distant that an integral along the ray smoothed away everything the density did
+  — four rounds of tuning went into that one before the fixture was suspected — a page fixture whose single
+  ramped layer normalized to a constant, a flat-coloured page that could not distinguish a linear-light
+  average from a byte-space one, and an aliasing metric taken across the one axis its fixture's stripes did
+  not vary along. **The pattern is worth naming: a fixture that cannot fail is indistinguishable from a
+  fixture that passes.** The cheap defence is to make the *wrong* implementation's prediction part of the
+  assertion, which is what the linear-light test does.
 - **Presentation needs running, not just testing.** The one bug the headless suite structurally could not
   catch — surface capabilities queried through an adapter from the wrong instance — appeared the first
   time the window opened.
