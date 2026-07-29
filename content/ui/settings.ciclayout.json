@@ -42,10 +42,39 @@
         ]
       },
       {
-        "id": "settings_antialias",
-        "widget": "checkbox",
-        "text_key": "settings.antialiasing",
-        "height": { "fixed": 28.0 }
+        "direction": "row",
+        "height": { "fixed": 32.0 },
+        "gap": 16.0,
+        "children": [
+          {
+            "widget": "label",
+            "text_key": "settings.antialiasing",
+            "width": { "fixed": 200.0 }
+          },
+          {
+            "id": "settings_antialias",
+            "widget": "combo",
+            "width": { "fixed": 240.0 },
+            "children": [
+              {
+                "widget": "label",
+                "text_key": "settings.antialiasing_off",
+                "height": { "fixed": 28.0 }
+              },
+              {
+                "widget": "label",
+                "text_key": "settings.antialiasing_post",
+                "height": { "fixed": 28.0 }
+              },
+              {
+                "widget": "label",
+                "text_key": "settings.antialiasing_temporal",
+                "height": { "fixed": 28.0 }
+              }
+            ]
+          },
+          { "width": { "fill": 1 } }
+        ]
       },
       {
         "widget": "label",
@@ -53,26 +82,12 @@
         "text_key": "settings.antialiasing_note",
         "height": { "fixed": 18.0 }
       },
-      {
-        "direction": "row",
-        "height": { "fixed": 32.0 },
-        "gap": 16.0,
-        "children": [
-          { "widget": "label", "text_key": "settings.profile", "width": { "fixed": 200.0 } },
-          {
-            "id": "settings_profile",
-            "widget": "text_entry",
-            "width": { "fill": 1 },
-            "max_length": 24
-          }
-        ]
-      },
       { "height": { "fill": 1 } },
       {
-        "id": "settings_countdown",
+        "id": "settings_status",
         "widget": "label",
-        "style": "warning",
-        "text_key": "settings.confirm_prompt",
+        "style": "caption",
+        "text_key": "settings.status",
         "height": { "fixed": 20.0 }
       },
       {
@@ -89,25 +104,11 @@
             "action": "back"
           },
           {
-            "id": "settings_revert",
-            "widget": "button",
-            "text_key": "settings.revert",
-            "width": { "fixed": 120.0 },
-            "action": "revert_settings"
-          },
-          {
             "id": "settings_apply",
             "widget": "button",
             "text_key": "settings.apply",
             "width": { "fixed": 120.0 },
             "action": "apply_settings"
-          },
-          {
-            "id": "settings_confirm",
-            "widget": "button",
-            "text_key": "settings.confirm",
-            "width": { "fixed": 120.0 },
-            "action": "confirm_settings"
           }
         ]
       }

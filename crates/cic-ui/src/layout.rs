@@ -149,6 +149,15 @@ pub enum Widget {
     /// names, and only the chosen one is on screen — see [`Node::pages`]. Without `pages` it is a segmented
     /// picker whose selection some other screen reads.
     Tabs,
+    /// A closed control showing one of a set, which opens a list over whatever is beneath it.
+    ///
+    /// Its children are the options, and the control draws the chosen one's text. They are laid out as a
+    /// column *below* the control rather than inside it, and they exist on screen only while it is open —
+    /// which is why a combo is the one widget whose geometry the solver decides rather than the author.
+    ///
+    /// A `Tabs` shows every option at once and costs a row of screen for each; a combo costs one row
+    /// whatever the count, which is what makes it the control for a resolution list or a quality preset.
+    Combo,
     /// Clips its child and holds a scroll offset.
     Scroll,
 }
@@ -162,7 +171,7 @@ impl Widget {
     pub const fn activatable(self) -> bool {
         matches!(
             self,
-            Self::Button | Self::Checkbox | Self::List | Self::Tabs
+            Self::Button | Self::Checkbox | Self::List | Self::Tabs | Self::Combo
         )
     }
 
@@ -181,6 +190,7 @@ impl Widget {
                 | Self::TextEntry
                 | Self::List
                 | Self::Tabs
+                | Self::Combo
         )
     }
 
@@ -197,6 +207,7 @@ impl Widget {
                 | Self::TextEntry
                 | Self::List
                 | Self::Tabs
+                | Self::Combo
                 | Self::Scroll
         )
     }
@@ -598,6 +609,13 @@ fn validate_node<'a>(
         return Err(LayoutError::ZeroMaxLength);
     }
 
+    // A combo draws the chosen option's own text, so one with no options has nothing to display and no
+    // value to hold. Refused rather than drawn empty, which would read as a control that failed to load its
+    // contents — and the same posture as a slider without a range.
+    if node.widget == Widget::Combo && node.children.is_empty() {
+        return Err(LayoutError::ComboWithoutOptions);
+    }
+
     match (node.widget, node.pages.as_deref()) {
         (Widget::Tabs, Some(pages)) => {
             // A strip cannot hold its own pages, and the check is a subtree search rather than an equality
@@ -737,6 +755,8 @@ pub enum LayoutError {
     },
     /// A text entry accepted no characters at all.
     ZeroMaxLength,
+    /// A combo declared no options to choose between.
+    ComboWithoutOptions,
     /// A tab strip named a pages container no node carries.
     UnknownPages {
         /// The identifier it named.
@@ -824,6 +844,10 @@ impl std::fmt::Display for LayoutError {
                     "a TextEntry accepting no characters is not usable"
                 )
             }
+            Self::ComboWithoutOptions => write!(
+                formatter,
+                "a Combo draws the chosen option's own text, so one with no options can show nothing"
+            ),
             Self::UnknownPages { id } => write!(
                 formatter,
                 "a Tabs names {id:?} as its pages, and no node carries that id"
@@ -1226,6 +1250,33 @@ mod tests {
                 widget: Widget::Panel,
             })
         );
+    }
+
+    #[test]
+    fn a_combo_must_declare_the_options_it_chooses_between() {
+        // A combo draws the chosen option's own text, so an empty one has nothing to show and no value to
+        // hold. The same posture as a slider without a range: refused, rather than drawn as a control that
+        // looks like it failed to load its contents.
+        let refused = wrap(Node {
+            id: Some("quality".to_owned()),
+            widget: Widget::Combo,
+            ..Node::default()
+        })
+        .validate();
+        assert_eq!(refused, Err(LayoutError::ComboWithoutOptions));
+
+        let accepted = wrap(Node {
+            id: Some("quality".to_owned()),
+            widget: Widget::Combo,
+            children: vec![Node {
+                widget: Widget::Label,
+                text_key: Some("quality.low".to_owned()),
+                ..Node::default()
+            }],
+            ..Node::default()
+        })
+        .validate();
+        assert_eq!(accepted, Ok(()));
     }
 
     #[test]

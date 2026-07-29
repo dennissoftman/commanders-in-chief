@@ -76,6 +76,10 @@ fn screens_and_layouts() -> Vec<(Screen, Layout)> {
             Screen::QuitConfirm,
             include_bytes!("../../../content/ui/quit_confirm.ciclayout.json").as_slice(),
         ),
+        (
+            Screen::SettingsConfirm,
+            include_bytes!("../../../content/ui/settings_confirm.ciclayout.json").as_slice(),
+        ),
     ] {
         let layout = Layout::from_json(bytes)
             .unwrap_or_else(|error| panic!("{} does not load: {error}", screen.slug()));
@@ -263,9 +267,9 @@ fn the_main_menu_draws() {
 
 #[test]
 fn the_settings_screen_draws_every_widget_kind_it_has() {
-    // The screen with the most in it: a slider mid-range, a checkbox on, a focused text entry with a
-    // caret, a warning label, and four buttons one of which is hovered. If any of those is drawn wrong
-    // this is the capture that says so.
+    // The screen with the most in it: a slider mid-range, a closed dropdown showing its chosen tier, a
+    // focused text entry with a caret, a caption, and two buttons one of which is hovered. If any of those
+    // is drawn wrong this is the capture that says so.
     let Some(context) = context() else {
         return;
     };
@@ -278,11 +282,8 @@ fn the_settings_screen_draws_every_widget_kind_it_has() {
     shell
         .interface_mut()
         .set_text("settings_scale_value", "1.25x");
-    shell.interface_mut().set_toggle("settings_antialias", true);
-    shell
-        .interface_mut()
-        .set_text("settings_profile", "Ardennes");
-    shell.interface_mut().set_focus(Some("settings_profile"));
+    shell.interface_mut().set_selection("settings_antialias", 1);
+    shell.interface_mut().set_focus(Some("settings_apply"));
     // Hover over the apply button, so the capture pins one control's hovered face too.
     let apply = shell
         .solved()
@@ -297,6 +298,63 @@ fn the_settings_screen_draws_every_widget_kind_it_has() {
         &metrics,
     );
     support::check_reference(context, "ui-settings.png", &capture(context, &shell));
+}
+
+#[test]
+fn an_open_dropdown_draws_over_the_screen_beneath_it() {
+    // The one state of a combo a still capture can pin, and the reason the paint layer holds the overlay back
+    // rather than drawing in sequence order: the list covers the caption, the profile row and the status line,
+    // all of which come *after* the control in the layout file. Drawn in place it would be behind them.
+    let Some(context) = context() else {
+        return;
+    };
+    let theme = Theme::default();
+    let strings = strings();
+    let metrics = UiMetrics::new(&theme, &strings, 1.0);
+    let mut shell = shell();
+    shell.act(Action::OpenSettings, &metrics);
+    shell.interface_mut().set_slide("settings_scale", 1.25);
+    shell
+        .interface_mut()
+        .set_text("settings_scale_value", "1.25x");
+    shell.interface_mut().set_selection("settings_antialias", 2);
+    shell.interface_mut().set_focus(Some("settings_antialias"));
+    shell.interface_mut().set_open(Some("settings_antialias"));
+    // Re-solved, because whether the options are on screen at all is decided when the layout is solved.
+    shell.resize(viewport(), &metrics);
+    support::check_reference(context, "ui-combo-open.png", &capture(context, &shell));
+}
+
+#[test]
+fn the_settings_confirmation_asks_over_the_screen_that_applied_it() {
+    // The dialog the revert window needs, as an image. It is pushed by *applying*, not by a button that opens
+    // it, so this arrives the way a user gets there: stage a change, apply, and the question is up with the
+    // settings screen still behind it.
+    let Some(context) = context() else {
+        return;
+    };
+    let theme = Theme::default();
+    let strings = strings();
+    let metrics = UiMetrics::new(&theme, &strings, 1.0);
+    let mut shell = shell();
+    shell.act(Action::OpenSettings, &metrics);
+    shell.settings_mut().staged_mut().scale = 1.5;
+    let outcome = shell.act(Action::ApplySettings, &metrics);
+    assert!(
+        outcome.settings_in_force,
+        "the dialog only exists because something was applied"
+    );
+    assert_eq!(shell.top(), Screen::SettingsConfirm);
+    shell.interface_mut().set_text(
+        "settings_confirm_countdown",
+        "Reverting in 12 s unless you keep it",
+    );
+    shell.interface_mut().set_focus(Some("settings_keep"));
+    support::check_reference(
+        context,
+        "ui-settings-confirm.png",
+        &capture(context, &shell),
+    );
 }
 
 #[test]
@@ -334,10 +392,7 @@ fn dressed_settings(shell: &mut Shell<Display>, metrics: &UiMetrics<'_>) {
         .interface_mut()
         .set_text("settings_scale_value", "1.25x");
     shell.interface_mut().set_toggle("settings_antialias", true);
-    shell
-        .interface_mut()
-        .set_text("settings_profile", "Ardennes");
-    shell.interface_mut().set_focus(Some("settings_profile"));
+    shell.interface_mut().set_focus(Some("settings_apply"));
 }
 
 #[test]
@@ -389,7 +444,7 @@ fn a_screen_change_draws_both_screens_partway_through() {
     shell.act(Action::OpenSkirmishSetup, &metrics);
     // A third of the way in, which is far enough that both screens hold real coverage and near enough the
     // start that the departing one has not faded to nothing.
-    shell.tick(Motion::DEFAULT.duration / 3.0);
+    shell.tick(Motion::DEFAULT.duration / 3.0, &metrics);
     assert!(shell.is_changing());
     assert_eq!(shell.frames().len(), 2, "both screens must be drawn");
     support::check_reference(context, "ui-transition.png", &capture(context, &shell));

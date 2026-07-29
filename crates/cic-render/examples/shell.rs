@@ -73,6 +73,10 @@ fn screens() -> Result<Screens, Box<dyn Error>> {
             Screen::QuitConfirm,
             include_bytes!("../../../content/ui/quit_confirm.ciclayout.json").as_slice(),
         ),
+        (
+            Screen::SettingsConfirm,
+            include_bytes!("../../../content/ui/settings_confirm.ciclayout.json").as_slice(),
+        ),
     ] {
         screens.insert(screen, Layout::from_json(bytes)?);
     }
@@ -144,11 +148,22 @@ impl ShellApp {
         let Some(active) = self.active.as_mut() else {
             return;
         };
+        // The countdown belongs to the dialog asking the question, which is a *different* screen with its own
+        // retained state — so while it is up, that is the only readout to keep current. The settings screen
+        // beneath it is not being edited, and its own readouts cannot go stale.
+        if active.shell.top() == Screen::SettingsConfirm {
+            if let Some(left) = active.shell.settings().remaining() {
+                active.shell.interface_mut().set_text(
+                    "settings_confirm_countdown",
+                    format!("Reverting in {:.0} s unless you keep it", left.ceil()),
+                );
+            }
+            return;
+        }
         if active.shell.top() != Screen::Settings {
             return;
         }
         let staged = *active.shell.settings().staged();
-        let remaining = active.shell.settings().remaining();
         let dirty = active.shell.settings().is_dirty();
         let interface = active.shell.interface_mut();
         // The slider is the source of truth while it is being dragged, so the staged value follows it
@@ -167,31 +182,54 @@ impl ShellApp {
             "settings_scale_value",
             format!("{:.2}x", staged.resolution_scale),
         );
-        let prompt = match remaining {
-            Some(left) => format!("Reverting in {:.0} s unless you keep it", left.ceil()),
-            None if dirty => "Apply puts a change in force for 15 seconds.".to_owned(),
-            None => "Nothing staged.".to_owned(),
+        let status = if dirty {
+            "Apply puts the change in force, then asks whether to keep it."
+        } else {
+            "Nothing staged."
         };
         active
             .shell
             .interface_mut()
-            .set_text("settings_countdown", prompt);
+            .set_text("settings_status", status);
     }
 
-    /// Reads the checkbox back into the staged settings.
+    /// The three antialiasing tiers, in the order the combo's options are authored.
+    ///
+    /// One place, so the option a user picks and the setting it stands for cannot drift apart — the layout
+    /// names the text and this names the meaning, and the index is the only thing they share.
+    const ANTIALIASING: [cic_render::Antialiasing; 3] = [
+        cic_render::Antialiasing::None,
+        cic_render::Antialiasing::Fxaa,
+        cic_render::Antialiasing::Taa,
+    ];
+
+    /// Reads the antialiasing combo back into the staged settings, or seeds it from them.
+    ///
+    /// The same two-way rule the resolution slider follows: once the control holds a value it is the source of
+    /// truth, and until then it takes one from the settings. Seeding it every frame instead would fight the
+    /// user, and never seeding it would open the screen showing a tier that is not in force.
     fn stage_antialiasing(&mut self) {
         let Some(active) = self.active.as_mut() else {
             return;
         };
-        let Some(on) = active.shell.interface().toggle("settings_antialias") else {
+        let staged = *active.shell.settings().staged();
+        let Some(chosen) = active.shell.interface().selection("settings_antialias") else {
+            // Nothing chosen yet, so the control takes its value from the settings. Once it holds one it is
+            // the source of truth and this branch never runs again for this screen.
+            let current = Self::ANTIALIASING
+                .iter()
+                .position(|tier| *tier == staged.antialiasing)
+                .unwrap_or(0);
+            active
+                .shell
+                .interface_mut()
+                .set_selection("settings_antialias", current);
             return;
         };
-        let wanted = if on {
-            cic_render::Antialiasing::Fxaa
-        } else {
-            cic_render::Antialiasing::None
-        };
-        let staged = *active.shell.settings().staged();
+        let wanted = Self::ANTIALIASING
+            .get(chosen)
+            .copied()
+            .unwrap_or(cic_render::Antialiasing::None);
         if staged.antialiasing != wanted {
             active
                 .shell
@@ -415,7 +453,8 @@ impl ApplicationHandler for ShellApp {
         let now = Instant::now();
         let elapsed = now.duration_since(active.last).as_secs_f32();
         active.last = now;
-        if let Probation::Lapsed = active.shell.tick(elapsed) {
+        let metrics = UiMetrics::new(&self.theme, &active.strings, active.scale);
+        if let Probation::Lapsed = active.shell.tick(elapsed, &metrics) {
             eprintln!(
                 "the revert window ran out: {:?} is back in force",
                 active.shell.settings().in_force()

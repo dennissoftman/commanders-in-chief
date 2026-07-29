@@ -275,9 +275,16 @@ impl<T: Clone + PartialEq> Shell<T> {
     /// One call drives both clocks deliberately. Two methods to call each frame is one that eventually
     /// stops being called, and the failure would be silent in both directions: a revert window that never
     /// fires, or an interface stuck half-faded between two screens.
-    pub fn tick(&mut self, elapsed: f32) -> Probation {
+    pub fn tick(&mut self, elapsed: f32, measure: &impl Measure) -> Probation {
         self.stack.advance(elapsed);
-        self.settings.tick(elapsed)
+        let probation = self.settings.tick(elapsed);
+        // The window running out closes the question it was asking. This is the case the whole mechanism
+        // exists for — a user who cannot see the screen cannot close a dialog either — so the dialog has to
+        // go away on its own rather than waiting to be dismissed by somebody who is not able to.
+        if probation == Probation::Lapsed {
+            self.close_confirmation(measure);
+        }
+        probation
     }
 
     /// Whether a screen change is still animating, which tells a host to keep redrawing.
@@ -322,13 +329,14 @@ impl<T: Clone + PartialEq> Shell<T> {
         let Some((_, solved)) = self.drawn.last() else {
             return Outcome::IDLE;
         };
-        // A tab strip's chosen page is decided when the layout is *solved*, so an event that moves one has
-        // to be followed by a re-solve or the new page never appears. Compared rather than assumed, because
-        // solving every screen on every pointer move is what the cached layout exists to avoid — and an
-        // event that switches a tab usually raises no action at all, so `act` below would not have run.
-        let before = page_selections(solved, self.stack.interface());
+        // What is *on screen* is decided when the layout is solved — which tab page shows, and whether a
+        // dropdown's options exist at all — so an event that moves either has to be followed by a re-solve or
+        // the change never appears. Compared rather than assumed, because solving every screen on every
+        // pointer move is what the cached layout exists to avoid, and neither of these events usually raises
+        // an action, so `act` below would not have run.
+        let before = shown(solved, self.stack.interface());
         let action = self.stack.interface_mut().handle(solved, event);
-        let switched = page_selections(solved, self.stack.interface()) != before;
+        let switched = shown(solved, self.stack.interface()) != before;
         if switched {
             self.resolve(measure);
         }
@@ -352,20 +360,50 @@ impl<T: Clone + PartialEq> Shell<T> {
                 request: Some(Request::LaunchSkirmish),
                 ..Outcome::IDLE
             },
-            Action::ApplySettings => Outcome {
-                settings_in_force: self.settings.apply(),
-                ..Outcome::IDLE
-            },
+            Action::ApplySettings => {
+                let settings_in_force = self.settings.apply();
+                // The keep-or-revert question is a *modal*, not two more buttons on the settings screen.
+                // Three reasons, and the first is the mechanism's own: the question only exists while a
+                // change is unconfirmed, and a button that is inert most of the time teaches people to
+                // ignore it. The second is that a dialog is what makes the countdown unmissable. The
+                // third is that it puts the decision in front of the user rather than beside the control
+                // they were adjusting.
+                //
+                // Only when something actually took effect. Applying with nothing staged changes nothing,
+                // and a dialog asking whether to keep a change nobody made would be a prompt about
+                // nothing.
+                let transition = if settings_in_force {
+                    self.stack.push(Screen::SettingsConfirm)
+                } else {
+                    Transition::Unchanged
+                };
+                if transition != Transition::Unchanged {
+                    self.resolve(measure);
+                }
+                Outcome {
+                    transition,
+                    settings_in_force,
+                    request: None,
+                }
+            }
             Action::ConfirmSettings => {
                 // Confirming changes nothing about what is in force; it only stops the countdown that
-                // would have taken it away.
+                // would have taken it away. What it does change is that the question has been answered,
+                // so the dialog asking it goes.
                 self.settings.confirm();
-                Outcome::IDLE
+                Outcome {
+                    transition: self.close_confirmation(measure),
+                    ..Outcome::IDLE
+                }
             }
-            Action::RevertSettings => Outcome {
-                settings_in_force: self.settings.revert(),
-                ..Outcome::IDLE
-            },
+            Action::RevertSettings => {
+                let settings_in_force = self.settings.revert();
+                Outcome {
+                    transition: self.close_confirmation(measure),
+                    settings_in_force,
+                    request: None,
+                }
+            }
             _ => self.navigate(action, measure),
         }
     }
@@ -394,6 +432,21 @@ impl<T: Clone + PartialEq> Shell<T> {
         }
     }
 
+    /// Closes the keep-or-revert dialog if it is open, reporting what that did to the stack.
+    ///
+    /// Called from three places — both answers and the window running out — because all three end the
+    /// question. Idempotent, so the tick that lapses after a button has already closed it does nothing.
+    fn close_confirmation(&mut self, measure: &impl Measure) -> Transition {
+        if !self.stack.contains(Screen::SettingsConfirm) {
+            return Transition::Unchanged;
+        }
+        let transition = self.stack.apply(Action::Back);
+        if transition != Transition::Unchanged {
+            self.resolve(measure);
+        }
+        transition
+    }
+
     /// Rebuilds the solved layout of every screen involved in what is drawn.
     ///
     /// Solved against [`ScreenStack::involved`] rather than `drawn`, so a screen on its way out has a
@@ -419,18 +472,21 @@ impl<T: Clone + PartialEq> Shell<T> {
     }
 }
 
-/// The chosen tab of every strip that switches pages, in sequence order.
+/// Everything about this screen's state that decides which nodes are on screen.
 ///
-/// A signature rather than a set of ids: what matters is only whether any of them moved, and a strip whose
-/// selection has not been touched answers for its first page — the same default the solver uses.
-fn page_selections(solved: &Solved, interface: &Interface) -> Vec<usize> {
-    solved
+/// A signature rather than a set of ids: what matters is only whether any of it moved. Two things are in it —
+/// the chosen tab of every strip that switches pages, and which dropdown is open — because those are the two
+/// pieces of state the solver reads. A third would have to be added here as well as there, which is why they
+/// arrive through one trait rather than two.
+fn shown(solved: &Solved, interface: &Interface) -> (Option<String>, Vec<usize>) {
+    let pages = solved
         .nodes()
         .iter()
         .filter(|node| node.pages.is_some())
         .filter_map(|node| node.id.as_deref())
         .map(|id| interface.selection(id).unwrap_or(0))
-        .collect()
+        .collect();
+    (interface.open().map(str::to_owned), pages)
 }
 
 #[cfg(test)]
@@ -484,6 +540,10 @@ mod tests {
             screen_layout("launch", Action::LaunchSkirmish),
         );
         screens.insert(Screen::QuitConfirm, screen_layout("yes", Action::Quit));
+        screens.insert(
+            Screen::SettingsConfirm,
+            screen_layout("keep", Action::ConfirmSettings),
+        );
         Shell::new(
             screens,
             StringTable::new(),
@@ -568,6 +628,7 @@ mod tests {
             (Screen::Settings, "apply", Action::ApplySettings),
             (Screen::SkirmishSetup, "launch", Action::LaunchSkirmish),
             (Screen::QuitConfirm, "yes", Action::Quit),
+            (Screen::SettingsConfirm, "keep", Action::ConfirmSettings),
         ] {
             screens.insert(screen, screen_layout(id, action));
         }
@@ -618,7 +679,8 @@ mod tests {
             Err(ShellError::MissingLayouts(vec![
                 Screen::Settings,
                 Screen::SkirmishSetup,
-                Screen::QuitConfirm
+                Screen::QuitConfirm,
+                Screen::SettingsConfirm
             ]))
         );
     }
@@ -651,8 +713,10 @@ mod tests {
     }
 
     #[test]
-    fn applying_settings_stays_on_the_settings_screen() {
-        // Load-bearing: the revert window is only useful while the confirm button is reachable.
+    fn applying_settings_asks_whether_to_keep_them_without_leaving_the_screen() {
+        // Load-bearing: the revert window is only useful while the answer is reachable. The question is a
+        // modal *over* the settings screen rather than two more buttons on it, so the screen underneath is
+        // still open and still drawn — which is what makes cancelling out of the dialog land somewhere sane.
         let mut shell = shell();
         shell.act(Action::OpenSettings, &NoContent);
         shell.settings_mut().staged_mut().scale = 200;
@@ -661,10 +725,24 @@ mod tests {
             outcome.settings_in_force,
             "the host must reapply to the device"
         );
-        assert_eq!(outcome.transition, Transition::Unchanged);
-        assert_eq!(shell.top(), Screen::Settings);
+        assert_eq!(
+            outcome.transition,
+            Transition::Pushed(Screen::SettingsConfirm)
+        );
+        assert_eq!(shell.top(), Screen::SettingsConfirm);
+        assert!(
+            shell.stack().contains(Screen::Settings),
+            "the screen being edited is still open beneath the question"
+        );
         assert_eq!(shell.settings().in_force().scale, 200);
         assert_eq!(shell.settings().remaining(), Some(REVERT_WINDOW));
+
+        // Applying with nothing staged asks nothing: a dialog about a change nobody made is a prompt about
+        // nothing.
+        shell.act(Action::ConfirmSettings, &NoContent);
+        let idle = shell.act(Action::ApplySettings, &NoContent);
+        assert!(idle.is_idle());
+        assert_eq!(shell.top(), Screen::Settings);
     }
 
     #[test]
@@ -674,10 +752,24 @@ mod tests {
         shell.act(Action::OpenSettings, &NoContent);
         shell.settings_mut().staged_mut().scale = 200;
         shell.act(Action::ApplySettings, &NoContent);
-        assert_eq!(shell.tick(5.0), Probation::Pending(REVERT_WINDOW - 5.0));
-        assert_eq!(shell.tick(REVERT_WINDOW), Probation::Lapsed);
+        assert_eq!(
+            shell.tick(5.0, &NoContent),
+            Probation::Pending(REVERT_WINDOW - 5.0)
+        );
+        assert_eq!(
+            shell.top(),
+            Screen::SettingsConfirm,
+            "the question is up while the window runs"
+        );
+        assert_eq!(shell.tick(REVERT_WINDOW, &NoContent), Probation::Lapsed);
         assert_eq!(shell.settings().in_force().scale, 100);
-        assert_eq!(shell.top(), Screen::Settings);
+        // And the dialog goes with it. This is the case the mechanism exists for: somebody who cannot see the
+        // screen cannot dismiss a dialog either, so the window running out has to close it.
+        assert_eq!(
+            shell.top(),
+            Screen::Settings,
+            "the question closes itself when it has been answered by the clock"
+        );
     }
 
     #[test]
@@ -688,10 +780,18 @@ mod tests {
         shell.act(Action::ApplySettings, &NoContent);
         let outcome = shell.act(Action::ConfirmSettings, &NoContent);
         assert!(
-            outcome.is_idle(),
+            !outcome.settings_in_force,
             "confirming changes nothing about what is in force"
         );
-        assert_eq!(shell.tick(REVERT_WINDOW * 2.0), Probation::Settled);
+        assert_eq!(
+            outcome.transition,
+            Transition::Popped(Screen::Settings),
+            "answering the question closes the dialog asking it"
+        );
+        assert_eq!(
+            shell.tick(REVERT_WINDOW * 2.0, &NoContent),
+            Probation::Settled
+        );
         assert_eq!(shell.settings().in_force().scale, 200);
     }
 
@@ -704,6 +804,19 @@ mod tests {
         shell.act(Action::OpenSettings, &NoContent);
         shell.settings_mut().staged_mut().scale = 200;
         shell.act(Action::ApplySettings, &NoContent);
+
+        // Backing out of the *question* is not answering it. The change stays in force with its window still
+        // running, which is the honest reading of "I have not decided" — and the clock decides, which is the
+        // whole design. Reverting here instead would take the setting away from somebody who was still
+        // looking at it.
+        let dismissed = shell.act(Action::Back, &NoContent);
+        assert_eq!(dismissed.transition, Transition::Popped(Screen::Settings));
+        assert!(!dismissed.settings_in_force);
+        assert!(shell.settings().is_unconfirmed());
+        assert_eq!(shell.settings().in_force().scale, 200);
+
+        // Closing the screen is. Nobody is going to confirm a change on a screen that is no longer open, so
+        // the countdown would otherwise fire minutes later somewhere else.
         let outcome = shell.act(Action::Back, &NoContent);
         assert_eq!(outcome.transition, Transition::Popped(Screen::MainMenu));
         assert!(
@@ -739,14 +852,19 @@ mod tests {
         assert!(!outcome.settings_in_force);
         assert_eq!(shell.settings().in_force().scale, 200);
         assert!(shell.settings().is_unconfirmed());
-        // Both are drawn, because the modal covers only part of the surface.
+        // All three are drawn, because a modal covers only part of the surface — the settings screen, the
+        // question about the change it applied, and the question about leaving.
         assert_eq!(
             shell
                 .drawn()
                 .iter()
                 .map(|(screen, _)| *screen)
                 .collect::<Vec<_>>(),
-            vec![Screen::Settings, Screen::QuitConfirm]
+            vec![
+                Screen::Settings,
+                Screen::SettingsConfirm,
+                Screen::QuitConfirm
+            ]
         );
     }
 
@@ -825,13 +943,13 @@ mod tests {
 
         // One call advances both, and neither is finished after a fraction of a second.
         assert!(matches!(
-            shell.tick(Motion::DEFAULT.duration / 2.0),
+            shell.tick(Motion::DEFAULT.duration / 2.0, &NoContent),
             Probation::Pending(_)
         ));
         assert!(shell.is_changing());
         // The change finishes long before the revert window does.
         assert!(matches!(
-            shell.tick(Motion::DEFAULT.duration),
+            shell.tick(Motion::DEFAULT.duration, &NoContent),
             Probation::Pending(_)
         ));
         assert!(!shell.is_changing());
@@ -868,7 +986,7 @@ mod tests {
             );
         }
         // Once it settles there is one frame, fully shown.
-        shell.tick(Motion::DEFAULT.duration);
+        shell.tick(Motion::DEFAULT.duration, &NoContent);
         let frames = shell.frames();
         assert_eq!(frames.len(), 1);
         assert!(frames[0].1.is_shown());

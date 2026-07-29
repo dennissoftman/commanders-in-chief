@@ -265,6 +265,12 @@ pub struct Interface {
     focus: Option<String>,
     hover: Option<String>,
     armed: Option<String>,
+    /// The combo whose dropdown is open, if any.
+    ///
+    /// One field rather than a flag per control, because at most one dropdown is open at a time and that is
+    /// a property of dropdowns rather than a simplification: opening a second one closes the first *by
+    /// construction* here, where a per-control flag would make it a rule somebody has to remember to apply.
+    open: Option<String>,
     values: BTreeMap<String, Value>,
 }
 
@@ -291,6 +297,20 @@ impl Interface {
     #[must_use]
     pub fn armed(&self) -> Option<&str> {
         self.armed.as_deref()
+    }
+
+    /// The combo whose dropdown is open, if any.
+    #[must_use]
+    pub fn open(&self) -> Option<&str> {
+        self.open.as_deref()
+    }
+
+    /// Opens one combo's dropdown, closing whichever was open, or closes them all with `None`.
+    ///
+    /// Public because a host may want to open one itself — a key binding, or a screen that opens on a choice
+    /// — and because a test wants to arrange the open state without synthesising a click.
+    pub fn set_open(&mut self, id: Option<&str>) {
+        self.open = id.map(str::to_owned);
     }
 
     /// Focuses a control by id, or clears focus with `None`.
@@ -389,6 +409,13 @@ impl Interface {
                 None
             }
             UiEvent::PointerPressed { x, y } => {
+                // A press outside an open dropdown dismisses it and stops there. Letting the press through
+                // as well is the behaviour people complain about: aiming at a list and having the click land
+                // on whatever was behind it once it closed.
+                if self.open.is_some() && !solved.covers_overlay(x, y) {
+                    self.open = None;
+                    return None;
+                }
                 let hit = solved
                     .hit_focusable(x, y)
                     .and_then(|index| solved.get(index));
@@ -411,6 +438,9 @@ impl Interface {
                     return None;
                 }
                 let index = solved.index_of(&armed)?;
+                if solved.get(index)?.widget == Widget::Combo {
+                    return self.release_on_combo(solved, index, x, y);
+                }
                 // A tab strip is one control holding several headers, so where inside it the release landed
                 // decides *which* tab — the keyboard's `Adjust` steps the selection and a pointer names it.
                 self.select_at(solved, index, x, y);
@@ -455,7 +485,16 @@ impl Interface {
             }
             // Escape means "leave this screen", which the screen stack interprets. Returning it as an
             // action rather than popping anything here keeps this module free of navigation.
-            UiEvent::Cancel => Some(Action::Back),
+            //
+            // Unless a dropdown is open, in which case it means "close this" — the innermost thing the key
+            // could dismiss. Escaping the whole screen out from under an open list would lose the change the
+            // user was in the middle of making.
+            UiEvent::Cancel => {
+                if self.open.take().is_some() {
+                    return None;
+                }
+                Some(Action::Back)
+            }
         }
     }
 
@@ -468,6 +507,16 @@ impl Interface {
         {
             let flipped = !self.toggle(id).unwrap_or(false);
             self.set(id.to_owned(), Value::Toggle(flipped));
+        }
+        // Activating a combo opens its list, or closes it again. That is what the keyboard equivalent of
+        // clicking the control has to do, and it is why a combo is `activatable` at all.
+        if let Some(id) = node.id.as_deref().filter(|_| node.widget == Widget::Combo) {
+            self.open = if self.is_open(id) {
+                None
+            } else {
+                Some(id.to_owned())
+            };
+            return None;
         }
         node.action
     }
@@ -504,6 +553,47 @@ impl Interface {
             return;
         };
         self.set(id, Value::Select(chosen));
+    }
+
+    /// Applies a release on a combo: choosing an option, or opening and closing the list.
+    ///
+    /// The two cases are told apart by *where* the release landed, not by what was pressed, because a
+    /// dropdown's list and the control that owns it are one focusable node — a press anywhere the list covers
+    /// arms the combo. So a release on a row chooses it and closes; a release on the control itself toggles.
+    ///
+    /// A release inside the list but between rows falls to the toggle, which closes it. That is the right way
+    /// round: the alternative is a click inside an open dropdown that appears to do nothing.
+    fn release_on_combo(
+        &mut self,
+        solved: &Solved,
+        index: usize,
+        x: f32,
+        y: f32,
+    ) -> Option<Action> {
+        let node = solved.get(index)?;
+        let id = node.id.clone()?;
+        let action = node.action;
+        let row = solved
+            .child_rects(index)
+            .into_iter()
+            .position(|rect| rect.contains(x, y));
+        if let Some(option) = row.filter(|_| self.is_open(&id)) {
+            self.open = None;
+            self.set(id, Value::Select(option));
+            // A combo's action means "the choice changed", which is the one moment it has to say so.
+            return action;
+        }
+        self.open = if self.is_open(&id) { None } else { Some(id) };
+        None
+    }
+
+    /// Whether this control's dropdown is the open one.
+    ///
+    /// Public because both the solver and the paint layer ask it, through the [`Selections`] trait and
+    /// directly. It is the same question in all three places, so it has one answer.
+    #[must_use]
+    pub fn is_open(&self, id: &str) -> bool {
+        self.open.as_deref() == Some(id)
     }
 
     /// Moves an armed slider to wherever the pointer is along its track.
@@ -548,6 +638,9 @@ impl Interface {
 
     /// Moves focus through the focusable controls in reading order, wrapping at both ends.
     fn move_focus(&mut self, solved: &Solved, direction: FocusMove) {
+        // Focus leaving a combo closes its list. A dropdown left open behind a focus ring somewhere else is a
+        // list floating over a screen with nothing selecting from it.
+        self.open = None;
         let order = solved.focus_order();
         if order.is_empty() {
             self.focus = None;
@@ -589,7 +682,7 @@ impl Interface {
                 };
                 self.set(focused, Value::Slide(range.clamp(current + step)));
             }
-            Widget::List | Widget::Tabs => {
+            Widget::List | Widget::Tabs | Widget::Combo => {
                 // Bounded by the children the layout actually has, so a selection can never name an
                 // entry that is not there. Clamped rather than wrapped: a list that jumps from the last
                 // row to the first on one key press reads as a lost keystroke.
@@ -670,6 +763,10 @@ impl Interface {
 impl Selections for Interface {
     fn selection(&self, id: &str) -> Option<usize> {
         Self::selection(self, id)
+    }
+
+    fn is_open(&self, id: &str) -> bool {
+        Self::is_open(self, id)
     }
 }
 
@@ -814,6 +911,136 @@ mod tests {
         layout.validate().expect("the fixture must be valid");
         let viewport = Viewport::new(200, 400, 1.0).expect("valid viewport");
         solve_selected(&layout, viewport, &NoContent, ui)
+    }
+
+    /// A combo of three options 20 tall, over a button filling the rest of the surface.
+    ///
+    /// The button is what makes the routing falsifiable: it is *behind* the open list and after it in the
+    /// sequence, so every one of these assertions would pass on a control that simply did nothing.
+    fn combo_screen() -> Layout {
+        let option = |key: &str| Node {
+            widget: Widget::Label,
+            text_key: Some(key.to_owned()),
+            height: Sizing::Fixed(20.0),
+            ..Node::default()
+        };
+        Layout {
+            format_version: crate::layout::FORMAT_VERSION,
+            root: Node {
+                width: Sizing::Fill(1),
+                height: Sizing::Fill(1),
+                children: vec![
+                    Node {
+                        id: Some("pick".to_owned()),
+                        widget: Widget::Combo,
+                        width: Sizing::Fixed(100.0),
+                        height: Sizing::Fixed(20.0),
+                        children: vec![option("off"), option("some"), option("lots")],
+                        ..Node::default()
+                    },
+                    Node {
+                        id: Some("beneath".to_owned()),
+                        widget: Widget::Button,
+                        width: Sizing::Fill(1),
+                        height: Sizing::Fill(1),
+                        action: Some(Action::Quit),
+                        ..Node::default()
+                    },
+                ],
+                ..Node::default()
+            },
+        }
+    }
+
+    /// The combo screen solved against an interface, which is what decides whether the list is on screen.
+    fn combo_solved(ui: &Interface) -> Solved {
+        let layout = combo_screen();
+        layout.validate().expect("the fixture must be valid");
+        let viewport = Viewport::new(200, 400, 1.0).expect("valid viewport");
+        solve_selected(&layout, viewport, &NoContent, ui)
+    }
+
+    #[test]
+    fn a_combo_opens_on_a_click_and_an_option_chooses_and_closes_it() {
+        let mut ui = Interface::new();
+        let solved = combo_solved(&ui);
+        assert!(ui.open().is_none());
+
+        // On the control: opens, and chooses nothing.
+        ui.handle(&solved, UiEvent::PointerPressed { x: 50.0, y: 10.0 });
+        ui.handle(&solved, UiEvent::PointerReleased { x: 50.0, y: 10.0 });
+        assert_eq!(ui.open(), Some("pick"));
+        assert_eq!(ui.selection("pick"), None);
+
+        // On the second row, which is only there because it is open — and which overlaps the button.
+        let solved = combo_solved(&ui);
+        let action = {
+            ui.handle(&solved, UiEvent::PointerPressed { x: 50.0, y: 50.0 });
+            ui.handle(&solved, UiEvent::PointerReleased { x: 50.0, y: 50.0 })
+        };
+        assert_eq!(ui.selection("pick"), Some(1));
+        assert!(ui.open().is_none(), "choosing an option closes the list");
+        assert_eq!(
+            action, None,
+            "this combo carries no action, and the button behind the list must not have fired"
+        );
+    }
+
+    #[test]
+    fn a_press_outside_an_open_dropdown_dismisses_it_and_reaches_nothing_else() {
+        // The behaviour people complain about when it is missing: aiming at a list, having it close, and the
+        // click landing on whatever was behind it. The button here would quit the game.
+        let mut ui = Interface::new();
+        ui.set_open(Some("pick"));
+        let solved = combo_solved(&ui);
+        let armed = ui.handle(&solved, UiEvent::PointerPressed { x: 50.0, y: 300.0 });
+        assert_eq!(armed, None);
+        assert!(ui.open().is_none(), "the press dismissed the list");
+        assert_eq!(ui.armed(), None, "and armed nothing beneath it");
+        let released = ui.handle(&solved, UiEvent::PointerReleased { x: 50.0, y: 300.0 });
+        assert_eq!(released, None, "so the release fires nothing either");
+    }
+
+    #[test]
+    fn escape_closes_an_open_dropdown_before_it_leaves_the_screen() {
+        // Innermost first, which is what Escape means everywhere else too. Leaving the screen out from under
+        // an open list would discard the choice the user was in the middle of making.
+        let mut ui = Interface::new();
+        ui.set_open(Some("pick"));
+        let solved = combo_solved(&ui);
+        assert_eq!(ui.handle(&solved, UiEvent::Cancel), None);
+        assert!(ui.open().is_none());
+        // Closed, the same key leaves the screen.
+        assert_eq!(
+            ui.handle(&solved, UiEvent::Cancel),
+            Some(Action::Back),
+            "with nothing open, Escape is still navigation"
+        );
+    }
+
+    #[test]
+    fn the_keyboard_opens_a_combo_steps_it_and_closes_it_by_moving_on() {
+        let mut ui = Interface::new();
+        let solved = combo_solved(&ui);
+        ui.set_focus(Some("pick"));
+        assert_eq!(ui.handle(&solved, UiEvent::Activate), None);
+        assert_eq!(ui.open(), Some("pick"), "Activate is the keyboard's click");
+
+        ui.handle(&solved, UiEvent::Adjust(Adjust::Increase));
+        ui.handle(&solved, UiEvent::Adjust(Adjust::Increase));
+        assert_eq!(ui.selection("pick"), Some(2));
+        ui.handle(&solved, UiEvent::Adjust(Adjust::Increase));
+        assert_eq!(
+            ui.selection("pick"),
+            Some(2),
+            "clamped to the options there are, not wrapped"
+        );
+
+        // Focus leaving closes it: a list floating over a screen with nothing selecting from it is worse
+        // than either state.
+        ui.handle(&solved, UiEvent::Focus(FocusMove::Next));
+        assert!(ui.open().is_none());
+        assert_eq!(ui.focus(), Some("beneath"));
     }
 
     #[test]

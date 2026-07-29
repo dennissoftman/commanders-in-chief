@@ -1,0 +1,65 @@
+{
+  "format_version": 1,
+  "root": {
+    "style": "scrim",
+    "width": { "fill": 1 },
+    "height": { "fill": 1 },
+    "direction": "stack",
+    "align": "center",
+    "children": [
+      {
+        "style": "card",
+        "width": { "fixed": 380.0 },
+        "height": { "fixed": 170.0 },
+        "direction": "column",
+        "gap": 14.0,
+        "padding": { "left": 24.0, "top": 24.0, "right": 24.0, "bottom": 24.0 },
+        "children": [
+          {
+            "widget": "label",
+            "text_key": "confirm.question",
+            "height": { "fixed": 24.0 },
+            "align": "center"
+          },
+          {
+            "id": "settings_confirm_countdown",
+            "widget": "label",
+            "style": "warning",
+            "text_key": "confirm.countdown",
+            "height": { "fixed": 20.0 },
+            "align": "center"
+          },
+          {
+            "widget": "label",
+            "style": "caption",
+            "text_key": "confirm.note",
+            "height": { "fixed": 18.0 },
+            "align": "center"
+          },
+          { "height": { "fill": 1 } },
+          {
+            "direction": "row",
+            "height": { "fixed": 34.0 },
+            "gap": 12.0,
+            "children": [
+              {
+                "id": "settings_revert",
+                "widget": "button",
+                "text_key": "confirm.revert",
+                "width": { "fill": 1 },
+                "action": "revert_settings"
+              },
+              {
+                "id": "settings_keep",
+                "widget": "button",
+                "text_key": "confirm.keep",
+                "width": { "fill": 1 },
+                "action": "confirm_settings"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

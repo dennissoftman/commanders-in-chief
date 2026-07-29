@@ -66,7 +66,7 @@ thing that decides.
 
 ## Widget kinds
 
-`panel`, `label`, `button`, `checkbox`, `slider`, `text_entry`, `list`, `tabs`, `scroll`.
+`panel`, `label`, `button`, `checkbox`, `slider`, `text_entry`, `list`, `tabs`, `combo`, `scroll`.
 
 A kind decides three things beyond how it draws, and the layout is validated against all three:
 
@@ -77,7 +77,7 @@ A kind decides three things beyond how it draws, and the layout is validated aga
 | `checkbox` | yes | yes | yes | **yes** |
 | `slider` | no | yes | yes | **yes** |
 | `text_entry` | no | yes | yes | **yes** |
-| `list`, `tabs` | yes | yes | yes | **yes** |
+| `list`, `tabs`, `combo` | yes | yes | yes | **yes** |
 | `scroll` | no | no | yes | **yes** |
 
 **Why an id is required rather than optional.** Retained state is keyed by id — that is what makes a
@@ -120,6 +120,51 @@ every button having to say so.
 **Dynamic text is a stored value, not a layout field.** A label with an `id` draws whatever the host
 stored against that id, falling back to its `text_key`. That is the channel for text no string table can
 hold — a countdown, a chosen map's name — and it keeps per-frame values out of the table.
+
+## Combos
+
+A `combo` is a closed control showing one of a set, which opens a list over whatever is beneath it. Its
+children are the options, and the control draws the **chosen option's own text** — it has no text of its
+own, which is why one with no options is refused at load.
+
+```json
+{
+  "id": "settings_antialias",
+  "widget": "combo",
+  "width": { "fixed": 240.0 },
+  "children": [
+    { "widget": "label", "text_key": "settings.antialiasing_off", "height": { "fixed": 28.0 } },
+    { "widget": "label", "text_key": "settings.antialiasing_post", "height": { "fixed": 28.0 } },
+    { "widget": "label", "text_key": "settings.antialiasing_temporal", "height": { "fixed": 28.0 } }
+  ]
+}
+```
+
+**The options are positioned by the solver, not by the author.** They hang below the control, at the
+control's width, each as tall as it asked to be or as tall as its text measured. This is the one
+arrangement no `direction` can express, because the list belongs *outside* the box that owns it — and it is
+why a combo is a widget kind rather than a convention over panels. `padding` on a combo is ignored for the
+same reason: it would inset the list from the control it hangs off, and a list narrower than its own
+control reads as a rendering fault.
+
+**A closed combo's options are not on screen at all** — the same mechanism a tab page that is not chosen
+uses. They take no clicks, hold no tab stops, and are not drawn.
+
+**An open list is drawn last and searched first.** A dropdown breaks the one assumption the flat solved
+sequence rests on, which is that a node's place in the sequence is its place in the stacking order: a combo
+early in a screen opens a list over siblings authored *after* it. So the open combo's subtree is named as
+an overlay, drawn after everything else and hit-tested before it, and clipped to the viewport rather than to
+whatever encloses the control.
+
+**How it is driven.** Clicking the control opens it and clicking a row chooses that row and closes it; a
+click anywhere else dismisses it and reaches nothing beneath, because a dropdown that closed *and* passed
+the click through is the behaviour people complain about. `Activate` — Enter — is the keyboard's click,
+`Adjust` steps the choice clamped to the options there are, Escape closes the list rather than leaving the
+screen, and moving focus away closes it too. At most one dropdown is open at a time.
+
+**Choose a combo over `tabs` when the options are many or the row is scarce.** A tab strip shows every
+option at once and costs a row of screen per option; a combo costs one row whatever the count. A resolution
+list, a quality preset and a level-of-detail choice all want the second.
 
 ## Tabs
 
@@ -320,6 +365,8 @@ Beyond what the shape enforces:
 - A `style` role must suit its widget: a surface role only on a `panel`, a text role only on a `label`,
   and neither on a kind that already looks like something.
 - `max_length` may not be zero.
+- A `combo` must declare at least one option. It draws the chosen option's own text, so an empty one can
+  show nothing at all — the same posture as a slider without a range.
 - A `pages` container must exist, must `stack` its children, must hold exactly as many as the strip has
   headers, and must not be the strip itself or anything inside it. The count is the check worth having:
   three headers over two pages is a screen whose third tab shows nothing, and neither node is wrong on its
