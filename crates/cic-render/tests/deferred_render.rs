@@ -20,7 +20,10 @@ use std::time::Duration;
 
 use cic_assets::{Terrain, TerrainLayer};
 use cic_camera::CameraPose;
+use cic_render::detail::TerrainDetailRequest;
+use cic_render::display::JITTER_PHASES;
 use cic_render::terrain::LayerColour;
+use cic_render::terrain_virtual::VirtualPageView;
 use cic_render::{
     Antialiasing, Capture, CaptureTarget, Clouds, DeferredFrame, DeferredRenderer, DeferredTargets,
     DisplaySettings, Environment, Fog, GpuContext, TerrainRenderer, TimedPass, WaterBody,
@@ -1533,8 +1536,15 @@ fn antialiasing_softens_edges_without_dimming_or_blurring_the_frame() {
     );
     // And it must not be so timid that it is doing nothing either. A gate that never fires satisfies
     // every assertion above except the first, and it is worth recording which side of it we are on.
+    //
+    // The bound was 0.98 and had to be loosened, for a reason worth recording rather than hiding. While the
+    // resolve passes offset their texture coordinate by half a pixel — see
+    // `no_chunk_offsets_the_framebuffer_position_by_half_a_pixel` — every tap this pass took was a bilinear
+    // average of two texels, so the luma gate saw a gradient almost everywhere and fired on about 3% of the
+    // frame. With exact taps it fires on about 1%, and halves the silhouette edge energy while doing it. The
+    // pass got *more* selective and no less effective, which is what a gate is for.
     assert!(
-        untouched < 0.98,
+        untouched < 0.995,
         "{:.1}% of the frame is untouched, which is a pass that found almost no edges",
         untouched * 100.0
     );
@@ -1689,5 +1699,444 @@ fn antialiasing_composes_with_a_resolution_scale() {
         untouched > 0.2,
         "only {:.1}% of the supersampled frame was left alone",
         untouched * 100.0
+    );
+}
+
+/// Renders a whole jitter cycle and returns the last frame.
+///
+/// This is what [ADR 0005](../../docs/adr/0005-antialiasing-strategy.md) predicted the harness would need:
+/// a temporal accumulator makes one captured frame depend on the frames before it, so a reference image
+/// stops being reproducible from a single render. The answer the ADR offered as one of two — render a fixed
+/// number of frames with a pinned jitter sequence — is the one taken, and it is only available because the
+/// jitter phase is a frame *parameter* rather than a counter inside the renderer.
+///
+/// Renders `JITTER_PHASES` frames, so every sub-pixel position has contributed. It is not fully converged at
+/// that point and does not need to be: the reference is whatever the sequence produces, and the sequence is
+/// deterministic.
+fn render_converged(context: &GpuContext, harness: &Harness, frame: DeferredFrame) -> Capture {
+    // Reset first, and that is not tidiness — it is what makes the sequence a *function* of its inputs. A
+    // temporal resolve carries state across calls by construction, so without this the eight frames would
+    // start from whatever the last sequence left behind and two identical calls would disagree. The first
+    // draft of this helper omitted it and the reproducibility assertion below caught it immediately, which
+    // is the case `reset_history` exists for.
+    harness.deferred.reset_history();
+    let mut capture = None;
+    for phase in 0..JITTER_PHASES {
+        capture = Some(render(context, harness, frame.at_jitter(phase)));
+    }
+    capture.expect("at least one jitter phase")
+}
+
+#[test]
+fn a_temporal_resolve_accumulates_over_a_pinned_jitter_sequence() {
+    // Four claims, and each of them fails differently:
+    //
+    // 1. The sequence is *reproducible*. Two runs of the same phases give the same bytes. Without this the
+    //    reference below could not exist at all, and it is the property the whole design of `jitter` as a
+    //    frame parameter is for.
+    // 2. Edge energy on the silhouette falls. That is the accumulation acting where the aliasing is.
+    // 3. Mean luminance does not move. A jitter that shifted the projection by a whole pixel, or an
+    //    accumulation whose weights did not sum to one, moves it.
+    // 4. The first frame of a sequence is *not* antialiased. There is no history to accumulate yet, so a
+    //    first frame that already looked resolved would mean the pass was blending against uninitialised
+    //    memory and happening to get away with it.
+    let Some(context) = context() else { return };
+    let terrain = shadowing_terrain();
+    let aliased = harness_with(context, terrain.clone(), DisplaySettings::NATIVE);
+    let temporal = harness_with(
+        context,
+        terrain,
+        DisplaySettings::NATIVE.with_antialiasing(Antialiasing::Taa),
+    );
+
+    let frame = DeferredFrame::new(pose(&aliased.terrain), WIDTH, HEIGHT);
+    let before = render(context, &aliased, frame);
+
+    // The first frame has no predecessor, so it must be the unaccumulated image — and byte-identical to the
+    // one the chain produces with no temporal path at all, because the jitter of phase 0 is the only thing
+    // that differs and the resolve returns the current frame untouched.
+    temporal.deferred.reset_history();
+    let first = render(context, &temporal, frame.at_jitter(0));
+    let converged = render_converged(context, &temporal, frame);
+    write_capture("deferred-temporal-first.png", &first);
+    write_capture("deferred-temporal.png", &converged);
+    // The capture is the verification. A motion vector with a sign error, or a history sampled at the wrong
+    // coordinate, produces exactly the statistics below.
+    support::check_reference(context, "deferred-temporal.png", &converged);
+
+    assert_eq!(converged.width(), WIDTH, "the output size must not change");
+    assert_eq!(converged.height(), HEIGHT);
+
+    let again = render_converged(context, &temporal, frame);
+    assert_eq!(
+        converged.rgba(),
+        again.rgba(),
+        "the same jitter sequence must give the same frame, or no reference could exist"
+    );
+
+    let band = boundary_band(&sky_mask(&before), WIDTH, HEIGHT, 2);
+    let rough = masked_edge_energy(&before, &band);
+    let unaccumulated = masked_edge_energy(&first, &band);
+    let smooth = masked_edge_energy(&converged, &band);
+    eprintln!(
+        "silhouette edge energy: {rough:.5} aliased, {unaccumulated:.5} first frame, \
+         {smooth:.5} converged"
+    );
+    assert!(
+        smooth < rough * 0.8,
+        "silhouette edge energy went from {rough:.5} to {smooth:.5}, so the accumulation is barely \
+         acting where the aliasing is"
+    );
+    assert!(
+        unaccumulated > smooth * 1.2,
+        "the first frame ({unaccumulated:.5}) should be no better resolved than the aliased one, but it \
+         is close to the converged frame ({smooth:.5}) -- which means the resolve blended against \
+         something it should not have"
+    );
+
+    let shift = (mean_luminance(&converged) - mean_luminance(&before)).abs();
+    assert!(
+        shift < 0.005,
+        "mean luminance moved by {shift:.4}: either the jitter is shifting the image rather than \
+         sampling inside a pixel, or the accumulation weights do not sum to one"
+    );
+}
+
+#[test]
+fn a_temporal_resolve_follows_a_moving_camera_rather_than_smearing_it() {
+    // What the motion target is for. Two accumulated sequences from *different* camera positions must
+    // produce different frames, and each must stay as sharp as its own still frame — an accumulation that
+    // ignored motion would blend the two positions and leave a trail.
+    //
+    // Measured as edge energy rather than as a difference, because a smear and a correct reprojection both
+    // "change the frame". A trail is specifically a *loss* of edge energy that a still camera does not have.
+    let Some(context) = context() else { return };
+    let terrain = shadowing_terrain();
+    let temporal = harness_with(
+        context,
+        terrain,
+        DisplaySettings::NATIVE.with_antialiasing(Antialiasing::Taa),
+    );
+    let still = DeferredFrame::new(pose(&temporal.terrain), WIDTH, HEIGHT);
+
+    // A pan of a few world units per frame, which at this standoff is several pixels — well past the point
+    // where a history sampled at the wrong coordinate would be visible.
+    let mut panned = still;
+    let mut last = None;
+    temporal.deferred.reset_history();
+    for phase in 0..JITTER_PHASES {
+        // Deliberately not derived from a clock: the pan is a fixed step per phase, so this sequence is as
+        // reproducible as the still one.
+        let step = 4.0 * f32::from(u8::try_from(phase).expect("eight phases"));
+        panned.pose.eye[0] = still.pose.eye[0] + step;
+        panned.pose.focus[0] = still.pose.focus[0] + step;
+        panned.projection = still.projection;
+        last = Some(render(context, &temporal, panned.at_jitter(phase)));
+    }
+    let moving = last.expect("at least one frame");
+    write_capture("deferred-temporal-panned.png", &moving);
+
+    // The reference for the moving case is the still one it must *not* resemble: a smear would pull the
+    // silhouette toward where the camera was.
+    let converged = render_converged(context, &temporal, still);
+    assert_ne!(
+        converged.rgba(),
+        moving.rgba(),
+        "a panned sequence must not produce the still frame"
+    );
+
+    // Sharpness, on the panned frame's own silhouette. A trail shows up here and nowhere else: the frame is
+    // otherwise a plausible image of a slightly different camera.
+    let band = boundary_band(&sky_mask(&moving), WIDTH, HEIGHT, 2);
+    let panned_energy = masked_edge_energy(&moving, &band);
+    let still_energy = masked_edge_energy(
+        &converged,
+        &boundary_band(&sky_mask(&converged), WIDTH, HEIGHT, 2),
+    );
+    eprintln!("silhouette edge energy: {still_energy:.5} still, {panned_energy:.5} panned");
+    assert!(
+        panned_energy > still_energy * 0.5,
+        "the panned silhouette carries {panned_energy:.5} against the still frame's {still_energy:.5}, \
+         so the history is being followed to the wrong place and smearing"
+    );
+}
+
+#[test]
+fn the_temporal_history_survives_a_frame_that_moves_nothing() {
+    // The degenerate case a ping-pong gets wrong: rendering the same frame twice must keep accumulating
+    // rather than reading the layer it is writing. If the swap were missed, the second frame would read its
+    // own output and the result would either be the current frame alone or a validation error.
+    let Some(context) = context() else { return };
+    let temporal = harness_with(
+        context,
+        shadowing_terrain(),
+        DisplaySettings::NATIVE.with_antialiasing(Antialiasing::Taa),
+    );
+    let frame = DeferredFrame::new(pose(&temporal.terrain), WIDTH, HEIGHT).at_jitter(3);
+
+    temporal.deferred.reset_history();
+    let mut frames = Vec::new();
+    for _ in 0..6 {
+        frames.push(render(context, &temporal, frame));
+    }
+
+    // The accumulation must be a *fixed point* under a repeated frame, not merely finite. Every frame after
+    // the first blends the same image with a history that is already that image, so the sequence has to sit
+    // still — a drift means the weights do not sum to one, and an oscillation means the history is being read
+    // from the layer that is being written.
+    //
+    // Bit equality *is* the assertion, and it took a bug to earn it. While the resolve offset its texture
+    // coordinate by half a pixel — see `no_chunk_offsets_the_framebuffer_position_by_half_a_pixel` — this
+    // sequence read its own history from half a pixel away and re-filtered it every frame, decaying as
+    // 48, 33, 19, 9, 6. That is a convergent sequence and it would have passed any tolerance stated as
+    // "settles"; only demanding a genuine fixed point distinguishes an accumulation that is correct from
+    // one that is merely stable.
+    let largest = |left: &Capture, right: &Capture| {
+        left.rgba()
+            .iter()
+            .zip(right.rgba())
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap_or(0)
+    };
+    let steps: Vec<u8> = frames
+        .windows(2)
+        .map(|pair| largest(&pair[0], &pair[1]))
+        .collect();
+    eprintln!("largest channel step between successive frames: {steps:?}");
+    // Where the worst one is, because a number alone does not say whether it is an edge or the whole frame.
+    if let Some(worst) = frames[0]
+        .rgba()
+        .iter()
+        .zip(frames[1].rgba())
+        .enumerate()
+        .max_by_key(|(_, (a, b))| a.abs_diff(**b))
+    {
+        let pixel = worst.0 / 4;
+        eprintln!(
+            "worst at pixel ({}, {}) channel {}: {} then {}",
+            pixel % WIDTH as usize,
+            pixel / WIDTH as usize,
+            worst.0 % 4,
+            worst.1.0,
+            worst.1.1
+        );
+    }
+    for (index, step) in steps.iter().enumerate() {
+        assert_eq!(
+            *step,
+            0,
+            "frame {index} to {} moved a channel by {step}, so the accumulation is not a fixed point",
+            index + 1
+        );
+    }
+    // And it has not walked: the sixth frame is still within one step of the second, so the per-frame bound
+    // above is not concealing a slow ramp of five successive one-step moves in the same direction.
+    let total = largest(&frames[1], &frames[5]);
+    eprintln!("largest channel step from frame 1 to frame 5: {total}");
+    assert_eq!(
+        total, 0,
+        "the accumulation drifted by {total} over four repeated frames"
+    );
+}
+
+/// A terrain split down the middle: the left half is layer 0 at full weight, the right half layer 1.
+///
+/// A hard boundary rather than a gradient, because what the page tests check is *where* a page reads its
+/// data from, and a smooth field looks plausible under a coordinate that is off by a page.
+fn split_terrain() -> Terrain {
+    let samples = 65u32;
+    let count = (samples * samples) as usize;
+    let mut left = vec![0u8; count];
+    let mut right = vec![0u8; count];
+    for index in 0..count {
+        if index as u32 % samples < samples / 2 {
+            left[index] = 255;
+        } else {
+            right[index] = 255;
+        }
+    }
+    Terrain::new(
+        samples,
+        samples,
+        10.0,
+        0.25,
+        vec![200u16; count],
+        vec![
+            TerrainLayer {
+                name: "left".to_owned(),
+                weights: left,
+            },
+            TerrainLayer {
+                name: "right".to_owned(),
+                weights: right,
+            },
+        ],
+    )
+    .expect("valid split terrain")
+}
+
+/// A view looking down at the middle of a terrain, in the terms the residency map wants.
+fn page_view(terrain: &Terrain) -> VirtualPageView {
+    let [extent_x, extent_y] = terrain.world_extent();
+    VirtualPageView::new(
+        [extent_x * 0.5, extent_y * 0.5 - 200.0, 300.0],
+        [0.0, 0.8, -0.6],
+        [1.0, 0.0, 0.0],
+        [0.0, 0.6, 0.8],
+        ([0.0, 0.0, 0.0], [extent_x, extent_y, 100.0]),
+        (std::f32::consts::PI / 6.0).tan(),
+        16.0 / 9.0,
+        terrain.horizontal_scale(),
+    )
+}
+
+/// A cache holding `layers` pages, warmed over the whole terrain at the coarse level.
+fn warmed_cache(
+    context: &GpuContext,
+    harness: &Harness,
+    layers: u32,
+) -> cic_render::TerrainPageCache {
+    let mut cache =
+        cic_render::TerrainPageCache::new(context, &harness.renderer, layers).expect("page cache");
+    let (cells_x, cells_y) = harness.renderer.cell_size();
+    let composed = cache.update(
+        context,
+        &[TerrainDetailRequest::uniform(
+            [0, 0],
+            [cells_x, cells_y],
+            16,
+        )],
+        page_view(&harness.terrain),
+    );
+    assert!(composed > 0, "the cache must stage pages to be useful");
+    cache
+}
+
+/// Mean and worst per-channel difference between two captures of the same size.
+fn channel_difference(left: &Capture, right: &Capture) -> (f64, u8) {
+    let mut total = 0u64;
+    let mut worst = 0u8;
+    let mut counted = 0u64;
+    for (a, b) in left
+        .rgba()
+        .chunks_exact(4)
+        .zip(right.rgba().chunks_exact(4))
+    {
+        for channel in 0..3 {
+            let difference = a[channel].abs_diff(b[channel]);
+            total += u64::from(difference);
+            worst = worst.max(difference);
+            counted += 1;
+        }
+    }
+    (total as f64 / counted.max(1) as f64, worst)
+}
+
+#[test]
+fn terrain_sampled_from_pages_matches_the_direct_blend() {
+    // The property that makes the cache worth having: the two paths compute the *same* surface, so a frame
+    // drawn from pages and a frame drawn by blending must agree. If they did not, the cache would be a second
+    // appearance for the same ground and the camera's distance would decide which one a player saw.
+    //
+    // Not byte-identical, and every reason is in the design rather than in the arithmetic: a page stores eight
+    // bits per channel where the blend keeps float precision, a page sample is filtered from page texels
+    // rather than from the layer weights, and a page picks its own mip level because a compute shader has no
+    // derivatives. So the assertion is a bound on the difference, in eight-bit steps.
+    //
+    // Drawn through the *deferred* chain, which is where the page lookup lives. The forward pass deliberately
+    // has none: it draws terrain alone in one pass, which is the case a cache has nothing to offer — and the
+    // first draft of this test used it and reported the two frames as identical for that reason.
+    let Some(context) = context() else { return };
+    let mut harness = harness_for(context, split_terrain());
+    let frame = DeferredFrame::new(pose(&harness.terrain), WIDTH, HEIGHT);
+    let direct = render(context, &harness, frame);
+
+    let cache = warmed_cache(context, &harness, 16);
+    assert!(!harness.renderer.samples_pages());
+    harness.renderer.attach_pages(context, &cache);
+    assert!(harness.renderer.samples_pages());
+    let paged = render(context, &harness, frame);
+
+    write_capture("terrain-direct-blend.png", &direct);
+    write_capture("terrain-from-pages.png", &paged);
+    // The capture is the verification. A page coordinate off by a border, a level chosen the wrong way round,
+    // or a transfer function applied twice all produce a plausible image and a small mean difference.
+    support::check_reference(context, "terrain-from-pages.png", &paged);
+
+    // The frame must actually have changed hands: a bind group that silently kept its placeholders would make
+    // the two captures identical and every bound below trivially true.
+    assert_ne!(
+        direct.rgba(),
+        paged.rgba(),
+        "the paged frame is byte-identical to the direct one, so the cache is not being read at all"
+    );
+
+    let (mean, worst) = channel_difference(&direct, &paged);
+    eprintln!("direct against paged: mean channel difference {mean:.3}, worst {worst}");
+    // Both bounds are set from what was measured — 0.001 and 2 — with a wide margin rather than a generous
+    // guess, and the distinction is the point. A page resolved to the wrong layer, or a coordinate off by a
+    // border, differs by *tens to hundreds*; so a bound loose enough to be safe against adapter and filter
+    // variation is still two orders of magnitude tighter than any real fault. Choosing one without measuring
+    // first would have meant the looser number, which would have caught nothing.
+    assert!(
+        mean < 0.5,
+        "the two paths must agree on the surface: mean channel difference {mean:.3}"
+    );
+    // The worst case is bounded separately, because a mean can hide a small region that is wholly wrong —
+    // which is exactly what a page resolved to the wrong layer looks like.
+    assert!(
+        worst <= 8,
+        "some pixel differs by {worst}, which is a region reading the wrong page rather than the eight-bit \
+         quantisation a page store costs"
+    );
+
+    // Detaching restores the direct frame exactly, which is what says the fallback path is untouched by the
+    // feature rather than merely available.
+    harness.renderer.detach_pages(context);
+    assert!(!harness.renderer.samples_pages());
+    let restored = render(context, &harness, frame);
+    assert_eq!(
+        direct.rgba(),
+        restored.rgba(),
+        "detaching the cache must restore the direct frame byte for byte"
+    );
+}
+
+#[test]
+fn a_cell_with_no_resident_page_falls_back_to_the_direct_blend() {
+    // The reason the direct blend stays in the shader. A cache with one slot holds one page, so almost every
+    // fragment misses — and the frame has to be *the frame*, not a hole where the cache was. A cache is
+    // allowed to run out of slots, so a frame that depended on it having won would turn a memory budget into a
+    // correctness requirement.
+    let Some(context) = context() else { return };
+    let mut harness = harness_for(context, split_terrain());
+    let frame = DeferredFrame::new(pose(&harness.terrain), WIDTH, HEIGHT);
+    let direct = render(context, &harness, frame);
+
+    let cache = warmed_cache(context, &harness, 1);
+    assert_eq!(cache.layer_count(), 1);
+    harness.renderer.attach_pages(context, &cache);
+    let starved = render(context, &harness, frame);
+    write_capture("terrain-one-page.png", &starved);
+
+    // Most of the frame must be the direct blend's, byte for byte: one coarse page covers a sixteenth of this
+    // terrain. A comfortable majority identical is the fallback working, and a small minority differing is the
+    // one resident page being read rather than the cache being ignored.
+    let identical = direct
+        .rgba()
+        .chunks_exact(4)
+        .zip(starved.rgba().chunks_exact(4))
+        .filter(|(left, right)| left[0..3] == right[0..3])
+        .count();
+    let share = identical as f64 / (direct.rgba().len() / 4) as f64;
+    eprintln!("pixels identical to the direct blend with one page resident: {share:.3}");
+    assert!(
+        share > 0.8,
+        "only {share:.3} of the frame fell back to the direct blend, so a cache miss is not being handled"
+    );
+    assert!(
+        share < 1.0,
+        "the whole frame is the direct blend, so the one resident page is not being read"
     );
 }

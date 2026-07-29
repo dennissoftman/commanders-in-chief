@@ -1,6 +1,6 @@
 # ADR 0005: Antialiasing strategy, and why not MSAA
 
-- Status: accepted. Decisions 1, 2, 3 and 5 are implemented; 4 (TAA) is not started.
+- Status: accepted and **fully implemented**. All five decisions are in.
 
 ## Context
 
@@ -72,6 +72,14 @@ insufficient before TAA lands.
   of frames with a pinned jitter sequence to convergence, or captures are taken with the temporal path
   disabled. The reason this is a note rather than a problem is that scene time is already an explicit
   frame input, so nothing in the renderer reads a clock.
+
+  **Resolved by the first of the two options.** The jitter phase became a frame *parameter* —
+  `DeferredFrame::jitter` — alongside scene time, for exactly the reason scene time is one. The harness's
+  `render_converged` then renders a full eight-phase cycle and captures the last frame, and two calls
+  produce the same bytes. It needed one thing the design did not originally have: a way to say *this frame
+  does not continue the last one*. Without `DeferredRenderer::reset_history` the second sequence started
+  from what the first left behind and the two disagreed — which is also the real-game case of a jump cut,
+  so the API was missing rather than the test being wrong.
 - The composite's contrast-adaptive sharpen is *not* antialiasing and does not become part of this. It
   restores mid-contrast detail lost to texture filtering, and its own comment says as much; a sharpen
   applied after a resolution downsample or a TAA resolve may well want retuning, which is a tuning task
@@ -112,3 +120,71 @@ the last thing to touch the image, so nothing re-hardens what it softened.
 The general form of this is already in the milestone's design notes and this is another instance of it: a
 statistical assertion cannot replace a reference image. The committed captures are what verify these two
 settings; the numbers are the tripwire.
+
+## What implementing decision 4 established
+
+Recorded here for the same reason the section above exists: two of these changed things this ADR said it
+was not touching, and one of them was a defect the whole reference set had been rendered through.
+
+**The resolve passes were sampling half a pixel away from the fragment they were shading, and a temporal
+accumulator is what made it visible.** `@builtin(position)` in a fragment stage is already the pixel
+*centre* — the top-left pixel is at (0.5, 0.5) — and the composite, the post pass and the first draft of
+the temporal resolve all added a further half pixel before converting it to a texture coordinate. Three
+passes, one habit, and nothing caught it: every committed reference had been rendered through the same
+offset, so the images agreed with each other.
+
+What exposed it was a property no capture comparison can express. Accumulating a *static* frame must reach
+a fixed point — the same image blended with a history that is already that image is that image. It did not:
+successive frames differed by 48, 33, 19, 9 and 6 in the worst channel. That is a convergent sequence, and
+it would have satisfied any tolerance stated as "settles"; only demanding a genuine fixed point
+distinguishes an accumulation that is correct from one that is merely stable. The cause was each pass
+reading its own history from half a pixel away and re-filtering it every frame.
+
+The cost of the offset in the two older passes was worth measuring rather than assuming. In the composite it
+was a half-pixel translation of every frame plus, at a resolution scale of one, a bilinear average of two
+texels where the downsample is meant to return one exact texel — **1.5% of pixels differing by more than
+two, with a peak channel difference of 154**, and the difference image is edges and nothing else. In the
+post pass it made every tap a two-texel average, so the luma gate saw a gradient nearly everywhere and
+fired on about 3% of the frame; with exact taps it fires on about 1% and still halves the silhouette edge
+energy. The pass got more selective and no less effective, which is what a gate is for.
+
+Ten of the twenty-two committed references changed. A textual test now pins the convention, because this is
+the one class of error a reference comparison structurally cannot catch: it was applied to the reference and
+the result alike.
+
+**The motion target is written unconditionally, and that is a decision rather than an oversight.** The
+alternative is a second G-buffer pipeline per geometry kind, differing from the first in one attachment, and
+four pipelines to keep in step rather than two. Two channels of half float is 4.6 MB at 1920x1200 and one
+more write per fragment, and nothing but the temporal resolve reads it — so with that resolve off the frame
+is byte-identical to what it was before the target existed.
+
+**Sway made the motion vectors exact rather than approximate, for free.** Reprojecting depth against the
+previous view-projection is the cheap way to get motion and it is correct only for static geometry; scenery
+sway landed in the same change, so there is dynamic geometry to be wrong about. It turned out to cost
+nothing: the displacement is a pure function of scene time, so evaluating the same vertex function at the
+*previous* time returns exactly where the vertex was. No per-vertex history buffer, and no way for the
+motion vector to disagree with what the geometry did.
+
+**The neighbourhood clamp is in YCoCg, and the reason is the shape of the box.** In RGB the three axes are
+strongly correlated on real images, so an axis-aligned box fits a neighbourhood's actual distribution badly:
+loose along the diagonal, where luminance error lives, and tight across it, where clipping a small hue
+difference buys nothing. YCoCg decorrelates luminance from the two chroma axes and costs a handful of adds.
+
+**Measured cost, at 1920x1200 on an RTX 4080 SUPER**, over a 257x257 heightfield with no models or water:
+
+| Resolve | Frame | The resolve pass itself |
+|---|---|---|
+| None | 0.499 ms | — |
+| Post pass | 0.527 ms | 0.027 ms |
+| Temporal | 0.558 ms | 0.053 ms |
+
+The temporal resolve is twice the post pass and a nineteenth of the frame, which puts it well inside the
+"quality tier" this ADR called it. The number that matters more is the one that did not move: the G-buffer
+is 0.078 ms with the motion target, against 0.077 ms measured for the post-pass configuration that never
+reads it — the fourth attachment is inside the noise.
+
+**The sharpen was left alone, and this time that is the finding.** The consequences section above predicted
+a TAA resolve might want the sharpen retuned. It does not, because the order saves it: the sharpen runs in
+the composite and the temporal resolve runs after, so nothing re-hardens what the accumulation softened.
+The interaction that mattered was the opposite one — the sharpen was amplifying a half-pixel blur that
+should not have been there at all, and removing the blur is what fixed it.

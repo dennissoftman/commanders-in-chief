@@ -127,6 +127,140 @@ pub(crate) const TEXEL_COLOURS: [[u8; 4]; 4] = [
     [255, 255, 0, 255],
 ];
 
+/// Builds a one-triangle `.glb` carrying a full PBR map set: base colour, a normal map, and a
+/// metallic-roughness map that doubles as the occlusion map.
+///
+/// Three distinct images rather than one repeated, because the failure worth catching is a slot
+/// resolved to the wrong index — every map is an index into one shared image list, and a shift by one
+/// puts a roughness map where a normal map belongs with nothing reporting it.
+///
+/// `TANGENT` is deliberately absent. That is what an exporter usually produces, and it is the case the
+/// importer's derivation exists for.
+pub(crate) fn normal_mapped_triangle_glb() -> Vec<u8> {
+    // UVs increase with +X and +Y, so the derived tangent must come out along +X. A transposed 2x2
+    // solve would put it along +Y instead, which rotates every normal map a quarter turn.
+    let positions: [[f32; 3]; 3] = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+    let normals: [[f32; 3]; 3] = [[0.0, 0.0, 1.0]; 3];
+    let uvs: [[f32; 2]; 3] = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]];
+
+    let mut binary = Vec::new();
+    for position in positions {
+        for value in position {
+            binary.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    let normals_offset = binary.len();
+    for normal in normals {
+        for value in normal {
+            binary.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    let uvs_offset = binary.len();
+    for uv in uvs {
+        for value in uv {
+            binary.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+
+    // A flat tangent-space normal is (0.5, 0.5, 1.0) once encoded, and a roughness-metallic texel puts
+    // roughness in green and metallic in blue. Both are data rather than colour, which is why the
+    // renderer uploads them without an sRGB decode.
+    let mut views = vec![
+        json!({ "buffer": 0, "byteOffset": 0, "byteLength": 36 }),
+        json!({ "buffer": 0, "byteOffset": normals_offset, "byteLength": 36 }),
+        json!({ "buffer": 0, "byteOffset": uvs_offset, "byteLength": 24 }),
+    ];
+    for image in [
+        png_rgba(1, 1, &[200, 180, 160, 255]),
+        png_rgba(1, 1, &[128, 128, 255, 255]),
+        png_rgba(1, 1, &[255, 96, 32, 255]),
+    ] {
+        while !binary.len().is_multiple_of(4) {
+            binary.push(0);
+        }
+        let offset = binary.len();
+        let length = image.len();
+        binary.extend_from_slice(&image);
+        views.push(json!({ "buffer": 0, "byteOffset": offset, "byteLength": length }));
+    }
+
+    let document = json!({
+        "asset": { "version": "2.0" },
+        "scene": 0,
+        "scenes": [ { "name": "mapped", "nodes": [0] } ],
+        "nodes": [ { "mesh": 0 } ],
+        "meshes": [ { "primitives": [
+            { "attributes": { "POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2 }, "material": 0 }
+        ] } ],
+        "materials": [ {
+            "name": "plated",
+            "pbrMetallicRoughness": {
+                "baseColorTexture": { "index": 0 },
+                "metallicRoughnessTexture": { "index": 2 },
+                "metallicFactor": 1.0,
+                "roughnessFactor": 1.0
+            },
+            "normalTexture": { "index": 1, "scale": 0.75 },
+            "occlusionTexture": { "index": 2, "strength": 0.5 }
+        } ],
+        "textures": [ { "source": 0 }, { "source": 1 }, { "source": 2 } ],
+        "images": [
+            { "bufferView": 3, "mimeType": "image/png" },
+            { "bufferView": 4, "mimeType": "image/png" },
+            { "bufferView": 5, "mimeType": "image/png" },
+        ],
+        "accessors": [
+            {
+                "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
+                "min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, 0.0]
+            },
+            { "bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC3" },
+            { "bufferView": 2, "componentType": 5126, "count": 3, "type": "VEC2" },
+        ],
+        "bufferViews": views,
+        "buffers": [ { "byteLength": binary.len() } ],
+    });
+
+    glb(&document, &binary)
+}
+
+/// Builds a one-triangle `.glb` with a masked, double-sided material — the way foliage is authored.
+pub(crate) fn foliage_triangle_glb() -> Vec<u8> {
+    let positions: [[f32; 3]; 3] = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+    let mut binary = Vec::new();
+    for position in positions {
+        for value in position {
+            binary.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+
+    let document = json!({
+        "asset": { "version": "2.0" },
+        "scene": 0,
+        "scenes": [ { "name": "foliage", "nodes": [0] } ],
+        "nodes": [ { "mesh": 0 } ],
+        "meshes": [ { "primitives": [
+            { "attributes": { "POSITION": 0 }, "material": 0 }
+        ] } ],
+        // A cutoff other than the default, so the test distinguishes reading it from assuming it.
+        "materials": [ {
+            "name": "leaf",
+            "alphaMode": "MASK",
+            "alphaCutoff": 0.4,
+            "doubleSided": true,
+            "pbrMetallicRoughness": { "baseColorFactor": [0.35, 0.55, 0.25, 1.0] }
+        } ],
+        "accessors": [ {
+            "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
+            "min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, 0.0]
+        } ],
+        "bufferViews": [ { "buffer": 0, "byteOffset": 0, "byteLength": 36 } ],
+        "buffers": [ { "byteLength": binary.len() } ],
+    });
+
+    glb(&document, &binary)
+}
+
 /// Encodes RGBA bytes as a PNG.
 fn png_rgba(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
     let mut output = Vec::new();

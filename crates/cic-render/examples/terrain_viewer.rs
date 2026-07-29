@@ -17,7 +17,7 @@
 //! | `Q` `E` | Rotate |
 //! | `R` | Reset height and rotation |
 //! | `F` | Reset rotation only |
-//! | `T` | Toggle antialiasing |
+//! | `T` | Cycle antialiasing: none, post pass, temporal |
 //! | `[` `]` | Step the resolution scale |
 //! | `P` | Toggle the per-pass GPU timing printout |
 //! | `Esc` | Quit |
@@ -27,13 +27,20 @@
 //! frame rate for sampling rate — neither of which a headless test can show anyone. Both print the
 //! settings and the size they took effect at, so a screenshot of the terminal says what the window is
 //! showing.
+//!
+//! The temporal tier is the strongest case for that. A converged capture of it is a reference the harness
+//! can compare, and it says nothing at all about the two things that decide whether the setting is usable:
+//! whether a pan smears, and whether a stationary camera settles or shimmers.
 
 // The generator clamps before converting and its inputs are bounded constants, so the width casts
 // below cannot lose anything.
+// The geometry builders here are tables of corner coordinates. Splitting one to satisfy a line count would
+// put half a cube in one function and half in another, which is less readable rather than more.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_precision_loss,
-    clippy::cast_sign_loss
+    clippy::cast_sign_loss,
+    clippy::too_many_lines
 )]
 
 use std::error::Error;
@@ -243,18 +250,23 @@ fn building_model() -> Model {
     let primitives = faces
         .into_iter()
         .enumerate()
-        .map(|(index, (normal, corners))| ModelPrimitive {
-            vertices: corners
-                .into_iter()
-                .enumerate()
-                .map(|(corner, position)| ModelVertex {
-                    position,
-                    normal,
-                    uv: quad_uv(corner),
-                })
-                .collect(),
-            indices: vec![0, 1, 2, 0, 2, 3],
-            material: Some(usize::from(index == 0)),
+        .map(|(index, (normal, corners))| {
+            ModelPrimitive {
+                vertices: corners
+                    .into_iter()
+                    .enumerate()
+                    .map(|(corner, position)| ModelVertex {
+                        position,
+                        normal,
+                        uv: quad_uv(corner),
+                        ..ModelVertex::default()
+                    })
+                    .collect(),
+                indices: vec![0, 1, 2, 0, 2, 3],
+                material: Some(usize::from(index == 0)),
+            }
+            // Built in Rust, so the importer's tangent derivation never ran. See `model_render.rs`.
+            .with_generated_tangents()
         })
         .collect();
 
@@ -268,7 +280,7 @@ fn building_model() -> Model {
                 metallic: 0.0,
                 roughness: 0.85,
                 base_color_texture: Some(0),
-                blended: false,
+                ..ModelMaterial::default()
             },
             ModelMaterial {
                 name: "roof".to_owned(),
@@ -276,7 +288,7 @@ fn building_model() -> Model {
                 metallic: 0.0,
                 roughness: 0.65,
                 base_color_texture: Some(1),
-                blended: false,
+                ..ModelMaterial::default()
             },
         ],
         images: vec![wall_image(), roof_image()],
@@ -504,6 +516,8 @@ struct Viewer {
     last_frame: Option<Instant>,
     /// Seconds since the first frame, which is what animates the water.
     elapsed: f32,
+    /// How many frames have been presented, which drives the temporal jitter sequence.
+    frame_ordinal: u32,
     /// Held here rather than only inside the surface, so the setting survives the window being rebuilt.
     display: DisplaySettings,
     /// Seconds since the last per-pass breakdown was printed, or `None` when timing is off.
@@ -526,6 +540,7 @@ impl Viewer {
             active: None,
             last_frame: None,
             elapsed: 0.0,
+            frame_ordinal: 0,
             // Starts where the headless captures are, so the first frame in the window is the frame the
             // references were rendered from and pressing a key is the only difference from them.
             display: DisplaySettings::NATIVE,
@@ -789,9 +804,15 @@ impl Viewer {
         // Accumulated here rather than read from a clock inside the renderer, which is what lets a
         // headless capture of the same scene pin the wave phase and stay reproducible.
         self.elapsed += delta;
+        // The jitter phase advances once per presented frame, which is what a temporal resolve accumulates
+        // over. Counted here rather than inside the renderer so a capture of the same sequence is
+        // reproducible -- see `DeferredFrame::jitter`.
+        self.frame_ordinal = self.frame_ordinal.wrapping_add(1);
 
         let (width, height) = active.surface.size();
-        let frame = DeferredFrame::new(self.camera.pose(), width, height).at_time(self.elapsed);
+        let frame = DeferredFrame::new(self.camera.pose(), width, height)
+            .at_time(self.elapsed)
+            .at_jitter(self.frame_ordinal);
         active
             .surface
             .render(
@@ -813,9 +834,13 @@ impl Viewer {
 /// Maps a physical key to a change of display settings, or `None` if it is not one.
 fn display_change(code: KeyCode, current: DisplaySettings) -> Option<DisplaySettings> {
     Some(match code {
+        // All three, in ascending cost. Cycling rather than toggling because the point of the key is to
+        // compare them on a moving camera, and what an edge does *as the camera moves* is the whole
+        // subject -- no still capture reports it, and the temporal tier least of all.
         KeyCode::KeyT => current.with_antialiasing(match current.antialiasing {
             Antialiasing::None => Antialiasing::Fxaa,
-            Antialiasing::Fxaa => Antialiasing::None,
+            Antialiasing::Fxaa => Antialiasing::Taa,
+            Antialiasing::Taa => Antialiasing::None,
         }),
         // Stepped from the *sanitised* scale rather than the stored one, so a press at either end of
         // the range moves back into it instead of walking a value that is already clamped.

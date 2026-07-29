@@ -77,7 +77,14 @@ jobs:
           cache-on-failure: true
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      # `--no-fail-fast` because the rendering tests live in three binaries and cargo stops at
+      # the first one that fails. The artifact below is the only way a reference image rendered
+      # here can be reviewed, so stopping early means it carries the evidence for one binary and
+      # silently omits the rest — a deliberate rasteriser change then takes one CI round trip per
+      # binary to roll out, and worse, the run that goes green on the first binary is the first
+      # anybody hears that the second had failures all along. Regenerating a reference set is
+      # exactly when every failure needs to be visible at once.
+      - run: cargo test --workspace --no-fail-fast
       # The project's standing rule is that a rendering change is verified by looking at the
       # image, not by a green suite. A regression that trips the harness leaves the capture and
       # an amplified difference image on the runner's disk, where nobody can look at either, so

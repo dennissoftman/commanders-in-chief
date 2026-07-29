@@ -16,15 +16,15 @@
 //!
 //! # Why `staged` is a field and not a comment
 //!
-//! Four programs are wired to no pipeline. They are real work held for a milestone that has not started
-//! — the virtual-texture pair for terrain detail past one texture, and the two viewer passes — and they
-//! were previously indistinguishable from dead code, which is how six *genuinely* dead shaders survived
-//! in the set with comments describing a uniform layout that no longer existed. Marking them makes the
-//! live set countable, and [`Program::staged`] means a reader never has to grep the pipelines to find
-//! out whether a file does anything.
+//! Three programs are wired to no pipeline: the terrain, road and boundary viewer passes, held for the
+//! map editor M8 plans. They were previously indistinguishable from dead code, which is how six
+//! *genuinely* dead shaders survived in the set with comments describing a uniform layout that no longer
+//! existed. Marking them makes the live set countable, and [`Program::staged`] means a reader never has to
+//! grep the pipelines to find out whether a file does anything.
 //!
-//! The mechanism has now done its job once in the intended direction: `ui` was staged for M4 and became
-//! live when that milestone bound it, with nothing to clean up because it had never rotted.
+//! The mechanism has now done its job twice in the intended direction: `terrain_virtual` was staged for
+//! the page cache and `ui` for M4's interface, and each went live when the work that needed it landed,
+//! with nothing to clean up because neither had rotted.
 
 /// Every chunk of WGSL in the crate, as `(name, source)`.
 ///
@@ -40,9 +40,12 @@ const CHUNKS: &[(&str, &str)] = &[
     ("composite", include_str!("shaders/composite.wgsl")),
     ("lighting", include_str!("shaders/lighting.wgsl")),
     ("model_gbuffer", include_str!("shaders/model_gbuffer.wgsl")),
+    ("motion", include_str!("shaders/motion.wgsl")),
     ("road_viewer", include_str!("shaders/road_viewer.wgsl")),
     ("scene", include_str!("shaders/scene.wgsl")),
+    ("scenery", include_str!("shaders/scenery.wgsl")),
     ("shadow", include_str!("shaders/shadow.wgsl")),
+    ("taa", include_str!("shaders/taa.wgsl")),
     ("terrain_ao", include_str!("shaders/terrain_ao.wgsl")),
     (
         "terrain_forward",
@@ -97,18 +100,25 @@ pub const PROGRAMS: &[Program] = &[
         staged: false,
     },
     Program {
+        name: "taa",
+        chunks: &["scene", "taa"],
+        staged: false,
+    },
+    Program {
         name: "water",
         chunks: &["scene", "shadow", "atmosphere", "water"],
         staged: false,
     },
     Program {
         name: "terrain_gbuffer",
-        chunks: &["terrain_gbuffer"],
+        chunks: &["motion", "terrain_gbuffer"],
         staged: false,
     },
     Program {
         name: "model_gbuffer",
-        chunks: &["model_gbuffer"],
+        // `scenery` and `motion` first: they declare `sway_offset` and `motion_vector`, which the entry
+        // points here call, and WGSL requires a declaration before its use.
+        chunks: &["scenery", "motion", "model_gbuffer"],
         staged: false,
     },
     Program {
@@ -130,7 +140,7 @@ pub const PROGRAMS: &[Program] = &[
     Program {
         name: "terrain_virtual",
         chunks: &["terrain_virtual"],
-        staged: true,
+        staged: false,
     },
     Program {
         name: "terrain_viewer",
@@ -230,9 +240,43 @@ mod tests {
         // virtual-texture pair and the two viewer passes.
         let live = PROGRAMS.iter().filter(|entry| !entry.staged).count();
         let staged = PROGRAMS.iter().filter(|entry| entry.staged).count();
-        assert_eq!(live, 9, "live programs");
-        assert_eq!(staged, 4, "staged programs");
-        assert_eq!(CHUNKS.len(), 16);
+        assert_eq!(live, 11, "live programs");
+        assert_eq!(staged, 3, "staged programs");
+        assert_eq!(CHUNKS.len(), 19);
+    }
+
+    #[test]
+    fn every_model_entry_point_sways() {
+        // The one property no capture of the lit frame can check. A shadow cascade that applied a
+        // different displacement than the G-buffer would throw a shadow detached from its caster, and the
+        // caster and the shadow are in different parts of the image — so a reference comparison would
+        // pass on a frame that is visibly wrong to anyone looking at the ground.
+        //
+        // Textual rather than semantic, which is what a shader test can be. It asserts that the four
+        // entry points all route their position through the one function, which is the structure that
+        // makes them agree; it cannot assert that the function is right, and the reference captures do
+        // that.
+        let source = compose("model_gbuffer").expect("model_gbuffer composes");
+        // Five calls across four entry points: the G-buffer stage places its vertex twice, once at this
+        // frame's time and once at the previous frame's, which is what makes the motion vector exact for a
+        // swaying plant rather than approximate.
+        assert_eq!(
+            source.matches("place_vertex(input").count(),
+            5,
+            "every entry point must place its vertex through the shared path"
+        );
+        assert_eq!(
+            source.matches("fn sway_offset").count(),
+            1,
+            "one displacement, not one per pass"
+        );
+        // And the shared path is the *only* way a position reaches a clip space here, so a later entry point
+        // cannot quietly bypass the sway by transforming the raw attribute.
+        assert_eq!(
+            source.matches("input.position").count(),
+            1,
+            "the vertex position must be read in one place"
+        );
     }
 
     #[test]
@@ -257,6 +301,27 @@ mod tests {
         for (name, source) in CHUNKS {
             assert!(!source.trim().is_empty(), "{name} is empty");
             assert_eq!(chunk(name), Some(*source));
+        }
+    }
+
+    #[test]
+    fn no_chunk_offsets_the_framebuffer_position_by_half_a_pixel() {
+        // The framebuffer coordinate of the top-left pixel is (0.5, 0.5), so a pass converting it to a
+        // texture coordinate multiplies straight through. Three passes added a further half pixel and each
+        // therefore sampled half a pixel down and right of the fragment it was shading: a translation of the
+        // whole frame, plus a two-texel average where the downsample was meant to return one exact texel.
+        //
+        // It survived a long time because every reference was rendered through it, so the images agreed with
+        // each other. What exposed it was the temporal resolve, whose accumulation of a static frame could
+        // not reach a fixed point while each pass read its history offset from where it had written it.
+        //
+        // Pinned textually rather than by a capture for that exact reason — a capture comparison cannot
+        // catch an error that is applied uniformly to the reference and the result alike.
+        for (name, source) in CHUNKS {
+            assert!(
+                !source.contains("input.position.xy + vec2<f32>(0.5)"),
+                "{name} offsets the framebuffer position by half a pixel, which it already carries"
+            );
         }
     }
 

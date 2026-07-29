@@ -74,9 +74,9 @@ cargo run -p cic-render --example terrain_viewer --release
 ```
 
 Pass a `.cicmap` path to view a real map; with no argument it generates terrain, buildings, and their
-surfaces, so the viewer runs before any content exists. `T` toggles antialiasing and the bracket keys step
-the resolution scale; `P` prints a per-pass GPU timing breakdown. The viewer's own header lists every
-control.
+surfaces, so the viewer runs before any content exists. `T` cycles antialiasing through none, the post
+pass, and the temporal one; the bracket keys step the resolution scale; `P` prints a per-pass GPU timing
+breakdown. The viewer's own header lists every control.
 
 ## Crates
 
@@ -86,7 +86,7 @@ control.
 | `cic-vfs` | Virtual paths, ordered mounts, overlay resolution, zip and tar containers. |
 | `cic-assets` | glTF model import, the terrain container, JSON scenarios, map packages. |
 | `cic-camera` | The RTS camera model, free of window, input, and GPU dependencies. |
-| `cic-render` | Deferred chain, terrain, instanced models, texturing, antialiasing, windowed presentation, the WGSL shader set. |
+| `cic-render` | Deferred chain, terrain, instanced models, physically-based texturing, scenery sway, antialiasing to a temporal tier, windowed presentation, the WGSL shader set. |
 
 ## Asset formats
 

@@ -74,7 +74,18 @@ fn composite_fragment(input: FullscreenOutput) -> @location(0) vec4<f32> {
     // The output size, not the render size. This fragment is one pixel of the caller's target, and the
     // sampler resolves whatever ratio there is between that and the HDR target it reads.
     let inverse_viewport = camera.output.zw;
-    let uv = (input.position.xy + vec2<f32>(0.5)) * inverse_viewport;
+    // `position.xy` is already the pixel *centre* -- the framebuffer coordinate of the top-left pixel is
+    // (0.5, 0.5), not (0, 0). So this multiplies straight through, and adding a further half pixel would
+    // sample half a pixel down and right of where this fragment is.
+    //
+    // It did, until a temporal resolve made the error impossible to miss: with the half-pixel offset in
+    // place, an accumulation of a *static* frame never reached a fixed point, because each pass read its own
+    // history offset from where it had written it and re-filtered it every frame. With the offset removed the
+    // sequence is exactly stationary. The same error was in this pass and in the composite, where it cost a
+    // half-pixel translation of every frame and, at a resolution scale of one, an average of two texels
+    // instead of the single exact texel the downsample is supposed to return. Measured on the deferred
+    // fixture: 1.5% of pixels differed by more than two, with a peak channel difference of 154.
+    let uv = input.position.xy * inverse_viewport;
     let center = reinhard(textureSampleLevel(scene_color, scene_sampler, uv, 0.0).rgb);
     let north = reinhard(textureSampleLevel(
         scene_color,
