@@ -3,11 +3,12 @@
 A deterministic fixed-tick simulation kernel: the thing everything about gameplay and multiplayer
 rests on.
 
-**Status:** In progress — the kernel mechanics have landed as `cic-sim`, and every charter line below
-is exercised by a test. What remains is the exit condition's second half: scenario activation, where a
-map's declared starts produce the objects they claim. The prerequisite decision — how floating point is
-pinned where it reaches simulation state — was settled in [ADR
-0007](../adr/0007-simulation-arithmetic.md) before any of this was written.
+**Status:** Exit condition met. The kernel mechanics landed first, every charter line below exercised
+against a deliberately trivial subsystem; scenario activation followed as `cic_sim::activation`, so a
+map's declared players and placements construct into hashed kernel state. The prerequisite decision —
+how floating point is pinned where it reaches simulation state — was settled in [ADR
+0007](../adr/0007-simulation-arithmetic.md) before any of this was written, and the kernel was written
+inside it.
 
 ## Charter
 
@@ -49,11 +50,21 @@ A recorded command stream replayed against the same initial state reproduces ide
 hashes, verified in CI rather than by hand. Player and team activation, spawn assignment, and object
 construction from a scenario all work, with a scenario's declared starts producing the units it claims.
 
-**Half met.** The replay half runs in CI against a deliberately trivial subsystem — wandering points
+**Met.** The replay half runs in CI against a deliberately trivial subsystem — wandering points
 spawned through the id counter, drifting by stream draws, culled by command — which exercises
 everything the kernel owns while proving nothing about gameplay, exactly as the design notes below
-prescribe. The activation half is not started: nothing yet reads a scenario's players, starts, or
-placements into a running kernel, and that work is this milestone's remaining half.
+prescribe. The activation half is `cic_sim::activation`: players take seats in authored order, every
+placement becomes an object with an authored-order identifier, owners resolve to seats, and the pose
+crosses into simulation units exactly once — `f32` widening exactly to `f64`, degrees becoming an
+integer binary fraction of a revolution per ADR 0007's "angles are integers in simulation state".
+Activation is inside the determinism claim, not beside it: two kernels activated from one scenario
+hash identically on every following tick, and one moved placement diverges on tick zero, attributed
+to `forces`.
+
+One reading is pinned down rather than left to drift: "the units it claims" means the scenario's
+declared placements, because that is all a scenario today declares. A faction's *starting roster* —
+what a player gets at their start position beyond what the map places — needs the template set, and
+that is [M6](m6-gameplay.md)'s content, deliberately not reached for early.
 
 ## Design notes
 

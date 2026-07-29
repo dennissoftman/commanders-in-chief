@@ -6,21 +6,21 @@
 cic-core          (no dependencies)
    ├── cic-vfs    (+ flate2)
    │      └── cic-assets   (+ gltf, serde, serde_json)
-   │             └── cic-render   (+ cic-camera, cic-ui, wgpu, png, sha2;
-   │                                naga for shader validation in tests)
+   │             ├── cic-render   (+ cic-camera, cic-ui, wgpu, png, sha2;
+   │             │                   naga for shader validation in tests)
+   │             └── cic-sim
    └── cic-audio  (+ serde, serde_json)
 
 cic-camera        (no dependencies)
 cic-math          (no dependencies)
    └── cic-script
-cic-sim           (no dependencies yet)
 cic-ui            (+ serde, serde_json)
 ```
 
-`cic-sim` deliberately starts with no dependencies, and that is temporary rather than a principle: it
-takes `cic-math` the day a subsystem needs a transcendental — which is the direction the extraction
-anticipated — and scenario activation will bring it the scenario types. What it must never take is
-anything that renders, plays, or reads a clock.
+`cic-sim` consumes `cic-assets` for the same reason and in the same direction as the renderer does:
+scenario activation reads the authored formats, and assets never know about simulation. It takes
+`cic-math` the day a subsystem needs a transcendental — the direction the extraction anticipated. What
+it must never take is anything that renders, plays, or reads a clock.
 
 Four crates deliberately depend on nothing of this project's: `cic-core`, because bounded reading is a
 primitive; `cic-camera`, because the same camera must drive the game, the editor, and any debug viewer

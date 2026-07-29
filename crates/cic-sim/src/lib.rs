@@ -5,6 +5,8 @@
 //!
 //! - [`kernel`] — fixed ticks over ordered subsystems, hashed every step, advanced only through
 //!   [`Kernel::advance`].
+//! - [`activation`] — a scenario's players and placements constructed into kernel state, in
+//!   authored order.
 //! - [`subsystem`] — the [`Subsystem`] trait and the [`TickContext`] a tick hands one.
 //! - [`command`] — the tick-stamped input stream, recorded so every run is reproducible.
 //! - [`random`] — named, versioned, seeded streams; drawing is part of the state transition.
@@ -36,6 +38,7 @@
 //! `tests/arithmetic_restriction.rs`. The kernel itself is almost entirely integer — the one `f64`
 //! it owns is the tick length, one division fixed at construction.
 
+pub mod activation;
 pub mod command;
 pub mod hash;
 pub mod id;
@@ -44,6 +47,7 @@ pub mod random;
 pub mod subsystem;
 pub mod tick;
 
+pub use activation::{ActivationError, Forces, Placed, Player, activate};
 pub use command::{Command, CommandError, CommandLog, PlayerId};
 pub use hash::StateHasher;
 pub use id::{IdAllocator, ObjectId};
