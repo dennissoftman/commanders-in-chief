@@ -46,7 +46,10 @@ no platform transcendental appears in simulation code, because `sin` and its fam
 system's C library and differ in the last bits between them; the project supplies its own instead, pinned
 by exact-value tests, with angles stored as integer turns so range reduction is exact. Fixed-point was
 rejected because it charges for determinism that IEEE-754 already provides and still leaves the
-trigonometry to be written. `f64` over `f32` is for accumulation headroom and **not** for determinism —
+trigonometry to be written — though `cordic` is where to start if that is ever revisited. The `libm` crate
+was evaluated as the implementation and is used as the *oracle* instead: it is already vendored here and
+its code contains no architecture-gated path, but it promises nothing about reproducibility and has been
+archived, and this needs a guarantee rather than a likelihood. `f64` over `f32` is for accumulation headroom and **not** for determinism —
 the two widths are equally deterministic, and reaching for a wider type to fix a divergence treats a
 reproducibility problem as an accuracy problem.
 

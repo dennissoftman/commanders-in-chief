@@ -40,6 +40,8 @@ and `f64`.
    are deterministic by construction rather than by trust. Each is pinned by a test asserting exact bit
    patterns, not an approximate comparison — an approximate test for a function whose whole purpose is
    bit-exactness verifies nothing.
+   - **`libm` is the oracle, not the implementation.** It is a dev-dependency, used to check our accuracy
+     against a battle-tested MUSL port, and it never appears in a build. See *What was looked at first*.
 5. **Angles reaching those functions are stored as binary turns** — an unsigned integer fraction of a full
    revolution — rather than as radians. Range reduction is where a naive `sin` loses both accuracy and
    determinism, because reducing a large radian argument modulo π needs more precision than the argument
@@ -56,6 +58,55 @@ and `f64`.
 9. **Presentation is unrestricted.** It may use `f32`, `sin`, or anything else, because a frame is not
    state. The conversion runs one way only: simulation `f64` down to render `f32`, once per frame, and
    never back into state.
+
+## What was looked at first
+
+Writing trigonometry is not obviously better than taking someone else's, so the ecosystem was checked
+before any of the above was committed to. Three findings, and the third is the one that decided it.
+
+**[`libm`](https://crates.io/crates/libm) is the near-miss, and it is already in this tree.** A pure-Rust
+port of MUSL's libm, MIT-licensed, and already in `Cargo.lock` at 0.2.16 by way of `naga` and
+`num-traits` — so it is licence-cleared and vendored already. Being pure Rust rather than a call into the
+platform's C library, it should compute the same bits everywhere, which is exactly the property wanted.
+
+It is not taken as the implementation for three reasons, in ascending order of weight.
+
+- **It makes no reproducibility claim.** Checked in three places — the repository's own README, the
+  published documentation, and the README at its new home — and none of them mentions determinism,
+  reproducibility across targets, or correctness of rounding at all. That is not evidence of divergence;
+  it is the absence of a promise, and this ADR exists to produce a guarantee rather than a likelihood.
+- **Its own test suite records the hazard this ADR excludes.** `sin.rs` carries
+  `#[cfg_attr(x86_no_sse, ignore = "FIXME(i586): possible incorrect rounding")]` — a test disabled on
+  x86 without SSE because the rounding there may be wrong. That is the x87 80-bit problem decision 7
+  already puts out of scope, so it does not apply to any supported target. It is reassuring rather than
+  disqualifying: the implementation itself contains no architecture-gated or FMA-gated code path, only
+  basic arithmetic and bit manipulation.
+- **It was archived in April 2025** and folded into `compiler-builtins`. Depending on the standalone crate
+  means depending on a crate that has moved, for a property nobody has written down.
+
+**Fixed-point is what the ecosystem actually reaches for**, and the search confirms it: `cordic`
+implements the transcendentals over fixed-point by CORDIC, `simba` lets `nphysics` run on a fixed-point
+scalar explicitly for cross-platform determinism, and `iFloat` exists for the same purpose. That
+consensus is itself the evidence for the paragraph below — the reason everyone reaches for fixed-point is
+precisely that *no float library guarantees the transcendentals*. It is the road not taken here, and
+`cordic` is where to start if this ADR is ever reversed.
+
+**And the hazard is recognised as an opt-in rather than a default.** `fastmaths` assumes FMA at compile
+time unless a `soft-fma` feature is enabled "for deterministic builds", which is a crate in this space
+treating reproducibility as something a caller asks for. This one asks for it by construction.
+
+**What the evaluation changed.** Nothing in the decision, and one thing in the plan: `libm` becomes the
+**oracle** rather than the implementation. Exact-bit tests are needed either way — a version bump changing
+a polynomial coefficient is as much a desync as a platform difference — so the marginal cost of writing
+our own is the implementation and not the verification. The marginal gain is that the implementation
+cannot change beneath us. Testing against `libm` gets MUSL's accuracy, validated, without MUSL's silence
+about reproducibility.
+
+**And decision 5 is what makes decision 4 affordable.** Writing a correct `sin` is hard almost entirely
+because of range reduction: reducing a large radian argument modulo π needs more precision than the
+argument carries, which is why MUSL's `rem_pio2` is the longest and most delicate part of its `sin`.
+Storing angles as integer turns removes that problem rather than solving it — the reduction is a mask.
+What is left to write is a polynomial over a bounded interval, which is ordinary work.
 
 ## Rationale
 
@@ -101,7 +152,9 @@ revisited then.
   in M5.
 - The simulation crate owns a small mathematics module — trigonometry, inverse trigonometry, and whatever
   else gameplay actually needs — each function pinned by exact-value tests. It is more code than calling
-  the platform's, and it is code that cannot desync.
+  the platform's, and it is code that cannot desync. `libm` is a **dev-dependency** it is checked against,
+  which adds nothing to a build; if that ever becomes a runtime dependency, this ADR has been reversed and
+  should say so.
 - **Angles are integers in simulation state.** That is visible in the state layout, in save files later,
   and in what a designer sees in a scenario, so it is a format decision as much as an arithmetic one.
 - The forbidden-call test joins the small family of tests here that check things the compiler does not:
@@ -113,3 +166,8 @@ revisited then.
   target this project cares about.
 - If a desync ever appears despite this, the first question is which forbidden call got through — not which
   number was inaccurate. That is a much shorter search, and it is the return on deciding this here.
+- **The cheap reversal is available.** If writing the mathematics module turns out to cost more than it is
+  worth, `libm` is already vendored and its implementation contains no architecture-gated path, so
+  switching to it is a one-line change plus keeping the same exact-bit tests. That is worth recording
+  because it means this decision is not a bet: the fallback is better than the alternative it replaced,
+  and the tests that would catch a problem are written either way.
