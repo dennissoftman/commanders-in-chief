@@ -66,6 +66,11 @@ pub struct Template {
     /// String-table key for the display name, when one exists to show.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Movement speed in world units per second. Required for a `unit` — a unit that cannot move is
+    /// a structure wearing the wrong kind — and refused for everything else, which has no movement
+    /// for it to mean anything to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed: Option<f32>,
 }
 
 /// The template set: every template this content defines, keyed by identifier.
@@ -133,6 +138,21 @@ impl TemplateSet {
                 }
                 _ => {}
             }
+            match (template.speed, template.kind) {
+                (None, TemplateKind::Unit) => {
+                    return Err(TemplateError::MissingSpeed(template.id.clone()));
+                }
+                (Some(speed), TemplateKind::Unit) if !(speed.is_finite() && speed > 0.0) => {
+                    return Err(TemplateError::InvalidSpeed {
+                        id: template.id.clone(),
+                        speed,
+                    });
+                }
+                (Some(_), kind) if kind != TemplateKind::Unit => {
+                    return Err(TemplateError::SpeedOnNonUnit(template.id.clone()));
+                }
+                _ => {}
+            }
         }
         Ok(())
     }
@@ -159,6 +179,17 @@ pub enum TemplateError {
     MissingModel(String),
     /// A faction declared a model, which nothing can draw.
     FactionWithModel(String),
+    /// A unit declared no speed, and a unit that cannot move is a structure wearing the wrong kind.
+    MissingSpeed(String),
+    /// A unit's speed was zero, negative, or not finite.
+    InvalidSpeed {
+        /// The template.
+        id: String,
+        /// The offending value.
+        speed: f32,
+    },
+    /// Something that is not a unit declared a speed, which has no movement to mean anything to.
+    SpeedOnNonUnit(String),
 }
 
 impl std::fmt::Display for TemplateError {
@@ -177,6 +208,17 @@ impl std::fmt::Display for TemplateError {
             Self::FactionWithModel(id) => write!(
                 formatter,
                 "faction `{id}` declares a model, which nothing can draw"
+            ),
+            Self::MissingSpeed(id) => {
+                write!(formatter, "unit `{id}` declares no speed and cannot move")
+            }
+            Self::InvalidSpeed { id, speed } => write!(
+                formatter,
+                "unit `{id}` declares speed {speed}, which is not a positive finite number"
+            ),
+            Self::SpeedOnNonUnit(id) => write!(
+                formatter,
+                "template `{id}` declares a speed but is not a unit"
             ),
         }
     }
@@ -201,6 +243,7 @@ mod tests {
             kind,
             model: model.map(str::to_owned),
             name: None,
+            speed: None,
         }
     }
 
@@ -284,6 +327,38 @@ mod tests {
         assert!(matches!(
             confused.validate(),
             Err(TemplateError::FactionWithModel(id)) if id == "faction/vanguard"
+        ));
+    }
+
+    #[test]
+    fn a_unit_needs_a_positive_finite_speed_and_nothing_else_may_have_one() {
+        let unit = |speed: Option<f32>| {
+            let mut entry = template("unit/rifleman", TemplateKind::Unit, Some("models/r.glb"));
+            entry.speed = speed;
+            TemplateSet {
+                format_version: 1,
+                templates: vec![entry],
+            }
+        };
+        assert!(unit(Some(3.5)).validate().is_ok());
+        assert!(matches!(
+            unit(None).validate(),
+            Err(TemplateError::MissingSpeed(id)) if id == "unit/rifleman"
+        ));
+        assert!(matches!(
+            unit(Some(0.0)).validate(),
+            Err(TemplateError::InvalidSpeed { .. })
+        ));
+        assert!(matches!(
+            unit(Some(f32::NAN)).validate(),
+            Err(TemplateError::InvalidSpeed { .. })
+        ));
+
+        let mut rolling_depot = set();
+        rolling_depot.templates[1].speed = Some(2.0);
+        assert!(matches!(
+            rolling_depot.validate(),
+            Err(TemplateError::SpeedOnNonUnit(id)) if id == "structure/depot"
         ));
     }
 

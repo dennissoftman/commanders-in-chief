@@ -312,6 +312,13 @@ What works:
     integer binary fraction of a revolution, per ADR 0007's "angles are integers in simulation state".
     Activation is inside the determinism claim: one moved placement diverges on tick zero, attributed
     to `forces`.
+  - **The first verbs run inside it** ([`units`](crates/cic-sim/src/units.rs)): spawn, move, stop, as
+    command payloads this layer decodes while the kernel keeps them opaque. Movement is a straight
+    line in the permitted operation set — a `sqrt` and a division, no trigonometry, and units store no
+    heading: presentation derives one from the motion it sees. An order for a unit you do not own and
+    a payload that does not parse are both ignored *and counted, and the count is hashed* — every
+    machine ignores identically, and one that did not diverges on the tick it happened. Six verbs
+    scripted over ninety ticks replay to identical hashes.
 - Windowed presentation, driven by the reusable camera:
 
 ```bash
@@ -340,8 +347,10 @@ scenario activation, so a map's declared players and placements construct into h
 kernel state.** The next milestone on the path to something playable is
 [M6, gameplay](docs/milestones/m6-gameplay.md) — its dependencies (M5, M9, M10) are all standing, and
 its first slice, **the template set, has landed**: what a `template:` id resolves to, with activation
-resolving every placement and faction against it — **and the activated scenario is drawn**, headlessly
-in a capture test and live in the viewer. Next come the first verbs: spawn, move, order. Those verbs are also what
+resolving every placement and faction against it — **the activated scenario is drawn**, headlessly
+in a capture test and live in the viewer — **and the first verbs work**: spawn, move, and stop, in
+`cic_sim::units`, replay-identical over ninety ticks. Next: the kernel ticking live in the viewer with
+units visibly moving, then pathfinding or combat as the following M6 line. Those verbs are also what
 [ADR 7002](docs/adr/7002-script-events.md)'s host surface and first real events hang off, so M6's
 opening work and the script-event implementation meet in the same place once that record is accepted.
 
@@ -463,7 +472,7 @@ having to pretend.
 ## Gate status
 
 Formatting, strict lints (`clippy::all` and `clippy::pedantic` as errors, plus `-D warnings` as CI runs
-it), and the full test suite all passes on the pinned toolchain: **838 tests across ten crates**, up from
+it), and the full test suite all passes on the pinned toolchain: **846 tests across ten crates**, up from
 782 across eight. The ninth crate is `cic-math` — ADR 0007's arithmetic, extracted from `cic-script` so the
 kernel can share it — and its five new tests are its own copy of the decision-8 restriction scan plus a
 documentation example; the ten series tests moved with the code rather than being duplicated. The tenth is

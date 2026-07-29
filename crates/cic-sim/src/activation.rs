@@ -446,6 +446,7 @@ mod tests {
             kind,
             model: model.map(str::to_owned),
             name: None,
+            speed: None,
         };
         TemplateSet {
             format_version: 1,
