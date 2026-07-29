@@ -50,8 +50,9 @@ colour. Both were nearly free to design for and expensive to retrofit.
 ## Status
 
 Early. The foundation, resource layer, asset formats, and interface are complete, the renderer meets its
-exit condition, and the audio layer mixes. There is no playable game yet — nothing simulates, and the
-audio does not yet reach a speaker. See [ROADMAP.md](ROADMAP.md) for the milestone ladder and
+exit condition, the audio layer mixes, and scenario behaviour can be written in a script. There is no
+playable game yet — nothing simulates, the audio does not yet reach a speaker, and the verbs a script
+would call wait on a simulation kernel. See [ROADMAP.md](ROADMAP.md) for the milestone ladder and
 [CURRENT.md](CURRENT.md) for what is being worked on now.
 
 ## Building

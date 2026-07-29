@@ -467,6 +467,12 @@ present.
   `cic-audio` carries its own stream, seeded separately, so it never has to.
 - Anything that will reach simulation state follows [determinism](docs/invariants/determinism.md) from
   the start, because it cannot be retrofitted.
+- **Only [ADR 0007](docs/adr/0007-simulation-arithmetic.md)'s operation set may touch simulation state**,
+  and a subsystem that runs inside the simulation does not get an arithmetic of its own. `cic-script`
+  learned this the expensive way: it was built on fixed point, on an argument ADR 0007 shows is false,
+  and two arithmetics inside one lockstep simulation is a script and a kernel able to disagree about a
+  comparison. Decision 8's textual guard is not bookkeeping — its first run on that crate found a `powi`
+  nothing in the build would have objected to.
 - **A rendering change is not verified by a green test suite. Look at the capture.** Every rendering bug
   so far passed its own assertions and was caught by opening the PNG: reversed layer ramps, two separate
   tone-mapping mistakes, a shadow camera on the wrong side of the scene, an occlusion blur whose
