@@ -85,6 +85,21 @@ cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings
 `unsafe_code` is forbidden at workspace scope. Lints are errors, not warnings — a warning nobody fixes
 becomes noise that hides the next real one.
 
+## Decision records
+
+A decision with consequences gets an [ADR](docs/adr/README.md). Two rules about them, and the second is the
+one people trip over:
+
+**Take a number from your family block, not the next one in sequence.** ADR numbers carry a family prefix —
+`4xxx` renderer, `6xxx` audio, and so on. The table in [docs/adr/README.md](docs/adr/README.md) has the
+full list.
+
+**Add your row to that table in the same commit as the file.** This is not bookkeeping. Two branches open
+in the same week both reached for 0007, and git raises no conflict when that happens, because they add
+*differently named files* — so both merge cleanly and the repository ends up with two ADR 0007s and nothing
+objecting. The index is the one file every record must touch, which is what turns a duplicate number into a
+merge conflict somebody resolves before it lands.
+
 ## Two standing rules earned the hard way
 
 **A green test suite is not verification for a rendering change.** Look at the capture. Every rendering

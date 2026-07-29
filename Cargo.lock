@@ -298,6 +298,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cic-audio"
+version = "0.1.0"
+dependencies = [
+ "cic-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "cic-camera"
 version = "0.1.0"
 

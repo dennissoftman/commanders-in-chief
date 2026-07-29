@@ -49,8 +49,9 @@ colour. Both were nearly free to design for and expensive to retrofit.
 
 ## Status
 
-Early. The foundation, resource layer, and asset formats are complete; the renderer is in progress.
-There is no playable game yet. See [ROADMAP.md](ROADMAP.md) for the milestone ladder and
+Early. The foundation, resource layer, asset formats, and interface are complete, the renderer meets its
+exit condition, and the audio layer mixes. There is no playable game yet — nothing simulates, and the
+audio does not yet reach a speaker. See [ROADMAP.md](ROADMAP.md) for the milestone ladder and
 [CURRENT.md](CURRENT.md) for what is being worked on now.
 
 ## Building
@@ -98,6 +99,7 @@ back, because a display change can leave the person who made it unable to see we
 | `cic-camera` | The RTS camera model, free of window, input, and GPU dependencies. |
 | `cic-ui` | Interface layout and its format, the two-pass solver, widgets and retained state, input routing with input-method composition, the screen stack, transactional settings, screen transitions, and the paint layer. Free of window, GPU and font dependencies. |
 | `cic-render` | Deferred chain, terrain, instanced models, physically-based texturing, scenery sway, antialiasing to a temporal tier, interface drawing with an authored typeface, windowed presentation, the WGSL shader set. |
+| `cic-audio` | Mixer behind a replaceable backend, spatialisation, DSP, layered music, sound banks. No audio dependency at all. |
 
 ## Asset formats
 
@@ -109,11 +111,26 @@ back, because a display change can leave the person who made it unable to see we
 | A whole map | zip (`.cicmap`) |
 | One interface screen | JSON (`*.ciclayout.json`) |
 | Display text | JSON, keyed (`strings.<language>.json`) |
+| Sound events | JSON (`*.cicbank.json`) |
+| Audio clips | RIFF/WAVE (`.wav`) |
 
 Specifications are in [docs/formats/](docs/formats/README.md), and the reasoning is in
 [docs/milestones/m2-assets.md](docs/milestones/m2-assets.md). The short version: authored data a human
 edits and reviews should be text, bulk numeric data should be tight binary, and geometry should use a
 standard that content tools already export.
+
+## Audio
+
+[`cic-audio`](crates/cic-audio/) is a mixer behind a replaceable backend. The requirement was that FMOD,
+OpenAL, or another library could be substituted, and the whole decision turned out to be *where the
+boundary goes*: it is a command interface rather than a sample sink, because FMOD and OpenAL are complete
+mixers rather than devices, and a sink discards everything anyone adopts either of them for.
+
+The in-tree implementation of that trait is a software mixer written from scratch with no audio
+dependency at all, which is what keeps the licence claim below true for anyone who builds it — FMOD is
+proprietary and per-title licensed, and OpenAL Soft is LGPL. It also makes the whole system testable
+headlessly, since a mixer is a pure function from voices and a listener to frames. See
+[ADR 6001](docs/adr/6001-audio-backend-boundary.md).
 
 ## Engineering standards
 

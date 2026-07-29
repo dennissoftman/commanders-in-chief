@@ -4,10 +4,11 @@
 
 ```
 cic-core          (no dependencies)
-   └── cic-vfs    (+ flate2)
-          └── cic-assets   (+ gltf, serde, serde_json)
-                 └── cic-render   (+ cic-camera, cic-ui, wgpu, png, sha2;
-                                    naga for shader validation in tests)
+   ├── cic-vfs    (+ flate2)
+   │      └── cic-assets   (+ gltf, serde, serde_json)
+   │             └── cic-render   (+ cic-camera, cic-ui, wgpu, png, sha2;
+   │                                naga for shader validation in tests)
+   └── cic-audio  (+ serde, serde_json)
 
 cic-camera        (no dependencies)
 cic-ui            (+ serde, serde_json)
@@ -32,6 +33,12 @@ assets, and assets never know about rendering. Nothing in `cic-assets` mentions 
 or a pipeline, and the water surface is the clearest illustration — where a body of water *is* lives in
 the renderer rather than in the terrain container, because tint and wave scale are things an artist
 changes without touching a map.
+
+`cic-audio` takes `cic-core` for its bounded WAV reader and nothing else. It has **no audio dependency of
+any kind** — no device library, no decoder, no mixer — because [ADR
+6001](docs/adr/6001-audio-backend-boundary.md) puts the replaceable half behind a trait and implements one
+from scratch in the tree. FMOD is proprietary and OpenAL Soft is LGPL, and neither can be what a
+permissively licensed engine *requires* in order to make a sound.
 
 ## Where content lives
 
@@ -58,6 +65,11 @@ so the editor can be generous and a multiplayer client strict, running identical
 **Presentation may read simulation state; it may never advance or mutate it.** This is not stylistic.
 Frame rate varies per machine, so anything a frame can change is something that desyncs.
 
+**Presentation may never draw from a simulation random stream.** The less obvious half of the rule above,
+and audio is where it bites: variant selection and pitch spread need randomness on every gunshot, and
+drawing from a stream is part of the simulation's state transition — so a machine whose audio consumed one
+extra number has desynced. `cic-audio` therefore carries its own stream, seeded separately.
+
 **Semantic input, not device input.** The camera takes intents, not key codes; UI callbacks are typed
 events from a fixed set, not handlers named by data. Layout files and mods are data, and data must not
 be able to name an action the engine did not define.
@@ -81,7 +93,10 @@ not hash maps, explicit mount order, no dependence on directory enumeration orde
 The simulation kernel, once it exists, for the reasons in
 [docs/invariants/determinism.md](docs/invariants/determinism.md).
 
-Everything between the two is presentation and is free to be as machine-dependent as it likes.
+Everything between the two is presentation and is free to be as machine-dependent as it likes, which
+[ADR 0007](docs/adr/0007-simulation-arithmetic.md) decision 9 states explicitly. `cic-audio` uses floating
+point freely for exactly that reason — and is bound by the *other* half of the rule instead, which is that
+it must never draw from a simulation random stream.
 
 ## Testing posture
 
@@ -93,6 +108,15 @@ comment, a declared expansion that would exhaust memory — legibly enough to re
 Rendering is the exception to "tests are enough". A green suite coexists comfortably with a visibly
 broken frame, which is why M3 treats capture-based visual regression as a deliverable rather than as
 follow-up work.
+
+Audio has the same hazard and gets off much more cheaply, which is worth naming because it looks like luck
+and is not. A green suite coexists just as comfortably with a mix nobody would ship. What saves it is that
+the in-tree mixer is a **pure function** from voices and a listener to frames, so a property can be
+asserted about the samples themselves — that a crossing sound holds constant power, that a limiter holds
+eight times full scale below one at five separate frequencies, that a reverb's comb lengths are pairwise
+prime. Those are assertions a picture cannot make, and they exist because the boundary in
+[ADR 6001](docs/adr/6001-audio-backend-boundary.md) left the mixing on this side of it. What still needs
+listening to is what needs a device, which is [M9](docs/milestones/m9-audio.md)'s one open item.
 
 That harness now exists, and two of its properties are structural rather than incidental. The comparison
 is a pure function over bytes — the library never opens a file, so the caller supplies the reference and
