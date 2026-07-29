@@ -607,7 +607,8 @@ impl<'a, M: Measure> Pass<'a, '_, '_, M> {
 
         // The chosen option's text, in the control. Drawn from the option's own node so there is one source
         // of truth for what an option says.
-        let chosen = self.chosen_option(index, node);
+        let chosen_row = self.chosen_row(node);
+        let chosen = chosen_row.and_then(|row| self.solved.child(index, row));
         if let Some(option) = chosen.and_then(|at| self.solved.get(at)) {
             // Inset from the box, as a text entry's contents are: text against the border of the control
             // holding it reads as text that has overflowed. The right edge stops before the wedge rather
@@ -641,12 +642,29 @@ impl<'a, M: Measure> Pass<'a, '_, '_, M> {
             top_row.width,
             bottom_row.bottom() - top_row.y,
         )
+        .translated(self.shift[0], self.shift[1])
         .snapped();
         let bounds = self.bounds;
         self.fill(bounds, list, self.theme.card);
         self.stroke(bounds, list, self.theme.border);
-        if let Some(row) = chosen.and_then(|at| self.solved.get(at)) {
-            self.fill(bounds, row.rect, self.theme.accent);
+        // Both rows are taken from `rows`, which is where the list is *drawn*, and both are moved by the
+        // screen's own shift — so a dropdown open on a screen partway through a transition has its highlights
+        // where its text is rather than where the text is about to be.
+        let shift = self.shift;
+        let placed = move |row: &Rect| row.translated(shift[0], shift[1]).snapped();
+        // The row under the pointer, then the chosen one. In that order, so pointing at the chosen row leaves
+        // it looking chosen rather than merely hovered — a user moving down a list has chosen nothing yet, and
+        // the accent is the stronger statement of the two.
+        if let Some(hovered) = self
+            .interface
+            .hovered_option()
+            .and_then(|row| rows.get(row))
+            .map(placed)
+        {
+            self.fill(bounds, hovered, self.theme.control_hovered);
+        }
+        if let Some(row) = chosen_row.and_then(|row| rows.get(row)).map(placed) {
+            self.fill(bounds, row, self.theme.accent);
         }
     }
 
@@ -679,18 +697,20 @@ impl<'a, M: Measure> Pass<'a, '_, '_, M> {
         );
     }
 
-    /// The sequence index of the option a combo is showing.
+    /// Which of a combo's options it is showing, as a position among its children.
     ///
     /// Clamped to the options that exist, so a selection left behind by a layout that has since lost one
     /// shows the last option rather than nothing — the same rule a stale tab selection follows.
-    fn chosen_option(&self, index: usize, node: &SolvedNode) -> Option<usize> {
+    fn chosen_row(&self, node: &SolvedNode) -> Option<usize> {
+        if node.children == 0 {
+            return None;
+        }
         let chosen = node
             .id
             .as_deref()
             .and_then(|id| self.interface.selection(id))
             .unwrap_or(0);
-        self.solved
-            .child(index, chosen.min(node.children.saturating_sub(1)))
+        Some(chosen.min(node.children - 1))
     }
 
     /// A panel, which draws only what its role asks for.
@@ -1179,11 +1199,17 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn an_open_dropdown_draws_after_the_siblings_it_covers() {
-        // The drawing half of "an overlay is drawn last and searched first", and the one thing about a
-        // dropdown that a list of primitives can prove. The card beneath comes *after* the combo in the
-        // sequence, so in pre-order it is painted over the list — the popup would be behind the screen.
+    /// A combo of two options over a card the list covers.
+    ///
+    /// The card is the point: it comes *after* the combo in the sequence, so it is what a naive drawing order
+    /// paints over the list.
+    fn combo_layout() -> Layout {
+        let option = |key: &str| Node {
+            widget: Widget::Label,
+            text_key: Some(key.to_owned()),
+            height: Sizing::Fixed(20.0),
+            ..Node::default()
+        };
         let layout = Layout {
             format_version: FORMAT_VERSION,
             root: Node {
@@ -1195,20 +1221,7 @@ mod tests {
                         widget: Widget::Combo,
                         width: Sizing::Fixed(100.0),
                         height: Sizing::Fixed(20.0),
-                        children: vec![
-                            Node {
-                                widget: Widget::Label,
-                                text_key: Some("off".to_owned()),
-                                height: Sizing::Fixed(20.0),
-                                ..Node::default()
-                            },
-                            Node {
-                                widget: Widget::Label,
-                                text_key: Some("lots".to_owned()),
-                                height: Sizing::Fixed(20.0),
-                                ..Node::default()
-                            },
-                        ],
+                        children: vec![option("off"), option("lots")],
                         ..Node::default()
                     },
                     Node {
@@ -1222,6 +1235,15 @@ mod tests {
             },
         };
         layout.validate().expect("the fixture must be valid");
+        layout
+    }
+
+    #[test]
+    fn an_open_dropdown_draws_after_the_siblings_it_covers() {
+        // The drawing half of "an overlay is drawn last and searched first", and the one thing about a
+        // dropdown that a list of primitives can prove. The card beneath comes *after* the combo in the
+        // sequence, so in pre-order it is painted over the list — the popup would be behind the screen.
+        let layout = combo_layout();
 
         let mut interface = Interface::new();
         interface.set_open(Some("pick"));
@@ -1265,6 +1287,63 @@ mod tests {
             drawn.iter().filter(|(text, ..)| *text == "off").count(),
             1,
             "but the control still shows the chosen one"
+        );
+    }
+
+    #[test]
+    fn the_hovered_dropdown_row_is_filled_and_the_chosen_one_still_wins() {
+        // Feedback while choosing, which the control had none of: a user moving down a list has chosen nothing
+        // yet, so a dropdown that marked only the choice looked inert until they clicked. Two fills rather than
+        // one, and the accent wins where they land on the same row, because "chosen" is the stronger statement.
+        let layout = combo_layout();
+        let mut interface = Interface::new();
+        interface.set_selection("pick", 0);
+        interface.set_open(Some("pick"));
+        let solved = solve_selected(&layout, viewport(), &Monospace, &interface);
+        let strings = StringTable::new();
+        let theme = Theme::default();
+
+        // Among the *rows* only. The open control itself also draws with the hovered face — being open is a
+        // reason to look active — so a search over every fill would find that instead and prove nothing.
+        let rows = solved.child_rects(solved.index_of("pick").expect("the combo"));
+        let hovered_row = |interface: &Interface, solved: &Solved| {
+            let painted = fills(&paint(solved, interface, &strings, &theme));
+            rows.iter().position(|row| {
+                painted
+                    .iter()
+                    .any(|(rect, colour)| rect == row && *colour == theme.control_hovered)
+            })
+        };
+        assert_eq!(
+            hovered_row(&interface, &solved),
+            None,
+            "nothing is hovered yet, so no row is marked"
+        );
+
+        // The control is 20 tall, so its rows are at y 20..40 and 40..60. This is the second.
+        interface.handle(&solved, crate::UiEvent::PointerMoved { x: 20.0, y: 50.0 });
+        assert_eq!(interface.hovered_option(), Some(1));
+        assert_eq!(
+            hovered_row(&interface, &solved),
+            Some(1),
+            "the row under the pointer is filled with the hovered face"
+        );
+
+        // And the chosen row keeps the accent even while the pointer is on it.
+        interface.handle(&solved, crate::UiEvent::PointerMoved { x: 20.0, y: 30.0 });
+        assert_eq!(interface.hovered_option(), Some(0));
+        let painted = fills(&paint(&solved, &interface, &strings, &theme));
+        let accent = painted
+            .iter()
+            .position(|(rect, colour)| *rect == rows[0] && *colour == theme.accent)
+            .expect("the chosen row keeps the accent");
+        let hovered = painted
+            .iter()
+            .position(|(rect, colour)| *rect == rows[0] && *colour == theme.control_hovered)
+            .expect("and is also marked as hovered, beneath it");
+        assert!(
+            accent > hovered,
+            "the accent must be drawn after the hovered fill, or the row reads as merely hovered"
         );
     }
 

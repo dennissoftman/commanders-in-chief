@@ -28,6 +28,12 @@ list is drawn over siblings authored after it. And the **keep-or-revert question
 applying, rather than two buttons sitting inert on the screen: the settings screen has Back and Apply, and the
 revert window running out closes the dialog itself, which is the case the whole mechanism exists for.
 
+Adding the dropdown turned up something wider: **a hit test was comparing against where the layout placed a
+node rather than where it is drawn**, so every control inside a scrolled container was clickable in the wrong
+place. That is why a `list` could only be driven with the arrow keys. One field —
+`SolvedNode::scroll_offset` — and the rule that a hit test uses `visual_rect()` while a scroll limit uses
+`rect` closes it, and a list row is now chosen by pointing at it however far the list has scrolled.
+
 **M9 has landed, and it was chartered late for a capability that sits early in the dependency order.**
 Audio was simply missing — not deferred, not recorded anywhere as absent. `cic-audio`
 ([M9](docs/milestones/m9-audio.md)) is a mixer behind a replaceable backend, with positional audio, DSP,
@@ -383,7 +389,7 @@ having to pretend.
 ## Gate status
 
 Formatting, strict lints (`clippy::all` and `clippy::pedantic` as errors, plus `-D warnings` as CI runs
-it), and the full test suite all passes on the pinned toolchain: **680 tests across seven crates**, up from
+it), and the full test suite all passes on the pinned toolchain: **684 tests across seven crates**, up from
 543 across six. `cic-audio` accounts for 126 of the difference, counting one documentation test, and every one
 of those runs headless with no audio device present; the interface layer's dropdown and settings dialog
 account for the rest. The CI

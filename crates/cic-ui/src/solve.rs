@@ -115,6 +115,18 @@ pub trait Selections {
     /// screen at all, which is the same mechanism a tab page that is not chosen uses — so both arrive here
     /// rather than one being visibility and the other being a special case in three consumers.
     fn is_open(&self, id: &str) -> bool;
+
+    /// How far a scrollable container has been scrolled, in physical pixels.
+    ///
+    /// The third piece of state that decides *where a node is on screen* rather than merely how it looks, and
+    /// it arrives here for the same reason the other two do. A solved rectangle says where a node was placed;
+    /// a node inside a scrolled container is drawn somewhere else, and a hit test against the placement rather
+    /// than the drawing hands a click to a control the user is not pointing at.
+    ///
+    /// Zero by default, so a layout with nothing scrollable and a stub in a test need not answer.
+    fn scroll(&self, _id: &str) -> f32 {
+        0.0
+    }
 }
 
 /// A [`Selections`] where nothing has been chosen, so every tab strip shows its first page.
@@ -182,6 +194,11 @@ pub struct SolvedNode {
     /// still *solved* — its rectangle is correct for when its tab is chosen — but every consumer here skips
     /// it, so it takes no clicks, holds no tab stop, and is not drawn.
     pub visible: bool,
+    /// How far this node's *enclosing* scrollable containers have shifted it, in physical pixels.
+    ///
+    /// Its own scroll offset is not in this, because a scrollable container does not move itself -- it moves
+    /// what is inside it. See [`Self::visual_rect`], which is what a hit test has to use.
+    pub scroll_offset: f32,
     /// How many direct children it has, which is what bounds a list's or a tab strip's selection.
     pub children: usize,
     /// This node plus every descendant.
@@ -196,6 +213,17 @@ pub struct SolvedNode {
 }
 
 impl SolvedNode {
+    /// Where this node actually is on screen: its solved rectangle, moved by whatever scrolled it.
+    ///
+    /// [`Self::rect`] is where the *layout* put it, which is what a scroll limit is measured from and what
+    /// stays fixed while the contents move under a clip. This is where a person pointing at it is pointing, so
+    /// it is what a hit test compares against -- the two differ by exactly the offset the drawing layer
+    /// applies, which is what keeps a click and the pixel it landed on talking about the same control.
+    #[must_use]
+    pub fn visual_rect(&self) -> Rect {
+        self.rect.translated(0.0, -self.scroll_offset)
+    }
+
     /// The longest text this node accepts, defaulted when the layout did not say.
     #[must_use]
     pub fn text_limit(&self) -> usize {
@@ -254,7 +282,7 @@ impl Solved {
         self.overlay().any(|index| {
             self.nodes
                 .get(index)
-                .is_some_and(|node| node.rect.contains(x, y))
+                .is_some_and(|node| node.visual_rect().contains(x, y))
         })
     }
 
@@ -264,6 +292,33 @@ impl Solved {
         self.overlay
             .as_ref()
             .is_some_and(|range| range.contains(&index))
+    }
+
+    /// Records how far each node's enclosing scrollable containers have shifted it.
+    ///
+    /// A stack of `(end, offset)` over the pre-order sequence, which is the same shape the drawing layer's
+    /// frame stack has and for the same reason: a node's descendants are the entries after it, so the end of a
+    /// container's influence is arithmetic rather than another traversal.
+    ///
+    /// A container's *own* offset does not apply to itself. A scrollable box stays where the layout put it and
+    /// moves its contents, so including it would slide the container out from under its own scrollbar.
+    fn apply_scroll_offsets(&mut self, selections: &impl Selections) {
+        let mut frames: Vec<(usize, f32)> = Vec::new();
+        for index in 0..self.nodes.len() {
+            while frames.last().is_some_and(|(end, _)| index >= *end) {
+                frames.pop();
+            }
+            let inherited = frames.last().map_or(0.0, |(_, offset)| *offset);
+            let Some(node) = self.nodes.get_mut(index) else {
+                continue;
+            };
+            node.scroll_offset = inherited;
+            if node.widget == Widget::Scroll {
+                let own = node.id.as_deref().map_or(0.0, |id| selections.scroll(id));
+                let end = index + node.subtree;
+                frames.push((end, inherited + own));
+            }
+        }
     }
 
     /// Hides every closed combo's options, and names the open one's subtree as the overlay.
@@ -333,15 +388,16 @@ impl Solved {
         }
     }
 
-    /// The rectangles of a node's direct children, in authored order.
+    /// Where a node's direct children are on screen, in authored order.
     ///
-    /// What a tab strip's headers are: the strip is one control, and which of its children a click landed in
-    /// is what says which tab was chosen.
+    /// What a tab strip's headers, a list's rows and a dropdown's options all are: one control holding
+    /// several of them, where which one a click landed in is the answer. [`SolvedNode::visual_rect`] rather
+    /// than the solved rectangle, so a scrolled list's rows are tested where they are drawn.
     #[must_use]
     pub fn child_rects(&self, index: usize) -> Vec<Rect> {
         self.children_of(index)
             .into_iter()
-            .filter_map(|child| self.nodes.get(child).map(|node| node.rect))
+            .filter_map(|child| self.nodes.get(child).map(SolvedNode::visual_rect))
             .collect()
     }
 
@@ -443,7 +499,7 @@ impl Solved {
         let inside = |index: usize| {
             self.nodes
                 .get(index)
-                .is_some_and(|node| node.visible && node.rect.contains(x, y))
+                .is_some_and(|node| node.visible && node.visual_rect().contains(x, y))
         };
         if let Some(range) = self
             .overlay
@@ -589,6 +645,7 @@ pub fn solve_selected(
     };
     solved.hide_unselected_pages(selections);
     solved.resolve_open_combos(selections);
+    solved.apply_scroll_offsets(selections);
     solved
 }
 
@@ -709,6 +766,8 @@ impl Arrange<'_> {
             // Everything is visible until the visibility pass says otherwise, which it can only do once
             // the whole sequence exists: a strip's pages container may be anywhere in the tree.
             visible: true,
+            // Likewise: a scroll offset is state, and it is applied once the sequence exists.
+            scroll_offset: 0.0,
             children: node.children.len(),
             // The measure pass counted this already, and it counted it over the same tree in the same
             // order, so taking it from there beats walking the children again.

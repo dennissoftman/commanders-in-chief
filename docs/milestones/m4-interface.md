@@ -104,6 +104,25 @@ half a widget.
   - The chosen option's text is drawn from the option's own node, inset exactly as a text entry's contents
     are — so the value does not appear to move sideways when the list opens under it. Getting that wrong was
     visible immediately and only in a capture.
+  - **The row under the pointer is marked, and the chosen row still wins where they are the same.** Two facts
+    rather than one: somebody moving down a list has chosen nothing yet, so a control marking only the choice
+    looked inert until they clicked. It cannot reuse `hover`, which holds an *id* — a dropdown's rows have
+    none, being the combo's own children — so an index into those children is what names one, and it is
+    cleared everywhere the list closes, which is five different places.
+- **A hit test now agrees with where things are drawn**, which is what made a `list` selectable by pointer.
+  It was previously arrow-keys-only, and the reason was recorded as a limitation rather than fixed: a list
+  scrolls, so its rows are *drawn* somewhere other than where the layout placed them, and hit-testing the
+  placement selects the wrong row.
+  - **The limitation was wider than the widget.** Every control inside a scrolled container was hit-tested
+    where it was not drawn — a button in a scrolled panel would have been clickable at the wrong place. The
+    fix is one field: `SolvedNode::scroll_offset`, the accumulated offset of a node's *enclosing* scrollable
+    containers, and `visual_rect()` for the rectangle that follows from it. A container's own offset is
+    excluded, because a scrollable box stays where the layout put it and moves its contents.
+  - Which makes three pieces of state that decide where a node is on screen rather than how it looks — the
+    chosen tab page, the open dropdown, and now the scroll offset — and all three arrive through the same
+    `Selections` trait. That is the point of routing them together: the fourth gets added in one place.
+  - Verified by breaking it on purpose. With the hit test back on the placed rectangle, a click on the fifth
+    row of a list scrolled by two rows reports the third.
 - **Applying settings asks in a dialog**, rather than leaving a Keep and a Revert button on the settings
   screen. The screen has Back and Apply; applying puts the change in force and pushes
   `Screen::SettingsConfirm` over it, with the countdown on it.
@@ -284,7 +303,7 @@ A navigable shell: main menu, settings with transactional apply-and-rollback, an
 screen that can launch a map. Layout and widget behaviour covered by tests; the rendered result covered
 by the M3 capture harness.
 
-**Met.** 194 tests in `cic-ui` cover the format, the solver, retained state, input routing, composition,
+**Met.** 198 tests in `cic-ui` cover the format, the solver, retained state, input routing, composition,
 tab pages, dropdowns, the string table, the action set, the screen stack, the settings transaction, the paint
 layer, screen transitions, and the routing between them; 38 in `cic-render` cover the typeface, the
 rasteriser, the atlas, the draw list, and the authored screens' own strings and geometry;

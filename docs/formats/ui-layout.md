@@ -162,6 +162,15 @@ the click through is the behaviour people complain about. `Activate` — Enter �
 `Adjust` steps the choice clamped to the options there are, Escape closes the list rather than leaving the
 screen, and moving focus away closes it too. At most one dropdown is open at a time.
 
+**The row under the pointer is marked, and the chosen row still wins.** Two different facts, so two
+different marks: somebody moving down a list has chosen nothing yet, and a control that showed only the
+choice would look inert until they clicked. Where the pointer is on the chosen row, the choice is the
+stronger statement and keeps its own mark.
+
+**A `list` and a `tabs` are chosen the same two ways**: clicking a row or a header picks it, and
+`Adjust` steps the choice. A list's rows are hit-tested where they are *drawn*, so a scrolled list picks the
+row under the pointer rather than the row the layout placed there.
+
 **Choose a combo over `tabs` when the options are many or the row is scarce.** A tab strip shows every
 option at once and costs a row of screen per option; a combo costs one row whatever the count. A resolution
 list, a quality preset and a level-of-detail choice all want the second.
@@ -444,3 +453,8 @@ half-formed word as though the user had finished typing it.
 - **Nothing reads a clock, a font, or a device.** Text measurement arrives through a caller-supplied
   trait, the same way the camera takes ground height, so the solver is testable with a stub and drags no
   font library into a crate that otherwise needs none.
+- **A rectangle says where the layout put a node; `visual_rect` says where it is on screen.** The two differ
+  by whatever scrolled it, and the distinction is load-bearing: a scroll limit is measured from the first,
+  because the contents move under a fixed container, while a hit test uses the second, because that is where
+  the person pointing at it is pointing. Testing the placement instead selects the wrong row — confidently,
+  which is the worst way to be wrong.

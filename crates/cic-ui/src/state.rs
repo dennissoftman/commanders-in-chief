@@ -271,6 +271,15 @@ pub struct Interface {
     /// a property of dropdowns rather than a simplification: opening a second one closes the first *by
     /// construction* here, where a per-control flag would make it a rule somebody has to remember to apply.
     open: Option<String>,
+    /// Which row of the open dropdown the pointer is over.
+    ///
+    /// Separate from `hover`, which holds an *id*, because a dropdown's rows have none: they are the combo's
+    /// own children, and the control they belong to is what `hover` names. An index into those children is
+    /// what identifies one, and it survives a re-solve for the same reason a selection does.
+    ///
+    /// Only meaningful while `open` is set, and cleared with it — a highlighted row on a list nobody can see
+    /// would be state that outlived what it described.
+    hovered_option: Option<usize>,
     values: BTreeMap<String, Value>,
 }
 
@@ -305,12 +314,23 @@ impl Interface {
         self.open.as_deref()
     }
 
+    /// Which row of the open dropdown the pointer is over, if any.
+    ///
+    /// What a drawing layer highlights. Distinct from the *chosen* row: a user moving down a list is choosing
+    /// nothing yet, and a control that showed only the choice would give no feedback at all until they
+    /// clicked.
+    #[must_use]
+    pub const fn hovered_option(&self) -> Option<usize> {
+        self.hovered_option
+    }
+
     /// Opens one combo's dropdown, closing whichever was open, or closes them all with `None`.
     ///
     /// Public because a host may want to open one itself — a key binding, or a screen that opens on a choice
     /// — and because a test wants to arrange the open state without synthesising a click.
     pub fn set_open(&mut self, id: Option<&str>) {
         self.open = id.map(str::to_owned);
+        self.hovered_option = None;
     }
 
     /// Focuses a control by id, or clears focus with `None`.
@@ -402,6 +422,7 @@ impl Interface {
                     .hit_focusable(x, y)
                     .and_then(|index| solved.get(index))
                     .and_then(|node| node.id.clone());
+                self.hovered_option = self.option_at(solved, x, y);
                 // A slider tracks the pointer while armed, which is what makes it a slider rather than a
                 // pair of buttons. Only the armed one: dragging must not capture a control the press
                 // never touched.
@@ -413,7 +434,7 @@ impl Interface {
                 // as well is the behaviour people complain about: aiming at a list and having the click land
                 // on whatever was behind it once it closed.
                 if self.open.is_some() && !solved.covers_overlay(x, y) {
-                    self.open = None;
+                    self.close();
                     return None;
                 }
                 let hit = solved
@@ -448,6 +469,7 @@ impl Interface {
             }
             UiEvent::PointerLeft => {
                 self.hover = None;
+                self.hovered_option = None;
                 None
             }
             UiEvent::Scrolled { x, y, amount } => {
@@ -490,7 +512,8 @@ impl Interface {
             // could dismiss. Escaping the whole screen out from under an open list would lose the change the
             // user was in the middle of making.
             UiEvent::Cancel => {
-                if self.open.take().is_some() {
+                if self.open.is_some() {
+                    self.close();
                     return None;
                 }
                 Some(Action::Back)
@@ -511,11 +534,11 @@ impl Interface {
         // Activating a combo opens its list, or closes it again. That is what the keyboard equivalent of
         // clicking the control has to do, and it is why a combo is `activatable` at all.
         if let Some(id) = node.id.as_deref().filter(|_| node.widget == Widget::Combo) {
-            self.open = if self.is_open(id) {
-                None
+            if self.is_open(id) {
+                self.close();
             } else {
-                Some(id.to_owned())
-            };
+                self.open = Some(id.to_owned());
+            }
             return None;
         }
         node.action
@@ -527,15 +550,16 @@ impl Interface {
     /// to say which header it landed on — otherwise a tab strip could only be driven from the keyboard, and
     /// clicking the third tab would select whatever the arrow keys had last left behind.
     ///
-    /// Deliberately not extended to a [`Widget::List`], though the two share `Value::Select` and the same
-    /// bound. A list scrolls, and a scroll offset is retained state that the solved rectangles do not yet
-    /// carry — so hit-testing a scrolled list's rows against their unscrolled rectangles would select the
-    /// wrong row, confidently. A tab strip does not scroll, so it has no such gap.
+    /// A [`Widget::List`] is included, and for a while it was not. The reason it could not be is now fixed
+    /// rather than worked around: a list scrolls, its rows are therefore *drawn* somewhere other than where
+    /// the layout placed them, and hit-testing the placement would have selected the wrong row — confidently,
+    /// which is the worst way to be wrong. [`Solved::child_rects`] reports where a row is on screen, so the
+    /// row a user points at is the row they get however far the list has been scrolled.
     fn select_at(&mut self, solved: &Solved, index: usize, x: f32, y: f32) {
         let Some(node) = solved.get(index) else {
             return;
         };
-        if node.widget != Widget::Tabs {
+        if !matches!(node.widget, Widget::Tabs | Widget::List) {
             return;
         }
         let Some(id) = node.id.clone() else {
@@ -578,13 +602,36 @@ impl Interface {
             .into_iter()
             .position(|rect| rect.contains(x, y));
         if let Some(option) = row.filter(|_| self.is_open(&id)) {
-            self.open = None;
+            self.close();
             self.set(id, Value::Select(option));
             // A combo's action means "the choice changed", which is the one moment it has to say so.
             return action;
         }
-        self.open = if self.is_open(&id) { None } else { Some(id) };
+        if self.is_open(&id) {
+            self.close();
+        } else {
+            self.open = Some(id);
+        }
         None
+    }
+
+    /// Closes the open dropdown, and forgets the row the pointer was over.
+    ///
+    /// One place, because there are five ways a list closes — choosing, clicking the control again, clicking
+    /// away, Escape, and focus moving on — and a hovered row surviving any one of them would be a highlight
+    /// on a list that is no longer there.
+    fn close(&mut self) {
+        self.open = None;
+        self.hovered_option = None;
+    }
+
+    /// Which row of the open dropdown a point is over, if it is over one.
+    fn option_at(&self, solved: &Solved, x: f32, y: f32) -> Option<usize> {
+        let combo = solved.index_of(self.open.as_deref()?)?;
+        solved
+            .child_rects(combo)
+            .into_iter()
+            .position(|rect| rect.contains(x, y))
     }
 
     /// Whether this control's dropdown is the open one.
@@ -640,7 +687,7 @@ impl Interface {
     fn move_focus(&mut self, solved: &Solved, direction: FocusMove) {
         // Focus leaving a combo closes its list. A dropdown left open behind a focus ring somewhere else is a
         // list floating over a screen with nothing selecting from it.
-        self.open = None;
+        self.close();
         let order = solved.focus_order();
         if order.is_empty() {
             self.focus = None;
@@ -767,6 +814,10 @@ impl Selections for Interface {
 
     fn is_open(&self, id: &str) -> bool {
         Self::is_open(self, id)
+    }
+
+    fn scroll(&self, id: &str) -> f32 {
+        Self::scroll(self, id)
     }
 }
 
@@ -961,6 +1012,64 @@ mod tests {
     }
 
     #[test]
+    fn the_row_under_the_pointer_is_reported_separately_from_the_chosen_one() {
+        // What a drawing layer highlights. It cannot be `hover`, which holds an id: a dropdown's rows have
+        // none, being the combo's own children, so an index into those children is what names one. And it has
+        // to be separate from the *selection*, because a user moving down a list has chosen nothing yet — a
+        // control that showed only the choice would give no feedback until they clicked.
+        let mut ui = Interface::new();
+        ui.set_selection("pick", 0);
+        ui.set_open(Some("pick"));
+        let solved = combo_solved(&ui);
+
+        ui.handle(&solved, UiEvent::PointerMoved { x: 50.0, y: 50.0 });
+        assert_eq!(ui.hovered_option(), Some(1));
+        assert_eq!(ui.selection("pick"), Some(0), "hovering chooses nothing");
+
+        ui.handle(&solved, UiEvent::PointerMoved { x: 50.0, y: 70.0 });
+        assert_eq!(ui.hovered_option(), Some(2));
+
+        // Off the list, and then off the surface: both leave nothing highlighted.
+        ui.handle(&solved, UiEvent::PointerMoved { x: 180.0, y: 300.0 });
+        assert_eq!(ui.hovered_option(), None);
+        ui.handle(&solved, UiEvent::PointerMoved { x: 50.0, y: 50.0 });
+        ui.handle(&solved, UiEvent::PointerLeft);
+        assert_eq!(ui.hovered_option(), None);
+    }
+
+    #[test]
+    fn closing_the_list_forgets_the_row_the_pointer_was_over() {
+        // Five ways a list closes, and a highlight surviving any of them would be a mark on a list that is no
+        // longer there. Each is checked because each closes it from a different place in the routing.
+        let hover_then = |close: UiEvent| {
+            let mut ui = Interface::new();
+            ui.set_open(Some("pick"));
+            let solved = combo_solved(&ui);
+            ui.handle(&solved, UiEvent::PointerMoved { x: 50.0, y: 50.0 });
+            assert_eq!(ui.hovered_option(), Some(1));
+            ui.handle(&solved, close);
+            (ui.open().map(str::to_owned), ui.hovered_option())
+        };
+        // Escape, a press away from it, and focus moving on.
+        assert_eq!(hover_then(UiEvent::Cancel), (None, None));
+        assert_eq!(
+            hover_then(UiEvent::PointerPressed { x: 50.0, y: 300.0 }),
+            (None, None)
+        );
+        assert_eq!(hover_then(UiEvent::Focus(FocusMove::Next)), (None, None));
+
+        // And choosing a row, which closes it through a different path again.
+        let mut ui = Interface::new();
+        ui.set_open(Some("pick"));
+        let solved = combo_solved(&ui);
+        ui.handle(&solved, UiEvent::PointerMoved { x: 50.0, y: 50.0 });
+        ui.handle(&solved, UiEvent::PointerPressed { x: 50.0, y: 50.0 });
+        ui.handle(&solved, UiEvent::PointerReleased { x: 50.0, y: 50.0 });
+        assert_eq!(ui.selection("pick"), Some(1));
+        assert_eq!(ui.hovered_option(), None);
+    }
+
+    #[test]
     fn a_combo_opens_on_a_click_and_an_option_chooses_and_closes_it() {
         let mut ui = Interface::new();
         let solved = combo_solved(&ui);
@@ -1041,6 +1150,74 @@ mod tests {
         ui.handle(&solved, UiEvent::Focus(FocusMove::Next));
         assert!(ui.open().is_none());
         assert_eq!(ui.focus(), Some("beneath"));
+    }
+
+    /// A list of five rows 20 tall inside a scrollable box only 60 tall, so it must be scrolled to be read.
+    ///
+    /// The fixture that matters for pointer selection: a scrolled list's rows are *drawn* somewhere other than
+    /// where the layout placed them, so a hit test against the placement selects the wrong row. With no scroll
+    /// container the two agree and the test would pass on the broken version.
+    fn scrolled_list() -> Layout {
+        let row = || Node {
+            width: Sizing::Fill(1),
+            height: Sizing::Fixed(20.0),
+            ..Node::default()
+        };
+        Layout {
+            format_version: crate::layout::FORMAT_VERSION,
+            root: Node {
+                width: Sizing::Fill(1),
+                height: Sizing::Fill(1),
+                children: vec![Node {
+                    id: Some("box".to_owned()),
+                    widget: Widget::Scroll,
+                    width: Sizing::Fixed(100.0),
+                    height: Sizing::Fixed(60.0),
+                    children: vec![Node {
+                        id: Some("rows".to_owned()),
+                        widget: Widget::List,
+                        width: Sizing::Fill(1),
+                        children: vec![row(), row(), row(), row(), row()],
+                        ..Node::default()
+                    }],
+                    ..Node::default()
+                }],
+                ..Node::default()
+            },
+        }
+    }
+
+    fn scrolled_solved(ui: &Interface) -> Solved {
+        let layout = scrolled_list();
+        layout.validate().expect("the fixture must be valid");
+        let viewport = Viewport::new(200, 400, 1.0).expect("valid viewport");
+        solve_selected(&layout, viewport, &NoContent, ui)
+    }
+
+    #[test]
+    fn a_list_row_is_chosen_by_pointer_even_when_the_list_has_been_scrolled() {
+        // Two things at once, and the second is why the first was left out for a while. A list is selectable by
+        // pointer rather than only by arrow keys; and because a hit test now asks where a row *is on screen*
+        // rather than where the layout placed it, that stays true however far the list has scrolled.
+        let mut ui = Interface::new();
+        let solved = scrolled_solved(&ui);
+
+        // Unscrolled, the third row spans y 40..60.
+        ui.handle(&solved, UiEvent::PointerPressed { x: 50.0, y: 50.0 });
+        ui.handle(&solved, UiEvent::PointerReleased { x: 50.0, y: 50.0 });
+        assert_eq!(ui.selection("rows"), Some(2));
+
+        // Scrolled by two rows, the same point is over the fifth. Against the *placed* rectangles it would
+        // still report the third, which is the wrong row reported confidently.
+        ui.set("box", Value::Scroll(40.0));
+        let solved = scrolled_solved(&ui);
+        ui.handle(&solved, UiEvent::PointerPressed { x: 50.0, y: 50.0 });
+        ui.handle(&solved, UiEvent::PointerReleased { x: 50.0, y: 50.0 });
+        assert_eq!(
+            ui.selection("rows"),
+            Some(4),
+            "a scrolled row must be selected where it is drawn"
+        );
     }
 
     #[test]
