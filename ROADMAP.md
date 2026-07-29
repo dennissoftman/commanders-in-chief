@@ -12,8 +12,8 @@ exist, but nothing here forbids work starting early on a later milestone's desig
 | [M0](docs/milestones/m0-foundation.md) | Foundation: workspace, invariants, gate | Complete |
 | [M1](docs/milestones/m1-resources.md) | Resource layer: mounts, overlays, containers | Complete |
 | [M2](docs/milestones/m2-assets.md) | Asset formats: models, terrain, scenarios | Complete (read path) |
-| [M3](docs/milestones/m3-renderer.md) | Renderer: terrain, models, water, lighting, presentation | Exit condition met — terrain level of detail outstanding |
-| [M4](docs/milestones/m4-interface.md) | Interface: layout, widgets, shell | In progress — layout foundation landed |
+| [M3](docs/milestones/m3-renderer.md) | Renderer: terrain, models, water, lighting, presentation | Complete — terrain level of detail closed by amendment |
+| [M4](docs/milestones/m4-interface.md) | Interface: layout, widgets, shell | In progress — layout and widget behaviour landed |
 | [M5](docs/milestones/m5-simulation.md) | Simulation: deterministic fixed-tick kernel | Planned |
 | [M6](docs/milestones/m6-gameplay.md) | Gameplay: units, orders, combat, economy | Planned |
 | [M7](docs/milestones/m7-network.md) | Network: lockstep, replay, desync diagnosis | Planned |
