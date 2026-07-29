@@ -19,6 +19,7 @@
 //! - [`screen`] — which screens are open, in what order, and what each remembers.
 //! - [`settings`] — an apply that must be confirmed, and a revert that need not be reached.
 //! - [`shell`] — the navigable whole, and the routing between the two above.
+//! - [`transition`] — what a screen change looks like while it is happening.
 //!
 //! # A settings apply is undone by a machine, not by a user
 //!
@@ -88,6 +89,7 @@ pub mod shell;
 pub mod solve;
 pub mod state;
 pub mod strings;
+pub mod transition;
 
 pub use action::Action;
 pub use geometry::{Insets, Rect, Viewport, ViewportError};
@@ -103,3 +105,4 @@ pub use shell::{Outcome, Request, Shell, ShellError};
 pub use solve::{Measure, NoContent, Solved, SolvedNode, solve};
 pub use state::{Interface, TextField, Value};
 pub use strings::StringTable;
+pub use transition::{Change, Heading, Motion, Reveal};

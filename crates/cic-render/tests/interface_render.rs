@@ -30,7 +30,8 @@ use cic_render::ui::{DrawList, UiMetrics, UiRenderer, atlas_sizes};
 use cic_ui::paint::{Painter, Theme};
 use cic_ui::solve::solve;
 use cic_ui::{
-    Action, Interface, Layout, Screen, Screens, Shell, StringTable, UiEvent, Value, Viewport,
+    Action, Interface, Layout, Motion, Screen, Screens, Shell, StringTable, UiEvent, Value,
+    Viewport,
 };
 
 /// The captured size. Wide enough for the settings screen's rows to be readable and small enough that a
@@ -55,9 +56,9 @@ struct Display {
     antialiasing: bool,
 }
 
-/// Loads the shell's authored screens.
-fn screens() -> Screens {
-    let mut screens = Screens::new();
+/// Every authored screen with its layout, loaded.
+fn screens_and_layouts() -> Vec<(Screen, Layout)> {
+    let mut loaded = Vec::new();
     for (screen, bytes) in [
         (
             Screen::MainMenu,
@@ -78,6 +79,15 @@ fn screens() -> Screens {
     ] {
         let layout = Layout::from_json(bytes)
             .unwrap_or_else(|error| panic!("{} does not load: {error}", screen.slug()));
+        loaded.push((screen, layout));
+    }
+    loaded
+}
+
+/// The shell's authored screens as a catalogue.
+fn screens() -> Screens {
+    let mut screens = Screens::new();
+    for (screen, layout) in screens_and_layouts() {
         screens.insert(screen, layout);
     }
     screens
@@ -130,12 +140,15 @@ fn capture(context: &GpuContext, shell: &Shell<Display>) -> Capture {
     let painter = Painter::new(&theme, &metrics, shell.viewport());
 
     let mut list = DrawList::new();
-    for (screen, solved) in shell.drawn() {
-        // Only the top screen's state is live; a screen beneath a modal keeps its own, which is the whole
-        // point of the stack, so it is drawn with what it remembers rather than with the modal's.
-        let blank = Interface::new();
-        let interface = shell.stack().interface_for(*screen).unwrap_or(&blank);
-        list.extend(&painter.paint(solved, interface, shell.strings()), &atlas);
+    let mut primitives = Vec::new();
+    let blank = Interface::new();
+    for (screen, reveal, solved) in shell.frames() {
+        // Only the top screen's state is live; a screen beneath a modal, or one on its way out, keeps its
+        // own — which is the whole point of the stack — so each is drawn with what it remembers.
+        let interface = shell.stack().interface_for(screen).unwrap_or(&blank);
+        primitives.clear();
+        painter.paint_revealed(&mut primitives, solved, interface, shell.strings(), reveal);
+        list.extend(&primitives, &atlas);
     }
     assert!(!list.is_empty(), "the shell drew nothing at all");
 
@@ -344,6 +357,42 @@ fn the_same_layout_at_one_and_a_half_times_the_density_is_the_same_layout() {
     let capture = capture(context, &shell);
     assert_eq!(capture.width(), DENSE[0]);
     support::check_reference(context, "ui-settings-dense.png", &capture);
+}
+
+#[test]
+fn a_screen_change_draws_both_screens_partway_through() {
+    // The one state a transition has that neither of its ends does, and the one where the mistakes are: the
+    // departing screen still drawn and moved, the arriving one faded in over it, and both confined to where
+    // they have moved to. None of that is visible in an image of either end.
+    let Some(context) = context() else {
+        return;
+    };
+    let theme = Theme::default();
+    let strings = strings();
+    let metrics = UiMetrics::new(&theme, &strings, 1.0);
+    let mut screens = Screens::new();
+    for (screen, layout) in screens_and_layouts() {
+        screens.insert(screen, layout);
+    }
+    let mut shell = Shell::with_motion(
+        screens,
+        strings.clone(),
+        Display {
+            scale: 1.0,
+            antialiasing: false,
+        },
+        viewport(),
+        Motion::DEFAULT,
+        &metrics,
+    )
+    .expect("every screen has a layout");
+    shell.act(Action::OpenSkirmishSetup, &metrics);
+    // A third of the way in, which is far enough that both screens hold real coverage and near enough the
+    // start that the departing one has not faded to nothing.
+    shell.tick(Motion::DEFAULT.duration / 3.0);
+    assert!(shell.is_changing());
+    assert_eq!(shell.frames().len(), 2, "both screens must be drawn");
+    support::check_reference(context, "ui-transition.png", &capture(context, &shell));
 }
 
 #[test]

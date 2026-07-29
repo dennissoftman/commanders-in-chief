@@ -4,8 +4,8 @@ A retained user-interface layer: layout, widgets, input routing, and the screen 
 navigated through.
 
 **Status:** Exit condition met. The layout foundation, widget behaviour, the screen stack with
-transactional settings, and drawing have all landed — and the four authored screens are covered by the M3
-capture harness.
+transactional settings, drawing, and animated screen changes have all landed — and the four authored
+screens are covered by the M3 capture harness.
 
 ## Charter
 
@@ -160,6 +160,26 @@ capture harness.
   — because a fixture can be the bug, twice already in this tree, and a layout written to be photographed
   would go on passing while the screens the game navigates rotted.
 
+- **Animated screen changes** (`cic_ui::transition`), which the charter does not ask for and which the
+  screen stack could not have been given from outside.
+  - **The stack keeps the departing screen alive**, because `pop` otherwise drops its state the instant
+    navigation happens and there would be nothing left to draw on the way out. A host keeping its own copy
+    would be duplicating what the stack had just discarded, and that copy goes stale.
+  - **The curve eases out, not in and out.** A symmetric curve barely moves for the frames a user is
+    deciding whether the interface responded, so it reads as latency even though it finishes at the same
+    moment.
+  - **A duration of zero is an ordinary case**, and it is two things at once: the default, and what a
+    reduce-motion preference maps to. A special path for it would be one nobody exercises.
+  - **Input reaches the arriving screen at once and the departing one never**, which falls out of routing
+    to the top of the stack. Getting either wrong is a click landing on something fading out, or the
+    animation's duration added to the latency of every navigation.
+  - **A transition is an opacity and an offset over a primitive list**, applied by the paint layer, so the
+    renderer needed no change at all. That was the test of whether it was in the right layer.
+  - **A non-finite clock reading completes the change**, which is the *opposite* of the choice the settings
+    revert window makes on the same input — because the hazards are opposite. There, never firing leaves
+    somebody unable to see; here, never finishing leaves the interface stuck half-faded between two
+    screens. Both resolve toward the state the user is not trapped in.
+
 ## Remaining
 
 Nothing for the milestone. Two things noted for later, neither of them M4's:
@@ -175,13 +195,14 @@ A navigable shell: main menu, settings with transactional apply-and-rollback, an
 screen that can launch a map. Layout and widget behaviour covered by tests; the rendered result covered
 by the M3 capture harness.
 
-**Met.** 149 tests in `cic-ui` cover the format, the solver, retained state, input routing, composition,
-the string table, the action set, the screen stack, the settings transaction, the paint layer and the
-routing between them; 35 in `cic-render` cover the typeface, the rasteriser, the atlas, the draw list, and
-the authored screens' own strings and geometry;
-and five committed reference images cover the rendered result — the main menu, the settings screen with
+**Met.** 172 tests in `cic-ui` cover the format, the solver, retained state, input routing, composition,
+the string table, the action set, the screen stack, the settings transaction, the paint layer, screen
+transitions, and the routing between them; 36 in `cic-render` cover the typeface, the rasteriser, the
+atlas, the draw list, and the authored screens' own strings and geometry;
+and six committed reference images cover the rendered result — the main menu, the settings screen with
 every widget kind it has, that same screen at one and a half times the pixel density, a modal over the
-screen it covers, and a scrolled container clipped to itself.
+screen it covers, a scrolled container clipped to itself, and a screen change partway through with both
+screens drawn.
 
 **And it runs in a window**, which this project treats as a separate obligation: `cargo run -p cic-render
 --example shell`. The window opened at a scale of 1.5, which is what prompted the density reference — a

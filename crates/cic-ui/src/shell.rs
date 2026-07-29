@@ -35,6 +35,7 @@ use crate::screen::{Screen, ScreenStack, Screens, Transition};
 use crate::settings::{Probation, Transaction};
 use crate::solve::{Measure, Solved, solve};
 use crate::state::Interface;
+use crate::transition::{Motion, Reveal};
 use crate::{Action, StringTable, UiEvent};
 
 /// Something the host has to do that the shell cannot.
@@ -127,6 +128,29 @@ impl<T: Clone + PartialEq> Shell<T> {
         viewport: Viewport,
         measure: &impl Measure,
     ) -> Result<Self, ShellError> {
+        Self::with_motion(
+            screens,
+            strings,
+            settings,
+            viewport,
+            Motion::INSTANT,
+            measure,
+        )
+    }
+
+    /// Builds a shell whose screens animate as they change.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::new`].
+    pub fn with_motion(
+        screens: Screens,
+        strings: StringTable,
+        settings: T,
+        viewport: Viewport,
+        motion: Motion,
+        measure: &impl Measure,
+    ) -> Result<Self, ShellError> {
         let missing = screens.missing();
         if !missing.is_empty() {
             return Err(ShellError::MissingLayouts(missing));
@@ -134,7 +158,7 @@ impl<T: Clone + PartialEq> Shell<T> {
         let mut shell = Self {
             screens,
             strings,
-            stack: ScreenStack::new(Screen::MainMenu),
+            stack: ScreenStack::with_motion(Screen::MainMenu, motion),
             settings: Transaction::new(settings),
             viewport,
             drawn: Vec::new(),
@@ -238,13 +262,55 @@ impl<T: Clone + PartialEq> Shell<T> {
         self.resolve(measure);
     }
 
-    /// Advances the settings revert window.
+    /// Advances the settings revert window **and** any screen change in flight.
     ///
     /// `elapsed` is in seconds from the host's own clock — see [`crate::settings`] for why it must not
     /// come from scene time. A host calls this every frame whether or not a settings screen is open;
     /// the idle path does nothing.
+    ///
+    /// One call drives both clocks deliberately. Two methods to call each frame is one that eventually
+    /// stops being called, and the failure would be silent in both directions: a revert window that never
+    /// fires, or an interface stuck half-faded between two screens.
     pub fn tick(&mut self, elapsed: f32) -> Probation {
+        self.stack.advance(elapsed);
         self.settings.tick(elapsed)
+    }
+
+    /// Whether a screen change is still animating, which tells a host to keep redrawing.
+    #[must_use]
+    pub fn is_changing(&self) -> bool {
+        self.stack.is_changing()
+    }
+
+    /// How screens change.
+    #[must_use]
+    pub const fn motion(&self) -> Motion {
+        self.stack.motion()
+    }
+
+    /// Replaces how screens change, which is what a reduce-motion setting drives.
+    pub const fn set_motion(&mut self, motion: Motion) {
+        self.stack.set_motion(motion);
+    }
+
+    /// Every screen to draw right now, with its solved layout and how much of it shows.
+    ///
+    /// What a host paints. Outermost first, so drawing them in order puts a modal over its backdrop and a
+    /// screen arriving over the one it is replacing.
+    #[must_use]
+    pub fn frames(&self) -> Vec<(Screen, Reveal, &Solved)> {
+        self.stack
+            .frames()
+            .into_iter()
+            .filter_map(|(screen, reveal)| {
+                let solved = self
+                    .drawn
+                    .iter()
+                    .find(|(candidate, _)| *candidate == screen)
+                    .map(|(_, solved)| solved)?;
+                Some((screen, reveal, solved))
+            })
+            .collect()
     }
 
     /// Routes one event and reports everything it changed.
@@ -314,9 +380,13 @@ impl<T: Clone + PartialEq> Shell<T> {
         }
     }
 
-    /// Rebuilds the solved layout of every screen that is drawn.
+    /// Rebuilds the solved layout of every screen involved in what is drawn.
+    ///
+    /// Solved against [`ScreenStack::involved`] rather than `drawn`, so a screen on its way out has a
+    /// layout for as long as it is still being drawn. Cached rather than re-solved per frame because a
+    /// reveal changes every frame and a solved layout does not.
     fn resolve(&mut self, measure: &impl Measure) {
-        let screens = self.stack.drawn();
+        let screens = self.stack.involved();
         let mut drawn = Vec::with_capacity(screens.len());
         for screen in screens {
             if let Some(layout) = self.screens.get(screen) {
@@ -337,6 +407,7 @@ mod tests {
     use crate::screen::{Screen, Screens, Transition};
     use crate::settings::{Probation, REVERT_WINDOW};
     use crate::solve::NoContent;
+    use crate::transition::Motion;
     use crate::{Action, StringTable, UiEvent, Viewport};
 
     /// Stands in for a host's display settings.
@@ -590,6 +661,93 @@ mod tests {
             assert_eq!(solved.nodes()[0].rect.width, 1920.0);
         }
         assert_eq!(shell.interface().toggle("remember"), Some(true));
+    }
+
+    #[test]
+    fn one_tick_drives_both_the_revert_window_and_a_screen_change() {
+        // Two methods to call each frame is one that eventually stops being called, and the failure would
+        // be silent in both directions: a revert window that never fires, or an interface stuck half-faded
+        // between two screens.
+        let mut screens = Screens::new();
+        for screen in Screen::ALL {
+            screens.insert(*screen, screen_layout(screen.slug(), Action::Back));
+        }
+        let mut shell = Shell::with_motion(
+            screens,
+            StringTable::new(),
+            Display { scale: 100 },
+            Viewport::new(800, 600, 1.0).expect("viewport"),
+            Motion::DEFAULT,
+            &NoContent,
+        )
+        .expect("every screen has a layout");
+
+        shell.act(Action::OpenSettings, &NoContent);
+        shell.settings_mut().staged_mut().scale = 200;
+        shell.act(Action::ApplySettings, &NoContent);
+        assert!(shell.is_changing(), "the screen change is in flight");
+
+        // One call advances both, and neither is finished after a fraction of a second.
+        assert!(matches!(
+            shell.tick(Motion::DEFAULT.duration / 2.0),
+            Probation::Pending(_)
+        ));
+        assert!(shell.is_changing());
+        // The change finishes long before the revert window does.
+        assert!(matches!(
+            shell.tick(Motion::DEFAULT.duration),
+            Probation::Pending(_)
+        ));
+        assert!(!shell.is_changing());
+        assert!(shell.settings().is_unconfirmed());
+    }
+
+    #[test]
+    fn a_change_in_flight_gives_a_host_the_departing_screen_solved() {
+        // What a host paints. Without the layout it cannot draw the screen the stack is keeping alive, and
+        // keeping the screen without the layout would be state that cannot be used.
+        let mut screens = Screens::new();
+        for screen in Screen::ALL {
+            screens.insert(*screen, screen_layout(screen.slug(), Action::Back));
+        }
+        let mut shell = Shell::with_motion(
+            screens,
+            StringTable::new(),
+            Display { scale: 100 },
+            Viewport::new(800, 600, 1.0).expect("viewport"),
+            Motion::DEFAULT,
+            &NoContent,
+        )
+        .expect("every screen has a layout");
+        shell.act(Action::OpenSettings, &NoContent);
+        let frames = shell.frames();
+        assert_eq!(frames.len(), 2, "the one leaving and the one arriving");
+        assert_eq!(frames[0].0, Screen::MainMenu);
+        assert_eq!(frames[1].0, Screen::Settings);
+        assert!(frames[1].1.is_hidden(), "the arriving screen starts hidden");
+        for (screen, _, solved) in shell.frames() {
+            assert!(
+                !solved.is_empty(),
+                "{screen:?} was handed over without a layout"
+            );
+        }
+        // Once it settles there is one frame, fully shown.
+        shell.tick(Motion::DEFAULT.duration);
+        let frames = shell.frames();
+        assert_eq!(frames.len(), 1);
+        assert!(frames[0].1.is_shown());
+    }
+
+    #[test]
+    fn a_shell_with_no_motion_reports_one_fully_shown_frame() {
+        // The default, and what every capture reference was rendered through.
+        let mut shell = shell();
+        shell.act(Action::OpenSettings, &NoContent);
+        assert!(!shell.is_changing());
+        let frames = shell.frames();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].0, Screen::Settings);
+        assert!(frames[0].1.is_shown());
     }
 
     #[test]

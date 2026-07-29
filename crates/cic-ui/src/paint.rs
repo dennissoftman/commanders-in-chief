@@ -39,6 +39,7 @@ use crate::layout::{Align, Style, Widget};
 use crate::solve::{Measure, Solved, SolvedNode};
 use crate::state::Interface;
 use crate::strings::StringTable;
+use crate::transition::Reveal;
 
 /// A colour, as authored: one byte per channel, sRGB encoded, straight alpha.
 ///
@@ -329,17 +330,30 @@ impl<'t, M: Measure> Painter<'t, M> {
         self.viewport
     }
 
-    /// Draws one solved screen, appending to an existing list.
+    /// Draws one solved screen at a reveal, appending to an existing list.
     ///
     /// Appending rather than returning is what lets a host keep one buffer for the life of a window, and
     /// what lets a modal be drawn over the screen behind it by calling this twice.
-    pub fn paint_into<'a>(
+    ///
+    /// The [`Reveal`] is how a screen transition reaches the drawing layer, and it is the whole of it: an
+    /// opacity multiplying every colour's alpha and an offset moving every rectangle. Its offset is a
+    /// *fraction* of the viewport rather than a distance, because nothing outside the solver in this crate
+    /// knows how many pixels anything is — the conversion happens here, where the viewport is.
+    ///
+    /// A screen revealed to nothing appends nothing, so a change that has faded one out costs no vertices
+    /// at all rather than a screenful of invisible ones.
+    pub fn paint_revealed<'a>(
         &self,
         out: &mut Vec<Primitive<'a>>,
         solved: &'a Solved,
         interface: &'a Interface,
         strings: &'a StringTable,
+        reveal: Reveal,
     ) {
+        if reveal.is_hidden() {
+            return;
+        }
+        let bounds = self.viewport.bounds();
         let mut pass = Pass {
             theme: self.theme,
             metrics: self.metrics,
@@ -348,8 +362,24 @@ impl<'t, M: Measure> Painter<'t, M> {
             interface,
             strings,
             out,
+            opacity: reveal.opacity.clamp(0.0, 1.0),
+            shift: [
+                reveal.offset[0] * bounds.width,
+                reveal.offset[1] * bounds.height,
+            ],
         };
-        pass.walk(self.viewport.bounds());
+        pass.walk(bounds);
+    }
+
+    /// Draws one solved screen, fully revealed and in place.
+    pub fn paint_into<'a>(
+        &self,
+        out: &mut Vec<Primitive<'a>>,
+        solved: &'a Solved,
+        interface: &'a Interface,
+        strings: &'a StringTable,
+    ) {
+        self.paint_revealed(out, solved, interface, strings, Reveal::SHOWN);
     }
 
     /// Draws one solved screen.
@@ -413,6 +443,10 @@ struct Pass<'a, 'p, 't, M> {
     interface: &'a Interface,
     strings: &'a StringTable,
     out: &'p mut Vec<Primitive<'a>>,
+    /// Multiplies every colour's alpha, so a whole screen fades from one place.
+    opacity: f32,
+    /// Moves every rectangle and every clip, in physical pixels.
+    shift: [f32; 2],
 }
 
 /// What an enclosing scrollable container imposes on everything inside it.
@@ -434,6 +468,10 @@ impl<'a, M: Measure> Pass<'a, '_, '_, M> {
     /// traversal. A node's descendants are the `subtree - 1` entries after it, which is what makes the
     /// end of a frame arithmetic.
     fn walk(&mut self, bounds: Rect) {
+        // The clip starts at the shifted viewport rather than the viewport, so a screen moved sideways is
+        // confined to where it has moved *to*. Left unshifted it would be free to draw over whatever slid
+        // in beside it.
+        let bounds = bounds.translated(self.shift[0], self.shift[1]);
         let mut frames: Vec<Frame> = Vec::new();
         for index in 0..self.solved.len() {
             while frames.last().is_some_and(|frame| index >= frame.end) {
@@ -445,7 +483,10 @@ impl<'a, M: Measure> Pass<'a, '_, '_, M> {
             let Some(node) = self.solved.get(index) else {
                 continue;
             };
-            let rect = node.rect.translated(0.0, -offset).snapped();
+            let rect = node
+                .rect
+                .translated(self.shift[0], self.shift[1] - offset)
+                .snapped();
             if !clip.intersection(rect).is_empty() {
                 self.node(index, node, rect, clip);
             }
@@ -804,7 +845,45 @@ impl<'a, M: Measure> Pass<'a, '_, '_, M> {
     }
 
     fn push(&mut self, clip: Rect, content: Content<'a>) {
+        // One place, so a screen's opacity cannot reach some of its primitives and miss others -- which is
+        // exactly what would happen if each widget applied it for itself.
+        let content = if self.opacity >= 1.0 {
+            content
+        } else {
+            faded(&content, self.opacity)
+        };
         self.out.push(Primitive { clip, content });
+    }
+}
+
+/// Scales a primitive's alpha, for a screen partway through a change.
+fn faded<'a>(content: &Content<'a>, opacity: f32) -> Content<'a> {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let scale = |colour: Colour| {
+        colour.with_alpha(
+            (f32::from(colour.alpha) * opacity)
+                .round()
+                .clamp(0.0, 255.0) as u8,
+        )
+    };
+    match *content {
+        Content::Fill { rect, colour } => Content::Fill {
+            rect,
+            colour: scale(colour),
+        },
+        Content::Text {
+            rect,
+            text,
+            colour,
+            size,
+            align,
+        } => Content::Text {
+            rect,
+            text,
+            colour: scale(colour),
+            size,
+            align,
+        },
     }
 }
 
@@ -849,6 +928,7 @@ mod tests {
     };
     use crate::solve::{Measure, Solved, solve};
     use crate::state::Interface;
+    use crate::transition::Reveal;
     use crate::{StringTable, Viewport};
 
     /// A fixed-width stand-in for a font: every character is half the text size wide.
@@ -1471,6 +1551,94 @@ mod tests {
         // Two characters at 16 physical pixels each, past a doubled inset.
         assert_eq!(caret.0.x, theme.text_inset * 2.0 + 32.0);
         assert_eq!(caret.0.width, theme.caret_width * 2.0);
+    }
+
+    #[test]
+    fn a_reveal_fades_every_primitive_from_one_place_and_moves_them_together() {
+        // Applied where a primitive is pushed rather than by each widget, so a screen's opacity cannot
+        // reach some of its primitives and miss others -- which is exactly what would happen if a
+        // checkbox and a slider each did it for themselves.
+        let theme = Theme::default();
+        let solved = solved(Node {
+            style: Some(Style::Card),
+            width: Sizing::Fixed(100.0),
+            height: Sizing::Fixed(50.0),
+            ..Node::default()
+        });
+        let (interface, strings) = (Interface::new(), StringTable::new());
+        let painter = Painter::new(&theme, &Monospace, viewport());
+        let mut half = Vec::new();
+        painter.paint_revealed(
+            &mut half,
+            &solved,
+            &interface,
+            &strings,
+            Reveal {
+                opacity: 0.5,
+                // A twelfth of a 400-pixel viewport, so a third of a hundred-wide card.
+                offset: [0.25, 0.0],
+            },
+        );
+        let shown = painter.paint(&solved, &interface, &strings);
+        assert_eq!(half.len(), shown.len(), "the same primitives, faded");
+        for (faded, opaque) in fills(&half).iter().zip(fills(&shown)) {
+            // Every rectangle moved by the same amount.
+            assert_eq!(faded.0.x, opaque.0.x + 100.0);
+            assert_eq!(faded.0.width, opaque.0.width);
+            // And every colour's alpha halved, keeping its channels.
+            assert_eq!(faded.1.red, opaque.1.red);
+            assert_eq!(faded.1.alpha, 128);
+        }
+        // The clip moved with the screen, so a screen slid sideways cannot draw over what slid in beside it.
+        assert_eq!(half[0].clip.x, 100.0);
+    }
+
+    #[test]
+    fn a_screen_revealed_to_nothing_costs_no_primitives() {
+        // A change that has faded one screen out should cost nothing rather than a screenful of invisible
+        // rectangles the renderer has to blend.
+        let theme = Theme::default();
+        let solved = solved(Node {
+            style: Some(Style::Card),
+            width: Sizing::Fill(1),
+            height: Sizing::Fill(1),
+            ..Node::default()
+        });
+        let (interface, strings) = (Interface::new(), StringTable::new());
+        let mut out = Vec::new();
+        Painter::new(&theme, &Monospace, viewport()).paint_revealed(
+            &mut out,
+            &solved,
+            &interface,
+            &strings,
+            Reveal {
+                opacity: 0.0,
+                offset: [0.0, 0.0],
+            },
+        );
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn a_full_reveal_draws_exactly_what_no_reveal_would() {
+        // The property that keeps every committed capture valid: a screen at rest goes through the same
+        // path as one mid-change, and must come out identical.
+        let theme = Theme::default();
+        let mut strings = StringTable::new();
+        strings.set("k", "Settings");
+        let solved = solved(Node {
+            id: Some("go".to_owned()),
+            widget: Widget::Button,
+            text_key: Some("k".to_owned()),
+            width: Sizing::Fixed(120.0),
+            height: Sizing::Fixed(36.0),
+            ..Node::default()
+        });
+        let interface = Interface::new();
+        let painter = Painter::new(&theme, &Monospace, viewport());
+        let mut revealed = Vec::new();
+        painter.paint_revealed(&mut revealed, &solved, &interface, &strings, Reveal::SHOWN);
+        assert_eq!(revealed, painter.paint(&solved, &interface, &strings));
     }
 
     #[test]

@@ -188,7 +188,10 @@ What works:
   labels, checkboxes, sliders, text entry with a caret and an input-method composition, lists, tabs and a
   scrollable container all behave and all draw. Settings are **applied then confirmed**, with a 15-second
   window after which the change takes itself back — because a display change can leave the person who made
-  it unable to see the screen well enough to undo it.
+  it unable to see the screen well enough to undo it. Screens **fade and slide** as they change, over a
+  duration a host chooses and which defaults to none: the departing screen stays alive until the change
+  ends because it is still being drawn, and input reaches the arriving one immediately and the departing
+  one never.
 - Windowed presentation, driven by the reusable camera:
 
 ```bash
@@ -298,13 +301,13 @@ densities itself. The residency map already ranks by projected size.
 ## Gate status
 
 Formatting, strict lints (`clippy::all` and `clippy::pedantic` as errors, plus `-D warnings` as CI runs
-it), and the full test suite all passes on the pinned toolchain: **502 tests across six crates**. The CI
+it), and the full test suite all passes on the pinned toolchain: **526 tests across six crates**. The CI
 runner runs the same suite against Mesa's lavapipe. The rendering ones take about eleven
 seconds there, which is what makes this affordable on every pull request. Captures go to `target/tmp/` and
 upload as an artifact on every outcome, so a harness failure's capture and amplified difference image can
 be looked at rather than being stranded on the runner.
 
-**The five interface references have to be generated on the runner before CI can pass.** They can only be
+**A new interface reference has to be generated on the runner before CI can pass.** They can only be
 rendered where lavapipe is, so a branch adding a scene fails CI once with the captures uploaded as an
 artifact for review — the flow the harness is built around for a deliberate rendering change, and the same
 one the half-pixel fix and the five model captures went through. A missing reference is deliberately a
@@ -313,9 +316,9 @@ failure rather than a skip, because a silent pass would remove the coverage it w
 Sixteen references cover the scene: terrain layers, instanced models, the deferred chain, water, water
 under a glancing sun, cloud shadows, fog, wet ground, snow, an antialiased frame, a supersampled one, a
 temporally accumulated one, a normal-mapped model, a metallic one, alpha-tested foliage, and a swaying
-canopy. **Five more cover the interface**: the main menu, the settings screen with every widget kind it
-has, that same screen at one and a half times the pixel density, a modal over the screen it covers, and a
-scrolled container clipped to itself. Each was generated on its own machine and looked at before being
+canopy. **Six more cover the interface**: the main menu, the settings screen with every widget kind it
+has, that same screen at one and a half times the pixel density, a modal over the screen it covers, a
+scrolled container clipped to itself, and a screen change partway through with both screens drawn. Each was generated on its own machine and looked at before being
 committed — one set for an NVIDIA RTX 4080 SUPER, and one for lavapipe complete but for the interface five.
 
 The render tests still skip rather than fail when no adapter is available, so a developer machine with no

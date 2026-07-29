@@ -34,8 +34,8 @@ use cic_render::ui::{DrawList, UiMetrics, UiRenderer, atlas_sizes};
 use cic_render::{DisplaySettings, RenderError};
 use cic_ui::paint::{Painter, Theme};
 use cic_ui::{
-    Adjust, Edit, FocusMove, Interface, Layout, Probation, Screen, Screens, Shell, StringTable,
-    UiEvent, Viewport,
+    Adjust, Edit, FocusMove, Interface, Layout, Motion, Probation, Screen, Screens, Shell,
+    StringTable, UiEvent, Viewport,
 };
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
@@ -209,17 +209,19 @@ impl ShellApp {
         let painter = Painter::new(&self.theme, &metrics, active.shell.viewport());
 
         active.list.clear();
-        for (screen, solved) in active.shell.drawn() {
-            let blank = Interface::new();
-            let interface = active
-                .shell
-                .stack()
-                .interface_for(*screen)
-                .unwrap_or(&blank);
-            active.list.extend(
-                &painter.paint(solved, interface, active.shell.strings()),
-                &active.atlas,
+        let mut primitives = Vec::new();
+        let blank = Interface::new();
+        for (screen, reveal, solved) in active.shell.frames() {
+            let interface = active.shell.stack().interface_for(screen).unwrap_or(&blank);
+            primitives.clear();
+            painter.paint_revealed(
+                &mut primitives,
+                solved,
+                interface,
+                active.shell.strings(),
+                reveal,
             );
+            active.list.extend(&primitives, &active.atlas);
         }
 
         let configuration = configuration(active.format, active.size[0], active.size[1]);
@@ -259,30 +261,7 @@ impl ShellApp {
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("shell frame"),
                 });
-        // The interface pass loads rather than clears, because it is drawn over a scene as often as onto
-        // nothing. With no scene there is a backdrop to clear first.
-        let backdrop = self.theme.backdrop.to_linear();
-        encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("shell backdrop"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &view,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: f64::from(backdrop[0]),
-                        g: f64::from(backdrop[1]),
-                        b: f64::from(backdrop[2]),
-                        a: 1.0,
-                    }),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
+        clear_backdrop(&mut encoder, &view, self.theme.backdrop.to_linear());
         active.renderer.draw(
             active.context.device(),
             active.context.queue(),
@@ -348,11 +327,14 @@ impl ShellApp {
             StringTable::from_json(include_bytes!("../../../content/ui/strings.en.json"))?;
         let viewport = Viewport::new(width, height, scale)?;
         let metrics = UiMetrics::new(&self.theme, &strings, scale);
-        let shell = Shell::new(
+        // Animated, because the whole reason this example exists is that motion cannot be judged from a
+        // still image.
+        let shell = Shell::with_motion(
             screens()?,
             strings.clone(),
             DisplaySettings::NATIVE,
             viewport,
+            Motion::DEFAULT,
             &metrics,
         )?;
         for absent in shell.missing_strings() {
@@ -582,6 +564,34 @@ impl ShellApp {
             None => {}
         }
     }
+}
+
+/// Clears the surface before the interface is drawn over it.
+///
+/// The interface pass loads rather than clears, because it is drawn over a scene as often as onto nothing.
+/// With no scene there is a backdrop to put down first, and that is a host's job rather than the pass's.
+fn clear_backdrop(encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, colour: [f32; 4]) {
+    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("shell backdrop"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color {
+                    r: f64::from(colour[0]),
+                    g: f64::from(colour[1]),
+                    b: f64::from(colour[2]),
+                    a: 1.0,
+                }),
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
 }
 
 fn configuration(

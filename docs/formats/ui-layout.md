@@ -165,6 +165,36 @@ defines.
 Closing a screen discards what it held, which is why reopening settings shows what is in force rather
 than the edits somebody walked away from.
 
+## Screens change over time, or instantly
+
+A screen change is animated by a **motion**: a duration and a slide distance. Both are a host's choice
+rather than a layout's, so no screen file mentions either.
+
+- The arriving screen fades in and slides from the trailing edge going forward, from the leading edge
+  coming back. The departing one fades out and slides the other way.
+- **A modal only fades.** It does not displace what it covers, and sliding would make it look like it was
+  shoving the screen aside rather than appearing over it.
+- **Only the topmost screen animates.** Anything beneath it was already visible and is staying, so a modal
+  fades in over a backdrop that does not move.
+- **A duration of zero is the default and an ordinary case**, not a special path. It is also what a
+  reduce-motion preference maps to.
+
+**The departing screen stays alive until the change ends**, with everything it remembered, because it is
+still being drawn. It is released when the change finishes, which is why a host has to advance the clock
+rather than merely read it.
+
+**Input goes to the arriving screen immediately and to the departing one never.** A click during a change
+must not land on something fading out; and making the arriving screen wait would add the animation's
+duration to the latency of every navigation. Both follow from routing input to the top of the stack, since
+the departing screen is not on it.
+
+**A second navigation replaces a change rather than queueing one.** A queue of departing screens is depth
+in flight with no bound, which is the same leak the no-duplicates rule closes for the stack.
+
+The curve is a quadratic **ease-out** rather than an ease-in-out. A symmetric curve barely moves for the
+first few frames, and those are the frames a user is deciding whether the interface responded at all — so
+it reads as latency even though it finishes at the same moment.
+
 ## Settings are applied, then confirmed
 
 A display change can leave the person who made it unable to see the screen well enough to undo it — a

@@ -34,6 +34,7 @@ use std::collections::BTreeMap;
 
 use crate::layout::Layout;
 use crate::state::Interface;
+use crate::transition::{Change, Heading, Motion, Reveal};
 use crate::{Action, StringTable};
 
 /// One screen of the shell.
@@ -183,6 +184,13 @@ pub enum Transition {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScreenStack {
     entries: Vec<Entry>,
+    /// The screen a *backward* change is taking away, kept alive so it can still be drawn.
+    ///
+    /// Only ever set going backward. Going forward the screen being left is still in `entries`, one below
+    /// the top, so keeping a second copy of it would be two sources of truth for one screen's state.
+    leaving: Option<Entry>,
+    change: Option<Change>,
+    motion: Motion,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -192,15 +200,153 @@ struct Entry {
 }
 
 impl ScreenStack {
-    /// Opens a stack at its root.
+    /// Opens a stack at its root, with screens changing instantly.
+    ///
+    /// Instant by default because a stack is the navigation model and motion is a presentation choice — a
+    /// caller that has not made one gets no animation rather than one somebody guessed at. Use
+    /// [`Self::with_motion`] to animate.
     #[must_use]
     pub fn new(root: Screen) -> Self {
+        Self::with_motion(root, Motion::INSTANT)
+    }
+
+    /// Opens a stack at its root, animating changes.
+    #[must_use]
+    pub fn with_motion(root: Screen, motion: Motion) -> Self {
         Self {
             entries: vec![Entry {
                 screen: root,
                 interface: Interface::new(),
             }],
+            leaving: None,
+            change: None,
+            motion,
         }
+    }
+
+    /// How screens change.
+    #[must_use]
+    pub const fn motion(&self) -> Motion {
+        self.motion
+    }
+
+    /// Replaces how screens change, which is what a reduce-motion setting drives.
+    ///
+    /// A change already in flight is left to finish. Cancelling it would jump the interface to its end
+    /// state mid-movement, which is a worse thing to see than the last 100 milliseconds of an animation
+    /// somebody just turned off.
+    pub const fn set_motion(&mut self, motion: Motion) {
+        self.motion = motion;
+    }
+
+    /// The change in flight, if one is.
+    #[must_use]
+    pub fn change(&self) -> Option<Change> {
+        self.change.filter(|change| !change.is_done())
+    }
+
+    /// Whether a change is still animating, which is what tells a host to keep redrawing.
+    #[must_use]
+    pub fn is_changing(&self) -> bool {
+        self.change().is_some()
+    }
+
+    /// Advances a change in flight, reporting whether it finished on this tick.
+    ///
+    /// Finishing releases what the departing screen remembered, which is why this has to be called rather
+    /// than merely observed: a host that never ticks holds one screen's state forever.
+    pub fn advance(&mut self, elapsed: f32) -> bool {
+        let Some(change) = self.change.as_mut() else {
+            return false;
+        };
+        if !change.advance(elapsed) {
+            return false;
+        }
+        self.change = None;
+        self.leaving = None;
+        true
+    }
+
+    /// Every screen to draw right now with how much of it shows, outermost first.
+    ///
+    /// The same set as [`Self::drawn`] when nothing is changing. During a change it also carries the screen
+    /// being left, and the reveal each one is at.
+    ///
+    /// Only the **topmost** screen animates in. Anything beneath it was already visible and is staying —
+    /// a modal fades in over a backdrop that does not move, because a backdrop that faded with it would
+    /// look like the whole interface was being replaced rather than covered.
+    #[must_use]
+    pub fn frames(&self) -> Vec<(Screen, Reveal)> {
+        let drawn = self.drawn();
+        let Some(change) = self.change() else {
+            return drawn
+                .into_iter()
+                .map(|screen| (screen, Reveal::SHOWN))
+                .collect();
+        };
+        let mut frames = Vec::with_capacity(drawn.len() + 1);
+        // Skipped when the departing screen is *also* in the arriving set, which is what a modal opening
+        // over a screen looks like: it is not being left, it is being covered.
+        if let Some(screen) = self.outgoing().filter(|screen| !drawn.contains(screen)) {
+            frames.push((screen, change.leaving(!screen.is_modal())));
+        }
+        let last = drawn.len().saturating_sub(1);
+        for (index, screen) in drawn.into_iter().enumerate() {
+            let reveal = if index == last {
+                change.entering(!screen.is_modal())
+            } else {
+                Reveal::SHOWN
+            };
+            frames.push((screen, reveal));
+        }
+        frames
+    }
+
+    /// Every screen that has to be solved right now: the drawn set plus one being left.
+    ///
+    /// What a host caches solved layouts against, and a superset of [`Self::frames`] so a cache built from
+    /// it is never missing an entry a frame asks for.
+    #[must_use]
+    pub fn involved(&self) -> Vec<Screen> {
+        let mut screens = self.drawn();
+        if let Some(screen) = self.outgoing().filter(|screen| !screens.contains(screen)) {
+            screens.insert(0, screen);
+        }
+        screens
+    }
+
+    /// The screen a change in flight is taking away, whichever side of the stack it is on.
+    fn outgoing(&self) -> Option<Screen> {
+        let change = self.change()?;
+        match change.direction() {
+            // Still in the stack, one below the top, so there is only ever one copy of its state.
+            Heading::Forward => self
+                .entries
+                .len()
+                .checked_sub(2)
+                .and_then(|at| self.entries.get(at))
+                .map(|entry| entry.screen),
+            Heading::Backward => self.leaving.as_ref().map(|entry| entry.screen),
+        }
+    }
+
+    /// Records a change, unless motion is instant.
+    ///
+    /// An instant motion records nothing at all rather than a change that is immediately done: a stack
+    /// nobody ticks would otherwise hold the departing screen's state forever, and "nothing to advance" is
+    /// a simpler thing for a host to be correct about than "advance a change that has already finished".
+    ///
+    /// A second navigation while one is in flight replaces it. The abandoned screen is dropped rather than
+    /// queued, because a queue of departing screens is depth in flight with no bound — the same leak the
+    /// no-duplicates rule closed for the stack itself.
+    fn begin(&mut self, direction: Heading, leaving: Option<Entry>) {
+        self.leaving = leaving;
+        if self.motion.seconds() <= 0.0 {
+            self.change = None;
+            self.leaving = None;
+            return;
+        }
+        self.change = Some(Change::new(direction, self.motion));
     }
 
     /// The screen on top: the one input goes to and the one drawn last.
@@ -267,11 +413,13 @@ impl ScreenStack {
 
     /// What a particular open screen remembers, whether or not it is on top.
     ///
-    /// For a host reading a value off a screen it has navigated away from but not closed.
+    /// For a host reading a value off a screen it has navigated away from but not closed — and for one
+    /// *drawing* a screen that is on its way out, which is still there for as long as the change lasts.
     #[must_use]
     pub fn interface_for(&self, screen: Screen) -> Option<&Interface> {
         self.entries
             .iter()
+            .chain(self.leaving.as_ref())
             .find(|entry| entry.screen == screen)
             .map(|entry| &entry.interface)
     }
@@ -282,32 +430,49 @@ impl ScreenStack {
     /// the module documentation for why a screen never appears twice.
     pub fn push(&mut self, screen: Screen) -> Transition {
         if let Some(at) = self.entries.iter().position(|entry| entry.screen == screen) {
+            // Unwinding is going back, however it was asked for, so it animates backward. What leaves is
+            // the screen that was on *top* — what the user was actually looking at — rather than the
+            // outermost of the ones being closed. Unwinding several levels therefore shows one screen
+            // leaving rather than a stack of them, which is a simplification and the honest one: the
+            // intermediate screens were never visible.
+            let departing = (at + 1 < self.entries.len())
+                .then(|| self.entries.last().cloned())
+                .flatten();
             self.entries.truncate(at + 1);
+            self.begin(Heading::Backward, departing);
             return Transition::Popped(screen);
         }
         self.entries.push(Entry {
             screen,
             interface: Interface::new(),
         });
+        // Nothing is handed over: the screen being left is still one below the top.
+        self.begin(Heading::Forward, None);
         Transition::Pushed(screen)
     }
 
     /// Closes the top screen, unless it is the root.
     ///
     /// Returns the screen left on top, or nothing when there was only the root. What the closed screen
-    /// remembered is discarded, which is the point: reopening settings should show what is in force
-    /// rather than the edits somebody abandoned.
+    /// remembered is discarded once the change finishes, which is the point: reopening settings should show
+    /// what is in force rather than the edits somebody abandoned. It survives until then only so it can be
+    /// drawn on its way out.
     pub fn pop(&mut self) -> Option<Screen> {
         if self.entries.len() <= 1 {
             return None;
         }
-        self.entries.pop();
+        let departing = self.entries.pop();
+        self.begin(Heading::Backward, departing);
         Some(self.top())
     }
 
     /// Closes everything but the root.
     pub fn reset(&mut self) -> Screen {
-        self.entries.truncate(1);
+        if self.entries.len() > 1 {
+            let departing = self.entries.last().cloned();
+            self.entries.truncate(1);
+            self.begin(Heading::Backward, departing);
+        }
         self.top()
     }
 
@@ -349,9 +514,14 @@ impl ScreenStack {
 
 #[cfg(test)]
 mod tests {
+    // The durations below are the motion's own and halves of it, all exact in binary, and the offsets
+    // compared are the zeroes a screen that does not slide reports exactly.
+    #![allow(clippy::float_cmp)]
+
     use super::{Screen, ScreenStack, Screens, Transition};
     use crate::layout::{Layout, Node, Widget};
     use crate::state::Value;
+    use crate::transition::{Motion, Reveal};
     use crate::{Action, StringTable};
 
     fn layout(key: &str) -> Layout {
@@ -367,6 +537,11 @@ mod tests {
 
     fn stack() -> ScreenStack {
         ScreenStack::new(Screen::MainMenu)
+    }
+
+    /// A stack whose screens animate, for the tests that are about motion.
+    fn animated() -> ScreenStack {
+        ScreenStack::with_motion(Screen::MainMenu, Motion::DEFAULT)
     }
 
     #[test]
@@ -571,6 +746,166 @@ mod tests {
         assert_eq!(stack.apply(Action::LaunchSkirmish), Transition::Unchanged);
         assert_eq!(stack.apply(Action::Quit), Transition::Unchanged);
         assert_eq!(stack.top(), Screen::SkirmishSetup);
+    }
+
+    #[test]
+    fn an_instant_stack_records_no_change_at_all() {
+        // Not "a change that is already finished": a stack nobody ticks would then hold the departing
+        // screen's state forever, and "nothing to advance" is simpler for a host to be correct about.
+        let mut stack = stack();
+        stack.push(Screen::Settings);
+        assert!(!stack.is_changing());
+        assert_eq!(stack.change(), None);
+        assert_eq!(stack.frames(), vec![(Screen::Settings, Reveal::SHOWN)]);
+        assert_eq!(stack.involved(), vec![Screen::Settings]);
+        assert!(!stack.advance(1.0), "there is nothing to advance");
+    }
+
+    #[test]
+    fn a_change_keeps_the_departing_screen_drawable_until_it_finishes() {
+        // The load-bearing part. `pop` drops the entry, so without this the screen being left is gone
+        // before it can be drawn on its way out, and a host that kept its own copy would be duplicating
+        // state the stack had just discarded.
+        let mut stack = animated();
+        stack.push(Screen::Settings);
+        stack.interface_mut().set_text("name", "half typed");
+        assert_eq!(stack.pop(), Some(Screen::MainMenu));
+        assert!(stack.is_changing());
+        // Still drawable, and still holding what it held.
+        assert_eq!(
+            stack
+                .interface_for(Screen::Settings)
+                .and_then(|interface| interface.text("name"))
+                .map(|field| field.text().to_owned()),
+            Some("half typed".to_owned())
+        );
+        assert!(stack.involved().contains(&Screen::Settings));
+        let frames = stack.frames();
+        assert_eq!(frames.len(), 2, "{frames:?}");
+        assert_eq!(frames[0].0, Screen::Settings, "the departing one first");
+        assert_eq!(frames[1].0, Screen::MainMenu);
+        // Finishing releases it, which is why advancing has to be called rather than merely observed.
+        assert!(stack.advance(Motion::DEFAULT.duration));
+        assert!(!stack.is_changing());
+        assert!(stack.interface_for(Screen::Settings).is_none());
+        assert_eq!(stack.frames(), vec![(Screen::MainMenu, Reveal::SHOWN)]);
+    }
+
+    #[test]
+    fn input_reaches_the_arriving_screen_at_once_and_the_departing_one_never() {
+        // Two rules that would go wrong if the animation lived outside the stack. A click during a change
+        // must not land on a screen that is fading out, and the arriving screen must not spend the
+        // transition's duration ignoring input — that would add the animation to the latency of every
+        // navigation. Both fall out of routing to the top entry, because the departing screen is not one.
+        let mut stack = animated();
+        stack.push(Screen::Settings);
+        assert_eq!(
+            stack.top(),
+            Screen::Settings,
+            "input goes to the new screen"
+        );
+        stack.interface_mut().set_toggle("arrived", true);
+        stack.pop();
+        assert_eq!(stack.top(), Screen::MainMenu);
+        stack.interface_mut().set_toggle("returned", true);
+        // Neither reached the other.
+        assert_eq!(stack.interface().toggle("arrived"), None);
+        assert_eq!(
+            stack
+                .interface_for(Screen::Settings)
+                .and_then(|interface| interface.toggle("returned")),
+            None
+        );
+    }
+
+    #[test]
+    fn a_modal_fades_in_over_a_backdrop_that_does_not_move() {
+        // Only the topmost screen animates. A backdrop that faded with the modal would look like the whole
+        // interface was being replaced rather than covered, and the screen underneath is not going anywhere.
+        let mut stack = animated();
+        stack.push(Screen::Settings);
+        stack.advance(Motion::DEFAULT.duration);
+        stack.push(Screen::QuitConfirm);
+        let frames = stack.frames();
+        assert_eq!(frames.len(), 2, "{frames:?}");
+        assert_eq!(frames[0], (Screen::Settings, Reveal::SHOWN));
+        assert_eq!(frames[1].0, Screen::QuitConfirm);
+        assert!(frames[1].1.is_hidden(), "the modal starts invisible");
+        // And it fades rather than sliding, because it displaces nothing.
+        stack.advance(Motion::DEFAULT.duration / 2.0);
+        let frames = stack.frames();
+        assert_eq!(frames[1].1.offset, [0.0, 0.0]);
+        assert!(frames[1].1.opacity > 0.0 && frames[1].1.opacity < 1.0);
+    }
+
+    #[test]
+    fn opening_a_screen_slides_forward_and_going_back_slides_the_other_way() {
+        let mut stack = animated();
+        stack.push(Screen::Settings);
+        let forward = stack.frames();
+        let arriving = forward
+            .iter()
+            .find(|(screen, _)| *screen == Screen::Settings)
+            .expect("the new screen");
+        assert!(arriving.1.offset[0] > 0.0, "it arrives from the right");
+        stack.advance(Motion::DEFAULT.duration);
+        stack.pop();
+        let back = stack.frames();
+        let returning = back
+            .iter()
+            .find(|(screen, _)| *screen == Screen::MainMenu)
+            .expect("the screen returned to");
+        assert!(returning.1.offset[0] < 0.0, "it comes back from the left");
+    }
+
+    #[test]
+    fn a_second_navigation_replaces_a_change_rather_than_queueing_it() {
+        // A queue of departing screens is depth in flight with no bound, which is the same leak the
+        // no-duplicates rule closed for the stack itself.
+        let mut stack = animated();
+        stack.push(Screen::Settings);
+        stack.push(Screen::QuitConfirm);
+        assert!(stack.is_changing());
+        // Only ever one screen is on its way out, so a frame list stays small however fast somebody clicks.
+        assert!(stack.frames().len() <= Screen::ALL.len());
+        stack.pop();
+        assert!(stack.frames().len() <= Screen::ALL.len());
+        stack.advance(Motion::DEFAULT.duration);
+        assert!(!stack.is_changing());
+        assert_eq!(stack.frames().len(), 1);
+    }
+
+    #[test]
+    fn unwinding_several_levels_shows_the_screen_that_was_on_top_leaving() {
+        // The intermediate screens were never visible, so animating them out would be motion for something
+        // nobody saw arrive.
+        let mut stack = animated();
+        stack.push(Screen::Settings);
+        stack.push(Screen::QuitConfirm);
+        stack.advance(Motion::DEFAULT.duration);
+        stack.push(Screen::MainMenu);
+        let frames = stack.frames();
+        assert_eq!(frames.len(), 2, "{frames:?}");
+        assert_eq!(
+            frames[0].0,
+            Screen::QuitConfirm,
+            "what the user was looking at"
+        );
+        assert_eq!(frames[1].0, Screen::MainMenu);
+    }
+
+    #[test]
+    fn turning_motion_off_leaves_a_change_in_flight_to_finish() {
+        // Cancelling it would jump the interface to its end state mid-movement, which is worse to look at
+        // than the last hundred milliseconds of an animation somebody has just turned off.
+        let mut stack = animated();
+        stack.push(Screen::Settings);
+        stack.set_motion(Motion::INSTANT);
+        assert!(stack.is_changing(), "the one in flight still finishes");
+        stack.advance(Motion::DEFAULT.duration);
+        // And the next change does not animate.
+        stack.push(Screen::SkirmishSetup);
+        assert!(!stack.is_changing());
     }
 
     #[test]
