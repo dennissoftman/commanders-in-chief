@@ -10,8 +10,9 @@ yet — the host verbs a simulation kernel would supply, since [M5](m5-simulatio
 
 - A **language** content authors write by hand and review in diffs. **Done** — see
   [the specification](../formats/script.md).
-- **Deterministic to the bit**, because scripts run inside a lockstep simulation. **Done**, by having no
-  floating-point type at all.
+- **Deterministic to the bit**, because scripts run inside a lockstep simulation. **Done**, by
+  inheriting [ADR 0007](../adr/0007-simulation-arithmetic.md)'s arithmetic exactly rather than
+  inventing a second one.
 - **Sandboxed**: a script cannot reach anything the engine did not offer it. **Done**, and at compile
   time rather than at call time.
 - **Bounded**: a script cannot hang the match or exhaust memory. **Done** — fuel bounds time, and the
@@ -23,23 +24,25 @@ yet — the host verbs a simulation kernel would supply, since [M5](m5-simulatio
 ## Landed
 
 - **`cic-script`**, depending on nothing at all. Not on `serde`, not on a parser generator, not on a
-  maths crate — the fixed-point routines are here because the platform's are the problem being solved.
-- **No floating-point type**, which is the decision the rest follows from and is not a preference. IEEE
-  754 says nothing about `sin`, `cos`, `sqrt` or `pow`, so two platforms return different values for the
-  same input and both conform; fused multiply-add rounds once where two operations round twice; x87
-  computes at 80 bits and rounds when it spills. Each is survivable in presentation and each is a desync
-  in a simulation. The full comparison against Lua, Rhai, WebAssembly and a JSON trigger table is in
-  [ADR 7001](../adr/7001-scripting-language.md).
-  - **Fixed point is an `i64` with 16 fractional bits**: about ±140 trillion, resolving 0.000015. The
-    range is what the 64 bits are for — a distance calculation squares its operands, and a 32-bit fixed
-    type overflows squaring anything past about 180.
-  - **Every operation is checked.** Overflow is an error, not a wrap and not a saturation: wrapping puts
-    a unit at the edge of the map at the other edge, saturating turns a runaway calculation into a
-    plausible number that is wrong, and both are silent.
-  - **`sqrt` is integer Newton iteration and `sin` is an integer polynomial**, so a script computing a
-    facing gets the same answer on every machine. Five Taylor terms rather than four, because four would
-    have left the approximation as the limiting error by a factor of ten — measured, and written up in
-    the ADR.
+  maths crate — the transcendentals are written here because the platform's are the thing ADR 0007
+  forbids.
+- **The arithmetic is ADR 0007's, unchanged**: `f64`, restricted to the operations IEEE-754 requires to
+  be correctly rounded, with no platform transcendental. A script and the simulation kernel must reach
+  the same answer on the same two numbers, and the only way to guarantee that is for them to be doing
+  the same arithmetic. See [ADR 7001](../adr/7001-scripting-language.md), including what its first draft
+  got wrong.
+  - **`sqrt` is used directly**, because the standard *requires* it to be correctly rounded — unlike the
+    transcendentals, which it only recommends. That distinction is the whole of the divergence risk.
+  - **`sin` and `cos` are written in the permitted set** and take **turns** rather than radians, per ADR
+    0007 decision 5. The reduction is then `x - x.floor()`, which is exact for every `f64`, so
+    `sys.sin(1e12 + 0.125)` returns the identical bit pattern as `sys.sin(0.125)`.
+  - **The series agrees with the platform to the last bit** on the same first-quadrant argument, across
+    257 sample points. The few units in the last place that show up against a *whole-angle* reference
+    are the reference's own range reduction, which is the problem turns remove.
+  - **A non-finite result is a fault**, not because an infinity is non-deterministic — it is not — but
+    because every comparison against a NaN is false, so a rule involving one silently does not fire.
+  - **Integers stay integers.** `f64` is exact only to 2^53, so whole-number counting uses `i64` with
+    checked arithmetic that reports its own overflow.
 - **No heap.** Every value is a fixed-size scalar and a string is an index into the program's constant
   table. No allocator in the interpreter, so a script cannot exhaust memory however hostile it is; no
   garbage collector, so no pause and no allocation order to be non-deterministic about.
@@ -64,6 +67,14 @@ yet — the host verbs a simulation kernel would supply, since [M5](m5-simulatio
 - **Parser nesting is bounded**, for the same reason and with the same lesson the layout format
   recorded: recursive descent turns expression nesting into call nesting, and four thousand open
   parentheses in a mod file overflow the stack.
+- **ADR 0007 decision 8's textual guard**, in `tests/arithmetic_restriction.rs`, scanning this crate's
+  shipped source for the forbidden names. **It caught a real violation on its first run** — a `powi` in
+  the interpreter's own bounds check — which is the best possible argument for a test that otherwise
+  reads like bookkeeping. A test module may still use the platform as an *oracle*, exactly as ADR 0007
+  uses `libm`, so the scan stops at `#[cfg(test)]`.
+  - **The stronger enforcement is structural.** A script cannot reach a forbidden operation whatever
+    anyone writes, because the bytecode has no instruction for one. The Rust side gets a tripwire; the
+    language side gets a guarantee.
 - **Every failure is a value.** No `unwrap` in the interpreter and no arithmetic that can overflow,
   because this runs inside a tick and a panic mid-tick takes the match with it. Even malformed bytecode
   — a compiler bug rather than a script one — is reported rather than panicked on.
@@ -82,20 +93,25 @@ yet — the host verbs a simulation kernel would supply, since [M5](m5-simulatio
   on an `Interface` and implements one trait.
 - **Scripts in the map package.** The [package format](../formats/package.md) has no entry for them yet,
   and adding one is a format change rather than a language one.
-- **A determinism test across platforms.** The property is argued structurally — there is no float, so
-  there is nothing to diverge — and the tests pin that the interpreter is stateless and the arithmetic
-  is pure. What would settle it is the same standard the determinism invariants set for the simulation:
-  a recorded run replayed on another platform reproducing the same state hashes. That needs CI runners
-  on more than one platform and a kernel to hash.
+- **One implementation of the transcendentals, not two.** ADR 0007 decision 4 says the simulation crate
+  supplies its own `sin`; this crate already has one. When M5 lands they must not become two
+  implementations that can disagree — which would be the same class of bug as the two arithmetics this
+  milestone just finished removing. Whichever exists first is the one both use, and the natural home is
+  a crate below both.
+- **A determinism test across platforms.** The property is argued from the standard — only permitted
+  operations are used, and the guard proves it — and pinned locally by exact-bit assertions on the
+  series and on a whole computed script result. What would settle it is the standard the determinism
+  invariants set for the simulation: a recorded run replayed on another platform reproducing the same
+  hashes. That needs CI runners on more than one platform and a kernel to hash.
 
 ## Exit condition
 
 A scenario's behaviour can be written in a file, loaded from a package, and produce identical results
 from identical inputs — checked in CI rather than by hand.
 
-**Partly met.** The language, the sandbox, and the bounds are in and covered by 90 tests. What is not
-met is the "loaded from a package" half and the cross-platform half of the determinism claim, both for
-the reasons above.
+**Partly met.** The language, the sandbox, the arithmetic and the bounds are in and covered by 98 tests.
+What is not met is the "loaded from a package" half and the cross-platform half of the determinism
+claim, both for the reasons above.
 
 ## Design notes
 
@@ -107,9 +123,8 @@ languages.
 **There is no truthiness.** Only a `bool` is a condition; not zero, not nil, not the empty string.
 Coercion is a class of bug where a value of the wrong type takes a branch instead of being reported.
 
-**Mixed arithmetic promotes toward fixed point**, so `2 * 1.5` is 3.0. Every integer the type can hold
-is exactly representable, so the promotion loses nothing, while truncating the other way would discard
-a fraction an author wrote deliberately.
+**Mixed arithmetic promotes toward the real**, so `2 * 1.5` is `3.0`, while two integers stay an
+integer. Truncating the other way would discard a fraction an author wrote deliberately.
 
 ## Explicitly not done
 

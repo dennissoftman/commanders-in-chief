@@ -5,8 +5,13 @@ cannot express.
 
 A small language of this project's own, compiled to bytecode and run by an interpreter that cannot
 allocate, cannot hang, and cannot reach anything the engine did not offer it. Why it is not Lua, Rhai,
-or WebAssembly is [ADR 7001](../adr/7001-scripting-language.md); the short version is that a script runs
-inside a lockstep simulation and every one of those is built on `f64` and the platform's maths library.
+or WebAssembly is [ADR 7001](../adr/7001-scripting-language.md); the short version is that all three
+resolve calls at run time, so a mod naming a verb the engine lacks fails when a player triggers it
+rather than when the file loads.
+
+Its arithmetic is [ADR 0007](../adr/0007-simulation-arithmetic.md)'s, unchanged — the same `f64` and the
+same restricted operation set the simulation kernel uses. A script and the kernel have to reach the same
+answer on the same two numbers.
 
 ## Example
 
@@ -41,17 +46,22 @@ library of game verbs, and a script naming one the engine has not declared fails
 | Type | Written | Notes |
 |---|---|---|
 | `int` | `42`, `-7` | 64-bit. Overflow is an error, not a wrap. |
-| `fixed` | `1.5`, `0.25` | Fixed point: an `i64` with 16 fractional bits. **There is no float.** |
+| `real` | `1.5`, `0.25`, `1.5e-3` | `f64`, restricted to ADR 0007's permitted operations. |
 | `bool` | `true`, `false` | The only thing a condition accepts. |
 | `str` | `"text"` | Immutable, and cannot be built at run time. |
 | `nil` | `nil` | What a function without a `return` produces. |
 
-A decimal literal is assembled as an exact ratio — `1.5` is 15/10 — rather than parsed as a float and
-converted, so no rounding is introduced at the one point an author wrote an exact number down.
+A decimal literal is parsed to the nearest representable value, which Rust specifies exactly — so every
+platform turns the same text into the same bits. A literal too large to represent is refused rather than
+becoming an infinity.
 
-**Mixed arithmetic promotes toward `fixed`**: `2 * 1.5` is `3.0`. Every `int` the type can hold is
-exactly representable, so the promotion loses nothing; truncating the other way would discard a fraction
-an author wrote deliberately. Two integers stay an integer, so `7 / 2` is `3`.
+**Mixed arithmetic promotes toward `real`**: `2 * 1.5` is `3.0`. Two integers stay an integer, so `7 / 2`
+is `3` — not an optimisation, but because `f64` is exact only to 2^53 and whole-number counting is better
+served by arithmetic that reports its own overflow.
+
+**A result that is not finite is a fault.** Dividing by zero, or overflowing the range, stops the handler
+with a diagnostic. IEEE-754 defines both perfectly well and they are still mistakes: every comparison
+against a NaN is false, so a rule involving one silently does not fire and nothing reports why.
 
 ## Statements
 
@@ -122,18 +132,32 @@ Argument counts are checked at compile time too.
 ### The standard set
 
 Available where a host offers it, and a host may decline. These exist because the platform's versions
-are the thing being avoided — `sys.sin` is an integer polynomial evaluated in fixed point, so it returns
-the same value on every machine.
+are the thing being avoided. IEEE-754 only *recommends* correct rounding for the transcendentals, so two
+conforming libraries disagree in the last bits — `sys.sin` is a polynomial in the permitted operations,
+so it returns the same value on every machine.
 
 | Function | Returns | |
 |---|---|---|
-| `sys.abs(x)` | `fixed` | |
-| `sys.min(a, b)`, `sys.max(a, b)` | `fixed` | |
-| `sys.clamp(x, low, high)` | `fixed` | A reversed range returns `low`. |
-| `sys.sqrt(x)` | `fixed` | Integer Newton iteration. A negative argument is a fault. |
-| `sys.sin(x)`, `sys.cos(x)` | `fixed` | Radians. |
-| `sys.floor(x)` | `int` | Toward negative infinity, because what it is for is an index. |
+| `sys.abs(x)` | `real` | |
+| `sys.min(a, b)`, `sys.max(a, b)` | `real` | |
+| `sys.clamp(x, low, high)` | `real` | A reversed range returns `low`. |
+| `sys.sqrt(x)` | `real` | A negative argument is a fault. |
+| `sys.sin(t)`, `sys.cos(t)` | `real` | **Turns, not radians** — see below. |
+| `sys.floor(x)` | `int` | Toward negative infinity, because what it is for is an index. Outside the `int` range it is a fault. |
 | `sys.log(text)` | `nil` | Diagnostic only. |
+
+### Angles are turns
+
+One full revolution is `1.0`, so `sys.sin(0.25)` is one and `sys.cos(0.5)` is minus one. A script never
+writes pi.
+
+This is [ADR 0007](../adr/0007-simulation-arithmetic.md) decision 5, and the reason is reproducibility
+rather than taste. Reducing a large *radian* angle modulo pi needs more precision than the angle carries,
+which is the longest and most delicate part of any `sin` implementation and the place two libraries most
+easily disagree. In turns the reduction is a subtraction that cannot round, so `sys.sin(1000000.125)` and
+`sys.sin(0.125)` return the identical value rather than merely a close one.
+
+It also reads better for what game logic does with angles, which is mostly fractions of a circle.
 
 ## What a script cannot do
 

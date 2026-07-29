@@ -11,13 +11,15 @@ cic-core          (no dependencies)
    └── cic-audio  (+ serde, serde_json)
 
 cic-camera        (no dependencies)
+cic-script        (no dependencies)
 cic-ui            (+ serde, serde_json)
 ```
 
-Three crates deliberately depend on nothing of this project's: `cic-core`, because bounded reading is a
+Four crates deliberately depend on nothing of this project's: `cic-core`, because bounded reading is a
 primitive; `cic-camera`, because the same camera must drive the game, the editor, and any debug viewer
 without dragging a window system into each of them; and `cic-ui`, for the same reason one step further
-out. A layout solver that pulled in a graphics stack would make every tool that wants to position a box
+out; and `cic-script`, because a language that could reach the engine would be one whose sandbox was a
+matter of what it happened not to call. A layout solver that pulled in a graphics stack would make every tool that wants to position a box
 depend on one, so the two facts it cannot derive — how large a piece of text is, and what the display
 scale is — arrive from the caller instead.
 
@@ -93,7 +95,12 @@ not hash maps, explicit mount order, no dependence on directory enumeration orde
 The simulation kernel, once it exists, for the reasons in
 [docs/invariants/determinism.md](docs/invariants/determinism.md).
 
-Everything between the two is presentation and is free to be as machine-dependent as it likes, which
+**The scripting language**, which inherits ADR 0007 rather than restating it: scripts run inside the
+simulation, so the same restricted operation set binds them. Two mechanisms enforce it — the textual scan
+decision 8 requires, and the stronger structural one that the bytecode has no instruction for a forbidden
+operation. See [ADR 7001](docs/adr/7001-scripting-language.md).
+
+Everything between is presentation and is free to be as machine-dependent as it likes, which
 [ADR 0007](docs/adr/0007-simulation-arithmetic.md) decision 9 states explicitly. `cic-audio` uses floating
 point freely for exactly that reason — and is bound by the *other* half of the rule instead, which is that
 it must never draw from a simulation random stream.
