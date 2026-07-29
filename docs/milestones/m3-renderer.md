@@ -210,6 +210,113 @@ regression fails the build. See [Exit condition](#exit-condition) and the remain
     is that a rendering change is verified by looking at the image, and a harness failure was otherwise
     leaving the capture and its amplified difference on a disk nobody can reach.
 
+- **Physically-based model maps** ([`model`](../../crates/cic-render/src/model.rs)). Normal, roughness and
+  metallic maps alongside the base colour, with the tangent frame the first of them needs — read from
+  `TANGENT` where a model supplies one and derived from the texture coordinates where it does not, which is
+  the ordinary case rather than the exception. Three texture arrays per model rather than one, because base
+  colour is sRGB-encoded and the other two are linear measurements and one array has one format; see
+  [`ColourSpace`](../../crates/cic-render/src/texture.rs) for what a normal map decoded as a colour does.
+  - **Metallic cost no G-buffer bandwidth at all.** The albedo target's alpha channel was writing a constant
+    1.0 and nothing read it, so a fourth material channel was already paid for. Eight bits is ample for a
+    quantity that is 0 or 1 on almost every real material.
+  - Every expression the lighting pass gained **reduces to its predecessor at zero metalness**, by
+    construction rather than by tuning: a metal loses its diffuse term through a multiply by `1 - metallic`
+    and takes its highlight colour through a `mix` from the dielectric constant. That is what let every
+    committed reference stay byte-identical when the channel arrived.
+  - What a metal *cannot* look like here is a mirror, and the reason is structural rather than a gap in
+    this work: there is no environment probe, so a metal reflects the three light slots and the sky
+    gradient and nothing else. It reads as darker with a coloured highlight, which is correct and
+    incomplete. The light slots' own comment already anticipates the probe.
+- **Alpha-tested materials** ([`model`](../../crates/cic-render/src/model.rs)), which is how foliage is
+  authored. A material that cuts its own silhouette gets its own index range and its own pair of
+  pipelines, so opaque geometry keeps its early depth rejection and its fragment-free shadow pass — a
+  fragment stage that *can* discard forfeits early-Z on most hardware, and opaque geometry is the
+  overwhelming majority.
+  - The alpha test had to reach **every shadow cascade**, not only the lit frame. A leaf card casting the
+    rectangle its geometry occupies is worse than one casting nothing, because the eye reads a hard
+    quadrilateral on the ground as a solid object — so a canopy would darken the terrain in slabs.
+  - Alpha-tested and two-sided are **one split rather than two**. They arrive together in practice and each
+    is nearly free to grant to the other: foliage needs both, and an opaque material that merely asked to be
+    double-sided reads a zero cutoff as "never discard". Splitting four ways would double the pipeline count
+    to separate cases no content has asked for.
+- **Scenery sway** ([`scenery`](../../crates/cic-render/src/scenery.rs)), written from scratch — the last
+  outstanding provenance case in [LICENSING.md](../../LICENSING.md), now closed. Every constant is derived
+  in that file from a stated physical argument, because a number nobody can justify is indistinguishable
+  from a number that was copied.
+  - The model is three parts on three time scales: a steady bend along the wind, a slow oscillation about it
+    at the plant's own natural frequency, and a fast cross-wind flutter. Four profiles rather than a longer
+    table, each a distinct physical regime, with anything between them reachable by constructor.
+  - Two things would give the trick away at a glance and both are fixed by the *phase*. A stand moving in
+    unison is the obvious one, so each instance derives its own phase from its world position — integer
+    arithmetic, so it is identical every frame, every run, and in a capture. The subtler one is that wind
+    arrives somewhere first: the phase also carries a term along the wind direction, and the visible result
+    is a front crossing the map. That term costs one dot product and contributes more to the effect reading
+    as weather than anything else in the file.
+  - The flutter is at **5.37 times** the sway rather than 5, and the reason is this renderer's own history:
+    five summed water waves at related wavelengths interfered into a visible diamond lattice, recorded in
+    the design notes below. Two motions at an integer ratio repeat every slow cycle and the repeat is what
+    the eye finds.
+  - Sway is per-*instance* data rather than a bound uniform, and that is structural. The displacement has to
+    be identical in the G-buffer, in all four cascades and in the motion vector, and the instance buffer is
+    the only per-draw data every one of those passes already binds.
+- **A virtual-texture page cache on the GPU**
+  ([`terrain_page`](../../crates/cic-render/src/terrain_page.rs)), which is the consumer the residency
+  bookkeeping never had. Physical pages as an array texture, a page table per level, and a compute pass that
+  composes the layer blend once per page instead of once per fragment per frame — the blend depends only on
+  the terrain data, so recomputing it every frame for ground that has not changed is the waste this removes.
+  It is also what lets detail scale past one texture: a page is composed at a density chosen for how close it
+  is, so the ground under the camera carries far more texels per metre than a map-wide texture could afford
+  everywhere.
+  - **The compose shader was rewritten rather than wired up.** The staged one composed pages from a tile
+    atlas — per-cell material slots, blend masks with orientation codes, an edge-tile sheet, a macro lattice
+    — and this terrain is a heightfield plus per-layer weights, so every input it declared was a resource
+    this engine does not build. There was nothing to connect. See
+    [LICENSING.md](../../LICENSING.md), which records both that the file carries no derivation and that it
+    was written for a terrain this engine does not have.
+  - **The compose pass binds the terrain's own uniform buffer**, so it cannot disagree with the G-buffer
+    about the terrain it is composing. It also has to choose its own mip level, because a compute shader has
+    no screen-space derivatives — and that turns out to be the better answer rather than a workaround: a
+    page's texel density is a property of the page, not of whoever is looking at it.
+  - **A page carries a four-texel border of the neighbouring ground.** Without it a filtered tap at a page
+    edge clamps, which puts a seam along every page boundary — and boundaries are fixed to the ground rather
+    than to the screen, so the seams would crawl as the camera moved. A test reads a page back and checks
+    that a page straddling a colour boundary carries the far side in its border: interior red 89 against
+    border red 144, where a clamped border would read 89.
+  - **The G-buffer samples it**, and the two paths agree: a mean channel difference of **0.001** over the
+    whole frame with a worst case of **2** eight-bit steps, which is the quantisation a page store costs and
+    nothing else. The direct blend stays in the shader as the fallback, and that is not belt-and-braces — a
+    cache is allowed to run out of slots, so a frame that depended on it having won would turn a memory
+    budget into a correctness requirement. A one-slot cache renders 99.9% of the frame from the fallback and
+    the rest from its single page, which is the assertion.
+  - Both bounds above were set *from the measurement* rather than guessed. A page resolved to the wrong
+    layer, or a coordinate off by a border, differs by tens to hundreds — so a bound loose enough to be safe
+    is still two orders of magnitude tighter than any real fault, and a bound chosen before measuring would
+    have been the loose one and would have caught nothing.
+  - The forward pass has no page lookup, deliberately: it draws terrain alone in one pass, which is the case
+    a cache has nothing to offer. The first draft of the agreement test used it and reported the two frames
+    as identical for exactly that reason.
+- **Temporal antialiasing** ([`deferred`](../../crates/cic-render/src/deferred.rs), `taa.wgsl`), the last
+  tier of [ADR 0005](../adr/0005-antialiasing-strategy.md) and the last item on its list: a jittered
+  projection on an eight-phase Halton sequence, a motion-vector target, a ping-ponged float history, and a
+  neighbourhood clamp in YCoCg. **0.053 ms** at 1920x1200, twice the post pass and a nineteenth of the
+  frame.
+  - The jitter phase is a frame *parameter*, like scene time and for the same reason, which is what makes a
+    temporal capture reproducible: the harness renders a full cycle and compares the last frame, and two
+    runs agree byte for byte.
+  - It needed one API the design did not have. Two sequences in a row disagreed until `reset_history` was
+    added, because the second started from what the first left behind — and that is the real-game case of a
+    jump cut rather than a peculiarity of the test.
+  - **It found a defect the whole reference set had been rendered through.** Three resolve passes were
+    adding half a pixel to a framebuffer coordinate that already carries it, so each sampled half a pixel
+    away from the fragment it was shading. Nothing caught it because every reference had been rendered
+    through the same offset; what caught it was that accumulating a static frame never reached a fixed
+    point. Ten of the twenty-two references changed. The measurement, the cost in each pass, and why a
+    capture comparison structurally cannot catch this are in [ADR
+    0005](../adr/0005-antialiasing-strategy.md#what-implementing-decision-4-established).
+  - Motion vectors are **exact for swaying geometry**, not approximate, and it cost nothing: the
+    displacement is a pure function of scene time, so the same vertex function evaluated at the previous
+    time returns exactly where the vertex was.
+
 ## Remaining
 
 - **Terrain level of detail.** Frustum culling has landed and is half the charter item — see Landed — but
@@ -219,17 +326,14 @@ regression fails the build. See [Exit condition](#exit-condition) and the remain
   - Note what this is *not*. [`terrain_virtual`](../../crates/cic-render/src/terrain_virtual.rs) and
     [`detail`](../../crates/cic-render/src/detail.rs) are residency bookkeeping for terrain *texture*
     pages, decided in texels per cell. They are unwired, and wiring them would not remove a triangle.
-- **Temporal antialiasing**, the quality tier of [ADR 0005](../adr/0005-antialiasing-strategy.md). The two
-  cheaper tiers below have landed; this one needs jittered projection, a motion-vector target, a history
-  buffer, and neighbourhood clamping — and it constrains the regression harness, since a temporal
-  accumulator makes one captured frame depend on the frames before it. Scene time already being a frame
-  parameter is the precondition, and it is met.
-- Normal, roughness, and metallic *maps*. Only base colour is textured; the other channels are still
-  per-material or per-layer factors.
-- Alpha-tested materials. Everything is opaque, so the shadow passes have no fragment stage — foliage
-  will need one.
-- Wiring the residency bookkeeping to a real virtual-texture cache, so terrain detail scales past what
-  one texture can hold.
+- **Page mip chains**, which is what stands between the virtual-texture path being *correct* and being
+  *better*. A page has one level, so a page sampled at a shallow angle aliases where the direct blend does
+  not — the terrain would look worse on exactly the ground a virtual texture is for. The fix is a second
+  compute pass reducing each resident page, and the reduction has to respect the border or the seam the
+  border exists to prevent returns at every level below the base.
+- **A view-driven detail request.** Nothing derives a `TerrainDetailRequest` from a camera yet, so a caller
+  states which cells it wants at which density. The residency map already ranks pages by projected size, so
+  this is a small function over the frustum rather than a design.
 
 ## Exit condition
 
@@ -461,6 +565,23 @@ other used a ridge wider than its own shadow was long, so the shadow landed enti
 unlit back slope. Neither was a renderer fault, and neither was visible from the assertions.
 
 ## Explicitly not done
+
+**The ambient-occlusion map is read from glTF and not applied.** `ModelMaterial::occlusion_texture` and its
+strength are imported, and the renderer ignores both. Occlusion is an *ambient-only* multiplier and there is
+no G-buffer channel left for one: folding it into albedo would darken the direct term too, which is
+precisely what an occlusion map must not do. Widening the coverage target to two channels is the change if
+content ever ships one; until then this is a slot the importer fills and the renderer declines, which is
+better than a slot nobody can find.
+
+**Alpha *blending* is not supported, and cannot be without a second path.** A G-buffer pixel holds one
+material, and blending needs two. `AlphaMode::Blended` is therefore drawn as a cut at half coverage —
+`AlphaMode::cutoff` says so and says why — which is the closer of the two available wrong answers. Real
+blending wants a forward pass after the composite, which is a larger decision than this milestone.
+
+**The sway does not rotate normals.** The bend is a few degrees over a whole plant, well under the variation
+a normal map already carries, and deriving the rotated normal correctly needs the displacement's gradient —
+several times the cost of the displacement itself.
+
 
 - No post-processing chain beyond what the shader set already covers.
 - No particle system; it belongs with the gameplay that spawns effects.

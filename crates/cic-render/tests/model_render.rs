@@ -6,10 +6,13 @@
 //! public struct, so a box needs no asset file — which keeps these tests about *rendering* rather than
 //! about importing, a thing `cic-assets` already covers.
 
+// The fixture builders here are tables of corner coordinates. Splitting one to satisfy a line count would
+// put half a cube in one function and half in another, which is less readable rather than more.
 #![allow(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
-    clippy::cast_sign_loss
+    clippy::cast_sign_loss,
+    clippy::too_many_lines
 )]
 
 mod support;
@@ -18,11 +21,11 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use cic_assets::Terrain;
-use cic_assets::model::{Model, ModelImage, ModelMaterial, ModelPrimitive, ModelVertex};
+use cic_assets::model::{AlphaMode, Model, ModelImage, ModelMaterial, ModelPrimitive, ModelVertex};
 use cic_camera::CameraPose;
 use cic_render::{
     Capture, CaptureTarget, DeferredFrame, DeferredRenderer, DeferredTargets, GpuContext,
-    ModelBatch, ModelInstance, TerrainRenderer,
+    ModelBatch, ModelInstance, SwayProfile, TerrainRenderer,
 };
 
 const WIDTH: u32 = 720;
@@ -138,14 +141,21 @@ fn textured_box_model(
                 position,
                 normal,
                 uv: quad_uv(corner),
+                ..ModelVertex::default()
             })
             .collect();
-        primitives.push(ModelPrimitive {
-            vertices,
-            indices: vec![0, 1, 2, 0, 2, 3],
-            // The roof takes the second material; the walls take the first.
-            material: Some(usize::from(index == 0)),
-        });
+        primitives.push(
+            ModelPrimitive {
+                vertices,
+                indices: vec![0, 1, 2, 0, 2, 3],
+                // The roof takes the second material; the walls take the first.
+                material: Some(usize::from(index == 0)),
+            }
+            // These models are built in Rust, so the importer's derivation never ran on them and every
+            // tangent is the unset zero. A normal map is then correctly ignored, which is exactly the
+            // shape of failure a fixture must not have: the test would pass while measuring nothing.
+            .with_generated_tangents(),
+        );
     }
 
     Model {
@@ -158,7 +168,7 @@ fn textured_box_model(
                 metallic: 0.0,
                 roughness: 0.85,
                 base_color_texture: textures[0],
-                blended: false,
+                ..ModelMaterial::default()
             },
             ModelMaterial {
                 name: "roof".to_owned(),
@@ -166,7 +176,7 @@ fn textured_box_model(
                 metallic: 0.0,
                 roughness: 0.7,
                 base_color_texture: textures[1],
-                blended: false,
+                ..ModelMaterial::default()
             },
         ],
         images,
@@ -687,4 +697,640 @@ fn instances_can_be_updated_without_reuploading_geometry() {
     let mut grown = all.clone();
     grown.extend_from_slice(&all);
     assert!(batch.set_instances(context, &grown).is_err());
+}
+
+/// A tangent-space normal map whose surface is a grid of shallow pyramids.
+///
+/// Not noise and not a flat field: a pyramid has four faces tilting in four known directions, so a
+/// capture shows whether the perturbation follows the surface basis or is rotated, mirrored, or ignored.
+/// A noise map would produce plausible variation whichever of those went wrong.
+fn pyramid_normals(size: u32, cells: u32, tilt: f32) -> ModelImage {
+    let mut rgba = Vec::with_capacity((size * size * 4) as usize);
+    let step = size.div_ceil(cells.max(1)) as f32;
+    for y in 0..size {
+        for x in 0..size {
+            // Position within the cell, mapped to -1..1 on each axis, so each quadrant of the cell
+            // tilts away from its centre.
+            let local_x = ((x as f32 % step) / step) * 2.0 - 1.0;
+            let local_y = ((y as f32 % step) / step) * 2.0 - 1.0;
+            let normal_x = -local_x.signum() * tilt;
+            let normal_y = -local_y.signum() * tilt;
+            let encode = |value: f32| ((value * 0.5 + 0.5) * 255.0).clamp(0.0, 255.0) as u8;
+            rgba.extend_from_slice(&[
+                encode(normal_x),
+                encode(normal_y),
+                // The stored z. The shader rebuilds it from xy rather than reading this, so a sensible
+                // value here is documentation rather than data.
+                encode(
+                    (1.0 - normal_x * normal_x - normal_y * normal_y)
+                        .max(0.0)
+                        .sqrt(),
+                ),
+                255,
+            ]);
+        }
+    }
+    ModelImage {
+        width: size,
+        height: size,
+        rgba,
+    }
+}
+
+/// A metallic-roughness map, uniform in both channels. Roughness is green, metallic is blue.
+fn metallic_roughness(size: u32, roughness: u8, metallic: u8) -> ModelImage {
+    ModelImage {
+        width: size,
+        height: size,
+        rgba: [0, roughness, metallic, 255].repeat((size * size) as usize),
+    }
+}
+
+/// An image whose alpha is a filled circle: the shape a leaf card cuts out of its own quad.
+///
+/// A circle specifically, because it has no straight edges. The failure worth catching is an alpha test
+/// that does not run at all, and a rectangular cut-out is indistinguishable from the untested quad.
+fn circle_cutout(size: u32, colour: [u8; 3]) -> ModelImage {
+    let mut rgba = Vec::with_capacity((size * size * 4) as usize);
+    let centre = size as f32 * 0.5;
+    let radius = size as f32 * 0.44;
+    for y in 0..size {
+        for x in 0..size {
+            let dx = x as f32 + 0.5 - centre;
+            let dy = y as f32 + 0.5 - centre;
+            let inside = dx * dx + dy * dy <= radius * radius;
+            rgba.extend_from_slice(&[
+                colour[0],
+                colour[1],
+                colour[2],
+                if inside { 255 } else { 0 },
+            ]);
+        }
+    }
+    ModelImage {
+        width: size,
+        height: size,
+        rgba,
+    }
+}
+
+/// Two crossed quads on a bare stem: the standard way foliage is authored, and the case that needs both
+/// the alpha test and double-sided drawing.
+///
+/// The stem is opaque and the canopy is masked, so one model exercises both index ranges — which is the
+/// arrangement that catches a split putting the wrong primitives in the wrong run.
+fn foliage_model(spread: f32, height: f32, canopy_base: f32) -> Model {
+    let half = spread * 0.5;
+    let stem = spread * 0.06;
+    let mut primitives = Vec::new();
+
+    let quad = |normal: [f32; 3], corners: [[f32; 3]; 4], material: usize| {
+        ModelPrimitive {
+            vertices: corners
+                .into_iter()
+                .enumerate()
+                .map(|(corner, position)| ModelVertex {
+                    position,
+                    normal,
+                    uv: quad_uv(corner),
+                    ..ModelVertex::default()
+                })
+                .collect(),
+            indices: vec![0, 1, 2, 0, 2, 3],
+            material: Some(material),
+        }
+        .with_generated_tangents()
+    };
+
+    // The stem: a square column, opaque, material 0.
+    for (normal, corners) in [
+        (
+            [0.0, -1.0, 0.0],
+            [
+                [-stem, -stem, 0.0],
+                [stem, -stem, 0.0],
+                [stem, -stem, canopy_base],
+                [-stem, -stem, canopy_base],
+            ],
+        ),
+        (
+            [1.0, 0.0, 0.0],
+            [
+                [stem, -stem, 0.0],
+                [stem, stem, 0.0],
+                [stem, stem, canopy_base],
+                [stem, -stem, canopy_base],
+            ],
+        ),
+        (
+            [0.0, 1.0, 0.0],
+            [
+                [stem, stem, 0.0],
+                [-stem, stem, 0.0],
+                [-stem, stem, canopy_base],
+                [stem, stem, canopy_base],
+            ],
+        ),
+        (
+            [-1.0, 0.0, 0.0],
+            [
+                [-stem, stem, 0.0],
+                [-stem, -stem, 0.0],
+                [-stem, -stem, canopy_base],
+                [-stem, stem, canopy_base],
+            ],
+        ),
+    ] {
+        primitives.push(quad(normal, corners, 0));
+    }
+
+    // The canopy: two quads crossing at right angles, masked, material 1.
+    for (normal, corners) in [
+        (
+            [0.0, -1.0, 0.0],
+            [
+                [-half, 0.0, canopy_base],
+                [half, 0.0, canopy_base],
+                [half, 0.0, height],
+                [-half, 0.0, height],
+            ],
+        ),
+        (
+            [1.0, 0.0, 0.0],
+            [
+                [0.0, -half, canopy_base],
+                [0.0, half, canopy_base],
+                [0.0, half, height],
+                [0.0, -half, height],
+            ],
+        ),
+    ] {
+        primitives.push(quad(normal, corners, 1));
+    }
+
+    Model {
+        name: "foliage".to_owned(),
+        primitives,
+        materials: vec![
+            ModelMaterial {
+                name: "trunk".to_owned(),
+                base_color: [0.32, 0.24, 0.18, 1.0],
+                metallic: 0.0,
+                roughness: 0.9,
+                ..ModelMaterial::default()
+            },
+            ModelMaterial {
+                name: "leaves".to_owned(),
+                base_color: [1.0, 1.0, 1.0, 1.0],
+                metallic: 0.0,
+                roughness: 0.8,
+                base_color_texture: Some(0),
+                alpha_mode: AlphaMode::Masked { cutoff: 0.5 },
+                double_sided: true,
+                ..ModelMaterial::default()
+            },
+        ],
+        images: vec![circle_cutout(64, [96, 140, 62])],
+        has_skin: false,
+        has_animation: false,
+    }
+}
+
+/// A grid of plants, all rigid or all swaying.
+fn plantings(terrain: &Terrain, profile: Option<SwayProfile>) -> Vec<ModelInstance> {
+    let [extent_x, extent_y] = terrain.world_extent();
+    let mut placed = Vec::new();
+    for row in 0..3u16 {
+        for column in 0..4u16 {
+            let position = [
+                extent_x * (0.26 + 0.16 * f32::from(column)),
+                extent_y * (0.36 + 0.14 * f32::from(row)),
+                100.0,
+            ];
+            let rotation = 0.4 * f32::from(row * 4 + column);
+            placed.push(match profile {
+                Some(profile) => ModelInstance::planted(position, rotation, 1.0, profile),
+                None => ModelInstance::placed(position, rotation, 1.0),
+            });
+        }
+    }
+    placed
+}
+
+/// Whether a pixel belongs to the fixture canopy.
+///
+/// Green dominance. The canopy texture is the only green thing in these scenes -- terrain is a warm grey
+/// and the sky is blue -- so this measures canopy *area*, which is what an alpha test changes. Counting
+/// newly-visible sky instead was tried and is a far thinner signal, because a canopy silhouetted against
+/// the sky is a small part of the frame while its area is not.
+fn is_canopy(pixel: &[u8]) -> bool {
+    pixel[1] > pixel[0].saturating_add(10) && pixel[1] > pixel[2].saturating_add(10)
+}
+
+/// Whether a pixel is open sky rather than lit geometry.
+///
+/// Blue *dominance*, not darkness. An absolute brightness threshold was tried first and was wrong: the
+/// lighting pass's horizon band is (55, 70, 87), so a cutoff anywhere near it excludes most of the sky
+/// and the counts collapse to nothing. The gradient is strongly blue-dominant at every height, and the
+/// surfaces in the fixtures using this are warm, so the ordering of the channels separates them at any
+/// exposure.
+///
+/// Only usable where nothing in the scene is blue: the `instances` helper tints every third box bluish
+/// for the per-instance colour tests, and those pixels would classify as sky. Tests over tinted geometry
+/// measure something else — see the coverage comparison in the normal-map test.
+fn is_sky(pixel: &[u8]) -> bool {
+    pixel[2] > pixel[0].saturating_add(15) && pixel[2] > pixel[1].saturating_add(5)
+}
+
+/// The pixels where a capture differs from a reference capture of the same scene without the models.
+///
+/// An exact statement of what the geometry touched, arrived at without classifying colours: a pixel
+/// differs from the model-free frame if and only if a model covered it or a model shadowed it. Both of
+/// those are properties of geometry alone, so two frames whose geometry agrees have identical sets
+/// however differently they are shaded.
+fn touched_pixels(capture: &Capture, without_models: &Capture) -> Vec<bool> {
+    capture
+        .rgba()
+        .chunks_exact(4)
+        .zip(without_models.rgba().chunks_exact(4))
+        .map(|(pixel, bare)| pixel[0..3] != bare[0..3])
+        .collect()
+}
+
+/// Mean channel sum over the pixels a predicate accepts.
+fn mean_channel_sum(capture: &Capture, accept: fn(&[u8]) -> bool) -> f64 {
+    let mut sum = 0u64;
+    let mut count = 0u64;
+    for pixel in capture.rgba().chunks_exact(4) {
+        if accept(pixel) {
+            sum += u64::from(pixel[0]) + u64::from(pixel[1]) + u64::from(pixel[2]);
+            count += 1;
+        }
+    }
+    sum as f64 / count.max(1) as f64
+}
+
+/// How many pixels differ in colour between two captures of the same size.
+fn differing_pixels(left: &Capture, right: &Capture) -> usize {
+    left.rgba()
+        .chunks_exact(4)
+        .zip(right.rgba().chunks_exact(4))
+        .filter(|(a, b)| a[0..3] != b[0..3])
+        .count()
+}
+
+#[test]
+fn a_normal_map_perturbs_the_shading_without_moving_the_silhouette() {
+    // The property that distinguishes a normal map from displacement, and the one a still capture can
+    // check: the shading changes and the outline does not. A map wired into the position instead of the
+    // normal would pass a "did anything change" assertion and fail this one.
+    let Some(context) = context() else { return };
+    let harness = harness(context);
+    let placement = instances(&harness.terrain);
+
+    let flat = ModelBatch::new(
+        context,
+        &box_model(40.0, 70.0),
+        &placement,
+        harness.deferred.material_layout(),
+    )
+    .expect("flat batch");
+
+    let mut mapped_model = box_model(40.0, 70.0);
+    mapped_model.images = vec![pyramid_normals(64, 4, 0.8)];
+    for material in &mut mapped_model.materials {
+        material.normal_texture = Some(0);
+        material.roughness = 0.45;
+    }
+    // The flat batch takes the same roughness, so the only difference between the two frames is the map.
+    let mut flat_model = box_model(40.0, 70.0);
+    for material in &mut flat_model.materials {
+        material.roughness = 0.45;
+    }
+    let flat_smooth = ModelBatch::new(
+        context,
+        &flat_model,
+        &placement,
+        harness.deferred.material_layout(),
+    )
+    .expect("smooth flat batch");
+    drop(flat);
+    let mapped = ModelBatch::new(
+        context,
+        &mapped_model,
+        &placement,
+        harness.deferred.material_layout(),
+    )
+    .expect("normal-mapped batch");
+
+    let frame = frame_with_low_sun(&harness.terrain);
+    let without = render(context, &harness, std::slice::from_ref(&flat_smooth), frame);
+    let with = render(context, &harness, std::slice::from_ref(&mapped), frame);
+    write_capture("model-flat-normals.png", &without);
+    write_capture("model-normal-mapped.png", &with);
+    support::check_reference(context, "model-normal-mapped.png", &with);
+
+    let changed = differing_pixels(&without, &with);
+    eprintln!("pixels changed by the normal map: {changed}");
+    assert!(
+        changed > 1_000,
+        "a normal map on every face should change real area, got {changed}"
+    );
+    // It must add variation rather than shifting the whole surface, which is what a map decoded in the
+    // wrong colour space does: a uniform tilt everywhere reads as a different light direction.
+    assert!(
+        with.luminance_deviation() > without.luminance_deviation(),
+        "normal-mapped {} should vary more than flat {}",
+        with.luminance_deviation(),
+        without.luminance_deviation()
+    );
+
+    // The silhouette is unchanged, stated exactly. Both frames are compared against the same scene with
+    // no models in it, which gives the set of pixels the geometry touched without classifying any colour
+    // -- and a colour classifier is precisely what cannot do this job, because a fragment the map
+    // darkened can cross a threshold while sitting still.
+    let bare = render(context, &harness, &[], frame);
+    let flat_coverage = touched_pixels(&without, &bare);
+    let mapped_coverage = touched_pixels(&with, &bare);
+    let moved = flat_coverage
+        .iter()
+        .zip(&mapped_coverage)
+        .filter(|(left, right)| left != right)
+        .count();
+    let touched = flat_coverage.iter().filter(|touched| **touched).count();
+    eprintln!("coverage: {touched} pixels touched, {moved} of them changed");
+    assert!(
+        touched > 10_000,
+        "the fixture must cover real area for that comparison to mean anything"
+    );
+    // Not zero, and the residue is real rather than tolerated slop: a shaded box fragment can land on
+    // exactly the terrain colour behind it, in which case it registers as untouched in one frame and
+    // touched in the other purely because the shading changed. That is a fraction of a percent and it is
+    // scattered; a geometric displacement moves whole edges and would be two orders of magnitude larger.
+    assert!(
+        moved * 500 < touched,
+        "a normal map must not move geometry: {moved} of {touched} touched pixels changed coverage"
+    );
+}
+
+#[test]
+fn a_metallic_material_loses_its_diffuse_term() {
+    // Two boxes differing only in the metallic channel of one map. A metal has no subsurface scattering,
+    // so it loses the whole diffuse term and regains only a narrow coloured lobe — which makes it
+    // *darker*, and the direction of the change is the assertion. A metallic path wired backwards would
+    // also "change the frame".
+    let Some(context) = context() else { return };
+    let harness = harness(context);
+    let placement = instances(&harness.terrain);
+
+    let build = |roughness: u8, metallic: u8| {
+        let mut model = box_model(40.0, 70.0);
+        model.images = vec![metallic_roughness(4, roughness, metallic)];
+        for material in &mut model.materials {
+            material.metallic_roughness_texture = Some(0);
+            // Both factors at one, so the map alone decides. glTF multiplies rather than replacing.
+            material.metallic = 1.0;
+            material.roughness = 1.0;
+        }
+        ModelBatch::new(
+            context,
+            &model,
+            &placement,
+            harness.deferred.material_layout(),
+        )
+        .expect("batch")
+    };
+    let dielectric = build(90, 0);
+    let metal = build(90, 255);
+
+    let frame = frame_with_low_sun(&harness.terrain);
+    let painted = render(context, &harness, std::slice::from_ref(&dielectric), frame);
+    let plated = render(context, &harness, std::slice::from_ref(&metal), frame);
+    write_capture("model-dielectric.png", &painted);
+    write_capture("model-metallic.png", &plated);
+    support::check_reference(context, "model-metallic.png", &plated);
+
+    // Over the whole frame, including the sky. The sky is identical in both, so it dilutes the difference
+    // rather than biasing it -- and the sky classifier is not available here, because this placement
+    // tints every third instance bluish.
+    let dull = mean_channel_sum(&painted, |_| true);
+    let shiny = mean_channel_sum(&plated, |_| true);
+    eprintln!("mean channel sum: dielectric {dull}, metal {shiny}");
+    assert!(
+        shiny < dull,
+        "a metal loses its diffuse term, so {shiny} must be below {dull}"
+    );
+
+    // And the roughness half of the same map reached the surface: a fully rough material has no
+    // highlight at all, so raising roughness must change the frame.
+    let rough = build(255, 0);
+    let matte = render(context, &harness, std::slice::from_ref(&rough), frame);
+    assert!(
+        differing_pixels(&painted, &matte) > 500,
+        "the roughness channel must reach the surface too"
+    );
+}
+
+#[test]
+fn alpha_tested_foliage_cuts_its_own_silhouette_and_its_own_shadow() {
+    // The whole reason the alpha test has to exist in the cascades and not only in the lit frame. Two
+    // renders of the same canopy, one masked and one opaque: the masked one must show sky through the
+    // gaps *and* must not lay a solid rectangle of shadow on the ground.
+    let Some(context) = context() else { return };
+    let harness = harness(context);
+    let placement = plantings(&harness.terrain, None);
+
+    let masked_model = foliage_model(70.0, 110.0, 40.0);
+    let masked = ModelBatch::new(
+        context,
+        &masked_model,
+        &placement,
+        harness.deferred.material_layout(),
+    )
+    .expect("masked batch");
+    assert!(masked.has_cutout(), "the canopy cuts and is two-sided");
+    assert!(masked.has_solid(), "the stem is neither");
+    assert!(
+        !ModelBatch::new(
+            context,
+            &box_model(10.0, 10.0),
+            &placement,
+            harness.deferred.material_layout(),
+        )
+        .expect("box batch")
+        .has_cutout(),
+        "a single-sided opaque model must stay on the solid path"
+    );
+    assert_eq!(
+        masked.triangle_count(),
+        12,
+        "four stem quads and two canopy quads"
+    );
+
+    // The same model with the cut turned off, which is what the frame looked like before the alpha test
+    // existed: two solid quads per plant.
+    // Only the cutoff changes. `double_sided` stays set, so this model takes the same pipeline and the
+    // same culling as the masked one — which is what makes the comparison below about the alpha test
+    // alone. Comparing against a single-sided variant instead was tried and confounded the measurement:
+    // culling the back of a crossed quad removes canopy area too, and it removed *more* than the alpha
+    // test did.
+    let mut solid_model = masked_model.clone();
+    solid_model.materials[1].alpha_mode = AlphaMode::Opaque;
+    let solid = ModelBatch::new(
+        context,
+        &solid_model,
+        &placement,
+        harness.deferred.material_layout(),
+    )
+    .expect("uncut batch");
+    assert!(
+        solid.has_cutout(),
+        "still two-sided, so still the same path"
+    );
+
+    let frame = frame_with_low_sun(&harness.terrain);
+    let cut = render(context, &harness, std::slice::from_ref(&masked), frame);
+    let uncut = render(context, &harness, std::slice::from_ref(&solid), frame);
+    write_capture("model-foliage-masked.png", &cut);
+    write_capture("model-foliage-solid.png", &uncut);
+    support::check_reference(context, "model-foliage-masked.png", &cut);
+
+    // Canopy area: the cut must remove a substantial and *predictable* share of it. The texture's alpha
+    // is a disc of radius 0.44 in a unit quad, so it keeps pi times 0.44 squared -- about 61% -- and the
+    // masked frame must therefore show something near two fifths less canopy. A range rather than a
+    // threshold, because both a test that never fired and a test that discarded everything would pass a
+    // one-sided one.
+    let count = |capture: &Capture| {
+        capture
+            .rgba()
+            .chunks_exact(4)
+            .filter(|pixel| is_canopy(pixel))
+            .count()
+    };
+    let (through, blocked) = (count(&cut), count(&uncut));
+    let kept = through as f64 / blocked as f64;
+    eprintln!("canopy pixels: masked {through}, solid {blocked}, kept {kept:.3}");
+    assert!(
+        (0.45..=0.78).contains(&kept),
+        "a disc of radius 0.44 keeps about 0.61 of its quad, but {kept:.3} survived"
+    );
+
+    // And the ground is lighter, because the shadow the canopy casts is now perforated rather than
+    // solid. Measured over the lit part of the frame: a cascade still casting the full rectangle would
+    // leave this unchanged even with the lit silhouette correct, which is exactly the half-done state
+    // worth catching.
+    let perforated = mean_channel_sum(&cut, |pixel| !is_sky(pixel));
+    let slab = mean_channel_sum(&uncut, |pixel| !is_sky(pixel));
+    eprintln!("mean lit channel sum: masked {perforated}, solid {slab}");
+    assert!(
+        perforated > slab,
+        "a perforated shadow must leave the ground lighter: {perforated} against {slab}"
+    );
+}
+
+#[test]
+fn sway_moves_a_canopy_over_time_and_leaves_it_still_in_calm_air() {
+    // Three properties in one place, because they are only meaningful together: sway moves geometry,
+    // sway is *reproducible* at a given time, and still air is a genuine no-op rather than a small
+    // displacement. The third is what keeps every committed reference valid — the whole existing set was
+    // rendered in calm air.
+    let Some(context) = context() else { return };
+    let harness = harness(context);
+    let model = foliage_model(70.0, 110.0, 40.0);
+
+    let rigid = ModelBatch::new(
+        context,
+        &model,
+        &plantings(&harness.terrain, None),
+        harness.deferred.material_layout(),
+    )
+    .expect("rigid batch");
+    let swaying = ModelBatch::new(
+        context,
+        &model,
+        &plantings(&harness.terrain, Some(SwayProfile::GRASS)),
+        harness.deferred.material_layout(),
+    )
+    .expect("swaying batch");
+
+    let calm = frame_with_low_sun(&harness.terrain);
+    let mut windy = calm;
+    windy.environment.weather.wind = [12.0, 4.0];
+
+    // Still air: the swaying batch must render identically at two different times, byte for byte. A sway
+    // that displaced anything at zero wind would have invalidated every reference in the tree, all of
+    // which were rendered in calm air.
+    //
+    // Compared against *itself* at another time rather than against the rigid batch, which would fail for
+    // a reason that is not a bug: a swaying batch reports a taller caster than a rigid one — see
+    // `ModelInstance::sway_headroom` — so its shadow cascades are fitted to what it *can* do rather than
+    // to what the wind is doing this frame, and the fitted matrices differ by a hair in calm air too.
+    let still_rigid = render(context, &harness, std::slice::from_ref(&rigid), calm);
+    let still_swaying = render(context, &harness, std::slice::from_ref(&swaying), calm);
+    let still_swaying_later = render(
+        context,
+        &harness,
+        std::slice::from_ref(&swaying),
+        calm.at_time(7.5),
+    );
+    assert_eq!(
+        still_swaying.rgba(),
+        still_swaying_later.rgba(),
+        "sway in calm air must be exactly nothing, at any time"
+    );
+
+    // Wind, at two times. Both must differ from the still frame and from each other.
+    let early = render(
+        context,
+        &harness,
+        std::slice::from_ref(&swaying),
+        windy.at_time(1.0),
+    );
+    let later = render(
+        context,
+        &harness,
+        std::slice::from_ref(&swaying),
+        windy.at_time(1.9),
+    );
+    write_capture("model-sway-early.png", &early);
+    write_capture("model-sway-later.png", &later);
+    support::check_reference(context, "model-sway-early.png", &early);
+
+    assert_ne!(
+        still_swaying.rgba(),
+        early.rgba(),
+        "wind must displace the canopy"
+    );
+    assert_ne!(
+        early.rgba(),
+        later.rgba(),
+        "the canopy must move between two times"
+    );
+
+    // Reproducible: the same time gives the same frame. Nothing in the renderer may read a clock.
+    let again = render(
+        context,
+        &harness,
+        std::slice::from_ref(&swaying),
+        windy.at_time(1.0),
+    );
+    assert_eq!(
+        early.rgba(),
+        again.rgba(),
+        "the same scene time must give the same frame"
+    );
+
+    // And a rigid batch is unaffected by wind, so the displacement comes from the profile rather than
+    // from the wind reaching every vertex.
+    let rigid_in_wind = render(
+        context,
+        &harness,
+        std::slice::from_ref(&rigid),
+        windy.at_time(1.0),
+    );
+    assert_eq!(
+        still_rigid.rgba(),
+        rigid_in_wind.rgba(),
+        "wind must not move a rigid instance"
+    );
 }

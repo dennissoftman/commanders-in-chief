@@ -84,7 +84,77 @@ pub struct ModelVertex {
     pub normal: [f32; 3],
     /// First texture coordinate set, or zero when the primitive has none.
     pub uv: [f32; 2],
+    /// Unit tangent in `xyz` and the bitangent's handedness in `w`, as glTF defines it.
+    ///
+    /// A normal map stores a perturbation in *texture* space, so reading one needs the surface basis
+    /// that texture space corresponds to — and that basis is a property of how the UVs were laid out,
+    /// which nothing but the mesh knows. glTF makes `TANGENT` optional and says to derive it from the
+    /// texture coordinates when a normal-mapped primitive omits it, which is what
+    /// [`generate_tangents`] does.
+    ///
+    /// `w` is `+1` or `-1` and selects which way the bitangent points, because a mirrored UV island
+    /// flips handedness without changing either the normal or the tangent. Storing the sign is four
+    /// bytes; storing the bitangent itself is twelve and can disagree with the other two.
+    pub tangent: [f32; 4],
 }
+
+impl Default for ModelVertex {
+    /// A vertex at the origin facing `+Z`, with no texture coordinates and an unset tangent.
+    ///
+    /// The tangent is `(0, 0, 0, 1)` rather than a unit vector, matching what the importer writes for a
+    /// primitive whose material has no normal map: nothing reads it, and a zero says so.
+    fn default() -> Self {
+        Self {
+            position: [0.0; 3],
+            normal: [0.0, 0.0, 1.0],
+            uv: [0.0; 2],
+            tangent: [0.0, 0.0, 0.0, 1.0],
+        }
+    }
+}
+
+/// How a material's alpha is meant to be interpreted.
+///
+/// glTF's three modes, kept as an enum rather than reduced to a boolean. The distinction is
+/// load-bearing for a deferred renderer: masked geometry can be drawn in the G-buffer and in every
+/// shadow cascade by discarding fragments, and blended geometry fundamentally cannot, because a
+/// G-buffer pixel holds one material and blending needs two.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AlphaMode {
+    /// Alpha is ignored and the surface is fully opaque.
+    Opaque,
+    /// A fragment is drawn or discarded according to whether its alpha reaches `cutoff`.
+    ///
+    /// The mode foliage is authored in: a leaf card is a quad whose texture's alpha is the leaf
+    /// outline, and everything a renderer needs to know about it is where to cut.
+    Masked {
+        /// Alpha at or above which the fragment survives.
+        cutoff: f32,
+    },
+    /// Alpha is a coverage fraction to blend by.
+    Blended,
+}
+
+impl AlphaMode {
+    /// The alpha at which a fragment survives, for a mode that cuts.
+    ///
+    /// `None` for [`Self::Opaque`], which draws every fragment. [`Self::Blended`] reports the same
+    /// cutoff a masked material would default to, because a renderer that cannot blend has to choose
+    /// between drawing a blended surface as opaque and not drawing it at all — and a cut at half
+    /// coverage is the closer of the two answers. Whether to take that answer is the renderer's
+    /// decision; this only supplies the figure.
+    #[must_use]
+    pub const fn cutoff(self) -> Option<f32> {
+        match self {
+            Self::Opaque => None,
+            Self::Masked { cutoff } => Some(cutoff),
+            Self::Blended => Some(DEFAULT_ALPHA_CUTOFF),
+        }
+    }
+}
+
+/// The cutoff glTF applies when a masked material declares none.
+pub const DEFAULT_ALPHA_CUTOFF: f32 = 0.5;
 
 /// One imported triangle list.
 #[derive(Debug, Clone, PartialEq)]
@@ -97,21 +167,110 @@ pub struct ModelPrimitive {
     pub material: Option<usize>,
 }
 
+impl ModelPrimitive {
+    /// Fills in a tangent frame from this primitive's positions and texture coordinates.
+    ///
+    /// Public because a `Model` is a plain struct that anything may build: test fixtures do, and so will
+    /// procedural content and the map editor. Such a caller has the same problem an exporter that omits
+    /// `TANGENT` has — a normal map needs the surface basis its texture space corresponds to, and only
+    /// the mesh knows it — and should not have to reimplement the derivation to solve it.
+    ///
+    /// The importer calls this for any normal-mapped primitive whose source omitted `TANGENT`. Calling it
+    /// on a primitive that already has one overwrites it, which is the caller's decision to make.
+    #[must_use]
+    pub fn with_generated_tangents(mut self) -> Self {
+        generate_tangents(&mut self.vertices, &self.indices);
+        self
+    }
+}
+
 /// A physically-based material, in the subset a first renderer needs.
+///
+/// # Why the map indices are separate fields rather than a table
+///
+/// glTF allows any texture to be shared between materials and between slots, so the natural encoding
+/// is an index per slot into one image list. Naming the slots explicitly rather than holding a
+/// `Vec<(Slot, usize)>` is what makes the *absence* of a map a type-level fact: a renderer reads
+/// `normal_texture` and gets `None`, instead of searching a list and having to decide what a missing
+/// entry means.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelMaterial {
     /// Material name, or an empty string when unnamed.
     pub name: String,
     /// Linear base colour and alpha.
     pub base_color: [f32; 4],
-    /// Metallic factor in `0..=1`.
+    /// Metallic factor in `0..=1`, multiplied by the blue channel of
+    /// [`Self::metallic_roughness_texture`] where one is present.
     pub metallic: f32,
-    /// Roughness factor in `0..=1`.
+    /// Roughness factor in `0..=1`, multiplied by the green channel of
+    /// [`Self::metallic_roughness_texture`] where one is present.
     pub roughness: f32,
     /// Index of the base-colour texture within the glTF's image list, if any.
+    ///
+    /// This one image is sRGB-encoded; every other map below is not. That asymmetry is the spec's, and
+    /// it is worth stating here because it decides the texture format each map uploads in: base colour
+    /// carries a colour a human authored, and the rest carry measurements.
     pub base_color_texture: Option<usize>,
-    /// Whether the material asks for alpha blending rather than opaque or masked rendering.
-    pub blended: bool,
+    /// Index of the tangent-space normal map, if any.
+    pub normal_texture: Option<usize>,
+    /// Multiplier on the normal map's `xy`, which is how strongly it perturbs the surface.
+    ///
+    /// One leaves the map as authored. Applied to the tangent-space `xy` before the `z` is rebuilt, so
+    /// a scale of zero yields the geometric normal exactly rather than a flattened approximation of it.
+    pub normal_scale: f32,
+    /// Index of the combined metallic-roughness map, if any.
+    ///
+    /// glTF packs both into one image: roughness in green, metallic in blue. Red and alpha are unused
+    /// by the core spec, which is why an occlusion map is so often the same image.
+    pub metallic_roughness_texture: Option<usize>,
+    /// Index of the ambient-occlusion map, if any. Occlusion is in red.
+    pub occlusion_texture: Option<usize>,
+    /// How much of the occlusion map to apply, in `0..=1`.
+    pub occlusion_strength: f32,
+    /// Linear emissive colour, before [`Self::emissive_strength`].
+    pub emissive: [f32; 3],
+    /// Multiplier on [`Self::emissive`], from `KHR_materials_emissive_strength`.
+    ///
+    /// One when the extension is absent, which is the value that makes the extension's presence
+    /// invisible to a reader that does not care about it.
+    pub emissive_strength: f32,
+    /// How the material's alpha is meant to be interpreted.
+    pub alpha_mode: AlphaMode,
+    /// Whether the material asks to be drawn from both sides.
+    ///
+    /// Foliage needs it: a leaf card is a single quad meant to be seen from either face, and
+    /// back-face culling makes half of a canopy vanish depending on where the camera stands.
+    pub double_sided: bool,
+}
+
+impl Default for ModelMaterial {
+    /// The material glTF defines for a primitive that declares none.
+    ///
+    /// Its figures are the spec's, not a choice made here: opaque white, fully metallic, fully rough. Two
+    /// of those are surprising and both are deliberate in the spec — a fully rough metal has no visible
+    /// highlight and almost no diffuse term, so a mesh that reaches a renderer with no material at all
+    /// looks obviously unfinished rather than plausibly grey.
+    ///
+    /// A renderer wanting a *neutral* stand-in should not use this; see `pack_materials` in
+    /// `cic-render`, which constructs a mid-grey dielectric and says why.
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            base_color: [1.0; 4],
+            metallic: 1.0,
+            roughness: 1.0,
+            base_color_texture: None,
+            normal_texture: None,
+            normal_scale: 1.0,
+            metallic_roughness_texture: None,
+            occlusion_texture: None,
+            occlusion_strength: 1.0,
+            emissive: [0.0; 3],
+            emissive_strength: 1.0,
+            alpha_mode: AlphaMode::Opaque,
+            double_sided: false,
+        }
+    }
 }
 
 /// An imported model.
@@ -187,6 +346,8 @@ pub fn import_model(bytes: &[u8], limits: ModelLimits) -> Result<Model, ModelErr
         .materials()
         .map(|material| {
             let pbr = material.pbr_metallic_roughness();
+            let normal = material.normal_texture();
+            let occlusion = material.occlusion_texture();
             ModelMaterial {
                 name: material.name().unwrap_or_default().to_owned(),
                 base_color: pbr.base_color_factor(),
@@ -195,9 +356,43 @@ pub fn import_model(bytes: &[u8], limits: ModelLimits) -> Result<Model, ModelErr
                 base_color_texture: pbr
                     .base_color_texture()
                     .map(|info| info.texture().source().index()),
-                blended: matches!(material.alpha_mode(), gltf::material::AlphaMode::Blend),
+                normal_texture: normal.as_ref().map(|info| info.texture().source().index()),
+                // The scale is the map's, so it defaults to one only when there is no map to scale.
+                normal_scale: normal
+                    .as_ref()
+                    .map_or(1.0, gltf::material::NormalTexture::scale),
+                metallic_roughness_texture: pbr
+                    .metallic_roughness_texture()
+                    .map(|info| info.texture().source().index()),
+                occlusion_texture: occlusion
+                    .as_ref()
+                    .map(|info| info.texture().source().index()),
+                occlusion_strength: occlusion
+                    .as_ref()
+                    .map_or(1.0, gltf::material::OcclusionTexture::strength),
+                emissive: material.emissive_factor(),
+                // Absent means one rather than zero: the extension multiplies the factor, so a document
+                // without it must read exactly as it did before the extension existed.
+                emissive_strength: material.emissive_strength().unwrap_or(1.0),
+                alpha_mode: match material.alpha_mode() {
+                    gltf::material::AlphaMode::Opaque => AlphaMode::Opaque,
+                    gltf::material::AlphaMode::Mask => AlphaMode::Masked {
+                        cutoff: material.alpha_cutoff().unwrap_or(DEFAULT_ALPHA_CUTOFF),
+                    },
+                    gltf::material::AlphaMode::Blend => AlphaMode::Blended,
+                },
+                double_sided: material.double_sided(),
             }
         })
+        .collect::<Vec<_>>();
+
+    // Which materials carry a normal map, so a primitive using one gets tangents derived when its
+    // author omitted them. Collected before the walk because a primitive knows only its material
+    // *index*, and deriving tangents for every primitive regardless would spend the work on the
+    // majority of meshes that will never read a tangent.
+    let normal_mapped = materials
+        .iter()
+        .map(|material| material.normal_texture.is_some())
         .collect::<Vec<_>>();
 
     let scene = document
@@ -214,6 +409,7 @@ pub fn import_model(bytes: &[u8], limits: ModelLimits) -> Result<Model, ModelErr
             0,
             &buffers,
             limits,
+            &normal_mapped,
             &mut primitives,
             &mut totals,
         )?;
@@ -348,12 +544,14 @@ const IDENTITY: [[f32; 4]; 4] = [
     [0.0, 0.0, 0.0, 1.0],
 ];
 
+#[allow(clippy::too_many_arguments)]
 fn walk(
     node: &gltf::Node<'_>,
     parent: [[f32; 4]; 4],
     depth: usize,
     buffers: &[gltf::buffer::Data],
     limits: ModelLimits,
+    normal_mapped: &[bool],
     output: &mut Vec<ModelPrimitive>,
     totals: &mut Totals,
 ) -> Result<(), ModelError> {
@@ -376,7 +574,12 @@ fn walk(
                 });
             }
             output.push(import_primitive(
-                &primitive, world, buffers, limits, totals,
+                &primitive,
+                world,
+                buffers,
+                limits,
+                normal_mapped,
+                totals,
             )?);
         }
     }
@@ -388,6 +591,7 @@ fn walk(
             depth.saturating_add(1),
             buffers,
             limits,
+            normal_mapped,
             output,
             totals,
         )?;
@@ -401,6 +605,7 @@ fn import_primitive(
     world: [[f32; 4]; 4],
     buffers: &[gltf::buffer::Data],
     limits: ModelLimits,
+    normal_mapped: &[bool],
     totals: &mut Totals,
 ) -> Result<ModelPrimitive, ModelError> {
     if primitive.mode() != gltf::mesh::Mode::Triangles {
@@ -430,6 +635,7 @@ fn import_primitive(
     let uvs = reader
         .read_tex_coords(0)
         .map(|iter| iter.into_f32().collect::<Vec<_>>());
+    let tangents: Option<Vec<[f32; 4]>> = reader.read_tangents().map(Iterator::collect);
 
     let indices = match reader.read_indices() {
         Some(indices) => indices.into_u32().collect::<Vec<_>>(),
@@ -469,6 +675,24 @@ fn import_primitive(
             .as_ref()
             .and_then(|set| set.get(position_index).copied())
             .unwrap_or([0.0, 0.0, 0.0]);
+        // A supplied tangent is a direction in the same space as the positions, so it takes the same
+        // basis as the normal. Its `w` is a handedness sign and must pass through untransformed --
+        // scaling or rotating it would turn a flag into a number.
+        let tangent = tangents
+            .as_ref()
+            .and_then(|set| set.get(position_index).copied())
+            .map_or([0.0, 0.0, 0.0, 1.0], |tangent| {
+                let direction = normalize(transform_direction(
+                    normal_matrix,
+                    [tangent[0], tangent[1], tangent[2]],
+                ));
+                [
+                    direction[0],
+                    direction[1],
+                    direction[2],
+                    if tangent[3] < 0.0 { -1.0 } else { 1.0 },
+                ]
+            });
         vertices.push(ModelVertex {
             position: transform_point(world, *position),
             normal: normalize(transform_direction(normal_matrix, normal)),
@@ -476,10 +700,22 @@ fn import_primitive(
                 .as_ref()
                 .and_then(|set| set.get(position_index).copied())
                 .unwrap_or([0.0, 0.0]),
+            tangent,
         });
     }
     if normals.is_none() {
         generate_flat_normals(&mut vertices, &indices);
+    }
+    // Derived only where a tangent will actually be read. glTF requires `TANGENT` on a normal-mapped
+    // primitive in principle and exporters routinely omit it, so the fallback is not an edge case; but
+    // a primitive with no normal map has nothing to read a tangent frame in, and the derivation is the
+    // most expensive thing in this function.
+    let wants_tangents = primitive
+        .material()
+        .index()
+        .is_some_and(|index| normal_mapped.get(index).copied().unwrap_or(false));
+    if tangents.is_none() && wants_tangents {
+        generate_tangents(&mut vertices, &indices);
     }
 
     Ok(ModelPrimitive {
@@ -513,6 +749,137 @@ fn generate_flat_normals(vertices: &mut [ModelVertex], indices: &[u32]) {
     for vertex in vertices.iter_mut() {
         vertex.normal = normalize(vertex.normal);
     }
+}
+
+/// Derives a per-vertex tangent frame from the texture coordinates, for a normal-mapped primitive
+/// whose author supplied none.
+///
+/// # What it computes
+///
+/// A normal map's `x` axis is "the direction on the surface along which `u` increases". For one
+/// triangle that is a linear system: the two edge vectors are known in both position and UV space, so
+/// solving the 2x2 gives the position-space direction of `du` and of `dv` exactly. Each triangle's
+/// solution is accumulated at its three vertices and the sum normalized, which averages the frame
+/// across a smooth surface the same way the flat-normal fallback averages face normals.
+///
+/// The accumulated tangent is then Gram-Schmidt orthogonalized against the *vertex* normal rather than
+/// used as it came out. The two disagree wherever the surface is curved — the tangent is a chord
+/// direction and the normal is interpolated — and a basis whose axes are not perpendicular skews the
+/// perturbation, tilting a normal map's flat regions.
+///
+/// # Handedness
+///
+/// `w` records whether the bitangent is `cross(normal, tangent)` or its negation, which is decided by
+/// the sign of the UV parametrisation's determinant. A mirrored UV island — an extremely common way to
+/// texture a symmetric object with half the atlas — has the opposite sign from its twin while sharing
+/// both the normal and the tangent direction, so without this the lighting on one half of the model is
+/// inverted along one axis. That failure looks like a lighting bug rather than a data one, which is
+/// why it is worth the four bytes.
+///
+/// # Degenerate cases
+///
+/// A triangle with zero UV area contributes nothing rather than an infinity: its determinant is zero
+/// and the solve is skipped. A vertex left with no contribution at all — every triangle touching it
+/// degenerate, or the primitive having no texture coordinates — falls back to any unit vector
+/// perpendicular to its normal, which is an arbitrary but *valid* frame. The alternative, a zero
+/// tangent, produces a zero-length basis vector and a normal that is not a direction.
+pub fn generate_tangents(vertices: &mut [ModelVertex], indices: &[u32]) {
+    let mut accumulated = vec![[0.0f32; 3]; vertices.len()];
+    let mut handedness = vec![0.0f32; vertices.len()];
+
+    for triangle in indices.chunks_exact(3) {
+        let [a, b, c] = [
+            triangle[0] as usize,
+            triangle[1] as usize,
+            triangle[2] as usize,
+        ];
+        let edge1 = subtract(vertices[b].position, vertices[a].position);
+        let edge2 = subtract(vertices[c].position, vertices[a].position);
+        let uv1 = [
+            vertices[b].uv[0] - vertices[a].uv[0],
+            vertices[b].uv[1] - vertices[a].uv[1],
+        ];
+        let uv2 = [
+            vertices[c].uv[0] - vertices[a].uv[0],
+            vertices[c].uv[1] - vertices[a].uv[1],
+        ];
+        // The determinant of the UV edge pair. Zero means the triangle occupies no area in texture
+        // space, so no direction on it corresponds to `du` and there is nothing to contribute.
+        let determinant = uv1[0] * uv2[1] - uv2[0] * uv1[1];
+        if determinant.abs() < 1.0e-12 || !determinant.is_finite() {
+            continue;
+        }
+        let inverse = 1.0 / determinant;
+        let tangent = [
+            (edge1[0] * uv2[1] - edge2[0] * uv1[1]) * inverse,
+            (edge1[1] * uv2[1] - edge2[1] * uv1[1]) * inverse,
+            (edge1[2] * uv2[1] - edge2[2] * uv1[1]) * inverse,
+        ];
+        if !tangent.iter().all(|value| value.is_finite()) {
+            continue;
+        }
+        for index in [a, b, c] {
+            for (component, contribution) in accumulated[index].iter_mut().zip(tangent) {
+                *component += contribution;
+            }
+            // Summed rather than assigned, so a vertex shared between islands of opposite handedness
+            // takes whichever contributed more triangles instead of whichever was visited last.
+            handedness[index] += determinant;
+        }
+    }
+
+    for (index, vertex) in vertices.iter_mut().enumerate() {
+        let normal = vertex.normal;
+        let raw = accumulated[index];
+        // Gram-Schmidt: remove the component along the normal, leaving the part that lies in the
+        // tangent plane. See the handedness note above for why the sign is carried separately.
+        let along = dot(raw, normal);
+        let orthogonal = [
+            raw[0] - normal[0] * along,
+            raw[1] - normal[1] * along,
+            raw[2] - normal[2] * along,
+        ];
+        let length = length(orthogonal);
+        let direction = if length > 1.0e-8 && length.is_finite() {
+            [
+                orthogonal[0] / length,
+                orthogonal[1] / length,
+                orthogonal[2] / length,
+            ]
+        } else {
+            perpendicular(normal)
+        };
+        vertex.tangent = [
+            direction[0],
+            direction[1],
+            direction[2],
+            if handedness[index] < 0.0 { -1.0 } else { 1.0 },
+        ];
+    }
+}
+
+/// Any unit vector perpendicular to `normal`.
+///
+/// The axis crossed against is chosen to be the one `normal` points along *least*, so the cross
+/// product is never near zero — crossing against a fixed axis fails exactly when the surface faces
+/// along it, which for terrain-standing geometry is the common case rather than a rare one.
+fn perpendicular(normal: [f32; 3]) -> [f32; 3] {
+    let axis = if normal[0].abs() <= normal[1].abs() && normal[0].abs() <= normal[2].abs() {
+        [1.0, 0.0, 0.0]
+    } else if normal[1].abs() <= normal[2].abs() {
+        [0.0, 1.0, 0.0]
+    } else {
+        [0.0, 0.0, 1.0]
+    };
+    normalize(cross(normal, axis))
+}
+
+fn dot(left: [f32; 3], right: [f32; 3]) -> f32 {
+    left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
+}
+
+fn length(vector: [f32; 3]) -> f32 {
+    dot(vector, vector).sqrt()
 }
 
 fn multiply(left: [[f32; 4]; 4], right: [[f32; 4]; 4]) -> [[f32; 4]; 4] {

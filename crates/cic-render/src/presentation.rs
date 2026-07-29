@@ -183,6 +183,15 @@ impl SurfaceRenderer {
         Ok(())
     }
 
+    /// Discards the temporal accumulation, so the next presented frame starts a new sequence.
+    ///
+    /// Forwarded rather than reached through, because whether a transition is a continuation is the
+    /// *caller's* knowledge and nothing in the renderer can infer it. See
+    /// [`DeferredRenderer::reset_history`].
+    pub fn reset_history(&self) {
+        self.deferred.reset_history();
+    }
+
     /// Turns per-pass GPU timing on or off, returning whether it is on afterwards.
     ///
     /// Survives a resize and a settings change, both of which replace the renderer that owns the query

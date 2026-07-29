@@ -5,7 +5,12 @@
 // Lighting is deferred because the shadow and occlusion terms are screen-space: each needs the whole
 // depth buffer resolved before any pixel can be lit, which a forward pass cannot provide.
 
-// Peak highlight strength, reached only by a fully smooth material.
+// Peak highlight strength for a dielectric, reached only by a fully smooth material.
+//
+// It doubles as this renderer's reflectance at normal incidence. The standard figure for common
+// insulators is 0.04, from a refractive index near 1.5, and 0.06 is close enough that carrying two
+// constants a fiftieth apart would be a distinction the eye cannot make and a second thing to keep in
+// step.
 const SPECULAR_STRENGTH: f32 = 0.06;
 
 // What full saturation does to a surface. Both are multipliers on what the G-buffer already held, so a pale
@@ -37,9 +42,14 @@ fn lighting_fragment(input: FullscreenOutput) -> @location(0) vec4<f32> {
     let normal = normalize(normal_roughness.xyz);
 
     // The material, as written by whichever surface shader drew this pixel, then weathered.
-    let material = textureLoad(g_albedo, pixel, 0).rgb;
+    let stored = textureLoad(g_albedo, pixel, 0);
+    let material = stored.rgb;
     var albedo = material;
     var roughness = normal_roughness.w;
+    // Alpha carries the metallic factor. Terrain writes zero and so does every dielectric material, and
+    // at zero every expression below reduces to exactly what this pass computed before the channel
+    // carried anything — which is what keeps the committed references byte-identical.
+    var metallic = clamp(stored.a, 0.0, 1.0);
 
     // Wet ground is *darker and smoother*, not bluer. Water fills the pores, so less light scatters back
     // out of the surface and what does reflect leaves more coherently. Darkening is the larger half of the
@@ -55,6 +65,21 @@ fn lighting_fragment(input: FullscreenOutput) -> @location(0) vec4<f32> {
     let settled = smoothstep(SNOW_SLOPE_LIMIT, 1.0, normal.z) * snow;
     albedo = mix(albedo, SNOW_ALBEDO, settled);
     roughness = mix(roughness, SNOW_ROUGHNESS, settled);
+    // Snow lying on a metal hull is snow, not metal. Without this a snowed-over vehicle keeps a bright
+    // coloured highlight and no diffuse term, which reads as a chrome silhouette rather than a covered
+    // one.
+    metallic = mix(metallic, 0.0, settled);
+
+    // A metal has no subsurface scattering, so it has no diffuse term at all: what a dielectric returns
+    // diffusely, a metal returns in its specular lobe, tinted by its own colour. Those are the two
+    // substitutions below, and both are the identity at zero.
+    let diffuse_albedo = albedo * (1.0 - metallic);
+    // Reflectance at normal incidence: the dielectric constant for an insulator, the material's own
+    // colour for a metal. This is what makes a copper highlight copper and a painted one white.
+    let reflectance = mix(vec3<f32>(SPECULAR_STRENGTH), albedo, metallic);
+    // The ambient term is deliberately *not* scaled by metalness. A metal in shade is a mirror of the
+    // sky, so `albedo * ambient` is already the right answer for it — the same expression a dielectric
+    // wants, for a different reason.
     let view_direction = normalize(camera.camera_position.xyz - world);
     var primary_visibility = shadow_visibility(world, normal);
     // Fade toward fully lit at grazing incidence to the primary light. See SHADOW_INCIDENCE_FADE.
@@ -98,7 +123,7 @@ fn lighting_fragment(input: FullscreenOutput) -> @location(0) vec4<f32> {
             );
             let light_direction = -light.source_direction.xyz / direction_length;
             let diffuse_factor = max(dot(normal, light_direction), 0.0);
-            color += albedo * light.diffuse.rgb * diffuse_factor * visibility;
+            color += diffuse_albedo * light.diffuse.rgb * diffuse_factor * visibility;
             // Highlight strength falls off with roughness, not just its width, so a fully rough
             // material has no highlight at all. A fixed strength instead gives every surface a
             // sheen regardless of what its material declared, once per light.
@@ -107,7 +132,7 @@ fn lighting_fragment(input: FullscreenOutput) -> @location(0) vec4<f32> {
                 max(dot(normal, half_vector), 0.0),
                 mix(64.0, 8.0, roughness)
             );
-            let specular_strength = SPECULAR_STRENGTH * (1.0 - roughness);
+            let specular_strength = reflectance * (1.0 - roughness);
             color += light.diffuse.rgb * specular * specular_strength * visibility;
         }
     }

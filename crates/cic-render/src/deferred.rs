@@ -16,7 +16,7 @@
 //! 5. lighting       reconstruct world position from depth, apply light with shadow and AO -> HDR
 //! 6. water          procedural waves, blended into the HDR target
 //! 7. composite      tone map, downsample and sharpen -> the caller's target
-//! 8. antialias      luma edge-directed blend -> the caller's target, when enabled
+//! 8. antialias      a luma edge-directed blend, or a temporal resolve, when enabled
 //! ```
 //!
 //! Water sits *inside* the HDR target rather than being composited over the finished image, so its
@@ -36,6 +36,18 @@
 //! intermediate and no extra pass, so the default path costs exactly what it did before either setting
 //! existed.
 //!
+//! # The motion target, which is written whatever pass 8 does
+//!
+//! The G-buffer carries a fourth attachment: the texture-coordinate offset from each fragment to where the
+//! same surface point sat in the previous frame. Only the temporal resolve reads it, and it is written
+//! unconditionally — because the alternative is a second G-buffer pipeline per geometry kind, differing from
+//! the first in one attachment, and four pipelines to keep in step rather than two. Two bytes a channel over
+//! two channels is 4.6 MB at 1920x1200 and one more write per fragment, which the per-pass timer makes
+//! visible rather than a matter of opinion.
+//!
+//! Nothing but the temporal resolve reads it, so with that resolve off the frame is unchanged — which is
+//! what keeps every committed reference byte-identical across this addition.
+//!
 //! The G-buffer stores no world position. It is reconstructed from depth in step 5, for the reason
 //! documented at `world_from_depth` in `scene.wgsl`: a half-float position target
 //! quantises to whole world units past 1024, which striped self-shadowing across the whole terrain in
@@ -48,12 +60,12 @@ use std::ops::Range;
 
 use crate::RenderError;
 use crate::culling::{Frustum, contiguous_runs};
-use crate::display::DisplaySettings;
+use crate::display::{DisplaySettings, jitter_offset};
 use crate::environment::Environment;
 use crate::gpu::{DEPTH_FORMAT, GpuContext};
 use crate::model::{ModelBatch, buffer_layouts};
 use crate::shadow::{CASCADE_COUNT, CASCADE_RESOLUTION, Cascade, fit_cascades};
-use crate::terrain::{DirectionalLight, TerrainRenderer};
+use crate::terrain::{Animation, DirectionalLight, Motion, TerrainRenderer};
 use crate::timing::{FrameTimings, PassTimer, TimedPass};
 use crate::view::{Projection, invert, look_at, multiply, perspective};
 use crate::water::WaterBody;
@@ -73,6 +85,26 @@ pub const COVERAGE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R16Float;
 
 /// Ambient occlusion, a single unsigned channel.
 pub const AO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
+
+/// Texture-coordinate motion since the previous frame, two signed channels.
+///
+/// Half float rather than `Rg8Snorm`: the values are *fractions of the screen*, so a pixel moving one pixel
+/// at 1920 wide has a motion of 0.0005 — which eight bits over a range of `-1..=1` quantises to zero. The
+/// slow, sub-pixel motion a temporal resolve exists to accumulate is exactly the range an integer format
+/// cannot represent.
+pub const MOTION_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg16Float;
+
+/// The accumulated temporal history, at output size.
+///
+/// Not the output format, and the reason is precision rather than range. The history is a running average of
+/// eight-bit inputs, so its *values* fit in eight bits but its increments do not: at a history weight of 0.9
+/// each frame contributes a tenth of a step, which an eight-bit store rounds to either zero or one step and
+/// so either freezes the accumulation or oscillates around it. A float history stores the average of the
+/// samples rather than the nearest representable neighbour of it.
+pub const HISTORY_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+
+/// Byte size of the temporal resolve's own uniform block: one vec4.
+const TEMPORAL_UNIFORM_BYTES: usize = 16;
 
 /// The size the occlusion *estimate* is computed at, for a given render size.
 ///
@@ -157,6 +189,16 @@ pub struct DeferredFrame {
     /// would make it irreproducible — the wall clock — is kept out of the renderer entirely. The
     /// caller running a window advances this; a test pins it.
     pub time: f32,
+    /// Which sub-pixel jitter phase this frame is rendered at.
+    ///
+    /// A frame parameter for the same reason [`Self::time`] is one, and it is the reason a temporal capture
+    /// is reproducible at all: the renderer holds no counter, so a test that renders phases 0 to 7 in order
+    /// produces the same eight frames every run and on every machine. A caller running a window passes its
+    /// own frame ordinal, which [`crate::display::jitter_offset`] wraps into the cycle.
+    ///
+    /// Ignored unless the display settings ask for a temporal resolve. Without one the projection is
+    /// unjittered whatever this says, which is what keeps every committed reference valid.
+    pub jitter: u32,
 }
 
 impl DeferredFrame {
@@ -179,6 +221,7 @@ impl DeferredFrame {
             shadow_distance: DEFAULT_SHADOW_DISTANCE,
             environment,
             time: 0.0,
+            jitter: 0,
         }
     }
 
@@ -202,6 +245,13 @@ impl DeferredFrame {
         self.time = time;
         self
     }
+
+    /// Returns the frame with its jitter phase replaced.
+    #[must_use]
+    pub const fn at_jitter(mut self, jitter: u32) -> Self {
+        self.jitter = jitter;
+        self
+    }
 }
 
 /// Every render target the chain writes, and the two sizes it writes them at.
@@ -221,7 +271,14 @@ pub struct DeferredTargets {
     shadow_layers: Vec<wgpu::TextureView>,
     ao_raw: wgpu::TextureView,
     ao_blurred: wgpu::TextureView,
+    motion: wgpu::TextureView,
     hdr: wgpu::TextureView,
+    /// The temporal history: one two-layer texture, read as an array and written a layer at a time.
+    ///
+    /// One texture rather than two, so the resolve needs one bind group with the layer as a uniform instead
+    /// of two bind groups that must not drift apart. `None` unless the settings asked for a temporal
+    /// resolve, since two float targets at output size is real memory to spend on a pass that will not run.
+    history: Option<HistoryTargets>,
     /// The tone-mapped image, at output size and in the output format, when a pass reads it.
     ///
     /// `None` with antialiasing off, and then the composite writes into the caller's target directly.
@@ -330,7 +387,11 @@ impl DeferredTargets {
                 occlusion_height,
             ),
             ao_blurred: screen("cic-render ao blurred", AO_FORMAT),
+            motion: screen("cic-render motion", MOTION_FORMAT),
             hdr: screen("cic-render hdr scene", HDR_FORMAT),
+            history: display
+                .needs_history()
+                .then(|| HistoryTargets::new(device, width, height)),
             // At output size, not render size: the composite has already downsampled by the time this
             // is written, so the antialias pass reading it measures edges in pixels the viewer sees.
             ldr: display
@@ -374,6 +435,48 @@ impl DeferredTargets {
     }
 }
 
+/// The two temporal history layers.
+///
+/// One texture of two layers rather than two textures, so the pair cannot drift apart in size or format —
+/// they are one allocation with one descriptor. Each layer has its own single-layer view, which serves as
+/// both the attachment it is written through and the sampled resource it is read through, in alternate
+/// frames.
+#[derive(Debug)]
+struct HistoryTargets {
+    layers: [wgpu::TextureView; 2],
+}
+
+impl HistoryTargets {
+    fn new(device: &wgpu::Device, width: u32, height: u32) -> Self {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("cic-render temporal history"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 2,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: HISTORY_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let layer = |index: u32| {
+            texture.create_view(&wgpu::TextureViewDescriptor {
+                label: Some("cic-render temporal history layer"),
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                base_array_layer: index,
+                array_layer_count: Some(1),
+                ..Default::default()
+            })
+        };
+        Self {
+            layers: [layer(0), layer(1)],
+        }
+    }
+}
+
 /// The deferred pipelines and their uniforms.
 #[derive(Debug)]
 pub struct DeferredRenderer {
@@ -381,14 +484,25 @@ pub struct DeferredRenderer {
     gbuffer_pipeline: wgpu::RenderPipeline,
     model_shadow_pipeline: wgpu::RenderPipeline,
     model_gbuffer_pipeline: wgpu::RenderPipeline,
+    /// The alpha-tested pair. Built unconditionally rather than on demand, because a batch can gain a
+    /// masked material through [`ModelBatch::set_instances`]-style reuse and a pipeline created mid-frame
+    /// would stall; two pipelines are cheap, and a scene with no foliage simply never records them.
+    model_masked_shadow_pipeline: wgpu::RenderPipeline,
+    model_masked_gbuffer_pipeline: wgpu::RenderPipeline,
     material_layout: wgpu::BindGroupLayout,
     water_pipeline: wgpu::RenderPipeline,
     water_layout: wgpu::BindGroupLayout,
     ao: AoStage,
     lighting: LightingStage,
-    /// The antialias resolve, present only when the settings asked for one.
+    /// The post-pass antialias resolve, present only when the settings asked for that one.
     antialias: Option<AntialiasStage>,
+    /// The temporal resolve, present only when the settings asked for that one.
+    temporal: Option<TemporalStage>,
     scene_uniform: wgpu::Buffer,
+    /// The temporal resolve's own block. Its own rather than three more fields on the scene block, because
+    /// two of the three change *during* a frame's recording rather than before it — which the scene block,
+    /// written once in `set_frame` and read by six passes, has no room to express.
+    temporal_uniform: wgpu::Buffer,
     shadow_uniform: wgpu::Buffer,
     cascade_uniforms: Vec<wgpu::Buffer>,
     cascade_groups: Vec<wgpu::BindGroup>,
@@ -408,6 +522,40 @@ pub struct DeferredRenderer {
     /// frame the caller already supplied, and a caller free to pass a *different* set than the one
     /// `set_frame` computed could cull geometry the cascades were fitted around.
     visible: RefCell<VisibleChunks>,
+    /// What the previous frame looked like, for the motion target and the history ping-pong.
+    ///
+    /// In a cell for the same reason the visible set is: this is derived from frames the caller already
+    /// supplied, and it is the renderer's own bookkeeping rather than the caller's. Making the caller carry
+    /// it would make a temporal resolve silently wrong for anyone who forgot to thread it through, which is
+    /// the worst available failure mode — a frame that renders and is subtly stale.
+    previous: RefCell<PreviousFrame>,
+}
+
+/// The state one frame of a temporal resolve inherits from the frame before it.
+#[derive(Debug)]
+struct PreviousFrame {
+    /// The unjittered view-projection the previous frame was rendered with.
+    view_projection: [[f32; 4]; 4],
+    /// The previous frame's scene time, so a swaying vertex can be evaluated where it was.
+    time: f32,
+    /// Which history layer holds the accumulation. The resolve reads this one and writes the other.
+    history: usize,
+    /// Whether there is an accumulation at all.
+    ///
+    /// False until the first frame has been recorded, and reset by a rebuild — which is what a resize does,
+    /// and a resize is precisely when the history describes an image of the wrong size.
+    accumulated: bool,
+}
+
+impl Default for PreviousFrame {
+    fn default() -> Self {
+        Self {
+            view_projection: [[0.0; 4]; 4],
+            time: 0.0,
+            history: 0,
+            accumulated: false,
+        }
+    }
 }
 
 /// The chunk runs each terrain pass draws, for one frame.
@@ -454,6 +602,8 @@ impl DeferredRenderer {
         let composite_shader = shader_module(device, "composite");
         let water_shader = shader_module(device, "water");
         let ao_shader = shader_module(device, "terrain_ao");
+        let temporal_uniform =
+            uniform_buffer(device, "cic-render temporal", TEMPORAL_UNIFORM_BYTES);
 
         let (cascade_layout, cascade_uniforms, cascade_groups) = build_cascade_bindings(device);
         let material_layout = ModelBatch::material_layout(device);
@@ -474,15 +624,44 @@ impl DeferredRenderer {
         // Built only when there is a target for the composite to write into, which is the same condition
         // that allocated one. Both come from the settings the targets carry, so the pass and the texture
         // it reads exist or not together rather than by two independent decisions.
-        let antialias = targets.ldr.as_ref().map(|ldr| {
-            build_antialias(
-                device,
-                ldr,
-                &lighting_layout,
-                &resolved_layout,
-                output_format,
-            )
-        });
+        // Only one of the two resolves is ever built, because only one is ever recorded: they share the
+        // LDR intermediate and the pass slot, and the settings that allocate the one thing select which.
+        let temporal = targets
+            .ldr
+            .as_ref()
+            .zip(targets.history.as_ref())
+            .map(|(ldr, history)| {
+                build_temporal(
+                    device,
+                    ldr,
+                    history,
+                    &targets.motion,
+                    &temporal_uniform,
+                    &lighting_layout,
+                    output_format,
+                )
+            });
+        let antialias = targets
+            .ldr
+            .as_ref()
+            .filter(|_| temporal.is_none())
+            .map(|ldr| {
+                build_antialias(
+                    device,
+                    ldr,
+                    &lighting_layout,
+                    &resolved_layout,
+                    output_format,
+                )
+            });
+
+        let model = ModelPipelines::new(
+            device,
+            terrain.bind_group_layout(),
+            &cascade_layout,
+            &material_layout,
+            &model_shader,
+        );
 
         Ok(Self {
             shadow_pipeline: build_shadow_pipeline(
@@ -496,18 +675,10 @@ impl DeferredRenderer {
                 terrain.bind_group_layout(),
                 &gbuffer_shader,
             ),
-            model_shadow_pipeline: build_model_shadow_pipeline(
-                device,
-                terrain.bind_group_layout(),
-                &cascade_layout,
-                &model_shader,
-            ),
-            model_gbuffer_pipeline: build_model_gbuffer_pipeline(
-                device,
-                terrain.bind_group_layout(),
-                &material_layout,
-                &model_shader,
-            ),
+            model_shadow_pipeline: model.shadow,
+            model_gbuffer_pipeline: model.gbuffer,
+            model_masked_shadow_pipeline: model.masked_shadow,
+            model_masked_gbuffer_pipeline: model.masked_gbuffer,
             material_layout,
             water_pipeline: build_water_pipeline(
                 device,
@@ -519,6 +690,8 @@ impl DeferredRenderer {
             ao: build_ao(device, targets, &scene_uniform, &ao_shader),
             lighting,
             antialias,
+            temporal,
+            temporal_uniform,
             scene_uniform,
             shadow_uniform,
             cascade_uniforms,
@@ -529,7 +702,29 @@ impl DeferredRenderer {
             render: targets.render,
             output: targets.output,
             visible: RefCell::default(),
+            previous: RefCell::default(),
         })
+    }
+
+    /// Discards the temporal accumulation, so the next frame starts a new sequence.
+    ///
+    /// # When a caller has to
+    ///
+    /// A temporal resolve assumes the next frame continues the last one, and a motion vector is what makes
+    /// that assumption safe — it says where each surface point *went*. Some transitions have no answer to
+    /// that question at all: a jump cut to another part of the map, a scenario loading, a replay seeking.
+    /// Accumulating across one of those blends two unrelated images, and the neighbourhood clamp only
+    /// bounds how wrong the result is rather than preventing it.
+    ///
+    /// A resize does not need this. It rebuilds the whole chain, which replaces this renderer along with
+    /// the history it describes — and it has to, because every bind group in it holds views of targets that
+    /// were reallocated.
+    ///
+    /// Cheap: it clears a flag. The next frame writes its own image into the history rather than blending,
+    /// which is the same path the very first frame of a sequence takes.
+    pub fn reset_history(&self) {
+        let mut previous = self.previous.borrow_mut();
+        previous.accumulated = false;
     }
 
     /// Turns per-pass GPU timing on or off, returning whether it is on afterwards.
@@ -596,12 +791,33 @@ impl DeferredRenderer {
         frame: DeferredFrame,
     ) -> Result<[Cascade; CASCADE_COUNT], RenderError> {
         let view = look_at(frame.pose.eye, frame.pose.focus, [0.0, 0.0, 1.0]);
-        let view_projection = multiply(perspective(frame.projection), view);
+        // Unjittered, and kept: it is what the motion target reprojects against next frame, and what the
+        // shadow cascades are fitted from. Jittering the cascade fitting would move every shadow by a
+        // sub-pixel amount of the *camera's* pixels, which is not a quantity a light-space frustum has any
+        // business knowing about.
+        let unjittered = multiply(perspective(frame.projection), view);
+        let (view_projection, motion, previous_time) = self.reproject(frame, &unjittered);
         let inverse = invert(view_projection).ok_or(RenderError::SingularCamera)?;
 
         // The terrain pipelines read the terrain uniform's own view-projection, so it has to agree
         // with the one the lighting pass inverts or the reconstruction lands somewhere else entirely.
-        terrain.set_frame(context, &view_projection, frame.pose.eye, frame.light);
+        //
+        // The wind and scene time ride along in the same block, because the model vertex stages bind it
+        // and a swaying vertex needs both. Setting them here rather than leaving it to the caller is what
+        // stops a batch being drawn a frame out of step with the rest of the scene — the same reasoning
+        // that puts the water bodies' time below.
+        terrain.set_frame_animated(
+            context,
+            &view_projection,
+            frame.pose.eye,
+            frame.light,
+            Animation {
+                wind: frame.environment.weather.sanitised().wind,
+                time: frame.time,
+                previous_time,
+            },
+            motion,
+        );
 
         let cascades = fit_cascades(
             frame.pose.eye,
@@ -649,12 +865,102 @@ impl DeferredRenderer {
             body.set_time(context, frame.time);
         }
 
-        // Which terrain chunks each pass will draw. Done here rather than in `render` because it depends on
-        // the frame, and done for the cascades from their *fitted* matrices rather than from the camera, so
-        // each cascade draws the casters it actually covers instead of the whole heightfield five times.
-        self.cull_terrain(terrain, &view_projection, &cascades);
+        self.upload_temporal(queue);
+
+        // Culled against the *unjittered* frustum. A sub-pixel offset cannot bring a chunk into view that a
+        // full-pixel frustum excludes, and culling against the jittered one would make the visible set
+        // flicker at the jitter period on chunks exactly at the edge — which is the one thing a temporal
+        // accumulator handles worst.
+        //
+        // Done here rather than in `render` because it depends on the frame, and done for the cascades from
+        // their *fitted* matrices rather than from the camera, so each cascade draws the casters it actually
+        // covers instead of the whole heightfield five times.
+        self.cull_terrain(terrain, &unjittered, &cascades);
+
+        // Recorded last, so everything above read the *previous* frame's values.
+        {
+            let mut previous = self.previous.borrow_mut();
+            previous.view_projection = unjittered;
+            previous.time = frame.time;
+        }
 
         Ok(cascades)
+    }
+
+    /// Applies this frame's sub-pixel jitter and resolves what the previous frame looked like.
+    ///
+    /// Returns the view-projection to rasterize with, what a geometry pass needs to write a motion vector,
+    /// and the previous frame's scene time. Separate from [`Self::set_frame`] because it is the one part of
+    /// that function whose correctness is about *two* frames rather than one, and because it is where the
+    /// jitter's two roles have to stay consistent: the same offset that moves the projection is the offset
+    /// the motion pass subtracts back out.
+    fn reproject(
+        &self,
+        frame: DeferredFrame,
+        unjittered: &[[f32; 4]; 4],
+    ) -> ([[f32; 4]; 4], Motion, f32) {
+        // The jitter is a clip-space translation proportional to `w`, which is why it can be applied to the
+        // projection's first two rows and removed again by subtraction in the motion pass. Two render pixels
+        // make one normalized unit, hence the doubling.
+        let jitter = if self.temporal.is_some() {
+            let [x, y] = jitter_offset(frame.jitter);
+            [
+                x * 2.0 / render_dimension(self.render[0]),
+                y * 2.0 / render_dimension(self.render[1]),
+            ]
+        } else {
+            [0.0, 0.0]
+        };
+        let mut view_projection = *unjittered;
+        for column in 0..4 {
+            view_projection[column][0] += jitter[0] * unjittered[column][3];
+            view_projection[column][1] += jitter[1] * unjittered[column][3];
+        }
+
+        // The previous frame's view and time, read before this frame overwrites them. On the very first
+        // frame of a sequence there is no predecessor, so this frame stands in for it — which reports
+        // exactly zero motion, the honest answer rather than a small wrong one.
+        let previous = self.previous.borrow();
+        let (previous_view_projection, previous_time) = if previous.accumulated {
+            (previous.view_projection, previous.time)
+        } else {
+            (*unjittered, frame.time)
+        };
+        (
+            view_projection,
+            Motion {
+                previous_view_projection,
+                jitter,
+            },
+            previous_time,
+        )
+    }
+
+    /// Uploads the temporal resolve's own block, if there is one.
+    ///
+    /// Written in [`Self::set_frame`] with every other uniform, so a caller cannot render a frame whose
+    /// resolve disagrees with its geometry.
+    fn upload_temporal(&self, queue: &wgpu::Queue) {
+        if self.temporal.is_none() {
+            return;
+        }
+        let accumulated = self.previous.borrow().accumulated;
+        let mut bytes = Vec::with_capacity(TEMPORAL_UNIFORM_BYTES);
+        push_vec4(
+            &mut bytes,
+            [
+                TEMPORAL_HISTORY_WEIGHT,
+                f32::from(u8::from(accumulated)),
+                0.0,
+                0.0,
+            ],
+        );
+        debug_assert_eq!(
+            bytes.len(),
+            TEMPORAL_UNIFORM_BYTES,
+            "temporal uniform drifted"
+        );
+        queue.write_buffer(&self.temporal_uniform, 0, &bytes);
     }
 
     /// Decides the visible chunk runs for the camera and for each fitted cascade.
@@ -724,6 +1030,9 @@ impl DeferredRenderer {
                     Some(clear_attachment(&targets.albedo)),
                     Some(clear_attachment(&targets.normal)),
                     Some(clear_attachment(&targets.coverage)),
+                    // Cleared to zero, which reads as "did not move" — correct for the sky, which is the
+                    // only thing that leaves it unwritten.
+                    Some(clear_attachment(&targets.motion)),
                 ],
                 depth_stencil_attachment: Some(depth_attachment(&targets.depth)),
                 multiview_mask: None,
@@ -739,6 +1048,17 @@ impl DeferredRenderer {
                 pass.set_bind_group(0, terrain.bind_group(), &[]);
                 for batch in models {
                     batch.draw(&mut pass, Some(2));
+                }
+                // Cutout geometry last, and in one run rather than interleaved with the solid draws.
+                // Solid geometry has already written its depth by then, so a leaf hidden behind a hull is
+                // rejected before its fragment stage runs — which is the whole reason the ordering is
+                // worth stating.
+                if models.iter().any(ModelBatch::has_cutout) {
+                    pass.set_pipeline(&self.model_masked_gbuffer_pipeline);
+                    pass.set_bind_group(0, terrain.bind_group(), &[]);
+                    for batch in models {
+                        batch.draw_cutout(&mut pass, Some(2));
+                    }
                 }
             }
         }
@@ -848,6 +1168,16 @@ impl DeferredRenderer {
                 for batch in models {
                     batch.draw(&mut pass, None);
                 }
+                // And foliage cuts its own shadow, in every cascade. A leaf card casting the rectangle
+                // its geometry occupies would darken the ground in slabs.
+                if models.iter().any(ModelBatch::has_cutout) {
+                    pass.set_pipeline(&self.model_masked_shadow_pipeline);
+                    pass.set_bind_group(0, terrain.bind_group(), &[]);
+                    pass.set_bind_group(1, group, &[]);
+                    for batch in models {
+                        batch.draw_cutout(&mut pass, Some(2));
+                    }
+                }
             }
         }
     }
@@ -883,9 +1213,14 @@ impl DeferredRenderer {
         // half-configured chain draws the frame without the resolve rather than skipping the composite
         // or panicking.
         let resolve = self.antialias.as_ref().zip(targets.ldr.as_ref());
-        let composite_target = match resolve {
-            Some((_, ldr)) => ldr,
-            None => output,
+        let temporal = self
+            .temporal
+            .as_ref()
+            .zip(targets.ldr.as_ref())
+            .zip(targets.history.as_ref());
+        let composite_target = match (resolve, temporal) {
+            (Some((_, ldr)), _) | (_, Some(((_, ldr), _))) => ldr,
+            (None, None) => output,
         };
         fullscreen_pass(
             encoder,
@@ -906,6 +1241,49 @@ impl DeferredRenderer {
                 self.time(recorded, TimedPass::Antialias),
             );
         }
+
+        if let Some(((stage, _), history)) = temporal {
+            // Written to the layer the resolve is *not* reading, then swapped. Reading and writing one
+            // texture in a pass is not allowed and would not be meaningful anyway: each output pixel reads a
+            // reprojected neighbourhood rather than itself.
+            let source = self.previous.borrow().history;
+            let target = (source + 1) % 2;
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("cic-render temporal resolve"),
+                    color_attachments: &[
+                        Some(clear_attachment(output)),
+                        Some(clear_attachment(&history.layers[target])),
+                    ],
+                    depth_stencil_attachment: None,
+                    multiview_mask: None,
+                    timestamp_writes: self.time(recorded, TimedPass::Antialias),
+                    occlusion_query_set: None,
+                });
+                pass.set_pipeline(&stage.pipeline);
+                pass.set_bind_group(0, &self.lighting.group, &[]);
+                pass.set_bind_group(1, &stage.groups[source], &[]);
+                pass.draw(0..3, 0..1);
+            }
+            let mut previous = self.previous.borrow_mut();
+            previous.history = target;
+            previous.accumulated = true;
+        }
+    }
+}
+
+/// The share of a temporal result taken from the history when nothing is moving.
+///
+/// Duplicated across the language boundary because the shader documents the trade in full and the CPU needs
+/// the number to upload. A test pins the pair rather than trusting the comment.
+const TEMPORAL_HISTORY_WEIGHT: f32 = 0.9;
+
+/// One render dimension as a float, floored at one so the jitter cannot divide by zero.
+fn render_dimension(size: u32) -> f32 {
+    // Bounded by `MAX_RENDER_DIMENSION`, far inside exact `f32` range.
+    #[allow(clippy::cast_precision_loss)]
+    {
+        size.max(1) as f32
     }
 }
 
@@ -1145,6 +1523,7 @@ fn build_gbuffer_pipeline(
                 Some(colour_target(ALBEDO_FORMAT)),
                 Some(colour_target(NORMAL_FORMAT)),
                 Some(colour_target(COVERAGE_FORMAT)),
+                Some(colour_target(MOTION_FORMAT)),
             ],
         }),
         multiview_mask: None,
@@ -1152,15 +1531,79 @@ fn build_gbuffer_pipeline(
     })
 }
 
-/// Builds the instanced model G-buffer pipeline.
+/// The four pipelines an instanced model draws through: two paths times two passes.
 ///
-/// Group 1 is left empty: the shader declares the shadow cascade there, and this entry point does not
-/// use it. The pipeline layout takes an optional layout per slot for exactly this case.
+/// Grouped because they are one decision built four ways, and because constructing them inline made the
+/// renderer's constructor long enough to hide the rest of what it does.
+struct ModelPipelines {
+    gbuffer: wgpu::RenderPipeline,
+    shadow: wgpu::RenderPipeline,
+    masked_gbuffer: wgpu::RenderPipeline,
+    masked_shadow: wgpu::RenderPipeline,
+}
+
+impl ModelPipelines {
+    fn new(
+        device: &wgpu::Device,
+        terrain_layout: &wgpu::BindGroupLayout,
+        cascade_layout: &wgpu::BindGroupLayout,
+        material_layout: &wgpu::BindGroupLayout,
+        model_shader: &wgpu::ShaderModule,
+    ) -> Self {
+        Self {
+            gbuffer: build_model_gbuffer_pipeline(
+                device,
+                terrain_layout,
+                material_layout,
+                model_shader,
+                false,
+            ),
+            shadow: build_model_shadow_pipeline(
+                device,
+                terrain_layout,
+                cascade_layout,
+                material_layout,
+                model_shader,
+                false,
+            ),
+            masked_gbuffer: build_model_gbuffer_pipeline(
+                device,
+                terrain_layout,
+                material_layout,
+                model_shader,
+                true,
+            ),
+            masked_shadow: build_model_shadow_pipeline(
+                device,
+                terrain_layout,
+                cascade_layout,
+                material_layout,
+                model_shader,
+                true,
+            ),
+        }
+    }
+}
+
+/// Builds the instanced model G-buffer pipeline, opaque or alpha-tested.
+///
+/// Group 1 is left empty: the shader declares the shadow cascade there, and neither entry point uses it.
+/// The pipeline layout takes an optional layout per slot for exactly this case.
+///
+/// The two differ in three things, and each of them is why they are two pipelines rather than one:
+///
+/// - **The fragment stage.** A stage that *can* discard forfeits early depth rejection on most hardware,
+///   and opaque geometry is the overwhelming majority. Paying for the possibility everywhere to serve the
+///   foliage would be the wrong trade.
+/// - **Culling.** A leaf card is a single quad meant to be seen from either face, so a masked pipeline
+///   draws both. Culling one would make half of a canopy vanish depending on where the camera stands.
+/// - **Nothing else.** Same targets, same depth state, same vertex stage.
 fn build_model_gbuffer_pipeline(
     device: &wgpu::Device,
     terrain_layout: &wgpu::BindGroupLayout,
     material_layout: &wgpu::BindGroupLayout,
     model_shader: &wgpu::ShaderModule,
+    masked: bool,
 ) -> wgpu::RenderPipeline {
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("cic-render model gbuffer pipeline layout"),
@@ -1179,9 +1622,10 @@ fn build_model_gbuffer_pipeline(
         },
         primitive: wgpu::PrimitiveState {
             topology: wgpu::PrimitiveTopology::TriangleList,
-            // Back faces are culled, unlike terrain. A model is a closed solid, so its back faces are
-            // its interior; drawing them wastes fill and can win the depth test at grazing angles.
-            cull_mode: Some(wgpu::Face::Back),
+            // Back faces are culled for opaque geometry, unlike terrain. A model is a closed solid, so
+            // its back faces are its interior; drawing them wastes fill and can win the depth test at
+            // grazing angles. Alpha-tested geometry is the opposite case — see above.
+            cull_mode: if masked { None } else { Some(wgpu::Face::Back) },
             ..Default::default()
         },
         depth_stencil: Some(wgpu::DepthStencilState {
@@ -1194,12 +1638,17 @@ fn build_model_gbuffer_pipeline(
         multisample: wgpu::MultisampleState::default(),
         fragment: Some(wgpu::FragmentState {
             module: model_shader,
-            entry_point: Some("gbuffer_fragment"),
+            entry_point: Some(if masked {
+                "gbuffer_masked_fragment"
+            } else {
+                "gbuffer_fragment"
+            }),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             targets: &[
                 Some(colour_target(ALBEDO_FORMAT)),
                 Some(colour_target(NORMAL_FORMAT)),
                 Some(colour_target(COVERAGE_FORMAT)),
+                Some(colour_target(MOTION_FORMAT)),
             ],
         }),
         multiview_mask: None,
@@ -1207,16 +1656,27 @@ fn build_model_gbuffer_pipeline(
     })
 }
 
-/// Builds the instanced model depth-only shadow pipeline.
+/// Builds the instanced model shadow pipeline, depth-only or alpha-tested.
+///
+/// The masked variant is the reason the alpha test cannot live in the lit frame alone: a leaf card that
+/// cast a rectangular shadow would be *worse* than one that cast none, because the eye reads a hard
+/// quadrilateral on the ground as a solid object. So it carries a fragment stage whose only output is the
+/// discard, and it binds the materials the opaque variant does not need.
 fn build_model_shadow_pipeline(
     device: &wgpu::Device,
     terrain_layout: &wgpu::BindGroupLayout,
     cascade_layout: &wgpu::BindGroupLayout,
+    material_layout: &wgpu::BindGroupLayout,
     model_shader: &wgpu::ShaderModule,
+    masked: bool,
 ) -> wgpu::RenderPipeline {
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("cic-render model shadow pipeline layout"),
-        bind_group_layouts: &[Some(terrain_layout), Some(cascade_layout)],
+        bind_group_layouts: &[
+            Some(terrain_layout),
+            Some(cascade_layout),
+            masked.then_some(material_layout),
+        ],
         immediate_size: 0,
     });
     let buffers = buffer_layouts();
@@ -1225,16 +1685,24 @@ fn build_model_shadow_pipeline(
         layout: Some(&layout),
         vertex: wgpu::VertexState {
             module: model_shader,
-            entry_point: Some("shadow_vertex"),
+            entry_point: Some(if masked {
+                "shadow_masked_vertex"
+            } else {
+                "shadow_vertex"
+            }),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             buffers: &buffers,
         },
         primitive: wgpu::PrimitiveState {
             topology: wgpu::PrimitiveTopology::TriangleList,
-            // Front faces are culled here, not back. Recording only the far side of a solid moves the
-            // stored depth away from the receiver, which removes self-shadowing acne at its source
-            // rather than biasing it away afterwards.
-            cull_mode: Some(wgpu::Face::Front),
+            // Front faces are culled for a solid, not back. Recording only the far side moves the stored
+            // depth away from the receiver, which removes self-shadowing acne at its source rather than
+            // biasing it away afterwards. A leaf card has no far side to record, so it draws both.
+            cull_mode: if masked {
+                None
+            } else {
+                Some(wgpu::Face::Front)
+            },
             ..Default::default()
         },
         depth_stencil: Some(wgpu::DepthStencilState {
@@ -1249,7 +1717,12 @@ fn build_model_shadow_pipeline(
             },
         }),
         multisample: wgpu::MultisampleState::default(),
-        fragment: None,
+        fragment: masked.then(|| wgpu::FragmentState {
+            module: model_shader,
+            entry_point: Some("shadow_masked_fragment"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[],
+        }),
         multiview_mask: None,
         cache: None,
     })
@@ -1492,6 +1965,120 @@ fn build_antialias(
     }
 }
 
+/// The temporal resolve: one fullscreen pass that reads the tone-mapped image, the motion target and the
+/// history, and writes the presented frame and the next history in one go.
+#[derive(Debug)]
+struct TemporalStage {
+    pipeline: wgpu::RenderPipeline,
+    /// One group per history layer. The resolve binds the group that *reads* the layer it is not writing.
+    ///
+    /// Two rather than one with the layer as a uniform, because a colour attachment is an exclusive usage
+    /// over the layers it covers: an array view of both layers bound as a sampled resource while one of them
+    /// is the attachment is refused by the API, and correctly so — nothing defines what such a read returns.
+    groups: [wgpu::BindGroup; 2],
+}
+
+/// Builds the temporal resolve against the targets it reads.
+///
+/// Group 0 is the lighting group, as the composite's and the post pass's are, purely for the scene uniform:
+/// this pass needs the output size to step by one pixel and nothing else from it. Group 1 is its own — it is
+/// the only pass in the chain reading four different resources, so there is nothing to share a layout with.
+fn build_temporal(
+    device: &wgpu::Device,
+    ldr: &wgpu::TextureView,
+    history: &HistoryTargets,
+    motion: &wgpu::TextureView,
+    uniform: &wgpu::Buffer,
+    lighting_layout: &wgpu::BindGroupLayout,
+    output_format: wgpu::TextureFormat,
+) -> TemporalStage {
+    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("cic-render temporal layout"),
+        entries: &[
+            texture_entry(0, FILTERABLE),
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            texture_entry(2, FILTERABLE),
+            texture_entry(3, FILTERABLE),
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    });
+    // One filtering sampler for all three textures. The motion target is at render resolution and the other
+    // two at output resolution, and a filtered read is the right thing for each: a bilinear tap of the motion
+    // field is a reasonable estimate between two samples of a continuous flow, and the history is being read
+    // at a fractional coordinate by construction.
+    let sampler = build_scene_sampler(device);
+    let group = |source: &wgpu::TextureView| {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("cic-render temporal"),
+            layout: &layout,
+            entries: &[
+                view_entry(0, ldr),
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+                view_entry(2, source),
+                view_entry(3, motion),
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: uniform.as_entire_binding(),
+                },
+            ],
+        })
+    };
+    let groups = [group(&history.layers[0]), group(&history.layers[1])];
+
+    let module = shader_module(device, "taa");
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("cic-render temporal pipeline layout"),
+        bind_group_layouts: &[Some(lighting_layout), Some(&layout)],
+        immediate_size: 0,
+    });
+    TemporalStage {
+        pipeline: device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("cic-render temporal pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("fullscreen_vertex"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("taa_fragment"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                // Two attachments: the frame the viewer sees and the history the next frame reads. See
+                // `TemporalOutput` in `taa.wgsl` for why this is one pass rather than a pass and a copy.
+                targets: &[
+                    Some(colour_target(output_format)),
+                    Some(colour_target(HISTORY_FORMAT)),
+                ],
+            }),
+            multiview_mask: None,
+            cache: None,
+        }),
+        groups,
+    }
+}
+
 /// Builds the water pipeline.
 ///
 /// Not a [`fullscreen_pipeline`]: water has its own procedural grid rather than one covering triangle,
@@ -1570,6 +2157,13 @@ fn build_shadow_sampler(device: &wgpu::Device) -> wgpu::Sampler {
         ..Default::default()
     })
 }
+
+/// The sample type every colour texture in the chain is read as.
+///
+/// Named rather than repeated, because the *other* value is a real possibility and a silent one: a
+/// `Rg16Float` bound as unfilterable would refuse the sampler beside it at bind group creation, and the
+/// error names a binding index rather than the decision behind it.
+const FILTERABLE: wgpu::TextureSampleType = wgpu::TextureSampleType::Float { filterable: true };
 
 /// A plain filtering sampler for reading the HDR scene during the composite.
 fn build_scene_sampler(device: &wgpu::Device) -> wgpu::Sampler {

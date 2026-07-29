@@ -11,12 +11,19 @@
 //! - **Display settings** ([`display`]): the resolution the chain renders at and how it resolves.
 //!   Multisampling is declined rather than pending — see
 //!   [ADR 0005](../../../docs/adr/0005-antialiasing-strategy.md) — so a resolution scale is the primary
-//!   control and a post pass is the floor beneath it.
+//!   control, a post pass is the floor beneath it, and a temporal accumulation is the tier above. This
+//!   module also owns the jitter sequence, because a sub-pixel sample position is arithmetic and the
+//!   subtle failures live in arithmetic.
 //! - **Terrain** ([`terrain`]), rendered from a [`cic_assets::Terrain`] with heights and layer weights
 //!   held in *writable* GPU textures rather than a baked mesh, and per-layer albedo tiled in world
 //!   space. See that module for why the writable-texture choice is load-bearing rather than incidental.
-//! - **Models** ([`model`]), instanced, with per-instance transform and tint and one draw call per
-//!   model however many materials it has.
+//! - **Models** ([`model`]), instanced, with per-instance transform, tint and sway, and one draw call per
+//!   model per material path however many materials it has. Base colour, normal and metallic-roughness
+//!   maps, and a second index range for materials that cut their own silhouette — which is how foliage is
+//!   authored, and which has to reach every shadow cascade rather than only the lit frame.
+//! - **Scenery sway** ([`scenery`]), the wind model a plant's vertices are displaced by. Written from
+//!   scratch with every constant derived in the file; see [LICENSING.md](../../../LICENSING.md) for why
+//!   that is stated rather than assumed.
 //! - **Water** ([`water`]), a bounded plane with procedural waves, blended into the scene before tone
 //!   mapping. Its shoreline comes from the depth buffer rather than from an authored outline, so a
 //!   rectangle plus a heightfield already produce an arbitrarily shaped shore.
@@ -36,15 +43,16 @@
 //!   blank frame.
 //! - **Virtual-page residency bookkeeping** ([`terrain_virtual`]), which decides which terrain pages
 //!   to stage and evict for a given view. That is arithmetic, and the subtle bugs live in it, so it
-//!   is kept separate from device calls.
+//!   is kept separate from device calls — and [`terrain_page`] is the device side that consumes it: the
+//!   physical pages, the tables that index them, and the compute pass that composes the layer blend once
+//!   per page instead of once per fragment per frame.
 //! - **Texture resources** ([`resource`]), which deduplicate decoded images by content hash under
 //!   explicit byte budgets.
 //!
 //! # What is next
 //!
-//! Temporal antialiasing, normal and roughness maps, a real virtual-texture cache behind the residency
-//! bookkeeping, and a CI runner with an adapter so the reference captures run there. See
-//! `docs/milestones/m3-renderer.md`.
+//! Mip chains for the virtual-texture pages, without which a page aliases at a shallow angle where the
+//! direct blend does not; and terrain level of detail. See `docs/milestones/m3-renderer.md`.
 
 pub mod culling;
 pub mod deferred;
@@ -57,9 +65,11 @@ pub mod presentation;
 pub mod regression;
 pub mod resource;
 pub mod scene;
+pub mod scenery;
 pub mod shader;
 pub mod shadow;
 pub mod terrain;
+pub mod terrain_page;
 pub mod terrain_virtual;
 pub mod texture;
 pub mod timing;
@@ -79,10 +89,12 @@ pub use presentation::{Action, InputState, SurfaceRenderer, TerrainGround};
 pub use regression::{Comparison, Tolerance};
 pub use resource::{TextureId, TextureResourceManager};
 pub use scene::{TerrainFrame, capture_terrain, render_terrain_into};
+pub use scenery::{SwayProfile, sway_phase};
 pub use shader::{PROGRAMS, Program, compose};
 pub use shadow::{CASCADE_COUNT, Cascade, fit_cascades};
-pub use terrain::{DirectionalLight, LayerColour, LayerMaterial, TerrainRenderer};
-pub use texture::{TextureArray, TextureImage};
+pub use terrain::{Animation, DirectionalLight, LayerColour, LayerMaterial, TerrainRenderer};
+pub use terrain_page::TerrainPageCache;
+pub use texture::{ColourSpace, TextureArray, TextureImage};
 pub use timing::{FrameTimings, PassTimer, TimedPass};
 pub use view::{Projection, view_projection};
 pub use water::{WaterBody, WaterMaterial, WaterSurface};

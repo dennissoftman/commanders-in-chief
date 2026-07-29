@@ -23,10 +23,14 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use cic_assets::{Terrain, TerrainLayer};
+use cic_render::detail::TerrainDetailRequest;
 use cic_render::terrain::LayerColour;
+use cic_render::terrain_virtual::VirtualPageView;
+use cic_render::view::Projection;
 use cic_render::{
-    Capture, CaptureTarget, GpuContext, LayerMaterial, TerrainFrame, TerrainRenderer, TextureImage,
-    capture_terrain, render_terrain_into,
+    Capture, CaptureTarget, DirectionalLight, GpuContext, LayerMaterial, TerrainFrame,
+    TerrainPageCache, TerrainRenderer, TextureImage, capture_terrain, render_terrain_into,
+    view_projection,
 };
 
 const WIDTH: u32 = 640;
@@ -540,4 +544,347 @@ fn encoder(context: &GpuContext) -> wgpu::CommandEncoder {
         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("test resolve"),
         })
+}
+
+/// A terrain split down the middle: the left half is layer 0 at full weight, the right half layer 1.
+///
+/// A hard boundary rather than a gradient, because the properties worth checking are about *where* a page
+/// reads its data from. A smooth field would look plausible under a coordinate that was off by a page.
+fn split_terrain() -> Terrain {
+    let samples = 65u32;
+    let count = (samples * samples) as usize;
+    let mut left = vec![0u8; count];
+    let mut right = vec![0u8; count];
+    for index in 0..count {
+        let x = index as u32 % samples;
+        if x < samples / 2 {
+            left[index] = 255;
+        } else {
+            right[index] = 255;
+        }
+    }
+    Terrain::new(
+        samples,
+        samples,
+        10.0,
+        0.25,
+        vec![200u16; count],
+        vec![
+            TerrainLayer {
+                name: "left".to_owned(),
+                weights: left,
+            },
+            TerrainLayer {
+                name: "right".to_owned(),
+                weights: right,
+            },
+        ],
+    )
+    .expect("valid split terrain")
+}
+
+/// Reads one physical page back as RGBA bytes, row-major from its top-left corner.
+fn read_page(context: &GpuContext, cache: &TerrainPageCache, layer: u32) -> Vec<u8> {
+    let extent = cic_render::terrain_virtual::VIRTUAL_PAGE_EXTENT;
+    // A copy destination's row pitch has to be a multiple of 256 bytes, so the buffer is padded and the
+    // padding is dropped on the way out. The same arithmetic the capture path uses, and for the same reason.
+    let unpadded = extent * 4;
+    let padded = unpadded.div_ceil(256) * 256;
+    let buffer = context.device().create_buffer(&wgpu::BufferDescriptor {
+        label: Some("page readback"),
+        size: u64::from(padded) * u64::from(extent),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = context
+        .device()
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("page readback"),
+        });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: cache.pages(),
+            mip_level: 0,
+            origin: wgpu::Origin3d {
+                x: 0,
+                y: 0,
+                z: layer,
+            },
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded),
+                rows_per_image: Some(extent),
+            },
+        },
+        wgpu::Extent3d {
+            width: extent,
+            height: extent,
+            depth_or_array_layers: 1,
+        },
+    );
+    let submission = context.queue().submit([encoder.finish()]);
+
+    let slice = buffer.slice(..);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = sender.send(result);
+    });
+    context
+        .device()
+        .poll(wgpu::PollType::Wait {
+            submission_index: Some(submission),
+            timeout: Some(std::time::Duration::from_secs(30)),
+        })
+        .expect("poll the readback");
+    receiver
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the map callback fires")
+        .expect("the map succeeds");
+    let mapped = slice.get_mapped_range().expect("the mapped range");
+    let mut rgba = Vec::with_capacity((unpadded * extent) as usize);
+    for row in 0..extent {
+        let start = (row * padded) as usize;
+        rgba.extend_from_slice(&mapped[start..start + unpadded as usize]);
+    }
+    drop(mapped);
+    buffer.unmap();
+    rgba
+}
+
+/// One page texel, as RGBA.
+fn page_texel(page: &[u8], x: u32, y: u32) -> [u8; 4] {
+    let extent = cic_render::terrain_virtual::VIRTUAL_PAGE_EXTENT;
+    let offset = ((y * extent + x) * 4) as usize;
+    [
+        page[offset],
+        page[offset + 1],
+        page[offset + 2],
+        page[offset + 3],
+    ]
+}
+
+/// A view looking down at the middle of a terrain, in the terms the residency map wants.
+fn page_view(terrain: &Terrain) -> VirtualPageView {
+    let [extent_x, extent_y] = terrain.world_extent();
+    VirtualPageView::new(
+        [extent_x * 0.5, extent_y * 0.5 - 200.0, 300.0],
+        [0.0, 0.8, -0.6],
+        [1.0, 0.0, 0.0],
+        [0.0, 0.6, 0.8],
+        ([0.0, 0.0, 0.0], [extent_x, extent_y, 100.0]),
+        (std::f32::consts::PI / 6.0).tan(),
+        16.0 / 9.0,
+        terrain.horizontal_scale(),
+    )
+}
+
+#[test]
+fn the_page_cache_composes_the_ground_a_view_asks_for() {
+    // The first thing worth knowing about a cache is that it is a cache: a view that has not changed must
+    // compose nothing the second time. That is the property the whole residency map exists to provide, and
+    // until now nothing on a GPU had ever asked it for anything.
+    let Some(context) = context() else { return };
+    let terrain = split_terrain();
+    let renderer = TerrainRenderer::new(
+        context,
+        &terrain,
+        &[LayerColour([1.0, 0.0, 0.0]), LayerColour([0.0, 0.0, 1.0])],
+    )
+    .expect("terrain renderer");
+    // The uniform block has to be uploaded before the compose pass reads it: the pass binds the terrain's
+    // own buffer, which is what stops it disagreeing with the G-buffer, and an unwritten buffer is zeroes.
+    renderer.set_frame(
+        context,
+        &view_projection(
+            TerrainFrame::overview(&terrain, 64, 64).pose,
+            Projection::for_viewport(64, 64),
+        ),
+        [0.0; 3],
+        DirectionalLight::default(),
+    );
+
+    let mut cache = TerrainPageCache::new(context, &renderer, 8).expect("page cache");
+    assert_eq!(cache.layer_count(), 8);
+
+    let (cells_x, cells_y) = renderer.cell_size();
+    let requests = [TerrainDetailRequest::uniform(
+        [0, 0],
+        [cells_x, cells_y],
+        16,
+    )];
+    let view = page_view(&terrain);
+
+    let first = cache.update(context, &requests, view);
+    assert!(first > 0, "the first update must compose pages");
+    let second = cache.update(context, &requests, view);
+    assert_eq!(
+        second, 0,
+        "an unchanged view must compose nothing: {first} pages were already resident"
+    );
+
+    // The page table names a resident layer for the pages that were staged, and zero elsewhere. Level 1 is
+    // the coarse level the request asked for at 16 texels per cell.
+    let resident = cache.table_view(1).expect("level 1 exists");
+    let _ = resident;
+}
+
+#[test]
+fn a_composed_page_holds_the_surface_the_terrain_declares() {
+    // What the compose pass is for, checked by reading the page rather than by rendering it. A page over the
+    // left half of a split terrain must be that half's colour, and one over the right half the other — so a
+    // coordinate off by a page, a transposed axis, or a page written to the wrong layer all fail here.
+    let Some(context) = context() else { return };
+    let terrain = split_terrain();
+    let renderer = TerrainRenderer::new(
+        context,
+        &terrain,
+        &[LayerColour([0.9, 0.1, 0.1]), LayerColour([0.1, 0.1, 0.9])],
+    )
+    .expect("terrain renderer");
+    renderer.set_frame(
+        context,
+        &view_projection(
+            TerrainFrame::overview(&terrain, 64, 64).pose,
+            Projection::for_viewport(64, 64),
+        ),
+        [0.0; 3],
+        DirectionalLight::default(),
+    );
+    let mut cache = TerrainPageCache::new(context, &renderer, 16).expect("page cache");
+
+    // Two pages, one wholly inside each half. The terrain is 64 cells across and a level-1 page spans 16, so
+    // page (0, 0) is entirely left and page (3, 0) entirely right.
+    let (_, cells_y) = renderer.cell_size();
+    let composed = cache.update(
+        context,
+        &[TerrainDetailRequest::uniform([0, 0], [64, cells_y], 16)],
+        page_view(&terrain),
+    );
+    assert!(composed >= 2, "expected at least two pages, got {composed}");
+
+    // The interior centre of each page, which is where a coordinate error is unambiguous: the border could be
+    // clamped for a legitimate reason at the map edge, and the centre never can.
+    let border = cic_render::terrain_virtual::VIRTUAL_PAGE_BORDER;
+    let interior = cic_render::terrain_virtual::VIRTUAL_PAGE_INTERIOR;
+    let centre = border + interior / 2;
+
+    // Which layer holds which page is the residency map's decision, so both are read and matched by content
+    // rather than assumed. A page is "left" if it is red-dominant and "right" if blue-dominant.
+    let mut saw_left = false;
+    let mut saw_right = false;
+    for layer in 0..cache.layer_count() {
+        let page = read_page(context, &cache, layer);
+        let texel = page_texel(&page, centre, centre);
+        if texel[0] > texel[2].saturating_add(40) {
+            saw_left = true;
+        } else if texel[2] > texel[0].saturating_add(40) {
+            saw_right = true;
+        }
+        // Roughness rides in alpha, and every layer here takes the default. A page whose alpha came out zero
+        // would mean the fourth channel was never written, which no colour assertion would notice.
+        assert!(
+            texel[3] > 200,
+            "layer {layer} has alpha {} — the roughness channel is not being written",
+            texel[3]
+        );
+    }
+    assert!(
+        saw_left && saw_right,
+        "the cache must hold both halves of the terrain: left {saw_left}, right {saw_right}"
+    );
+}
+
+#[test]
+fn a_page_border_carries_the_neighbouring_ground_rather_than_a_clamped_edge() {
+    // The property that decides whether pages can be sampled with filtering at all. A bilinear tap at a
+    // page's edge reads across it, so the border has to hold the *adjacent* cells' surface — and if it
+    // clamped instead, every page boundary would show a seam, and the seams would crawl as the camera moved
+    // because page boundaries are fixed to the ground rather than to the screen.
+    //
+    // Measured on the split terrain, and the fixture is the whole argument. Its boundary sits at cell 32,
+    // which is exactly a level-1 page boundary — so one page's interior begins in the right half while its
+    // border lies over the left half, and the two halves are different colours. A clamped border would
+    // simply repeat the interior's colour, which is a difference of about sixty in the red channel rather
+    // than a difference of one.
+    //
+    // Two earlier fixtures could not show this, and both failures are worth recording because they are the
+    // same failure. A single ramped layer normalizes to its palette colour whatever its weight is, because
+    // `surface()` divides by the summed weight — the frame was uniform and the test verified nothing. Two
+    // complementary ramps across the whole map fixed that and were still too shallow: four border texels
+    // span a quarter of a cell, which at that gradient is under one eight-bit step. This is the third time a
+    // fixture in this crate has been the bug rather than the code, which the milestone's design notes
+    // already carry as a standing warning.
+    let Some(context) = context() else { return };
+    let terrain = split_terrain();
+    let renderer = TerrainRenderer::new(
+        context,
+        &terrain,
+        &[LayerColour([0.9, 0.1, 0.1]), LayerColour([0.1, 0.1, 0.9])],
+    )
+    .expect("terrain renderer");
+    renderer.set_frame(
+        context,
+        &view_projection(
+            TerrainFrame::overview(&terrain, 64, 64).pose,
+            Projection::for_viewport(64, 64),
+        ),
+        [0.0; 3],
+        DirectionalLight::default(),
+    );
+    let mut cache = TerrainPageCache::new(context, &renderer, 16).expect("page cache");
+    let (cells_x, cells_y) = renderer.cell_size();
+    cache.update(
+        context,
+        &[TerrainDetailRequest::uniform(
+            [0, 0],
+            [cells_x, cells_y],
+            16,
+        )],
+        page_view(&terrain),
+    );
+
+    let border = cic_render::terrain_virtual::VIRTUAL_PAGE_BORDER;
+    let interior = cic_render::terrain_virtual::VIRTUAL_PAGE_INTERIOR;
+    let middle = border + interior / 2;
+
+    // Which slot holds which page is the residency map's decision, so the page that straddles the split is
+    // found by content rather than assumed: its interior is blue and its border, lying over the left half,
+    // carries more red.
+    let mut found = false;
+    for layer in 0..cache.layer_count() {
+        let page = read_page(context, &cache, layer);
+        let inside = page_texel(&page, border, middle);
+        let outside = page_texel(&page, 0, middle);
+        // Only the page whose interior begins in the right half can say anything here.
+        if inside[2] <= inside[0].saturating_add(40) {
+            continue;
+        }
+        if outside[0] > inside[0].saturating_add(30) {
+            found = true;
+            eprintln!(
+                "layer {layer}: interior red {}, border red {} — the border is reading the left half",
+                inside[0], outside[0]
+            );
+            // And the border is a *gradient* across its four columns rather than a step at its inner edge,
+            // which is what a correctly composed border looks like when the ground beneath it is being
+            // filtered: nearer the interior is nearer the interior's colour.
+            let nearer = page_texel(&page, border - 1, middle)[0];
+            assert!(
+                nearer < outside[0],
+                "layer {layer}: the border's inner column ({nearer}) is not between the interior ({}) and \
+                 its outer column ({}), so the border is not a continuation of the ground",
+                inside[0],
+                outside[0]
+            );
+        }
+    }
+    assert!(
+        found,
+        "no page carried the neighbouring half in its border, so either the border is clamped or no page \
+         straddles the split"
+    );
 }

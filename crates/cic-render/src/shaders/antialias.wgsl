@@ -86,7 +86,18 @@ fn antialias_fragment(input: FullscreenOutput) -> @location(0) vec4<f32> {
     // The output size, not the viewport: this pass runs after the composite has already downsampled to
     // the size the caller asked for, so a step here is one pixel of the final image.
     let step_uv = camera.output.zw;
-    let uv = (input.position.xy + vec2<f32>(0.5)) * step_uv;
+    // `position.xy` is already the pixel *centre* -- the framebuffer coordinate of the top-left pixel is
+    // (0.5, 0.5), not (0, 0). So this multiplies straight through, and adding a further half pixel would
+    // sample half a pixel down and right of where this fragment is.
+    //
+    // It did, until a temporal resolve made the error impossible to miss: with the half-pixel offset in
+    // place, an accumulation of a *static* frame never reached a fixed point, because each pass read its own
+    // history offset from where it had written it and re-filtered it every frame. With the offset removed the
+    // sequence is exactly stationary. The same error was in this pass and in the composite, where it cost a
+    // half-pixel translation of every frame and, at a resolution scale of one, an average of two texels
+    // instead of the single exact texel the downsample is supposed to return. Measured on the deferred
+    // fixture: 1.5% of pixels differed by more than two, with a peak channel difference of 154.
+    let uv = input.position.xy * step_uv;
 
     let centre_colour = tap(uv);
     let north_colour = tap(uv + vec2<f32>(0.0, -step_uv.y));

@@ -128,11 +128,12 @@ attaching the ancestry to `main` is what made them easy to reach by accident. A 
 reinstates the copyleft obligation for every snapshot after it and silently voids the Apache-2.0 offer
 this file records — silently, because nothing in the build would fail.
 
-The risk is highest for whoever implements water and scenery, since the removed code is precisely the
-code they would most like to consult. Do not consult it.
+The risk was highest for whoever implemented water and scenery, since the removed code is precisely the
+code they would most like to consult. Neither consulted it.
 
-Water has since been written, from scratch and without consulting it — see below. Scenery sway remains,
-and is now the only outstanding case.
+**Both are now written, and there is no outstanding case.** The rule above does not lapse with them: the
+region still contains every removed constant, and a later change wanting a camera profile or a
+standing-water policy would find them exactly as reachable as before.
 
 ## Audit result
 
@@ -143,7 +144,7 @@ code.
 No source file asserts a licence of its own — the licence is declared once, in the workspace manifest.
 That is deliberate rather than an omission: it makes *any* licence header appearing in this tree an
 inherited one, which is precisely the copy-paste worth catching. A test in `cic-render`
-(`no_shader_carries_an_inherited_licence_header`) fails if one is ever pasted back into a shader.
+(`no_chunk_carries_an_inherited_licence_header`) fails if one is ever pasted back into a shader.
 
 **Seeded clean, verbatim**
 
@@ -178,6 +179,28 @@ per-chunk licence-header test now runs over all 16.
 The remaining 5 — `terrain_forward`, `terrain_gbuffer`, `model_gbuffer`, `water` and `antialias` — were
 written after the seed against the native formats and have no predecessor.
 
+**One of the two clean survivors is worth a note, because "cleared of derivation" is not the same as
+"usable".** `terrain_virtual.wgsl` composes terrain pages from a tile atlas: per-cell material slots, blend
+masks with orientation and diagonal codes, a 32-pixel edge-tile sheet, a macro lattice. This project's
+terrain is a heightfield plus per-layer weight textures and has none of those things, which is why the file
+is still staged and why wiring it means rewriting it against the native model rather than connecting it up.
+The audit finding stands — there is no derivation in it — and it was also a shader written for a terrain this
+engine does not have.
+
+**It has since been replaced by one written against the native model**, composing a page from the
+heightfield's per-layer weight textures and layer albedo, in the same blend the G-buffer already used. That
+is a rewrite rather than a salvage: the tile atlas, the blend masks, the orientation and diagonal codes, the
+edge-tile sheet and the macro lattice are all gone, because none of them describes anything this engine
+builds. Nothing was carried across, and there was nothing worth carrying — a file whose every input is a
+resource that does not exist has no reusable part.
+
+**The shader set has grown again, and the tally is restated because this table is the audit.** It now holds
+19 chunks: the 16 above plus `scenery` for the sway model, `motion` for the screen-space motion vector, and
+`taa` for the temporal resolve. All three were written after the seed, from scratch, and have no
+predecessor — the sway is documented in full above, and the other two implement techniques with no file to
+copy from. The per-chunk licence-header test runs over all 19, and a second test now also fails on a
+half-pixel framebuffer offset, which is a correctness tripwire rather than a provenance one.
+
 **`antialias.wgsl` is worth a sentence of its own, because "FXAA" names a file as well as a technique.**
 Timothy Lottes' `fxaa3_11.h` is the reference implementation everybody reaches for, it carries NVIDIA's
 own licence terms, and it was **not** consulted — nor was any derivative or port of it. What is in the
@@ -195,7 +218,7 @@ These paths do not exist in the tree. They are listed by the name their replacem
 
 | File | Why | State |
 |---|---|---|
-| `cic-render/src/scenery.rs` | Its sway defaults and ten sway families derive from `ScriptEngine.cpp` and `W3DTreeBuffer.cpp`. The instancing structure was original and is worth redoing; the constants must be re-authored. | **Outstanding.** |
+| `cic-render/src/scenery.rs` | Its sway defaults and ten sway families derive from `ScriptEngine.cpp` and `W3DTreeBuffer.cpp`. The instancing structure was original and is worth redoing; the constants must be re-authored. | **Resolved** — re-authored, not recovered. See below. |
 | `cic-render/src/water_viewer.wgsl` | Standing-water texture scale, tint and alpha, and depth-feather policy derive from `W3DWater.cpp`. The bounded screen and sky reflection in the same file *was* original work. | **Resolved** — replaced, not salvaged. See below. |
 
 **Water was re-authored rather than recovered.** It landed as `cic-render/src/water.rs` plus a water
@@ -212,8 +235,31 @@ exponent, because a mirror-like value produced no highlight at all. That history
 [the M3 milestone](docs/milestones/m3-renderer.md) as evidence of independent derivation: the values are
 where they are because of what this renderer's own frames showed.
 
-**Scenery sway is now the only outstanding case.** Whoever writes it must not consult the original. This
-is the single easiest way to silently reintroduce the obligation this document exists to record.
+**Scenery sway was re-authored rather than recovered.** It landed as `cic-render/src/scenery.rs` plus a
+`scenery` shader chunk, and the removed file was not consulted. Nothing was salvaged from it, including the
+instancing structure the table above notes was original: the sway rides on the per-instance data the model
+batch already carried for its colour tint, which is a structure this tree arrived at for its own reasons
+before any of this work started.
+
+The replacement is deliberately *not* a table of ten families. It is four profiles, each a distinct physical
+regime — stiff trunk, slack stem, bladed, and fixed — with anything between them reachable by constructor,
+and that shape is itself part of the evidence: a set of four justified regimes is not a redrawing of a set
+of ten tuned entries.
+
+Every constant is derived in the file from a stated physical argument, and the arguments are what make the
+derivation checkable rather than asserted. A cantilever's first mode shape is super-linear near its base,
+which fixes the weight exponent at two. The steady share of the bend must exceed the oscillating share, or
+the plant leans *into* the wind for part of every cycle — which fixes the split at 0.55 and 0.45 rather than
+leaving it to taste, and a test asserts the constraint rather than the values. The response saturates
+because nothing stops a scenario authoring an absurd wind and a vertex shader cannot refuse one. And the
+flutter sits at 5.37 times the sway rather than 5 because *this* renderer was already caught by
+near-harmonic ratios, when five summed water waves at related wavelengths interfered into a visible diamond
+lattice — a reason that could only come from this tree's own history, recorded in
+[the M3 milestone](docs/milestones/m3-renderer.md).
+
+**Nothing is left that wants to break the rule.** The prohibition stands for its own sake: the region still
+holds the camera profile, the standing-water policy, and the sway families, and a future change reaching
+for any of them would reinstate the copyleft obligation as silently as ever.
 
 ## Dependencies
 

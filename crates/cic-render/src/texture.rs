@@ -21,16 +21,56 @@
 //! the camera does. Generating them here rather than with a GPU blit chain keeps this a pure function
 //! over bytes, which is testable without a device.
 //!
-//! Both the resample and the mip reduction average in **linear** light, not in stored sRGB. Averaging
-//! encoded values is brighter than the correct result — the encode curve is concave, so the mean of
-//! two encoded values sits above the encoding of their mean — and on a high-contrast texture that
-//! reads as a surface that pales as it recedes.
+//! For a *colour* array, both the resample and the mip reduction average in **linear** light rather
+//! than in stored sRGB. Averaging encoded values is brighter than the correct result — the encode curve
+//! is concave, so the mean of two encoded values sits above the encoding of their mean — and on a
+//! high-contrast texture that reads as a surface that pales as it recedes.
+//!
+//! # Why the colour space is a parameter
+//!
+//! A normal map, a roughness map and a metallic map are not colours. Their bytes are measurements
+//! stored linearly, and running them through the sRGB decode above *undoes an encoding that was never
+//! applied*: a flat normal's 128 becomes 0.216 instead of 0.502, so the surface tilts everywhere by the
+//! same wrong amount and reads as a lighting bug rather than a texture one. Roughness 128 becomes 0.216
+//! too, which is a different material.
+//!
+//! So [`ColourSpace`] governs two things together, and they must agree: the texture format the hardware
+//! reads through, and whether this module's own averaging round-trips through the transfer function. A
+//! format without the matching averaging is the more insidious half of the mistake, because it is
+//! invisible at the base mip level and only appears as the camera pulls back.
 
 use crate::RenderError;
 
-/// Format every colour array uses. sRGB, because albedo is authored in sRGB and the hardware's
+/// Whether an array's bytes are an sRGB-encoded colour or a linear measurement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColourSpace {
+    /// sRGB-encoded colour: albedo, base colour, anything a human picked.
+    ///
+    /// The hardware decodes on read, and this module averages in linear light.
+    Srgb,
+    /// Linear data: normals, roughness, metallic, occlusion.
+    ///
+    /// The hardware returns the stored value, and this module averages the stored values directly.
+    Linear,
+}
+
+impl ColourSpace {
+    /// The texture format an array in this space uploads in.
+    #[must_use]
+    pub const fn format(self) -> wgpu::TextureFormat {
+        match self {
+            Self::Srgb => ARRAY_FORMAT,
+            Self::Linear => LINEAR_ARRAY_FORMAT,
+        }
+    }
+}
+
+/// Format a colour array uses. sRGB, because albedo is authored in sRGB and the hardware's
 /// conversion on read is free.
 pub const ARRAY_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+/// Format a linear-data array uses: the same eight bits per channel with no transfer function.
+pub const LINEAR_ARRAY_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 /// Largest dimension a single array slice may have, matching the baseline device limit for a 2D
 /// texture. Anything above it is refused here rather than at pipeline creation, where the failure
@@ -108,6 +148,16 @@ impl TextureImage {
     /// were authored to one budget never resamples at all.
     #[must_use]
     pub fn resampled(&self, width: u32, height: u32) -> Self {
+        self.resampled_in(width, height, ColourSpace::Srgb)
+    }
+
+    /// Returns this image resampled to another size, averaging in the space its bytes are in.
+    ///
+    /// See [`ColourSpace`] for why the space has to be stated: interpolating a normal map through the
+    /// sRGB transfer function decodes an encoding that was never applied, which tilts the surface
+    /// everywhere by the same wrong amount.
+    #[must_use]
+    pub fn resampled_in(&self, width: u32, height: u32, space: ColourSpace) -> Self {
         let (width, height) = (width.max(1), height.max(1));
         if width == self.width && height == self.height {
             return self.clone();
@@ -115,18 +165,21 @@ impl TextureImage {
         Self {
             width,
             height,
-            rgba: encode(&resample(
-                &decode(&self.rgba),
-                self.width,
-                self.height,
-                width,
-                height,
-            )),
+            rgba: encode_in(
+                &resample(
+                    &decode_in(&self.rgba, space),
+                    self.width,
+                    self.height,
+                    width,
+                    height,
+                ),
+                space,
+            ),
         }
     }
 }
 
-/// A colour texture array on the GPU, with every mip level filled.
+/// A texture array on the GPU, with every mip level filled.
 #[derive(Debug)]
 pub struct TextureArray {
     view: wgpu::TextureView,
@@ -134,28 +187,47 @@ pub struct TextureArray {
     height: u32,
     layers: u32,
     mip_levels: u32,
+    space: ColourSpace,
 }
 
 impl TextureArray {
+    /// Uploads sRGB colour images as the slices of one array. See [`Self::new_in`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::new_in`].
+    pub fn new(
+        context: &crate::GpuContext,
+        label: &str,
+        images: &[TextureImage],
+    ) -> Result<Self, RenderError> {
+        Self::new_in(context, label, images, ColourSpace::Srgb, [u8::MAX; 4])
+    }
+
     /// Uploads images as the slices of one array, resampling each to the largest size present.
     ///
-    /// An empty slice list yields a single opaque-white slice rather than an error, because that is
-    /// exactly what a caller with no textures needs: white multiplies its material colour through
-    /// unchanged, so one code path covers both cases.
+    /// An empty slice list yields a single slice of `fallback` rather than an error, because that is
+    /// exactly what a caller with no textures needs: one code path covers both cases as long as the
+    /// fallback is the identity for whatever the array means. For colour that is opaque white, which
+    /// multiplies a material colour through unchanged; for a normal map it is the encoded flat normal,
+    /// which perturbs nothing. A caller supplying the wrong one gets a *plausible* image rather than an
+    /// error, which is why it is a parameter rather than a constant here.
     ///
     /// # Errors
     ///
     /// Returns [`RenderError::TextureTooLarge`] when the slices and their mip levels exceed
     /// [`MAX_ARRAY_BYTES`], or [`RenderError::InvalidTexture`] when the layer count does not fit an
     /// array texture.
-    pub fn new(
+    pub fn new_in(
         context: &crate::GpuContext,
         label: &str,
         images: &[TextureImage],
+        space: ColourSpace,
+        fallback: [u8; 4],
     ) -> Result<Self, RenderError> {
-        let white = [TextureImage::solid(1, 1, [u8::MAX; 4])];
+        let default = [TextureImage::solid(1, 1, fallback)];
         let images = if images.is_empty() {
-            &white[..]
+            &default[..]
         } else {
             images
         };
@@ -183,22 +255,22 @@ impl TextureArray {
             mip_level_count: mip_levels,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: ARRAY_FORMAT,
+            format: space.format(),
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
 
         let queue = context.queue();
         for (index, image) in images.iter().enumerate() {
-            let slice = image.resampled(width, height);
+            let slice = image.resampled_in(width, height, space);
             let layer = u32::try_from(index).map_err(|_| RenderError::InvalidTexture)?;
             let mut level_width = width;
             let mut level_height = height;
-            let mut linear = decode(slice.rgba());
+            let mut working = decode_in(slice.rgba(), space);
             for level in 0..mip_levels {
                 if level > 0 {
                     let (next_width, next_height) = (halve(level_width), halve(level_height));
-                    linear = reduce(&linear, level_width, level_height);
+                    working = reduce(&working, level_width, level_height);
                     level_width = next_width;
                     level_height = next_height;
                 }
@@ -213,7 +285,7 @@ impl TextureArray {
                         },
                         aspect: wgpu::TextureAspect::All,
                     },
-                    &encode(&linear),
+                    &encode_in(&working, space),
                     wgpu::TexelCopyBufferLayout {
                         offset: 0,
                         bytes_per_row: Some(level_width * 4),
@@ -238,7 +310,14 @@ impl TextureArray {
             height,
             layers,
             mip_levels,
+            space,
         })
+    }
+
+    /// Returns the space this array's bytes are in, and therefore the format it was uploaded as.
+    #[must_use]
+    pub const fn colour_space(&self) -> ColourSpace {
+        self.space
     }
 
     /// Returns the array view, for binding.
@@ -330,15 +409,19 @@ fn total_bytes(
         .ok_or(RenderError::TextureTooLarge)
 }
 
-/// Expands stored bytes to linear-light floats, leaving alpha alone.
+/// Expands stored bytes to the floats this module averages, for a given space.
 ///
-/// Alpha is not gamma encoded — it is a coverage fraction, and running it through the colour transfer
-/// function would make every partially transparent edge the wrong opacity.
-fn decode(rgba: &[u8]) -> Vec<f32> {
+/// Alpha is never gamma encoded, in either space — it is a coverage fraction, and running it through the
+/// colour transfer function would make every partially transparent edge the wrong opacity.
+///
+/// [`ColourSpace::Linear`] is a plain scale by 1/255 on every channel including alpha, so the
+/// round trip through [`encode_in`] is the identity up to rounding — which is the property a normal or
+/// roughness map needs and the sRGB path deliberately does not have.
+fn decode_in(rgba: &[u8], space: ColourSpace) -> Vec<f32> {
     rgba.iter()
         .enumerate()
         .map(|(index, value)| {
-            if index % 4 == 3 {
+            if space == ColourSpace::Linear || index % 4 == 3 {
                 f32::from(*value) / 255.0
             } else {
                 srgb_to_linear(*value)
@@ -347,13 +430,13 @@ fn decode(rgba: &[u8]) -> Vec<f32> {
         .collect()
 }
 
-/// Re-encodes linear-light floats as stored bytes.
-fn encode(linear: &[f32]) -> Vec<u8> {
-    linear
+/// Re-encodes averaged floats as stored bytes, in the space they were decoded from.
+fn encode_in(values: &[f32], space: ColourSpace) -> Vec<u8> {
+    values
         .iter()
         .enumerate()
         .map(|(index, value)| {
-            if index % 4 == 3 {
+            if space == ColourSpace::Linear || index % 4 == 3 {
                 quantize(*value)
             } else {
                 quantize(linear_to_srgb(*value))
@@ -464,10 +547,71 @@ fn reduce(source: &[f32], width: u32, height: u32) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_ARRAY_DIMENSION, TextureImage, decode, encode, mip_level_count, reduce, resample,
-        total_bytes,
+        ColourSpace, MAX_ARRAY_DIMENSION, TextureImage, decode_in, encode_in, mip_level_count,
+        reduce, resample, total_bytes,
     };
     use crate::RenderError;
+
+    #[test]
+    fn the_linear_round_trip_is_the_identity_and_the_srgb_one_is_not() {
+        // The property that makes a normal or roughness map survive a resample. Every byte, because the
+        // failure worth catching is a transfer function applied to data that never carried one — and it
+        // is worst in the mid range, where sRGB and linear differ by more than a factor of two.
+        let bytes: Vec<u8> = (0u8..=255).collect();
+        let round_tripped = encode_in(&decode_in(&bytes, ColourSpace::Linear), ColourSpace::Linear);
+        assert_eq!(round_tripped, bytes, "linear must not transform anything");
+        // And the sRGB path genuinely does transform: 128 decodes to 0.216, not 0.502.
+        let mid = decode_in(&[128, 128, 128, 128], ColourSpace::Srgb);
+        assert!(
+            (mid[0] - 0.216).abs() < 0.002,
+            "sRGB mid grey is 0.216 in linear light, got {}",
+            mid[0]
+        );
+        // Alpha is a coverage fraction in either space, so it is never gamma encoded.
+        assert!((mid[3] - 128.0 / 255.0).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn a_linear_mip_reduction_averages_the_stored_values() {
+        // The same fixture as the sRGB case below, and the correct answer is the *other* one: for data
+        // that was never encoded, the mean of 0 and 255 is 128 rather than 188. Getting this wrong is
+        // invisible at the base level and shows up only as the camera pulls back, which is why it is
+        // pinned rather than left to the format alone.
+        let black_and_white: Vec<u8> = [[0, 0, 0, 255], [255, 255, 255, 255]]
+            .into_iter()
+            .cycle()
+            .take(4)
+            .flatten()
+            .collect();
+        let reduced = encode_in(
+            &reduce(&decode_in(&black_and_white, ColourSpace::Linear), 2, 2),
+            ColourSpace::Linear,
+        );
+        assert_eq!(reduced[0], 128, "a linear average of 0 and 255");
+    }
+
+    #[test]
+    fn each_space_declares_its_own_format() {
+        // The format and the averaging have to agree, and this is the pair that makes them one decision
+        // rather than two.
+        assert_eq!(
+            ColourSpace::Srgb.format(),
+            wgpu::TextureFormat::Rgba8UnormSrgb
+        );
+        assert_eq!(
+            ColourSpace::Linear.format(),
+            wgpu::TextureFormat::Rgba8Unorm
+        );
+    }
+
+    #[test]
+    fn a_linear_resample_interpolates_without_a_transfer_function() {
+        // Two texels, 0 then 200, doubled. Linearly the interior samples land at a quarter and three
+        // quarters of the way, so the near-left one is 50 -- through the sRGB path it would be 111.
+        let image = TextureImage::new(2, 1, vec![0, 0, 0, 255, 200, 200, 200, 255]).expect("valid");
+        let wide = image.resampled_in(4, 1, ColourSpace::Linear);
+        assert_eq!(wide.rgba()[4], 50, "got {:?}", wide.rgba());
+    }
 
     #[test]
     fn an_image_checks_its_own_dimensions() {
@@ -515,7 +659,10 @@ mod tests {
             .take(4)
             .flatten()
             .collect();
-        let reduced = encode(&reduce(&decode(&black_and_white), 2, 2));
+        let reduced = encode_in(
+            &reduce(&decode_in(&black_and_white, ColourSpace::Srgb), 2, 2),
+            ColourSpace::Srgb,
+        );
         assert_eq!(reduced.len(), 4);
         assert!(
             (185..=190).contains(&reduced[0]),
