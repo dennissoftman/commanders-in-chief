@@ -3,29 +3,57 @@
 A deterministic fixed-tick simulation kernel: the thing everything about gameplay and multiplayer
 rests on.
 
-**Status:** Planned. The one decision that had to be made before any of it — how floating point is pinned
-where it reaches simulation state — is settled in [ADR 0007](../adr/0007-simulation-arithmetic.md).
+**Status:** In progress — the kernel mechanics have landed as `cic-sim`, and every charter line below
+is exercised by a test. What remains is the exit condition's second half: scenario activation, where a
+map's declared starts produce the objects they claim. The prerequisite decision — how floating point is
+pinned where it reaches simulation state — was settled in [ADR
+0007](../adr/0007-simulation-arithmetic.md) before any of this was written.
 
 ## Charter
 
 - Fixed ticks at a defined rate, independent of frame rate. Presentation may interpolate between ticks;
-  it may never advance them.
+  it may never advance them. **Done** — `Kernel::advance` is the only way state moves, one tick at a
+  time; advancing needs `&mut Kernel`, which a render loop does not hold, and the `TickAccumulator`
+  is the presentation-side loop every host shares rather than rewrites.
 - Stable object identifiers from a deterministic counter — never an allocation address, never insertion
-  order in a hashed container.
+  order in a hashed container. **Done** — `ObjectId` from `IdAllocator`, counting from one, never
+  reused within a run, with zero reserved as "no object". The counter is itself hashed state.
 - Named, versioned, seeded random streams. Drawing from a stream is part of the state transition, so no
-  stream may be consumed by presentation, logging, or diagnostics.
+  stream may be consumed by presentation, logging, or diagnostics. **Done** — SplitMix64 streams keyed
+  by name in a `BTreeMap`, seeded from the session seed, the name, and a version, so a subsystem that
+  changes how it consumes its stream bumps the version and every stale replay fails its hash comparison
+  immediately. Stream states and draw counts are hashed with everything else, which is what caught the
+  planted extra-draw bug in the replay test on the exact tick it happened.
 - Ordered scheduling: for one tick, every subsystem runs in a defined order, and that order is part of
-  the format's contract.
-- Command recording: the tick-stamped input stream that produced a run.
-- Replay: the same commands against the same initial state reproduce the run exactly.
+  the format's contract. **Done** — registration order is execution order, a duplicate name is refused
+  at registration, and the hash record preserves the order so a reordering is visible.
+- Command recording: the tick-stamped input stream that produced a run. **Done** — `CommandLog`,
+  append-only and tick-ordered, refusing an out-of-order record rather than sorting it, because a log
+  that reorders its input cannot testify about what arrived. Payloads are opaque bytes: what a command
+  *means* is M6's to define.
+- Replay: the same commands against the same initial state reproduce the run exactly. **Done** — the
+  exit-condition test in `tests/replay.rs` runs 120 ticks with commands landing mid-run, twice, and
+  requires every per-tick hash to match.
 - Per-tick, per-subsystem state hashes, so a divergence reports *which* subsystem drifted and *when*.
-- Snapshots the interface can read without being able to mutate.
+  **Done** — FNV-1a over explicitly written state (floats by bit pattern, so two machines holding
+  different zeros are diverged and say so), one entry per subsystem plus the kernel's own ids and
+  streams, and `first_divergence` names the entry and the tick. Commands are folded into each tick's
+  combined hash, so different *inputs* are caught on the tick they differ rather than surfacing later
+  as mysterious state drift.
+- Snapshots the interface can read without being able to mutate. **Done** — `Kernel::subsystem` hands
+  out `&dyn Subsystem`, downcast for reading; mutation needs the `&mut` only the tick path holds.
 
 ## Exit condition
 
 A recorded command stream replayed against the same initial state reproduces identical per-tick state
 hashes, verified in CI rather than by hand. Player and team activation, spawn assignment, and object
 construction from a scenario all work, with a scenario's declared starts producing the units it claims.
+
+**Half met.** The replay half runs in CI against a deliberately trivial subsystem — wandering points
+spawned through the id counter, drifting by stream draws, culled by command — which exercises
+everything the kernel owns while proving nothing about gameplay, exactly as the design notes below
+prescribe. The activation half is not started: nothing yet reads a scenario's players, starts, or
+placements into a running kernel, and that work is this milestone's remaining half.
 
 ## Design notes
 

@@ -13,8 +13,14 @@ cic-core          (no dependencies)
 cic-camera        (no dependencies)
 cic-math          (no dependencies)
    └── cic-script
+cic-sim           (no dependencies yet)
 cic-ui            (+ serde, serde_json)
 ```
+
+`cic-sim` deliberately starts with no dependencies, and that is temporary rather than a principle: it
+takes `cic-math` the day a subsystem needs a transcendental — which is the direction the extraction
+anticipated — and scenario activation will bring it the scenario types. What it must never take is
+anything that renders, plays, or reads a clock.
 
 Four crates deliberately depend on nothing of this project's: `cic-core`, because bounded reading is a
 primitive; `cic-camera`, because the same camera must drive the game, the editor, and any debug viewer
@@ -96,8 +102,11 @@ benefits from, at the cost of diffability, size, or tooling — all of which som
 The resource layer, because path resolution and mount ordering feed everything downstream: ordered maps
 not hash maps, explicit mount order, no dependence on directory enumeration order.
 
-The simulation kernel, once it exists, for the reasons in
-[docs/invariants/determinism.md](docs/invariants/determinism.md).
+The simulation kernel, `cic-sim`, for the reasons in
+[docs/invariants/determinism.md](docs/invariants/determinism.md) — and structurally where it can be:
+advancing state requires a `TickContext` only `Kernel::advance` constructs, identifiers come from a
+hashed counter, random streams are named and registered up front, and every subsystem's state is
+folded into a per-tick hash so the invariants are *checked* per tick rather than trusted.
 
 **The scripting language**, which inherits ADR 0007 rather than restating it: scripts run inside the
 simulation, so the same restricted operation set binds them. Two mechanisms enforce it — the textual scan
