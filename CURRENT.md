@@ -18,7 +18,7 @@ document twice, is a line reading as though something were done.
 solver, a string table, the closed action set, widget behaviour with retained state and input-method
 composition, the screen stack with transactional settings, animated screen changes, and a paint layer;
 `cic-render` draws it, with a typeface authored in this tree. **The shell navigates and it is on screen** —
-four authored screens, covered by eight committed reference captures and driven by hand in a window. Its last
+five authored screens, covered by eight committed reference captures and driven by hand in a window. Its last
 open charter line was `tabs`, which selected and switched nothing, and **tabs now switch pages**.
 
 Two things have since landed past the charter, both because a settings screen needed them. A **`combo`** — a
@@ -103,11 +103,12 @@ What works:
   moves with the swell.
 - **Shaders compose from named chunks** ([`shader`](crates/cic-render/src/shader.rs)). WGSL has no include
   mechanism, and without composition every pass needing the cascade selection had to share one file with
-  it — which is how a single shader reached 620 lines. Thirteen programs are assembled from sixteen chunks;
-  a test fails if any chunk is named by no program, and four programs are marked `staged` so work held for
-  a later milestone is distinguishable from dead code. The mechanism has now done its job once in the
-  intended direction: `ui` was staged for M4 and went live when that milestone bound it, with nothing to
-  clean up because it had never rotted.
+  it — which is how a single shader reached 620 lines. Fifteen programs are assembled from twenty-two chunks;
+  a test fails if any chunk is named by no program, and three programs are marked `staged` so work held for
+  a later milestone is distinguishable from dead code — the terrain, road and boundary viewer passes, held
+  for M8's map editor. The mechanism has now done its job twice in the intended direction: `ui` was staged
+  for M4 and `terrain_virtual` for the page cache, and each went live when the work that needed it landed,
+  with nothing to clean up because neither had rotted.
 - **An atmosphere** ([`environment`](crates/cic-render/src/environment.rs)) derived from two authored
   numbers, an hour and a weather state: the sun's direction and colour, ambient, sky, fog, and cloud
   coverage all follow from them. Weather is blendable scalars rather than an enum of presets.
@@ -255,10 +256,10 @@ What works:
     the guess, and the captures said 3x3 half-resolution taps show no more noise than the old 5x5 while
     landing closer to the frame they replace.
 - **A navigable shell** ([`cic-ui`](crates/cic-ui), drawn by [`ui`](crates/cic-render/src/ui.rs)): a main
-  menu, a settings screen, skirmish setup, and a quit modal, authored as
+  menu, a settings screen and its keep-or-revert dialog, skirmish setup, and a quit modal, authored as
   [layout files](content/ui) and drawn through one pipeline and one draw call per screen. Buttons,
-  labels, checkboxes, sliders, text entry with a caret and an input-method composition, lists and a
-  scrollable container all behave and all draw; a tab strip selects but does not yet switch pages. Settings are **applied then confirmed**, with a 15-second
+  labels, checkboxes, sliders, text entry with a caret and an input-method composition, lists, a
+  dropdown, tabs that switch their pages, and a scrollable container all behave and all draw. Settings are **applied then confirmed**, with a 15-second
   window after which the change takes itself back — because a display change can leave the person who made
   it unable to see the screen well enough to undo it. Screens **fade and slide** as they change, over a
   duration a host chooses and which defaults to none: the departing screen stays alive until the change
@@ -395,8 +396,9 @@ navigation and drawing all read the same solved sequence, so one of the three fo
 control the user cannot see taking a click. The consequence is that a tab change is a relayout, exactly as a
 resize is.
 
-The settings screen has real content waiting for it, since a display setting exists with more than one
-option — and now a way to arrange it.
+The settings screen was the first candidate for them, and its multi-option display setting landed as a
+dropdown instead — the right control for one-of-a-set. No authored screen uses a tab strip yet; pages wait
+for a screen with enough categories to need them.
 
 **The remaining renderer item is a view-driven detail request**, and the mip chain is what showed it
 matters. A page's chain is four levels, covering a minification of eight; past that a page saturates while
@@ -453,13 +455,15 @@ artifact for review — the flow the harness is built around for a deliberate re
 one the half-pixel fix and the five model captures went through. A missing reference is deliberately a
 failure rather than a skip, because a silent pass would remove the coverage it was providing.
 
-Sixteen references cover the scene: terrain layers, instanced models, the deferred chain, water, water
-under a glancing sun, cloud shadows, fog, wet ground, snow, an antialiased frame, a supersampled one, a
-temporally accumulated one, a normal-mapped model, a metallic one, alpha-tested foliage, and a swaying
-canopy. **Six more cover the interface**: the main menu, the settings screen with every widget kind it
-has, that same screen at one and a half times the pixel density, a modal over the screen it covers, a
-scrolled container clipped to itself, and a screen change partway through with both screens drawn. Each was generated on its own machine and looked at before being
-committed — one set for an NVIDIA RTX 4080 SUPER, and one for lavapipe complete but for the interface five.
+Seventeen references cover the scene: terrain layers, terrain drawn from composed pages, instanced
+models, the deferred chain, water, water under a glancing sun, cloud shadows, fog, wet ground, snow, an
+antialiased frame, a supersampled one, a temporally accumulated one, a normal-mapped model, a metallic
+one, alpha-tested foliage, and a swaying canopy. **Eight more cover the interface**: the main menu, the
+settings screen with every widget kind it has, that same screen at one and a half times the pixel
+density, a modal over the screen it covers, a scrolled container clipped to itself, a screen change
+partway through with both screens drawn, an open dropdown over the rows it covers, and the keep-or-revert
+dialog over the screen that applied it. Each was generated on its own machine and looked at before being
+committed — one set for an NVIDIA RTX 4080 SUPER and one for lavapipe, **both complete at twenty-five**.
 
 The render tests still skip rather than fail when no adapter is available, so a developer machine with no
 GPU reports honestly instead of red. **CI sets `CIC_REQUIRE_ADAPTER`, which makes the same situation a

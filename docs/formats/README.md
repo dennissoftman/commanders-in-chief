@@ -11,6 +11,7 @@ game's format, because nothing here reads one.
 | `*.ciclayout.json` | Interface layout: one screen's structure | [ui-layout.md](ui-layout.md) |
 | `strings.<language>.json` | Display text, keyed, so no layout holds a literal | [ui-layout.md](ui-layout.md) |
 | `*.cicbank.json` | Sound bank: what a sound *event* is | [sound-bank.md](sound-bank.md) |
+| `*.cics` | Script: behaviour in data — scenario logic and objectives | [script.md](script.md) |
 | `.glb` | Models, props, units | [glTF 2.0](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html) |
 | `.wav` | Audio clips | [RIFF/WAVE](https://learn.microsoft.com/en-us/windows/win32/xaudio2/resource-interchange-file-format--riff-) |
 | `.zip`, `.tar` | Content containers | Their own published specifications |
