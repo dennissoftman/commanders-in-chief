@@ -80,6 +80,8 @@ pub use layout::{
     Align, DEFAULT_MAX_LENGTH, Direction, FORMAT_VERSION, Justify, Layout, LayoutError, Node,
     Range, Sizing, Widget,
 };
-pub use solve::{Measure, NoContent, Solved, SolvedNode, solve};
+pub use solve::{
+    Measure, NoContent, NoSelection, Selections, Solved, SolvedNode, solve, solve_selected,
+};
 pub use state::{Interface, TextField, Value};
 pub use strings::StringTable;

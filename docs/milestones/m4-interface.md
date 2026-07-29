@@ -4,15 +4,17 @@ A retained user-interface layer: layout, widgets, input routing, and the screen 
 navigated through.
 
 **Status:** In progress. The layout foundation and widget behaviour have landed — the format, the solver,
-the string table, the action set, retained state, and input routing including input-method composition.
-The screen stack and drawing are still ahead.
+the string table, the action set, retained state, and input routing including input-method composition —
+and **tabs now switch pages** rather than merely holding a number. The screen stack and drawing are still
+ahead.
 
 ## Charter
 
 - A layout model of the project's own design, defined in a text format that is authored and reviewed
   like the scenario format is. **Done** — see [Landed](#landed).
 - A widget set covering what an RTS shell actually needs: buttons, labels, lists, sliders, checkboxes,
-  text entry, tabs, and a scrollable container. **Behaviour done; none of them draws yet.**
+  text entry, tabs, and a scrollable container. **Behaviour done; none of them draws yet.** Tabs
+  switch pages as well as track a selection — see [Landed](#landed).
 - Retained state across frames, so a scroll position or a text cursor survives a redraw. **Done**, keyed
   by node id, which is why the format requires one on every widget that holds state.
 - Input routing with focus, hover, and keyboard navigation, expressed as semantic events rather than
@@ -73,6 +75,29 @@ The screen stack and drawing are still ahead.
   - **Everything adjustable is bounded by the layout**: a slider by its own range, a list or tab strip by
     the children it actually has, typed text by `max_length`. Clamped rather than wrapped, because a list
     jumping from its last row to its first on one key press reads as a lost keystroke.
+- **Tabs that switch pages.** A `tabs` node's children are its *headers*; its `pages` field names the
+  container holding the bodies. Before this, `Widget::Tabs` tracked a number and nothing acted on it — the
+  format's own comment said "switches between sibling pages" and nothing did.
+  - **The pages cannot be the strip's children**, because a header sits in a strip and a page fills the
+    body, and no single container arranges both. So the strip names what it switches, and validation checks
+    the two agree: three headers over two pages is a screen whose third tab shows nothing, and neither node
+    is wrong on its own. The container must also `stack` its pages, since one shows and the rest must
+    neither take space nor leave a gap.
+  - **Visibility is decided in the solver**, which is the one place state flows *into* layout — through a
+    `Selections` trait, so the solver stays testable against a stub exactly as text measurement is. The
+    alternative was leaving each consumer to filter, and hit testing, keyboard navigation and drawing all
+    read the same solved sequence: one of the three forgetting is a control the user cannot see taking a
+    click. A hidden page is still solved, because its rectangles are correct for when its tab is chosen.
+  - **So a tab change is a relayout**, exactly as a resize is. That is the cost of the decision and it is
+    the right way round: solving is cheap and already happens per frame.
+  - **A pointer names a tab and the keyboard steps it.** A strip is one focusable control, so a release
+    inside it is resolved against its own children — without that, a tab strip could only be driven from the
+    keyboard and clicking the third tab would select whatever the arrow keys had last left behind. A release
+    in the strip's padding or gaps leaves the selection alone rather than jumping.
+  - Deliberately *not* extended to a `list`, though the two share the same stored value and the same bound.
+    A list scrolls, and its scroll offset is retained state the solved rectangles do not yet carry — so
+    hit-testing a scrolled list's rows against unscrolled rectangles would pick the wrong row, confidently.
+    A tab strip does not scroll.
 - **Input-method composition**, so Chinese, Japanese and Korean text can be typed at all.
   - A single character per keystroke is the *Latin* case. Under an input method a user types keys that
     produce no text, an uncommitted composition appears and changes as they continue, and only then is text
@@ -105,9 +130,9 @@ A navigable shell: main menu, settings with transactional apply-and-rollback, an
 screen that can launch a map. Layout and widget behaviour covered by tests; the rendered result covered
 by the M3 capture harness.
 
-**Not met.** Layout and widget behaviour are covered — 85 tests across the format, the solver, retained
-state, input routing, composition, the string table and the action set — but there is no shell yet, so
-nothing is navigable and nothing is drawn.
+**Not met.** Layout and widget behaviour are covered — 96 tests across the format, the solver, retained
+state, input routing, composition, tab pages, the string table and the action set — but there is no shell
+yet, so nothing is navigable and nothing is drawn.
 
 ## Design notes
 

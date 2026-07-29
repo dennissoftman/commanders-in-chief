@@ -60,6 +60,7 @@ thing that decides.
 | `action` | no | absent | One of the closed action set. Only on an activatable widget. |
 | `range` | **on a slider** | — | `{ "min", "max", "step" }`. Only on a `slider`, and required there. |
 | `max_length` | no | `256` | Longest text accepted. Only on a `text_entry`. |
+| `pages` | no | absent | Id of the container this tab strip switches. Only on a `tabs` — see *Tabs*. |
 | `children` | no | `[]` | In drawing and navigation order. |
 
 ## Widget kinds
@@ -86,6 +87,64 @@ it is checked, so the file is refused at load rather than silently forgetting at
 **Why `scroll` takes no focus.** It holds an offset, but nothing inside it *is* it, so landing keyboard
 focus on the container would give the user a tab stop where no key does anything. Scrolling follows the
 pointer.
+
+## Tabs
+
+A `tabs` node's own children are the **headers**, one per tab, in order. Its `pages` field names the
+container holding the bodies:
+
+```json
+{
+  "children": [
+    {
+      "id": "settings_tabs",
+      "widget": "tabs",
+      "direction": "row",
+      "height": { "fixed": 32.0 },
+      "pages": "settings_pages",
+      "children": [
+        { "widget": "label", "text_key": "settings.display" },
+        { "widget": "label", "text_key": "settings.audio" }
+      ]
+    },
+    {
+      "id": "settings_pages",
+      "direction": "stack",
+      "width": { "fill": 1 },
+      "height": { "fill": 1 },
+      "children": [
+        { "id": "display_page", "children": [] },
+        { "id": "audio_page", "children": [] }
+      ]
+    }
+  ]
+}
+```
+
+**Why the pages are not the strip's children.** A header sits in a strip and a page fills the body, and no
+single container arranges both — one is a row of small boxes and the other is one large box. So the strip
+names what it switches, and the two are validated against each other.
+
+**Why the container must `stack`.** Pages occupy the same box: one shows and the rest must neither take
+space nor leave a gap where they would have been. A column of pages lays out without error and is visibly
+wrong, so the arrangement is checked at load.
+
+**What the selection does.** Only the chosen page is on screen; every other page and everything inside it
+is skipped by hit testing, by keyboard navigation, and by drawing. A page's rectangles are still solved —
+they are correct for when its tab is chosen — but nothing on a hidden page can be clicked or focused, which
+is what stops a control the user cannot see from stealing a tab stop.
+
+**A tab change is a relayout**, exactly as a resize is. The selection is state, so a host passes its
+`Interface` to `solve_selected` and re-solves after handling input, which is what it already does per
+frame. Nothing chosen yet means the first tab.
+
+**Clicking a header picks it.** A tab strip is a single focusable control, so a release inside it is
+resolved against the strip's own children; a release in the strip's padding or gaps leaves the selection
+alone rather than jumping. Left and right — `Adjust` — step it from the keyboard, clamped to the tabs that
+exist rather than wrapping.
+
+**A `tabs` without `pages` is a segmented picker** whose selection some other screen reads, which is why
+`pages` is optional.
 
 ## Sizing
 
@@ -118,9 +177,15 @@ Beyond what the shape enforces:
 - A `slider` must declare a `range`, and that range must be one it can move over: `max` strictly above
   `min`, and a positive `step`. A collapsed range is a slider that cannot move and puts a division by zero
   one arithmetic step away.
-- `range` on anything but a slider, or `max_length` on anything but a text entry, is refused — the same
-  posture as an action on a panel, since inert authoring is a mistake that looks correct.
+- `range` on anything but a slider, `max_length` on anything but a text entry, or `pages` on anything but a
+  tab strip is refused — the same posture as an action on a panel, since inert authoring is a mistake that
+  looks correct.
 - `max_length` may not be zero.
+- A `pages` container must exist, must `stack` its children, must hold exactly as many as the strip has
+  headers, and must not be the strip itself or anything inside it. The count is the check worth having:
+  three headers over two pages is a screen whose third tab shows nothing, and neither node is wrong on its
+  own. Naming a container inside the strip would make each page one of the strip's own headers, so
+  selecting a page would change what "it" is.
 - Nesting is limited to 64 levels and a layout to 4096 nodes. The tree is walked recursively by
   decoding, validation, and solving alike, so unbounded nesting is a stack overflow reachable from a
   data file — an abort rather than an error, which the
