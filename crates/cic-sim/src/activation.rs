@@ -1,9 +1,10 @@
 //! Scenario activation: a map's declared players and placements become kernel state.
 //!
 //! This is where the kernel meets the asset formats. [`activate`] reads a validated
-//! [`Scenario`] — who plays, on which team, starting where, and what is placed — and constructs the
-//! [`Forces`] subsystem from it, allocating every object's identifier from the kernel's own counter
-//! in **authored order**. Authored order is the rule everywhere an order is needed here, for the
+//! [`Scenario`] — who plays, on which team, starting where, and what is placed — resolves every
+//! template and faction reference against the [`TemplateSet`], and constructs the [`Forces`]
+//! subsystem from it, allocating every object's identifier from the kernel's own counter in
+//! **authored order**. Authored order is the rule everywhere an order is needed here, for the
 //! reason mount order and dispatch order use it too: it is explicit, visible in a diff, and cannot
 //! differ between machines.
 //!
@@ -26,6 +27,7 @@
 use std::collections::BTreeMap;
 
 use cic_assets::scenario::Scenario;
+use cic_assets::templates::TemplateSet;
 
 use crate::command::PlayerId;
 use crate::hash::StateHasher;
@@ -147,6 +149,34 @@ pub enum ActivationError {
         /// The owner it names.
         owner: String,
     },
+    /// A placement names a template the set does not define.
+    UnknownTemplate {
+        /// The placement's index in authored order.
+        placement: usize,
+        /// The template it names.
+        template: String,
+    },
+    /// A placement names a template whose kind cannot be placed — a faction on the ground.
+    NotPlaceable {
+        /// The placement's index in authored order.
+        placement: usize,
+        /// The template it names.
+        template: String,
+    },
+    /// A player names a faction the set does not define.
+    UnknownFaction {
+        /// The player's scenario identifier.
+        player: String,
+        /// The faction it names.
+        faction: String,
+    },
+    /// A player's faction resolves to a template that is not a faction.
+    NotAFaction {
+        /// The player's scenario identifier.
+        player: String,
+        /// The template it names.
+        faction: String,
+    },
     /// The kernel already holds an activated scenario.
     AlreadyActivated,
 }
@@ -163,6 +193,28 @@ impl std::fmt::Display for ActivationError {
             Self::UnknownOwner { placement, owner } => write!(
                 formatter,
                 "placement {placement} is owned by `{owner}`, which no player declares"
+            ),
+            Self::UnknownTemplate {
+                placement,
+                template,
+            } => write!(
+                formatter,
+                "placement {placement} names `{template}`, which the template set does not define"
+            ),
+            Self::NotPlaceable {
+                placement,
+                template,
+            } => write!(
+                formatter,
+                "placement {placement} names `{template}`, whose kind cannot be placed"
+            ),
+            Self::UnknownFaction { player, faction } => write!(
+                formatter,
+                "player `{player}` names `{faction}`, which the template set does not define"
+            ),
+            Self::NotAFaction { player, faction } => write!(
+                formatter,
+                "player `{player}` names `{faction}`, which is not a faction"
             ),
             Self::AlreadyActivated => {
                 write!(formatter, "the kernel already holds an activated scenario")
@@ -203,12 +255,22 @@ fn binary_turns(degrees: f32) -> u32 {
 /// so the first declared placement is `ObjectId(1)` on every machine, which is what makes a
 /// scenario's construction as replayable as everything after it.
 ///
+/// Every reference is resolved against the template set here, because this is the last line before
+/// a name becomes kernel state: a placement must name a placeable template, and a player's faction
+/// must name a faction. The scenario and the set may come from different mounts, so neither format
+/// can check the other on its own — the same reason the package checks positions against the
+/// terrain.
+///
 /// # Errors
 ///
 /// Returns [`ActivationError`] when the scenario declares more players than seats, when a
-/// placement's owner names no declared player, or when the kernel already holds an activated
-/// scenario.
-pub fn activate(kernel: &mut Kernel, scenario: &Scenario) -> Result<(), ActivationError> {
+/// placement's owner names no declared player, when a placement or faction fails to resolve
+/// against the template set, or when the kernel already holds an activated scenario.
+pub fn activate(
+    kernel: &mut Kernel,
+    scenario: &Scenario,
+    templates: &TemplateSet,
+) -> Result<(), ActivationError> {
     if kernel.subsystem(FORCES).is_some() {
         return Err(ActivationError::AlreadyActivated);
     }
@@ -216,6 +278,40 @@ pub fn activate(kernel: &mut Kernel, scenario: &Scenario) -> Result<(), Activati
         return Err(ActivationError::TooManyPlayers {
             declared: scenario.players.len(),
         });
+    }
+    for slot in &scenario.players {
+        match templates.get(&slot.faction) {
+            None => {
+                return Err(ActivationError::UnknownFaction {
+                    player: slot.id.clone(),
+                    faction: slot.faction.clone(),
+                });
+            }
+            Some(template) if template.kind != cic_assets::templates::TemplateKind::Faction => {
+                return Err(ActivationError::NotAFaction {
+                    player: slot.id.clone(),
+                    faction: slot.faction.clone(),
+                });
+            }
+            Some(_) => {}
+        }
+    }
+    for (index, placement) in scenario.objects.iter().enumerate() {
+        match templates.get(&placement.template) {
+            None => {
+                return Err(ActivationError::UnknownTemplate {
+                    placement: index,
+                    template: placement.template.clone(),
+                });
+            }
+            Some(template) if !template.kind.placeable() => {
+                return Err(ActivationError::NotPlaceable {
+                    placement: index,
+                    template: placement.template.clone(),
+                });
+            }
+            Some(_) => {}
+        }
     }
 
     let players: Vec<Player> = scenario
@@ -284,6 +380,7 @@ mod tests {
     use cic_assets::scenario::{
         ObjectPlacement, PlayerSlot, Position, Scenario, TerrainReference, Waypoint,
     };
+    use cic_assets::templates::{Template, TemplateKind, TemplateSet};
 
     use super::{ActivationError, FORCES, Forces, activate, binary_turns};
     use crate::command::PlayerId;
@@ -343,6 +440,28 @@ mod tests {
         }
     }
 
+    fn templates() -> TemplateSet {
+        let entry = |id: &str, kind, model: Option<&str>| Template {
+            id: id.to_owned(),
+            kind,
+            model: model.map(str::to_owned),
+            name: None,
+        };
+        TemplateSet {
+            format_version: 1,
+            templates: vec![
+                entry("prop/pine", TemplateKind::Prop, Some("models/pine.glb")),
+                entry(
+                    "structure/depot",
+                    TemplateKind::Structure,
+                    Some("models/depot.glb"),
+                ),
+                entry("faction/north", TemplateKind::Faction, None),
+                entry("faction/south", TemplateKind::Faction, None),
+            ],
+        }
+    }
+
     fn kernel() -> Kernel {
         Kernel::new(KernelConfig {
             seed: 11,
@@ -356,7 +475,7 @@ mod tests {
         // order, three declared placements constructed with authored-order identifiers, owners
         // resolved to seats, and the pose carried into simulation units.
         let mut kernel = kernel();
-        activate(&mut kernel, &scenario()).expect("a valid scenario activates");
+        activate(&mut kernel, &scenario(), &templates()).expect("a valid scenario activates");
 
         let forces = kernel
             .subsystem(FORCES)
@@ -388,8 +507,8 @@ mod tests {
         // same hashes on every tick that follows.
         let mut ours = kernel();
         let mut theirs = kernel();
-        activate(&mut ours, &scenario()).expect("activates");
-        activate(&mut theirs, &scenario()).expect("activates");
+        activate(&mut ours, &scenario(), &templates()).expect("activates");
+        activate(&mut theirs, &scenario(), &templates()).expect("activates");
 
         let our_hashes: Vec<_> = (0..10).map(|_| ours.advance(&[]).unwrap()).collect();
         let their_hashes: Vec<_> = (0..10).map(|_| theirs.advance(&[]).unwrap()).collect();
@@ -402,12 +521,12 @@ mod tests {
         // The complement: activation state is *in* the hash, not beside it. One moved placement
         // must diverge on the first tick, attributed to the forces.
         let mut ours = kernel();
-        activate(&mut ours, &scenario()).expect("activates");
+        activate(&mut ours, &scenario(), &templates()).expect("activates");
 
         let mut moved = scenario();
         moved.objects[0].position.x = 501.0;
         let mut theirs = kernel();
-        activate(&mut theirs, &moved).expect("activates");
+        activate(&mut theirs, &moved, &templates()).expect("activates");
 
         let our_hashes = vec![ours.advance(&[]).unwrap()];
         let their_hashes = vec![theirs.advance(&[]).unwrap()];
@@ -421,7 +540,7 @@ mod tests {
     fn an_unknown_owner_is_refused_with_its_placement_named() {
         let mut broken = scenario();
         broken.objects[1].owner = Some("east".to_owned());
-        let result = activate(&mut kernel(), &broken);
+        let result = activate(&mut kernel(), &broken, &templates());
         assert_eq!(
             result,
             Err(ActivationError::UnknownOwner {
@@ -432,11 +551,63 @@ mod tests {
     }
 
     #[test]
+    fn an_unresolved_template_is_refused_with_its_placement_named() {
+        let mut unresolved = scenario();
+        unresolved.objects[0].template = "prop/oak".to_owned();
+        assert_eq!(
+            activate(&mut kernel(), &unresolved, &templates()),
+            Err(ActivationError::UnknownTemplate {
+                placement: 0,
+                template: "prop/oak".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn placing_a_faction_on_the_ground_is_refused() {
+        let mut confused = scenario();
+        confused.objects[2].template = "faction/north".to_owned();
+        assert_eq!(
+            activate(&mut kernel(), &confused, &templates()),
+            Err(ActivationError::NotPlaceable {
+                placement: 2,
+                template: "faction/north".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn an_unresolved_faction_is_refused_with_its_player_named() {
+        let mut unresolved = scenario();
+        unresolved.players[1].faction = "faction/east".to_owned();
+        assert_eq!(
+            activate(&mut kernel(), &unresolved, &templates()),
+            Err(ActivationError::UnknownFaction {
+                player: "south".to_owned(),
+                faction: "faction/east".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn a_player_whose_faction_is_a_prop_is_refused() {
+        let mut confused = scenario();
+        confused.players[0].faction = "prop/pine".to_owned();
+        assert_eq!(
+            activate(&mut kernel(), &confused, &templates()),
+            Err(ActivationError::NotAFaction {
+                player: "north".to_owned(),
+                faction: "prop/pine".to_owned()
+            })
+        );
+    }
+
+    #[test]
     fn activating_twice_is_refused() {
         let mut kernel = kernel();
-        activate(&mut kernel, &scenario()).expect("the first activation succeeds");
+        activate(&mut kernel, &scenario(), &templates()).expect("the first activation succeeds");
         assert_eq!(
-            activate(&mut kernel, &scenario()),
+            activate(&mut kernel, &scenario(), &templates()),
             Err(ActivationError::AlreadyActivated)
         );
     }
@@ -446,7 +617,7 @@ mod tests {
         let mut crowded = scenario();
         crowded.players = (0..257).map(|n| player(&format!("p{n}"), 0)).collect();
         assert_eq!(
-            activate(&mut kernel(), &crowded),
+            activate(&mut kernel(), &crowded, &templates()),
             Err(ActivationError::TooManyPlayers { declared: 257 })
         );
     }

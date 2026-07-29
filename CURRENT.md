@@ -335,7 +335,9 @@ minified.
 scenario activation, so a map's declared players and placements construct into hashed, replayable
 kernel state.** The next milestone on the path to something playable is
 [M6, gameplay](docs/milestones/m6-gameplay.md) — its dependencies (M5, M9, M10) are all standing, and
-its first slice is the template set and the first verbs: spawn, move, order. Those verbs are also what
+its first slice, **the template set, has landed**: what a `template:` id resolves to, with activation
+resolving every placement and faction against it. Next come drawing the activated scenario and the
+first verbs: spawn, move, order. Those verbs are also what
 [ADR 7002](docs/adr/7002-script-events.md)'s host surface and first real events hang off, so M6's
 opening work and the script-event implementation meet in the same place once that record is accepted.
 
@@ -457,13 +459,14 @@ having to pretend.
 ## Gate status
 
 Formatting, strict lints (`clippy::all` and `clippy::pedantic` as errors, plus `-D warnings` as CI runs
-it), and the full test suite all passes on the pinned toolchain: **827 tests across ten crates**, up from
+it), and the full test suite all passes on the pinned toolchain: **837 tests across ten crates**, up from
 782 across eight. The ninth crate is `cic-math` — ADR 0007's arithmetic, extracted from `cic-script` so the
 kernel can share it — and its five new tests are its own copy of the decision-8 restriction scan plus a
 documentation example; the ten series tests moved with the code rather than being duplicated. The tenth is
-`cic-sim` at 40: the kernel mechanics' unit tests, another copy of the scan, the replay suite whose
-headline test is the milestone's exit condition run twice, and seven activation tests including the
-one-moved-placement divergence. The CI
+`cic-sim` at 44: the kernel mechanics' unit tests, another copy of the scan, the replay suite whose
+headline test is the milestone's exit condition run twice, and eleven activation tests spanning the
+one-moved-placement divergence and the template resolutions; the template format's own six live in
+`cic-assets`. The CI
 runner runs the same suite against Mesa's lavapipe.
 
 **No reference moved for the page mip chain, which was not the expectation.** Every committed NVIDIA

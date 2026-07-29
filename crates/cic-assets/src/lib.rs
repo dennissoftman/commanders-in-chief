@@ -16,6 +16,7 @@
 pub mod model;
 pub mod package;
 pub mod scenario;
+pub mod templates;
 pub mod terrain;
 #[cfg(test)]
 mod testing;
@@ -28,6 +29,7 @@ pub use package::{MapPackage, PackageError, PackageLimits};
 pub use scenario::{
     ObjectPlacement, PlayerSlot, Position, Scenario, ScenarioError, TerrainReference, Waypoint,
 };
+pub use templates::{Template, TemplateError, TemplateKind, TemplateSet};
 pub use terrain::{Terrain, TerrainError, TerrainLayer, TerrainLimits, decode_terrain};
 
 #[cfg(test)]

@@ -17,7 +17,7 @@ be chartered in dependency order, and M9 was not.
 | [M3](docs/milestones/m3-renderer.md) | Renderer: terrain, models, water, lighting, presentation | M2 | **Complete** — terrain level of detail closed by amendment |
 | [M4](docs/milestones/m4-interface.md) | Interface: layout, widgets, shell | M3 | **Complete** |
 | [M5](docs/milestones/m5-simulation.md) | Simulation: deterministic fixed-tick kernel | M2 | **Complete** |
-| [M6](docs/milestones/m6-gameplay.md) | Gameplay: units, orders, combat, economy | M5, M9, M10 | Planned |
+| [M6](docs/milestones/m6-gameplay.md) | Gameplay: units, orders, combat, economy | M5, M9, M10 | **In progress** — templates landed |
 | [M7](docs/milestones/m7-network.md) | Network: lockstep, replay, desync diagnosis | M5 | Planned |
 | [M8](docs/milestones/m8-tooling.md) | Tooling: map editor, asset pipeline | M2, M4 | Planned |
 | [M9](docs/milestones/m9-audio.md) | Audio: mixer, spatialisation, DSP, music, cues | M1 | Charter met — device layer outstanding |
