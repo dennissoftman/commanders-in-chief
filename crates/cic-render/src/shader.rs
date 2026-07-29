@@ -16,12 +16,15 @@
 //!
 //! # Why `staged` is a field and not a comment
 //!
-//! Five programs are wired to no pipeline. They are real work held for a milestone that has not started
-//! — `ui` for M4's interface, the virtual-texture pair for terrain detail past one texture — and they
+//! Four programs are wired to no pipeline. They are real work held for a milestone that has not started
+//! — the virtual-texture pair for terrain detail past one texture, and the two viewer passes — and they
 //! were previously indistinguishable from dead code, which is how six *genuinely* dead shaders survived
 //! in the set with comments describing a uniform layout that no longer existed. Marking them makes the
 //! live set countable, and [`Program::staged`] means a reader never has to grep the pipelines to find
 //! out whether a file does anything.
+//!
+//! The mechanism has now done its job once in the intended direction: `ui` was staged for M4 and became
+//! live when that milestone bound it, with nothing to clean up because it had never rotted.
 
 /// Every chunk of WGSL in the crate, as `(name, source)`.
 ///
@@ -118,12 +121,12 @@ pub const PROGRAMS: &[Program] = &[
         chunks: &["terrain_forward"],
         staged: false,
     },
-    // Staged: real work held for a milestone that has not started.
     Program {
         name: "ui",
         chunks: &["ui"],
-        staged: true,
+        staged: false,
     },
+    // Staged: real work held for a milestone that has not started.
     Program {
         name: "terrain_virtual",
         chunks: &["terrain_virtual"],
@@ -223,11 +226,12 @@ mod tests {
     #[test]
     fn the_live_and_staged_split_is_what_is_declared() {
         // Stated as a number so adding a program without wiring it is a deliberate act rather than an
-        // oversight. The staged five are `ui`, the virtual-texture pair, and the two viewer passes.
+        // oversight. `ui` left the staged set when M4 bound it to a pipeline; the four remaining are the
+        // virtual-texture pair and the two viewer passes.
         let live = PROGRAMS.iter().filter(|entry| !entry.staged).count();
         let staged = PROGRAMS.iter().filter(|entry| entry.staged).count();
-        assert_eq!(live, 8, "live programs");
-        assert_eq!(staged, 5, "staged programs");
+        assert_eq!(live, 9, "live programs");
+        assert_eq!(staged, 4, "staged programs");
         assert_eq!(CHUNKS.len(), 16);
     }
 

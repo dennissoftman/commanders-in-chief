@@ -11,11 +11,11 @@ level of detail**: chunks are now frustum-culled per pass, but a chunk that is d
 density whatever its size on screen. This document and the milestone both claimed the whole item was done
 until it was checked.
 
-**M4 is under way.** A `cic-ui` crate holds the [layout format](docs/formats/ui-layout.md), a two-pass
-solver, a string table, the closed action set, widget behaviour — retained state keyed by node id,
-semantic input routing with focus and keyboard navigation, input-method composition — and now the screen
-stack with transactional settings, so the shell is navigable in tests. **Nothing draws it yet**, which is
-the one thing left before the milestone's exit condition is met.
+**M4's exit condition is met.** A `cic-ui` crate holds the [layout format](docs/formats/ui-layout.md), a
+two-pass solver, a string table, the closed action set, widget behaviour with retained state and
+input-method composition, the screen stack with transactional settings, and a paint layer; `cic-render`
+draws it, with a typeface authored in this tree. **The shell navigates and it is on screen** — four
+authored screens, covered by four committed reference captures.
 
 What works:
 
@@ -39,8 +39,10 @@ What works:
 - **Shaders compose from named chunks** ([`shader`](crates/cic-render/src/shader.rs)). WGSL has no include
   mechanism, and without composition every pass needing the cascade selection had to share one file with
   it — which is how a single shader reached 620 lines. Thirteen programs are assembled from sixteen chunks;
-  a test fails if any chunk is named by no program, and five programs are marked `staged` so work held for
-  a later milestone is distinguishable from dead code.
+  a test fails if any chunk is named by no program, and four programs are marked `staged` so work held for
+  a later milestone is distinguishable from dead code. The mechanism has now done its job once in the
+  intended direction: `ui` was staged for M4 and went live when that milestone bound it, with nothing to
+  clean up because it had never rotted.
 - **An atmosphere** ([`environment`](crates/cic-render/src/environment.rs)) derived from two authored
   numbers, an hour and a weather state: the sun's direction and colour, ambient, sky, fog, and cloud
   coverage all follow from them. Weather is blendable scalars rather than an enum of presets.
@@ -104,6 +106,13 @@ What works:
   - Its blur radius came *down* rather than up, against expectation — a wider kernel over coarser noise was
     the guess, and the captures said 3x3 half-resolution taps show no more noise than the old 5x5 while
     landing closer to the frame they replace.
+- **A navigable shell** ([`cic-ui`](crates/cic-ui), drawn by [`ui`](crates/cic-render/src/ui.rs)): a main
+  menu, a settings screen, skirmish setup, and a quit modal, authored as
+  [layout files](content/ui) and drawn through one pipeline and one draw call per screen. Buttons,
+  labels, checkboxes, sliders, text entry with a caret and an input-method composition, lists, tabs and a
+  scrollable container all behave and all draw. Settings are **applied then confirmed**, with a 15-second
+  window after which the change takes itself back — because a display change can leave the person who made
+  it unable to see the screen well enough to undo it.
 - Windowed presentation, driven by the reusable camera:
 
 ```bash
@@ -118,19 +127,49 @@ per-pass breakdown once a second, which is where the figures above came from.
 
 ## Next verified step
 
-**M4's interface layer, continued — and drawing is the only item left.** Everything else the milestone
-asks for has landed in a `cic-ui` crate depending on nothing but `serde`: the
-[layout format](docs/formats/ui-layout.md), a two-pass solver producing pixel-snapped rectangles, a
-string table, the closed action set, widget behaviour with retained state and input-method composition,
-and now the screen stack with transactional settings. See [M4](docs/milestones/m4-interface.md).
+**M4 is complete — see [M4](docs/milestones/m4-interface.md) — so the next milestone is
+[M5, the simulation](docs/milestones/m5-simulation.md).** Two items are outstanding from earlier
+milestones and are described below: terrain level of detail, which is a decision rather than a queue
+position, and the temporal antialiasing tier ADR 0005 plans.
 
-**Drawing it.** `ui.wgsl` is already in the shader set marked `staged` for this, and the capture harness
-that will cover the result now runs in CI — which is what makes it worth covering. Text rendering is the
-substantial part, and it is also what would let `ime_cursor_area` narrow from the whole field to the
-caret. The four authored `.ciclayout.json` screens come with it, since a screen nobody can see is not
-reviewable.
+**One thing the interface has not been through: a window.** The capture harness covers the four screens
+headlessly and in CI, and this project has a standing rule that presentation needs running rather than
+only testing — the one bug the headless suite structurally could not catch appeared the first time a
+window opened. So the shell should be driven interactively before the milestone is treated as closed in
+practice: hover, focus, typing, an input method, a real revert countdown.
 
-**The screen stack and transactional settings have landed.** A settings apply is now undone by a machine
+**Drawing landed in three parts, split where the mistakes are.** A **paint layer with no GPU in it**
+decides how the interface looks — which colour a focused button takes, where a checkbox's indicator sits,
+how far along its track a slider's knob is — so all of that is testable by asserting on a list rather than
+by capturing an image. A layout names a **role** and never a colour, the same argument the string table
+makes about text. Colours are authored as sRGB bytes and leave as **linear** floats, because a shader
+writing to an sRGB target must emit linear values and passing the bytes through is what makes every
+surface too bright — invisible in a test that compares numbers to themselves.
+
+**The typeface is authored in this tree**, and the licence is the reason. A font file is a binary asset
+with its own obligations and this repository exists to have one set; a *system* font makes the rendered
+result depend on which machine drew it, which a byte-comparison harness cannot tolerate. So
+`cic-render/src/text.rs` holds ninety-five glyphs as lines and elliptical arcs on one integer grid, given
+width by measuring each pixel's distance to the nearest stroke — a stroke has no inside, so there is no
+scanline pass and no winding rule, and coverage falling to zero across the last pixel of the half-width
+*is* the antialiasing. It reads as drafting lettering, which suits the subject. It covers Latin only: a
+character with no glyph draws as a hollow box, which is visible rather than silent, and a loaded-font path
+can go behind the same type later. See [LICENSING.md](LICENSING.md) for why that seam exists.
+
+Text metrics also close a loop the solver left open. An `Auto`-sized label is now as wide as its own text,
+and `ime_cursor_area` narrows from **the whole field to the caret** — on a wide field those are a long way
+apart, and the candidate window appearing beside the box rather than beside the character is what the
+milestone flagged.
+
+Two findings came out of drawing it. The **specimen sheet** caught two letterforms that were wrong — an
+`e` with its aperture at the top, because an arc authored against the mathematical convention comes out
+mirrored on a Y-down grid — and no assertion over coverage bytes would have shown either. And running four
+capture tests in parallel **crashed the driver**: four devices on one adapter, created and destroyed
+concurrently, gave an access violation rather than a failed test, so the run reported nothing at all about
+the images. The existing capture targets already shared one device through a `OnceLock`; this one now does
+too.
+
+**The screen stack and transactional settings landed before it.** A settings apply is undone by a machine
 rather than by a user: a change goes in force, a 15-second window opens, and the *absence* of a
 confirmation is what brings the previous settings back. That inversion is the whole point — a display
 change can leave the person who made it unable to see the screen well enough to click undo, so an undo
@@ -174,15 +213,20 @@ Also outstanding from M3, in rough order:
 
 Formatting, strict lints (`clippy::all` and `clippy::pedantic` as errors, plus `-D warnings` as CI runs
 it), and the full test suite all pass on the pinned toolchain — **and now on the CI runner too**, where the
-same **398 tests across six crates** pass against Mesa's lavapipe. The rendering ones take about eleven
+same **455 tests across six crates** pass against Mesa's lavapipe. The rendering ones take about eleven
 seconds there, which is what makes this affordable on every pull request. Captures go to `target/tmp/` and
 upload as an artifact on every outcome, so a harness failure's capture and amplified difference image can
 be looked at rather than being stranded on the runner.
 
 Eleven references per adapter cover terrain layers, instanced models, the deferred chain, water, water
-under a glancing sun, cloud shadows, fog, wet ground, snow, an antialiased frame, and a supersampled one —
-**twenty-two committed in total**, one set for an NVIDIA RTX 4080 SUPER and one for lavapipe, each
+under a glancing sun, cloud shadows, fog, wet ground, snow, an antialiased frame, and a supersampled one,
+and **four more cover the interface**: the main menu, the settings screen with every widget kind it has, a
+modal over the screen it covers, and a scrolled container clipped to itself. One set per adapter, each
 generated on its own machine and looked at before being committed.
+
+**The interface references exist for the NVIDIA adapter only.** The lavapipe set has to be generated on the
+runner, exactly as M3's was in three separate commits — until it is, those four tests will write a
+reference and fail there rather than passing silently, which is the harness working as designed.
 
 The render tests still skip rather than fail when no adapter is available, so a developer machine with no
 GPU reports honestly instead of red. **CI sets `CIC_REQUIRE_ADAPTER`, which makes the same situation a

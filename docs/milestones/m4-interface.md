@@ -3,17 +3,16 @@
 A retained user-interface layer: layout, widgets, input routing, and the screen stack the game is
 navigated through.
 
-**Status:** In progress. The layout foundation, widget behaviour, and the screen stack with transactional
-settings have landed — the format, the solver, the string table, the action set, retained state, input
-routing including input-method composition, and a shell that is navigable in tests. Drawing is still
-ahead.
+**Status:** Exit condition met. The layout foundation, widget behaviour, the screen stack with
+transactional settings, and drawing have all landed — and the four authored screens are covered by the M3
+capture harness.
 
 ## Charter
 
 - A layout model of the project's own design, defined in a text format that is authored and reviewed
   like the scenario format is. **Done** — see [Landed](#landed).
 - A widget set covering what an RTS shell actually needs: buttons, labels, lists, sliders, checkboxes,
-  text entry, tabs, and a scrollable container. **Behaviour done; none of them draws yet.**
+  text entry, tabs, and a scrollable container. **Done**, behaviour and drawing both.
 - Retained state across frames, so a scroll position or a text cursor survives a redraw. **Done**, keyed
   by node id, which is why the format requires one on every widget that holds state.
 - Input routing with focus, hover, and keyboard navigation, expressed as semantic events rather than
@@ -127,14 +126,48 @@ ahead.
     must react to — going back from settings both navigates *and* changes what is in force — and an enum
     would force dropping one of them.
 
+- **Drawing**, in three parts, split where the mistakes are.
+  - **A paint layer with no GPU in it** (`cic_ui::paint`). Which colour a focused button takes, where a
+    checkbox's indicator sits, how far along its track a slider's knob is, how a scroll offset moves a
+    container's contents — all arithmetic over a solved layout, and all of it testable by asserting on a
+    list rather than by capturing an image.
+  - **A layout names a role, never a colour.** The same argument the string table makes about text: an
+    authored colour is a decision about appearance spread across every screen file. Six roles, three for
+    a panel and three for a label, and a role that does not suit its widget is refused.
+  - **Colours are sRGB bytes in and linear floats out.** A shader writing to an sRGB target must emit
+    linear values; passing `byte / 255` through is what makes every surface too bright, and it is
+    invisible in a test that compares numbers to themselves.
+  - **The clip travels with every primitive** rather than as a push-and-pop marker, so no consumer has to
+    replay a state machine and leak a scissor into the rest of the frame.
+- **An authored typeface** (`cic_render::text`), which is the substantial part.
+  - **Written here rather than loaded**, and the licence is the reason. A font file is a binary asset with
+    its own obligations, and this tree exists to have one set; a *system* font makes the rendered result
+    depend on which machine drew it, which a byte-comparison harness cannot tolerate. See
+    [LICENSING.md](../../LICENSING.md).
+  - **Stroked rather than filled.** Ninety-five glyphs as lines and elliptical arcs on one integer grid,
+    given width by measuring each pixel's distance to the nearest stroke. A stroke has no inside, so no
+    scanline pass and no winding rule — coverage falling to zero across the last pixel of the half-width
+    *is* the antialiasing.
+  - **Its limitation is stated, not discovered.** No CJK glyphs, and a character without one draws as a
+    hollow box. The composition model in `cic-ui` is unaffected and not wasted: that is the expensive
+    thing to retrofit, and a loaded font can go behind the same type.
+  - **The atlas declares its sizes.** A lazily-grown one re-uploads its texture mid-frame; declared up
+    front, the drawing path only reads.
+- **A caret-tight IME cursor area.** `Interface::ime_cursor_area` reports the field because that module
+  cannot measure text; `Painter::ime_cursor_area` knows the caret's offset along the string, and on a wide
+  field those are a long way apart.
+- **The four authored screens**, in `content/ui/`, and the capture tests load *those* rather than fixtures
+  — because a fixture can be the bug, twice already in this tree, and a layout written to be photographed
+  would go on passing while the screens the game navigates rotted.
+
 ## Remaining
 
-- **Drawing.** `ui.wgsl` is already in the shader set marked `staged`, and the M3 capture harness is what
-  will cover the rendered result — which is now worth having, since it runs in CI. Text rendering is the
-  substantial part, and it is also what would let `ime_cursor_area` narrow from the field to the caret.
-- **A caret-tight IME cursor area**, which needs the text metrics drawing will bring.
-- **The layout files themselves.** The shell is navigable against layouts a test constructs; the four
-  authored `.ciclayout.json` screens come with drawing, since a screen nobody can see is not reviewable.
+Nothing for the milestone. Two things noted for later, neither of them M4's:
+
+- **A loaded-font path**, whenever text beyond Latin is needed. The seam is [`Font`], and the licence
+  question is answered in [LICENSING.md](../../LICENSING.md).
+- **A themed file.** The theme is a struct with a default; making it authored data is a small change and
+  nothing yet needs it.
 
 ## Exit condition
 
@@ -142,10 +175,11 @@ A navigable shell: main menu, settings with transactional apply-and-rollback, an
 screen that can launch a map. Layout and widget behaviour covered by tests; the rendered result covered
 by the M3 capture harness.
 
-**Half met.** The shell is navigable and covered — 126 tests across the format, the solver, retained
-state, input routing, composition, the string table, the action set, the screen stack, the settings
-transaction, and the routing between them. Nothing is drawn yet, so the second half of the condition is
-open and so are the authored layouts.
+**Met.** 149 tests in `cic-ui` cover the format, the solver, retained state, input routing, composition,
+the string table, the action set, the screen stack, the settings transaction, the paint layer and the
+routing between them; 33 in `cic-render` cover the typeface, the rasteriser, the atlas and the draw list;
+and four committed reference images cover the rendered result — the main menu, the settings screen with
+every widget kind it has, a modal over the screen it covers, and a scrolled container clipped to itself.
 
 ## Design notes
 

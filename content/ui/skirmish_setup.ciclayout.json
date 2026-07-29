@@ -1,0 +1,97 @@
+{
+  "format_version": 1,
+  "root": {
+    "style": "card",
+    "width": { "fill": 1 },
+    "height": { "fill": 1 },
+    "direction": "column",
+    "gap": 12.0,
+    "padding": { "left": 40.0, "top": 32.0, "right": 40.0, "bottom": 32.0 },
+    "children": [
+      {
+        "widget": "label",
+        "style": "title",
+        "text_key": "skirmish.title",
+        "height": { "fixed": 40.0 },
+        "align": "start"
+      },
+      { "style": "divider", "height": { "fixed": 1.0 } },
+      {
+        "direction": "row",
+        "height": { "fill": 1 },
+        "gap": 20.0,
+        "children": [
+          {
+            "direction": "column",
+            "width": { "fill": 1 },
+            "gap": 8.0,
+            "children": [
+              { "widget": "label", "text_key": "skirmish.maps", "height": { "fixed": 22.0 } },
+              {
+                "id": "skirmish_maps",
+                "widget": "list",
+                "height": { "fill": 1 },
+                "direction": "column",
+                "padding": { "left": 2.0, "top": 2.0, "right": 2.0, "bottom": 2.0 },
+                "children": [
+                  { "widget": "label", "text_key": "skirmish.map_ridge", "height": { "fixed": 26.0 } },
+                  { "widget": "label", "text_key": "skirmish.map_basin", "height": { "fixed": 26.0 } },
+                  { "widget": "label", "text_key": "skirmish.map_delta", "height": { "fixed": 26.0 } }
+                ]
+              }
+            ]
+          },
+          {
+            "direction": "column",
+            "width": { "fill": 1 },
+            "gap": 8.0,
+            "children": [
+              { "widget": "label", "text_key": "skirmish.commander", "height": { "fixed": 22.0 } },
+              {
+                "id": "skirmish_commander",
+                "widget": "text_entry",
+                "height": { "fixed": 30.0 },
+                "max_length": 20
+              },
+              {
+                "id": "skirmish_fog",
+                "widget": "checkbox",
+                "text_key": "skirmish.fog",
+                "height": { "fixed": 28.0 }
+              },
+              {
+                "widget": "label",
+                "style": "caption",
+                "text_key": "skirmish.fog_note",
+                "height": { "fixed": 18.0 }
+              },
+              { "height": { "fill": 1 } }
+            ]
+          }
+        ]
+      },
+      {
+        "direction": "row",
+        "height": { "fixed": 36.0 },
+        "gap": 12.0,
+        "justify": "end",
+        "children": [
+          {
+            "id": "skirmish_back",
+            "widget": "button",
+            "text_key": "skirmish.back",
+            "width": { "fixed": 120.0 },
+            "action": "back"
+          },
+          {
+            "id": "skirmish_launch",
+            "widget": "button",
+            "text_key": "skirmish.launch",
+            "width": { "fixed": 160.0 },
+            "action": "launch_skirmish"
+          }
+        ]
+      }
+    ]
+  }
+}

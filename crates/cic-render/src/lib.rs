@@ -64,6 +64,7 @@ pub mod terrain_virtual;
 pub mod text;
 pub mod texture;
 pub mod timing;
+pub mod ui;
 pub mod view;
 pub mod water;
 
@@ -83,8 +84,10 @@ pub use scene::{TerrainFrame, capture_terrain, render_terrain_into};
 pub use shader::{PROGRAMS, Program, compose};
 pub use shadow::{CASCADE_COUNT, Cascade, fit_cascades};
 pub use terrain::{DirectionalLight, LayerColour, LayerMaterial, TerrainRenderer};
+pub use text::{Coverage, Font, Glyph, GlyphAtlas, Placed};
 pub use texture::{TextureArray, TextureImage};
 pub use timing::{FrameTimings, PassTimer, TimedPass};
+pub use ui::{DrawList, UiMetrics, UiRenderer, atlas_sizes};
 pub use view::{Projection, view_projection};
 pub use water::{WaterBody, WaterMaterial, WaterSurface};
 
