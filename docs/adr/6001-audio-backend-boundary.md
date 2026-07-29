@@ -32,9 +32,11 @@ comfortable dynamically linked and a real constraint statically. Neither can be 
 *requires* in order to make a sound, or the licence claim in the README stops being true for anyone who
 builds it.
 
-**Audio is presentation, but it is adjacent to the simulation.** It reads game state constantly and must
-never write to it — and, less obviously, must never draw from a simulation random stream, because
-drawing from one is part of that simulation's state transition.
+**Audio is presentation, but it is adjacent to the simulation.** [ADR
+0007](0007-simulation-arithmetic.md) decision 9 already says presentation is unrestricted, so audio may
+use `f32` and the platform's `sin` freely. What it may *not* do is write to simulation state — and, less
+obviously, draw from a simulation random stream, because drawing from one is part of that simulation's
+state transition.
 
 ## Decision
 

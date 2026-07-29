@@ -17,6 +17,13 @@ composition, the screen stack with transactional settings, animated screen chang
 `cic-render` draws it, with a typeface authored in this tree. **The shell navigates and it is on screen** —
 four authored screens, covered by six committed reference captures and driven by hand in a window.
 
+**M9 has landed, and it was chartered late for a capability that sits early in the dependency order.**
+Audio was simply missing — not deferred, not recorded anywhere as absent. `cic-audio`
+([M9](docs/milestones/m9-audio.md)) is a mixer behind a replaceable backend, with positional audio, DSP,
+layered music, and a [sound bank format](docs/formats/sound-bank.md), depending on no audio library of any
+kind. The one thing it does not do is reach a speaker. The roadmap gained a *depends on* column, because
+appending M9 at the end contradicted its own claim to be ordered by dependency.
+
 **All five of M3's outstanding renderer items have landed** — temporal antialiasing, the physically-based
 map set, alpha-tested foliage, scenery sway (which was the last provenance case in
 [LICENSING.md](LICENSING.md)), and the virtual-texture cache, whose whole route from residency arithmetic to
@@ -28,6 +35,36 @@ Landing them turned up a defect every committed reference had been rendered thro
 twenty-two references changed** — see the antialiasing entry below.
 
 What works:
+
+- **Audio, from a cue name to mixed frames** ([`cic-audio`](crates/cic-audio/src/lib.rs)), with the
+  replaceable half behind a trait and the default implementation written from scratch. **The boundary is
+  the decision** — see [ADR 6001](docs/adr/6001-audio-backend-boundary.md). It is a *command* interface and
+  not a sample sink, because FMOD and OpenAL are complete mixers rather than devices, and reducing either
+  to a sink discards everything anyone would adopt it for. Engine policy — which cue, which recording,
+  which bus, what priority, whether the budget allows it — is above the line and does not move when the
+  implementation does.
+  - **The in-tree mixer makes every assertion headless.** 125 tests, no device, at whatever sample rate the
+    test picks — because a mixer is a pure function from voices and a listener to frames. The renderer
+    needed a capture harness and per-adapter references to approximate that.
+  - **The limiter needed a hold stage and a lookahead delay, and both were found by an assertion failing.**
+    The textbook arrangement let a sine at eight times full scale out at **1.12**. Two causes: a rectified
+    sine passes through zero twice a cycle, so the envelope sags 2.6 dB between peaks at 220 Hz, and the
+    attack ramp is applied to a peak that has already left. It is now checked at five frequencies from
+    55 Hz to 4 kHz, because the failure is worst at low ones and 220 Hz alone would have passed with the
+    bug present.
+  - **The listener is not the camera, and in this genre that is the whole problem.** A camera sixty metres
+    up hears a firefight forty metres away as seventy-two metres away, and the pan collapses because
+    everything is nearly straight down. `Listener::for_overhead_camera` lowers the ear toward the focus
+    point while keeping the camera's orientation.
+  - **The reverb's comb delays are prime**, which is the water-wave lattice failure in another domain: two
+    combs at related lengths reinforce at every common multiple and the tail rings at one pitch.
+  - **Gain ramps across a block while spatialisation is computed once per block.** Applying the new gain
+    from the block's first sample is a step discontinuity at the block rate — at 512 frames, a 94 Hz buzz
+    that follows the camera.
+  - **Audio draws from its own random stream**, never a simulation one. Variant selection and pitch spread
+    need randomness on every gunshot, and a stream consumed by presentation is a stream the other machine
+    did not consume. [ADR 0007](docs/adr/0007-simulation-arithmetic.md) decision 9 leaves presentation
+    otherwise unrestricted, so the mixer uses floating point freely.
 
 - A `cic-assets` terrain uploads to the GPU and renders through a seven-pass deferred chain: four shadow
   cascades, a G-buffer, a half-resolution ambient-occlusion estimate with a bilateral upsample, deferred
@@ -314,10 +351,19 @@ has to respect the border or the seam the border prevents comes back at every le
 After that: a `TerrainDetailRequest` derived from the camera, so a caller does not have to name cells and
 densities itself. The residency map already ranks by projected size.
 
+**Audio needs a device, and that is the one thing about it a green suite cannot establish.** The mixer
+produces correct frames and nothing hands them to hardware. This is the same lesson the standing constraint
+below records for presentation: the one bug the headless renderer suite structurally could not catch
+appeared the first time a window opened. `Capabilities::renders_to_buffer` exists so a host knows whether
+it needs a device at all, which is what keeps an FMOD backend — which owns its own output thread — from
+having to pretend.
+
 ## Gate status
 
 Formatting, strict lints (`clippy::all` and `clippy::pedantic` as errors, plus `-D warnings` as CI runs
-it), and the full test suite all passes on the pinned toolchain: **526 tests across six crates**. The CI
+it), and the full test suite all passes on the pinned toolchain: **652 tests across seven crates**, up from
+526 across six. `cic-audio` accounts for the whole difference — 126 tests counting one documentation test,
+every one of which runs headless with no audio device present. The CI
 runner runs the same suite against Mesa's lavapipe. The rendering ones take about eleven
 seconds there, which is what makes this affordable on every pull request. Captures go to `target/tmp/` and
 upload as an artifact on every outcome, so a harness failure's capture and amplified difference image can
@@ -351,7 +397,12 @@ present.
   **scenery sway has since been written the same way, which closes the last outstanding case.** The rule
   that nothing may be copied backward across `5e824cf` still stands, and still has nothing left that wants
   to break it.
-- Every decoder is bounded and total — see [binary parsing](docs/invariants/binary-parsing.md).
+- Every decoder is bounded and total — see [binary parsing](docs/invariants/binary-parsing.md). The WAV
+  reader is the newest and follows the same rules: a `data` chunk claiming four gigabytes is refused before
+  the buffer is sized, an unknown chunk is skipped and an unknown *format tag* is not.
+- **Presentation must not draw from a simulation random stream.** The less obvious half of the determinism
+  rule, and audio is where it bites — variant selection and pitch spread want randomness on every gunshot.
+  `cic-audio` carries its own stream, seeded separately, so it never has to.
 - Anything that will reach simulation state follows [determinism](docs/invariants/determinism.md) from
   the start, because it cannot be retrofitted.
 - **A rendering change is not verified by a green test suite. Look at the capture.** Every rendering bug
