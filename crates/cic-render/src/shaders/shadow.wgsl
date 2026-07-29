@@ -1,10 +1,46 @@
 // Cascade selection and the shadow term.
 //
-// A composition chunk. Requires `scene.wgsl` for the camera and cascade uniforms.
+// A composition chunk. Requires `scene.wgsl` for the camera and the world reconstruction.
 //
-// This exists as a chunk rather than as part of the lighting pass because three surfaces need it --
-// terrain, models and water -- and duplicating the bias, the depth slack, the blend band and the
-// incidence fade across them is exactly the drift the composition step was added to prevent.
+// This exists as a chunk rather than as part of the lighting pass because two passes need it -- the
+// deferred lighting resolve, which shades terrain and models out of the G-buffer, and the water
+// surface -- and duplicating the bias, the depth slack, the blend band and the incidence fade across
+// them is exactly the drift the composition step was added to prevent.
+//
+// # Why this chunk owns group 2
+//
+// Everything a cascaded shadow map needs is declared here rather than in `scene.wgsl`: the cascade
+// structs, the count, the depth array, its comparison sampler and the uniform. `shadow_visibility` is
+// then the *whole* interface a pass sees, and the technique behind it -- the resources as much as the
+// arithmetic -- is replaceable without touching a binding any other pass depends on. A provider that
+// ray-traced the term instead would declare its acceleration structure in this group, implement the
+// same signature, and be substituted by naming a different chunk in `shader.rs`; nothing in group 0
+// would move, and the composite and the two antialias resolves would not notice.
+//
+// Group 2 and not 1 because group 1 is where a pass keeps its *own* resources -- the water uniform,
+// the composite's sampled image, the history layers -- and those are per-pass while this is shared by
+// two. The lighting pipeline therefore declares a hole at group 1, which `wgpu` allows.
+
+// `params` packs the world units spanned by the full normalized depth range in `y` and the world
+// units covered by one shadow texel in `z`. `x` and `w` are reserved. Both scales are per cascade,
+// since the fitted frusta differ by more than an order of magnitude.
+struct ShadowCascade {
+    view_projection: mat4x4<f32>,
+    params: vec4<f32>,
+}
+
+// Four cascades rather than more. An RTS camera has a bounded height range, so the depth interval
+// needing shadows is far narrower than a free-flight camera's, and a fifth cascade would fit a
+// frustum slice the camera cannot reach.
+const SHADOW_CASCADE_COUNT: i32 = 4;
+
+struct ShadowCamera {
+    cascades: array<ShadowCascade, 4>,
+}
+
+@group(2) @binding(0) var primary_shadow: texture_depth_2d_array;
+@group(2) @binding(1) var primary_shadow_sampler: sampler_comparison;
+@group(2) @binding(2) var<uniform> shadow_camera: ShadowCamera;
 
 // Both bias terms are expressed in world units and converted with the light frustum's own
 // depth range, so widening the fitted frustum for a larger map no longer inflates the bias in

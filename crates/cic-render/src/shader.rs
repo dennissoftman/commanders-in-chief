@@ -41,6 +41,7 @@ const CHUNKS: &[(&str, &str)] = &[
     ("lighting", include_str!("shaders/lighting.wgsl")),
     ("model_gbuffer", include_str!("shaders/model_gbuffer.wgsl")),
     ("motion", include_str!("shaders/motion.wgsl")),
+    ("reflection", include_str!("shaders/reflection.wgsl")),
     ("road_viewer", include_str!("shaders/road_viewer.wgsl")),
     ("scene", include_str!("shaders/scene.wgsl")),
     ("scenery", include_str!("shaders/scenery.wgsl")),
@@ -106,7 +107,9 @@ pub const PROGRAMS: &[Program] = &[
     },
     Program {
         name: "water",
-        chunks: &["scene", "shadow", "atmosphere", "water"],
+        // `reflection` after `atmosphere`, because it calls `sky_colour` from it, and before `water`,
+        // which calls `reflection_colour`.
+        chunks: &["scene", "shadow", "atmosphere", "reflection", "water"],
         staged: false,
     },
     Program {
@@ -132,16 +135,16 @@ pub const PROGRAMS: &[Program] = &[
         staged: false,
     },
     Program {
+        name: "terrain_virtual",
+        chunks: &["terrain_virtual"],
+        staged: false,
+    },
+    Program {
         name: "ui",
         chunks: &["ui"],
         staged: false,
     },
     // Staged: real work held for a milestone that has not started.
-    Program {
-        name: "terrain_virtual",
-        chunks: &["terrain_virtual"],
-        staged: false,
-    },
     Program {
         name: "terrain_viewer",
         chunks: &["terrain_viewer"],
@@ -236,13 +239,14 @@ mod tests {
     #[test]
     fn the_live_and_staged_split_is_what_is_declared() {
         // Stated as a number so adding a program without wiring it is a deliberate act rather than an
-        // oversight. `ui` left the staged set when M4 bound it to a pipeline; the four remaining are the
-        // virtual-texture pair and the two viewer passes.
+        // oversight. Two have left the staged set since it was introduced -- `terrain_virtual` when the
+        // page cache bound it and `ui` when M4's interface did -- and the three remaining are the viewer
+        // passes M8's map editor wants.
         let live = PROGRAMS.iter().filter(|entry| !entry.staged).count();
         let staged = PROGRAMS.iter().filter(|entry| entry.staged).count();
         assert_eq!(live, 11, "live programs");
         assert_eq!(staged, 3, "staged programs");
-        assert_eq!(CHUNKS.len(), 19);
+        assert_eq!(CHUNKS.len(), 20);
     }
 
     #[test]

@@ -608,11 +608,11 @@ impl DeferredRenderer {
         let (cascade_layout, cascade_uniforms, cascade_groups) = build_cascade_bindings(device);
         let material_layout = ModelBatch::material_layout(device);
         let water_layout = WaterBody::layout(device);
-        // The lighting layout comes back out rather than staying inside the stage, because the water
-        // pass binds that very group: it needs the camera, the fitted cascades, the shadow array, and
-        // the scene depth, all of which are already declared there. Building a second identical layout
-        // for it would be two declarations to keep in step by hand.
-        let (lighting, lighting_layout, resolved_layout) = build_lighting(
+        // The scene and shadow layouts come back out rather than staying inside the stage, because the
+        // water pass binds both of those groups: it needs the camera and the scene depth from the one,
+        // and the fitted cascades from the other. Building second identical layouts for it would be two
+        // more declarations to keep in step by hand.
+        let (lighting, scene_layout, shadow_layout, resolved_layout) = build_lighting(
             device,
             targets,
             &scene_uniform,
@@ -637,7 +637,7 @@ impl DeferredRenderer {
                     history,
                     &targets.motion,
                     &temporal_uniform,
-                    &lighting_layout,
+                    &scene_layout,
                     output_format,
                 )
             });
@@ -646,13 +646,7 @@ impl DeferredRenderer {
             .as_ref()
             .filter(|_| temporal.is_none())
             .map(|ldr| {
-                build_antialias(
-                    device,
-                    ldr,
-                    &lighting_layout,
-                    &resolved_layout,
-                    output_format,
-                )
+                build_antialias(device, ldr, &scene_layout, &resolved_layout, output_format)
             });
 
         let model = ModelPipelines::new(
@@ -682,8 +676,9 @@ impl DeferredRenderer {
             material_layout,
             water_pipeline: build_water_pipeline(
                 device,
-                &lighting_layout,
+                &scene_layout,
                 &water_layout,
+                &shadow_layout,
                 &water_shader,
             ),
             water_layout,
@@ -1069,7 +1064,7 @@ impl DeferredRenderer {
             "cic-render ao",
             &targets.ao_raw,
             &self.ao.pipeline,
-            &[&self.ao.group],
+            &[(0, &self.ao.group)],
             self.time(&mut recorded, TimedPass::Occlusion),
         );
         fullscreen_pass(
@@ -1077,7 +1072,7 @@ impl DeferredRenderer {
             "cic-render ao blur",
             &targets.ao_blurred,
             &self.ao.blur_pipeline,
-            &[&self.ao.group, &self.ao.source_group],
+            &[(0, &self.ao.group), (1, &self.ao.source_group)],
             self.time(&mut recorded, TimedPass::OcclusionBlur),
         );
 
@@ -1087,7 +1082,7 @@ impl DeferredRenderer {
             "cic-render lighting",
             &targets.hdr,
             &self.lighting.pipeline,
-            &[&self.lighting.group],
+            &[(0, &self.lighting.group), (2, &self.lighting.shadow_group)],
             self.time(&mut recorded, TimedPass::Lighting),
         );
 
@@ -1108,6 +1103,7 @@ impl DeferredRenderer {
             });
             pass.set_pipeline(&self.water_pipeline);
             pass.set_bind_group(0, &self.lighting.group, &[]);
+            pass.set_bind_group(2, &self.lighting.shadow_group, &[]);
             for body in water {
                 body.draw(&mut pass);
             }
@@ -1227,7 +1223,10 @@ impl DeferredRenderer {
             "cic-render composite",
             composite_target,
             &self.lighting.composite_pipeline,
-            &[&self.lighting.group, &self.lighting.composite_group],
+            &[
+                (0, &self.lighting.group),
+                (1, &self.lighting.composite_group),
+            ],
             self.time(recorded, TimedPass::Composite),
         );
 
@@ -1237,7 +1236,7 @@ impl DeferredRenderer {
                 "cic-render antialias",
                 output,
                 &antialias.pipeline,
-                &[&self.lighting.group, &antialias.group],
+                &[(0, &self.lighting.group), (1, &antialias.group)],
                 self.time(recorded, TimedPass::Antialias),
             );
         }
@@ -1782,7 +1781,7 @@ fn build_ao(
             "cic-render ao pipeline",
             ao_shader,
             "ao_fragment",
-            &[&layout],
+            &[Some(&layout)],
             AO_FORMAT,
         ),
         blur_pipeline: fullscreen_pipeline(
@@ -1790,7 +1789,7 @@ fn build_ao(
             "cic-render ao blur pipeline",
             ao_shader,
             "ao_blur_fragment",
-            &[&layout, &source_layout],
+            &[Some(&layout), Some(&source_layout)],
             AO_FORMAT,
         ),
         group,
@@ -1805,14 +1804,30 @@ struct LightingStage {
     composite_pipeline: wgpu::RenderPipeline,
     group: wgpu::BindGroup,
     composite_group: wgpu::BindGroup,
+    /// Group 2: how the primary light's shadow term is produced.
+    ///
+    /// Held here rather than beside the pipelines because the two passes that bind it — lighting and
+    /// water — are recorded from different places, and both take it from the same field so neither can
+    /// bind a stale one.
+    shadow_group: wgpu::BindGroup,
 }
 
-/// Builds the lighting and composite stage, returning both of its bind group layouts as well.
+/// Builds the lighting and composite stage, returning the three bind group layouts as well.
 ///
-/// The lighting layout is returned because the water pass binds that very group and would otherwise need
-/// an identical second declaration. The composite layout is returned because the antialias pass wants
-/// exactly the same shape — one sampled colour texture and one filtering sampler — and reusing it is one
+/// The scene layout is returned because the water pass and both resolves bind that very group and would
+/// otherwise need an identical second declaration. The shadow layout is returned because the water pass
+/// samples the shadow term too. The composite layout is returned because the antialias pass wants exactly
+/// the same shape — one sampled colour texture and one filtering sampler — and reusing it is one
 /// declaration instead of two that must not drift.
+///
+/// # Why the shadow bindings are their own group
+///
+/// They were part of the scene layout, which meant the composite and both antialias resolves bound a
+/// shadow array and a cascade uniform none of them samples, purely because sharing one layout with the
+/// lighting pass was cheaper than declaring a second. Splitting them costs one more `set_bind_group` on
+/// the two passes that do sample it and buys the property that matters later: how the shadow term is
+/// *produced* is now one layout and one WGSL chunk, replaceable without touching a binding the rest of
+/// the chain depends on. See `shaders/shadow.wgsl`.
 fn build_lighting(
     device: &wgpu::Device,
     targets: &DeferredTargets,
@@ -1821,12 +1836,16 @@ fn build_lighting(
     lighting_shader: &wgpu::ShaderModule,
     composite_shader: &wgpu::ShaderModule,
     output_format: wgpu::TextureFormat,
-) -> (LightingStage, wgpu::BindGroupLayout, wgpu::BindGroupLayout) {
-    let comparison_sampler = build_shadow_sampler(device);
+) -> (
+    LightingStage,
+    wgpu::BindGroupLayout,
+    wgpu::BindGroupLayout,
+    wgpu::BindGroupLayout,
+) {
     let scene_sampler = build_scene_sampler(device);
 
     let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("cic-render lighting layout"),
+        label: Some("cic-render scene layout"),
         entries: &[
             texture_entry(0, wgpu::TextureSampleType::Float { filterable: false }),
             texture_entry(1, wgpu::TextureSampleType::Float { filterable: false }),
@@ -1835,45 +1854,24 @@ fn build_lighting(
             // this block's view-projection. The two fullscreen entry points using the same group do
             // not read it there, and extra visibility costs them nothing.
             uniform_entry(3, wgpu::ShaderStages::VERTEX_FRAGMENT),
-            wgpu::BindGroupLayoutEntry {
-                binding: 4,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Depth,
-                    view_dimension: wgpu::TextureViewDimension::D2Array,
-                    multisampled: false,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 5,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
-                count: None,
-            },
-            uniform_entry(6, wgpu::ShaderStages::FRAGMENT),
-            texture_entry(7, wgpu::TextureSampleType::Float { filterable: false }),
-            texture_entry(8, wgpu::TextureSampleType::Depth),
+            texture_entry(4, wgpu::TextureSampleType::Float { filterable: false }),
+            texture_entry(5, wgpu::TextureSampleType::Depth),
         ],
     });
     let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("cic-render lighting bindings"),
+        label: Some("cic-render scene bindings"),
         layout: &layout,
         entries: &[
             view_entry(0, &targets.albedo),
             view_entry(1, &targets.normal),
             view_entry(2, &targets.coverage),
             buffer_entry(3, scene_uniform),
-            view_entry(4, &targets.shadow_array),
-            wgpu::BindGroupEntry {
-                binding: 5,
-                resource: wgpu::BindingResource::Sampler(&comparison_sampler),
-            },
-            buffer_entry(6, shadow_uniform),
-            view_entry(7, &targets.ao_blurred),
-            view_entry(8, &targets.depth),
+            view_entry(4, &targets.ao_blurred),
+            view_entry(5, &targets.depth),
         ],
     });
+
+    let (shadow_layout, shadow_group) = build_shadow_bindings(device, targets, shadow_uniform);
 
     let composite_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("cic-render composite layout"),
@@ -1905,7 +1903,10 @@ fn build_lighting(
             "cic-render lighting pipeline",
             lighting_shader,
             "lighting_fragment",
-            &[&layout],
+            // The hole at group 1 is the per-pass slot this pass has no resources for. Group 2 is the
+            // shadow provider, and it keeps that index here so the one WGSL declaration in
+            // `shadow.wgsl` serves this pass and the water pass alike.
+            &[Some(&layout), None, Some(&shadow_layout)],
             HDR_FORMAT,
         ),
         composite_pipeline: fullscreen_pipeline(
@@ -1913,13 +1914,64 @@ fn build_lighting(
             "cic-render composite pipeline",
             composite_shader,
             "composite_fragment",
-            &[&layout, &composite_layout],
+            // No shadow group: the composite tone maps a lit image and never asks how it was shadowed.
+            &[Some(&layout), Some(&composite_layout)],
             output_format,
         ),
         group,
         composite_group,
+        shadow_group,
     };
-    (stage, layout, composite_layout)
+    (stage, layout, shadow_layout, composite_layout)
+}
+
+/// Builds group 2: everything the shadow term is produced *from*.
+///
+/// Separate from [`build_lighting`] because this is the one group a different shadow technique would
+/// replace wholesale. A provider that ray-traced the term would supply this function's counterpart —
+/// declaring an acceleration structure where the depth array and its comparison sampler are — and
+/// nothing above it would change, because the passes that bind group 2 do not know what is in it.
+fn build_shadow_bindings(
+    device: &wgpu::Device,
+    targets: &DeferredTargets,
+    shadow_uniform: &wgpu::Buffer,
+) -> (wgpu::BindGroupLayout, wgpu::BindGroup) {
+    let comparison_sampler = build_shadow_sampler(device);
+    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("cic-render shadow layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                count: None,
+            },
+            uniform_entry(2, wgpu::ShaderStages::FRAGMENT),
+        ],
+    });
+    let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("cic-render shadow bindings"),
+        layout: &layout,
+        entries: &[
+            view_entry(0, &targets.shadow_array),
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&comparison_sampler),
+            },
+            buffer_entry(2, shadow_uniform),
+        ],
+    });
+    (layout, group)
 }
 
 /// The antialias resolve: one fullscreen pass over the tone-mapped image.
@@ -1931,13 +1983,14 @@ struct AntialiasStage {
 
 /// Builds the antialias pass against the LDR intermediate it reads.
 ///
-/// Group 0 is the lighting group, as the composite's is, purely for the scene uniform: the pass needs the
+/// Group 0 is the scene group, as the composite's is, purely for the scene uniform: the pass needs the
 /// output size to step by one pixel and nothing else from it. Group 1 reuses the composite's layout, with
-/// the tone-mapped image bound where the HDR target is bound there.
+/// the tone-mapped image bound where the HDR target is bound there. No shadow group — it resolves edges in
+/// an already-lit image.
 fn build_antialias(
     device: &wgpu::Device,
     ldr: &wgpu::TextureView,
-    lighting_layout: &wgpu::BindGroupLayout,
+    scene_layout: &wgpu::BindGroupLayout,
     resolved_layout: &wgpu::BindGroupLayout,
     output_format: wgpu::TextureFormat,
 ) -> AntialiasStage {
@@ -1948,7 +2001,7 @@ fn build_antialias(
             "cic-render antialias pipeline",
             &shader_module(device, "antialias"),
             "antialias_fragment",
-            &[lighting_layout, resolved_layout],
+            &[Some(scene_layout), Some(resolved_layout)],
             output_format,
         ),
         group: device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -2085,17 +2138,19 @@ fn build_temporal(
 /// and it blends rather than overwriting.
 fn build_water_pipeline(
     device: &wgpu::Device,
-    lighting_layout: &wgpu::BindGroupLayout,
+    scene_layout: &wgpu::BindGroupLayout,
     water_layout: &wgpu::BindGroupLayout,
+    shadow_layout: &wgpu::BindGroupLayout,
     water_shader: &wgpu::ShaderModule,
 ) -> wgpu::RenderPipeline {
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("cic-render water pipeline layout"),
-        // Contiguous, with no empty slot. Water reuses the lighting group because it needs the camera,
-        // the cascades and the scene depth that are already declared there; its own uniform follows in
-        // group 1. It declares only the group-0 bindings it reads, and a layout carrying more than a
-        // shader uses is allowed.
-        bind_group_layouts: &[Some(lighting_layout), Some(water_layout)],
+        // Contiguous, with no empty slot. Water reuses the scene group because it needs the camera and
+        // the scene depth already declared there; its own uniform follows in group 1, and the shadow
+        // provider it samples the light's visibility from is group 2, the same index the lighting pass
+        // binds it at. It declares only the group-0 bindings it reads, and a layout carrying more than
+        // a shader uses is allowed.
+        bind_group_layouts: &[Some(scene_layout), Some(water_layout), Some(shadow_layout)],
         immediate_size: 0,
     });
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -2183,7 +2238,10 @@ fn fullscreen_pass(
     label: &str,
     target: &wgpu::TextureView,
     pipeline: &wgpu::RenderPipeline,
-    groups: &[&wgpu::BindGroup],
+    // Each group carries the index it binds at rather than taking it from its position, so a pass with
+    // a hole — lighting binds 0 and 2, skipping the per-pass slot it has no use for — is expressible,
+    // and so that every call site states which group is which instead of implying it by order.
+    groups: &[(u32, &wgpu::BindGroup)],
     timestamp_writes: Option<wgpu::RenderPassTimestampWrites<'_>>,
 ) {
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -2195,8 +2253,8 @@ fn fullscreen_pass(
         occlusion_query_set: None,
     });
     pass.set_pipeline(pipeline);
-    for (index, group) in groups.iter().enumerate() {
-        pass.set_bind_group(u32::try_from(index).unwrap_or(0), *group, &[]);
+    for (index, group) in groups {
+        pass.set_bind_group(*index, *group, &[]);
     }
     pass.draw(0..3, 0..1);
 }
@@ -2261,14 +2319,16 @@ fn fullscreen_pipeline(
     label: &str,
     shader: &wgpu::ShaderModule,
     entry_point: &str,
-    layouts: &[&wgpu::BindGroupLayout],
+    // `Option` per group rather than a plain slice, because the lighting pass has a hole: its scene
+    // bindings are group 0 and the shadow provider's are group 2, with group 1 belonging to whatever
+    // per-pass resources a program has and lighting having none. Declaring the hole is how a group
+    // index stays the same across the two programs that bind it.
+    layouts: &[Option<&wgpu::BindGroupLayout>],
     format: wgpu::TextureFormat,
 ) -> wgpu::RenderPipeline {
-    let owned: Vec<Option<&wgpu::BindGroupLayout>> =
-        layouts.iter().map(|layout| Some(*layout)).collect();
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some(label),
-        bind_group_layouts: &owned,
+        bind_group_layouts: layouts,
         immediate_size: 0,
     });
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {

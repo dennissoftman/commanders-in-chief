@@ -63,23 +63,6 @@ struct SceneCamera {
     output: vec4<f32>,
 }
 
-// `params` packs the world units spanned by the full normalized depth range in `y` and the world
-// units covered by one shadow texel in `z`. `x` and `w` are reserved. Both scales are per cascade,
-// since the fitted frusta differ by more than an order of magnitude.
-struct ShadowCascade {
-    view_projection: mat4x4<f32>,
-    params: vec4<f32>,
-}
-
-/// Four cascades rather than more. An RTS camera has a bounded height range, so the depth interval
-/// needing shadows is far narrower than a free-flight camera's, and a fifth cascade would fit a
-/// frustum slice the camera cannot reach.
-const SHADOW_CASCADE_COUNT: i32 = 4;
-
-struct ShadowCamera {
-    cascades: array<ShadowCascade, 4>,
-}
-
 struct FullscreenOutput {
     @builtin(position) position: vec4<f32>,
 }
@@ -94,19 +77,24 @@ fn fullscreen_vertex(@builtin(vertex_index) vertex_index: u32) -> FullscreenOutp
     return output;
 }
 
+// Group 0 is the G-buffer and the scene itself, and deliberately nothing technique-specific. Every
+// program composing this chunk binds it — lighting, water, the composite, and both resolves — so
+// anything declared here is something all five carry whether they read it or not. The shadow map and
+// its cascades used to sit at bindings 4 to 6 for exactly that reason and no better one: the water
+// pass needed them, and sharing one layout was cheaper than declaring a second. It also meant the
+// composite and the two antialias resolves bound a shadow array none of them samples, and that
+// swapping how shadows are produced would have changed a layout those three depend on. They now live
+// in group 2, declared by `shadow.wgsl`, which owns them. See that chunk.
 @group(0) @binding(0) var g_albedo: texture_2d<f32>;
 @group(0) @binding(1) var g_normal: texture_2d<f32>;
 // Geometry coverage in `r`: below 0.5 no geometry was drawn, 1.0 is opaque geometry, and anything
 // above 1.0 carries that much emissive strength.
 @group(0) @binding(2) var g_coverage: texture_2d<f32>;
 @group(0) @binding(3) var<uniform> camera: SceneCamera;
-@group(0) @binding(4) var primary_shadow: texture_depth_2d_array;
-@group(0) @binding(5) var primary_shadow_sampler: sampler_comparison;
-@group(0) @binding(6) var<uniform> shadow_camera: ShadowCamera;
-@group(0) @binding(7) var ambient_occlusion: texture_2d<f32>;
+@group(0) @binding(4) var ambient_occlusion: texture_2d<f32>;
 // The scene depth buffer, read directly. There is no multisample resolve step: this pass is not
 // multisampled, so the depth attachment the G-buffer wrote is sampleable as-is.
-@group(0) @binding(8) var scene_depth: texture_depth_2d;
+@group(0) @binding(5) var scene_depth: texture_depth_2d;
 
 // Reconstructs a G-buffer pixel's world position from its depth.
 //
