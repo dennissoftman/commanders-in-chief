@@ -19,10 +19,16 @@
 //! [`crate::deferred::DeferredRenderer::render`] stay `&self`: writing a timestamp mutates the query set
 //! on the *GPU*, not this struct.
 //!
-//! Two of the passes are conditional, which a fixed layout has to answer for. The resolve buffer is
-//! cleared before anything is resolved into it, and only the passes that ran are resolved, so a pass that
-//! did not run reads back as a pair of zeroes — and a pair whose end does not exceed its beginning is
-//! reported as absent rather than as a duration. Guessing from indeterminate contents was the alternative.
+//! Not every pass is timed every frame, which a fixed layout has to answer for. Water and the antialias
+//! resolve are conditional outright, and a shadow cascade that caught no caster is recorded — its clear is
+//! load-bearing — but left untimed, because a pass that rasterises nothing has no end-of-pass timestamp to
+//! give on every backend. See `DeferredRenderer::time_if` for that one. The resolve buffer is cleared before
+//! anything is resolved into it, and only the timed passes are resolved, so anything else reads back as a
+//! pair of zeroes — and a pair whose end does not exceed its beginning is reported as absent rather than as
+//! a duration. Guessing from indeterminate contents was the alternative.
+//!
+//! So *absent* means "nothing to attribute here", covering both a pass that never ran and one that ran over
+//! no geometry. What it never means is zero: see [`FrameTimings::get`].
 //!
 //! # What the numbers mean, and what they do not
 //!
@@ -56,12 +62,18 @@ const RESOLVE_ALIGNMENT: u64 = 256;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum TimedPass {
     /// The first shadow cascade, nearest the camera.
+    ///
+    /// Absent when its frustum caught no caster, which is ordinary rather than exceptional for this one: it
+    /// covers only the first few percent of the shadow distance, so a camera any height above the ground
+    /// has it sitting in the air over the terrain. A cascade with nothing in it is recorded — the clear
+    /// still has to happen — but not timed, since there is nothing to attribute.
     ShadowCascade0,
-    /// The second shadow cascade.
+    /// The second shadow cascade. Absent when it caught no caster, as [`Self::ShadowCascade0`] explains.
     ShadowCascade1,
-    /// The third shadow cascade.
+    /// The third shadow cascade. Absent when it caught no caster.
     ShadowCascade2,
-    /// The fourth shadow cascade, covering the far end of the shadow distance.
+    /// The fourth shadow cascade, covering the far end of the shadow distance. Absent when it caught no
+    /// caster, which for the outermost cascade means the camera is looking away from the terrain entirely.
     ShadowCascade3,
     /// Albedo, world normal with roughness, coverage, and scene depth.
     Gbuffer,
@@ -156,7 +168,10 @@ impl FrameTimings {
         &self.entries
     }
 
-    /// How long one pass took, or `None` when it did not run.
+    /// How long one pass took, or `None` when it was not timed.
+    ///
+    /// Not timed and zero are different claims, and this returns the first for both a pass that did not run
+    /// and a pass that ran over no geometry. See the module note.
     #[must_use]
     pub fn get(&self, pass: TimedPass) -> Option<Duration> {
         self.entries
@@ -177,6 +192,9 @@ impl FrameTimings {
     ///
     /// They are one decision — how far shadows reach and at what resolution — and reading them
     /// individually mostly reports how much of the scene each cascade happened to cover.
+    ///
+    /// A cascade that caught no caster contributes nothing rather than making the total absent. That is the
+    /// point of summing them: what the shadow distance costs is what the cascades holding geometry cost.
     #[must_use]
     pub fn shadow_total(&self) -> Duration {
         TimedPass::CASCADES
@@ -528,6 +546,20 @@ mod tests {
             timings.sum(),
             Duration::from_micros(100 * TimedPass::ALL.len() as u64)
         );
+    }
+
+    #[test]
+    fn a_cascade_with_no_casters_leaves_the_total_to_the_ones_that_drew() {
+        // The near cascade covers the first few percent of the shadow distance, so a camera above the
+        // ground routinely has one whose frustum catches nothing. Its pass is recorded for the clear and
+        // left untimed, which arrives here as the same cleared pair a skipped pass leaves — and the shadow
+        // total has to be the three cascades that drew rather than absent or a hole.
+        let mut ticks = all_ran(100_000);
+        ticks[TimedPass::ShadowCascade0.index()] = (0, 0);
+        let timings = timings_from_ticks(&ticks, UNIT_PERIOD);
+        assert_eq!(timings.get(TimedPass::ShadowCascade0), None);
+        assert_eq!(timings.shadow_total(), Duration::from_micros(300));
+        assert!(!timings.to_string().contains("shadow 0"));
     }
 
     #[test]
