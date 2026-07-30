@@ -67,11 +67,27 @@ where BC7 at the same bitrate manages 27.8. `z` was never needed — the shader 
 `xy`, because averaging a normal map down a mip chain does not preserve unit length and the *stored* `z`
 lies at every level but the first.
 
-**DDS rather than KTX2.** KTX2 is the better-specified container and the one glTF's own extension uses.
-DDS wins on one practical point: every texture tool a content author already has writes it, and its header
-is 128 bytes of fixed-offset fields needing no dependency to parse. KTX2 also permits a supercompressed
-payload (Zstd, Basis), which would put a decompressor in the runtime before the texture unit ever sees a
-block — a real feature, and not one needed here, because the package is already a zip.
+**DDS rather than KTX2.** KTX2 is the better-specified container and the one glTF's ratified extension
+(`KHR_texture_basisu`) uses. DDS wins on one practical point: every texture tool a content author already
+has writes it, and its header is 128 bytes of fixed-offset fields needing no dependency to parse.
+
+The argument against KTX2 is a runtime one and not a size one, and it is worth being exact because the
+size point runs the *other* way. A KTX2 payload can be supercompressed — Basis Universal as ETC1S or
+UASTC, optionally Zstd on top — and that is genuinely smaller on disk than raw BC7 even after the package
+zips it, because BC7 is fixed-rate and compresses poorly while UASTC is designed to compress. So KTX2 would
+win on disk.
+
+What it costs is a **transcoder in the runtime**: a UASTC payload is not blocks the texture unit can read
+until something converts it, per texture, at load. The reference implementation is C++, its Rust binding is
+FFI, and this workspace forbids `unsafe` — so adopting it is an ADR about that policy rather than a format
+choice. A hand-written UASTC transcoder is a great deal more than the BC7 decoder this record already
+justifies.
+
+**The case that would reverse this is portability, not size.** BC is a desktop feature: `wgpu` reports it on
+desktops, on WebGPU, and on only some Apple mobile parts. A BC-only pipeline therefore assumes a desktop
+target, and a second one — ETC2 or ASTC — would mean converting every texture twice. UASTC transcodes to
+whichever the device has, from one asset. If this engine ever targets mobile, revisit this record; nothing
+else about the decision changes.
 
 **The slot as the only knob.** Three things must be right about a converted texture: its block format, its
 colour space, and which channel means what. All three follow from what the texture *is*, and both ways of
