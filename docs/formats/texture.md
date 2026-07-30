@@ -87,21 +87,60 @@ An image with no name is never looked up. An **absent** sidecar is not an error 
 that has not been converted. A sidecar that **exists and will not read** is an error, because it means a
 converted texture is being silently rendered from its placeholder.
 
+## Where a model's textures live
+
+Two arrangements, and a model uses one or the other:
+
+**Inside the container** (`MSFT_texture_dds`, the default). One file holds the model, its materials and its
+compressed textures. A texture keeps its ordinary `source` — now a 1×1 placeholder — and adds an extension
+naming a second image whose payload is the DDS:
+
+```json
+"textures": [{ "source": 0, "extensions": { "MSFT_texture_dds": { "source": 1 } } }],
+"images": [
+  { "bufferView": 1, "mimeType": "image/png" },
+  { "bufferView": 2, "mimeType": "image/vnd-ms.dds" }
+]
+```
+
+Nothing to name, nothing to lose track of, and the fallback means a reader that has never heard of the
+extension still sees a complete glTF.
+
+**Beside it**, as `textures/<image name>.dds` — what `--sidecars` writes, and what a package sharing one
+texture between several models wants. Terrain layers always use this, having no container to live in.
+
+Read with `import_model_with_textures`, which returns the model and its textures together. The textures are
+keyed by the image index a *material* names — the fallback's — so an embedded texture and a sidecar are the
+same thing by the time the renderer sees one.
+
+### One wrinkle worth knowing
+
+The extension is designed so a reader ignorant of it falls back to the PNG, and that holds for a reader
+which decodes only the images it uses. The `gltf` crate decodes **every** entry in `images` eagerly and
+knows PNG and JPEG only — so a container with an embedded DDS is refused outright over an image no material
+would ever have sampled.
+
+So every import here first lifts the DDS images out of the crate's way, `import_model` included, even
+though it discards them. Otherwise the simpler function is a trap for whoever reaches for it next. A DDS
+image that *no* texture names is refused with a message saying so, because the extension is the only thing
+that makes a DDS image legal glTF in the first place.
+
 ## Converting a model's own textures
 
 A `.glb` carries its textures inside it, and `--from-glb` converts all of them at once:
 
 ```bash
-cic-texconv --from-glb models/hull.glb
+cic-texconv --from-glb models/hull.glb              # textures inside the model
+cic-texconv --from-glb models/hull.glb --sidecars textures   # textures beside it
 ```
 
 ```text
-hull.glb -> hull.glb and 3 textures in textures
+hull.glb -> hull.glb
   hull_orm.dds                  128x128       21.5 KiB  BC7_UNORM (merged for occlusion/roughness/metallic)
   hull_basecolor.dds            128x128       21.5 KiB  BC7_UNORM_SRGB
   hull_normal.dds               128x128       21.5 KiB  BC5_UNORM
   2 images are no longer referenced by any material, left as a placeholder
-  glb 2.7 KiB -> 1.6 KiB, 4 images replaced by a 1x1 placeholder
+  glb 2.7 KiB -> 66.6 KiB, 4 images replaced by a 1x1 placeholder and the DDS embedded beside it
 ```
 
 **No `--slot` here, and no filename heuristics.** A glTF material states which slot every image is read
@@ -117,7 +156,9 @@ is why this rewrites the model rather than only writing textures. A channel with
 whatever the other image happened to carry there: glTF leaves red unused in a metallic-roughness image, and
 reading it as occlusion would darken the surface for no reason.
 
-**It slims the container.** Every image becomes a 1×1 placeholder and the binary chunk is compacted. The
+**It slims the model's own images.** Every one becomes a 1×1 placeholder and the binary chunk is compacted —
+so with `--sidecars` the container shrinks outright, and when embedding it grows by exactly the textures it
+now carries. The
 images are not *removed*, because a material's slot references are how the runtime knows which sidecar
 belongs to which slot — a named image entry is the link. An image whose only reader was a merged-away slot
 stays as a placeholder too, and is reported so it can be pruned at the source; removing it would renumber

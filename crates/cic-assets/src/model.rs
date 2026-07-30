@@ -27,8 +27,12 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
 use cic_vfs::Vfs;
+use serde_json::Value;
 
-use crate::texture::{TextureAsset, TextureLimits, TextureResolveError, resolve_named_textures};
+use crate::glb::{DDS_MIME_TYPE, Glb, GlbError};
+use crate::texture::{
+    TextureAsset, TextureError, TextureLimits, TextureResolveError, resolve_named_textures,
+};
 
 /// Explicit bounds applied while importing an untrusted model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -417,6 +421,226 @@ pub fn resolve_model_textures(
     )?))
 }
 
+/// The extension name a texture carries when it has an embedded DDS alternative.
+pub const DDS_EXTENSION: &str = "MSFT_texture_dds";
+
+/// Imports a model together with whatever block-compressed textures its container carries.
+///
+/// # The extension
+///
+/// `MSFT_texture_dds` puts the DDS *inside* the `.glb`. A texture keeps its ordinary `source` — a PNG or
+/// JPEG any reader can use — and adds an extension naming a second image whose payload is a DDS:
+///
+/// ```json
+/// "textures": [{ "source": 0, "extensions": { "MSFT_texture_dds": { "source": 1 } } }],
+/// "images": [
+///   { "bufferView": 1, "mimeType": "image/png" },
+///   { "bufferView": 2, "mimeType": "image/vnd-ms.dds" }
+/// ]
+/// ```
+///
+/// So one file carries the model, its materials and its compressed textures, with no naming convention to
+/// keep and nothing to lose track of. The fallback is what makes it safe to ship: a reader that has never
+/// heard of the extension sees an ordinary textured glTF.
+///
+/// # Why the document has to be rewritten to read it
+///
+/// The `gltf` crate decodes every image eagerly and knows PNG and JPEG only, so a container holding an
+/// `image/vnd-ms.dds` is refused outright — "unsupported image encoding" — before any geometry is reached.
+/// This therefore lifts the DDS payloads out first and hands the crate a document whose DDS image entries
+/// have been pointed at their own texture's fallback. The crate then decodes a placeholder twice and is
+/// content, and nothing about the geometry, the materials or any other extension is touched.
+///
+/// # What comes back
+///
+/// The textures are keyed by the image index a *material* reports — the fallback's — because that is what
+/// [`ModelMaterial::base_color_texture`] and its siblings hold. So the renderer's existing lookup works
+/// unchanged, and an embedded texture and a sidecar are the same thing by the time it sees them.
+///
+/// # Errors
+///
+/// Returns [`ModelError::Container`] when the container will not split or reassemble,
+/// [`ModelError::EmbeddedTexture`] when a DDS payload will not read, and the same errors as
+/// [`import_model`] otherwise. An *absent* extension is not an error: a container with no embedded textures
+/// yields an empty table, which is exactly a model whose textures have not been converted.
+/// One embedded DDS: the fallback image a material names, and the image holding the compressed payload.
+type Embedded = (usize, usize);
+
+/// A container with its embedded DDS images lifted out of the `gltf` crate's way, and where they were.
+type Lifted = Option<(Vec<u8>, Vec<Embedded>)>;
+
+/// Lifts embedded DDS images out of a container's way, returning bytes the `gltf` crate will accept.
+///
+/// `None` when there is nothing to do — the bytes are not a container, or carry no embedded texture — in
+/// which case the caller passes the original bytes straight through.
+///
+/// # Why every import goes through this, not just the one that wants the textures
+///
+/// `MSFT_texture_dds` is designed so a reader ignorant of it falls back to the PNG the texture also names,
+/// and that works for a reader which decodes only the images it uses. The `gltf` crate decodes *every*
+/// entry in `images` eagerly, referenced or not, and knows PNG and JPEG only — so it refuses the whole
+/// container with "unsupported image encoding" over an image no material would ever have sampled.
+///
+/// Doing this in [`import_model`] as well as in [`import_model_with_textures`] is therefore not tidiness.
+/// It means no caller can hold a valid model this crate refuses to open, which is otherwise a trap set for
+/// whoever next reaches for the simpler function.
+fn lift_embedded(bytes: &[u8], limits: TextureLimits) -> Result<Lifted, ModelError> {
+    let mut glb = match Glb::split(bytes) {
+        Ok(glb) => glb,
+        // A `.gltf` with its buffers inline is a legal model and cannot carry an embedded DDS.
+        Err(GlbError::NotGlb) => return Ok(None),
+        Err(error) => return Err(ModelError::Container(error)),
+    };
+    let _ = limits;
+
+    // Which fallback image each embedded DDS belongs to, by walking the textures.
+    let mut embedded: Vec<Embedded> = Vec::new();
+    for texture in glb.array("textures") {
+        let Some(dds) = texture
+            .get("extensions")
+            .and_then(|extensions| extensions.get(DDS_EXTENSION))
+            .and_then(|extension| extension.get("source"))
+            .and_then(Value::as_u64)
+            .and_then(|index| usize::try_from(index).ok())
+        else {
+            continue;
+        };
+        let fallback = texture
+            .get("source")
+            .and_then(Value::as_u64)
+            .and_then(|index| usize::try_from(index).ok())
+            .ok_or(ModelError::EmbeddedTextureWithoutFallback { image: dds })?;
+        embedded.push((fallback, dds));
+    }
+
+    // A DDS image is only legal glTF *because* this extension permits it, and the extension's shape is that
+    // a texture names it. One that nothing names is outside that contract, and left alone it reaches the
+    // `gltf` crate as an opaque "unsupported image encoding" over an image no material would have sampled.
+    // Naming it is the difference between an author knowing what to fix and guessing.
+    let named: Vec<usize> = embedded.iter().map(|(_, dds)| *dds).collect();
+    for (index, image) in glb.array("images").iter().enumerate() {
+        let is_dds = image
+            .get("mimeType")
+            .and_then(Value::as_str)
+            .is_some_and(|mime| mime == DDS_MIME_TYPE);
+        if is_dds && !named.contains(&index) {
+            return Err(ModelError::UnreferencedEmbeddedTexture { image: index });
+        }
+    }
+
+    if embedded.is_empty() {
+        return Ok(None);
+    }
+
+    // Point every DDS image entry at its own fallback's payload, so the crate has only PNG and JPEG to
+    // decode. Done on a copy of the document; the bytes on disk are untouched, and the extension itself is
+    // left in place because the caller may still want to read it.
+    let fallbacks: Vec<(usize, Value, Value)> = embedded
+        .iter()
+        .filter_map(|(fallback, dds)| {
+            let image = glb.array("images").get(*fallback)?;
+            Some((
+                *dds,
+                image.get("bufferView")?.clone(),
+                image
+                    .get("mimeType")
+                    .cloned()
+                    .unwrap_or_else(|| Value::String("image/png".to_owned())),
+            ))
+        })
+        .collect();
+    if let Some(images) = glb.document.get_mut("images").and_then(Value::as_array_mut) {
+        for (dds, view, mime) in fallbacks {
+            if let Some(entry) = images.get_mut(dds).and_then(Value::as_object_mut) {
+                entry.insert("bufferView".to_owned(), view);
+                entry.insert("mimeType".to_owned(), mime);
+            }
+        }
+    }
+    let sanitised = glb.assemble().map_err(ModelError::Container)?;
+    Ok(Some((sanitised, embedded)))
+}
+
+/// Decodes the embedded payloads a [`lift_embedded`] pass found.
+fn decode_embedded(
+    bytes: &[u8],
+    embedded: &[Embedded],
+    limits: TextureLimits,
+) -> Result<ModelTextures, ModelError> {
+    // Read from the *original* container, whose DDS images still point at their own payloads.
+    let glb = Glb::split(bytes).map_err(ModelError::Container)?;
+    let mut assets: Vec<Option<TextureAsset>> = Vec::new();
+    for (fallback, dds) in embedded {
+        let payload = glb
+            .array("images")
+            .get(*dds)
+            .and_then(|image| image.get("bufferView"))
+            .and_then(Value::as_u64)
+            .and_then(|view| usize::try_from(view).ok())
+            .and_then(|view| glb.view(view))
+            .ok_or(ModelError::EmbeddedTextureMissing { image: *dds })?
+            .to_vec();
+        let texture = crate::texture::decode_dds(&payload, limits).map_err(|error| {
+            ModelError::EmbeddedTexture {
+                image: *dds,
+                error: Box::new(error),
+            }
+        })?;
+        if assets.len() <= *fallback {
+            assets.resize(*fallback + 1, None);
+        }
+        // Two textures sharing one fallback but naming different payloads cannot both be honoured: the
+        // renderer resolves by the image index a material reports, and that is the fallback.
+        if assets[*fallback].is_some() {
+            return Err(ModelError::AmbiguousEmbeddedTexture { image: *fallback });
+        }
+        assets[*fallback] = Some(texture);
+    }
+    Ok(ModelTextures::new(assets))
+}
+
+/// Imports a model together with whatever block-compressed textures its container carries.
+///
+/// See [`lift_embedded`] for the extension's shape and why reading it needs the document rewritten.
+///
+/// The textures are keyed by the image index a *material* reports — the fallback's — because that is what
+/// [`ModelMaterial::base_color_texture`] and its siblings hold. So the renderer's existing lookup works
+/// unchanged, and an embedded texture and a sidecar are the same thing by the time it sees one.
+///
+/// # Errors
+///
+/// As [`import_model`], plus [`ModelError::EmbeddedTexture`] when a payload will not read. An *absent*
+/// extension is not an error: a container with no embedded textures yields an empty table, which is exactly
+/// a model whose textures have not been converted.
+pub fn import_model_with_textures(
+    bytes: &[u8],
+    limits: ModelLimits,
+    texture_limits: TextureLimits,
+) -> Result<(Model, ModelTextures), ModelError> {
+    match lift_embedded(bytes, texture_limits)? {
+        None => Ok((import_gltf(bytes, limits)?, ModelTextures::default())),
+        Some((sanitised, embedded)) => {
+            let textures = decode_embedded(bytes, &embedded, texture_limits)?;
+            Ok((import_gltf(&sanitised, limits)?, textures))
+        }
+    }
+}
+
+/// Whether a container declares an embedded DDS texture, without importing it.
+///
+/// For a caller deciding which path to take before paying for a full import.
+#[must_use]
+pub fn has_embedded_textures(bytes: &[u8]) -> bool {
+    Glb::split(bytes).is_ok_and(|glb| {
+        glb.array("textures").iter().any(|texture| {
+            texture
+                .get("extensions")
+                .and_then(|extensions| extensions.get(DDS_EXTENSION))
+                .is_some()
+        })
+    })
+}
+
 /// Imports a `.glb` or self-contained `.gltf` model from bytes.
 ///
 /// # Errors
@@ -424,6 +648,17 @@ pub fn resolve_model_textures(
 /// Returns a structured [`ModelError`] when the container is malformed, references external files,
 /// omits required attributes, uses a non-triangle topology, or exceeds a [`ModelLimits`] bound.
 pub fn import_model(bytes: &[u8], limits: ModelLimits) -> Result<Model, ModelError> {
+    // Embedded DDS images are lifted out of the crate's way even here, where the caller has not asked for
+    // them. See `lift_embedded`: without this, a perfectly valid container is refused over an image no
+    // material would have sampled, and the simpler function becomes a trap.
+    match lift_embedded(bytes, TextureLimits::default())? {
+        None => import_gltf(bytes, limits),
+        Some((sanitised, _)) => import_gltf(&sanitised, limits),
+    }
+}
+
+/// Imports a model through the `gltf` crate, with no container pre-pass.
+fn import_gltf(bytes: &[u8], limits: ModelLimits) -> Result<Model, ModelError> {
     let (document, buffers, images) =
         gltf::import_slice(bytes).map_err(|error| ModelError::Gltf(Box::new(error)))?;
 
@@ -1093,6 +1328,35 @@ pub enum ModelError {
         /// The declared layout.
         format: String,
     },
+    /// The binary container could not be split or reassembled.
+    Container(GlbError),
+    /// A texture declared an embedded DDS but no fallback image, which the extension requires.
+    EmbeddedTextureWithoutFallback {
+        /// The DDS image the extension named.
+        image: usize,
+    },
+    /// A texture's embedded DDS image had no buffer view this container holds.
+    EmbeddedTextureMissing {
+        /// The image index.
+        image: usize,
+    },
+    /// An embedded DDS payload would not read.
+    EmbeddedTexture {
+        /// The image index.
+        image: usize,
+        /// The underlying container or format failure.
+        error: Box<TextureError>,
+    },
+    /// A DDS image no texture names through the extension that permits it to be there.
+    UnreferencedEmbeddedTexture {
+        /// The image index.
+        image: usize,
+    },
+    /// Two textures named one fallback image but different embedded payloads.
+    AmbiguousEmbeddedTexture {
+        /// The fallback image both named.
+        image: usize,
+    },
     /// An image's payload was shorter than its declared dimensions.
     TruncatedImage {
         /// Declared width.
@@ -1128,6 +1392,29 @@ impl Display for ModelError {
             Self::UnsupportedImageFormat { format } => {
                 write!(formatter, "unsupported image pixel layout {format}")
             }
+            Self::Container(error) => write!(formatter, "the glTF container is unusable: {error}"),
+            Self::EmbeddedTextureWithoutFallback { image } => write!(
+                formatter,
+                "a texture names embedded DDS image {image} but no fallback, which `{DDS_EXTENSION}` \
+                 requires so a reader without the extension still has something to draw"
+            ),
+            Self::EmbeddedTextureMissing { image } => write!(
+                formatter,
+                "embedded DDS image {image} has no buffer view in this container"
+            ),
+            Self::EmbeddedTexture { image, error } => {
+                write!(formatter, "embedded DDS image {image} is unusable: {error}")
+            }
+            Self::UnreferencedEmbeddedTexture { image } => write!(
+                formatter,
+                "image {image} is a DDS that no texture names through `{DDS_EXTENSION}`, which is the only \
+                 thing that makes a DDS image legal here"
+            ),
+            Self::AmbiguousEmbeddedTexture { image } => write!(
+                formatter,
+                "two textures name fallback image {image} with different embedded payloads, so which one \
+                 a material means is undecidable"
+            ),
             Self::TruncatedImage { width, height } => write!(
                 formatter,
                 "an image's payload is shorter than the {width}x{height} it declares"
@@ -1140,6 +1427,8 @@ impl Error for ModelError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Gltf(error) => Some(error.as_ref()),
+            Self::Container(error) => Some(error),
+            Self::EmbeddedTexture { error, .. } => Some(error.as_ref()),
             _ => None,
         }
     }

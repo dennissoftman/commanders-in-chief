@@ -91,7 +91,7 @@ cic-texconv — convert authored textures to block-compressed DDS
 
 usage:
     cic-texconv --slot <slot> <input.png> [-o <output.dds>]
-    cic-texconv --from-glb <model.glb> [-o <output.glb>] [--textures <dir>]
+    cic-texconv --from-glb <model.glb> [-o <output.glb>] [--sidecars <dir>]
 
 slots:
     base         base colour or albedo      BC7, sRGB, alpha kept
@@ -105,10 +105,14 @@ image it belongs to: that name is the key the runtime looks it up by.
 
 --from-glb needs no slot: a glTF material says which slot every image is read
 through, so each one's format and colour space are derived rather than guessed.
-It converts them all, merges a separate occlusion map into the ORM image, writes
-the sidecars to --textures (default: ./textures), and rewrites the model with 1x1
-placeholder images. Run it from the package root so the sidecars land where the
-runtime looks for them.
+It converts them all, merges a separate occlusion map into the ORM image, and
+rewrites the model with 1x1 placeholder images.
+
+By default the DDS goes *inside* the model, as MSFT_texture_dds -- one file, no
+naming convention to keep, and the placeholder means a reader without the
+extension still sees a complete glTF. Pass --sidecars <dir> to write them beside
+it instead, which is what a package that shares one texture between models
+wants.
 ";
 
 fn main() -> ExitCode {
@@ -139,7 +143,7 @@ fn run(arguments: Vec<String>) -> Result<String, String> {
         match argument.as_str() {
             "--help" | "-h" => return Ok(USAGE.to_owned()),
             "--from-glb" => from_glb = true,
-            "--textures" => {
+            "--sidecars" | "--textures" => {
                 textures = Some(PathBuf::from(
                     rest.next().ok_or("--textures needs a directory")?,
                 ));
@@ -174,7 +178,7 @@ fn run(arguments: Vec<String>) -> Result<String, String> {
         return repack_model(&input, output.as_deref(), textures.as_deref());
     }
     if textures.is_some() {
-        return Err("--textures applies to --from-glb, which writes several files".to_owned());
+        return Err("--sidecars applies to --from-glb, which writes several files".to_owned());
     }
 
     let slot = slot.ok_or_else(|| format!("--slot is required\n\n{USAGE}"))?;
@@ -208,31 +212,41 @@ fn repack_model(
         .file_stem()
         .and_then(|stem| stem.to_str())
         .ok_or_else(|| format!("{} has no usable file name", input.display()))?;
-    let repacked =
-        repack::repack(&bytes, stem).map_err(|error| format!("{}: {error}", input.display()))?;
+    // Embedded by default: one file, no naming convention to keep, and a fallback image means a reader
+    // without the extension still sees a complete glTF. `--sidecars` keeps the textures beside it instead.
+    let embed = textures.is_none();
+    let repacked = repack::repack(&bytes, stem, embed)
+        .map_err(|error| format!("{}: {error}", input.display()))?;
 
-    let directory = textures.unwrap_or_else(|| Path::new(repack::TEXTURE_DIRECTORY));
-    std::fs::create_dir_all(directory)
-        .map_err(|error| format!("{}: {error}", directory.display()))?;
-    for (name, dds) in &repacked.textures {
-        let path = directory.join(format!("{name}.dds"));
-        std::fs::write(&path, dds).map_err(|error| format!("{}: {error}", path.display()))?;
+    // Nothing is written beside the model when the textures went inside it, which is the point.
+    let mut written = String::new();
+    if let Some(directory) = textures {
+        std::fs::create_dir_all(directory)
+            .map_err(|error| format!("{}: {error}", directory.display()))?;
+        for (name, dds) in &repacked.textures {
+            let path = directory.join(format!("{name}.dds"));
+            std::fs::write(&path, dds).map_err(|error| format!("{}: {error}", path.display()))?;
+        }
+        written = format!(
+            " and {} texture{} in {}",
+            repacked.textures.len(),
+            if repacked.textures.len() == 1 {
+                ""
+            } else {
+                "s"
+            },
+            directory.display()
+        );
     }
     let model = output.map_or_else(|| input.to_path_buf(), Path::to_path_buf);
     std::fs::write(&model, &repacked.glb)
         .map_err(|error| format!("{}: {error}", model.display()))?;
 
     Ok(format!(
-        "{} -> {} and {} texture{} in {}\n{}",
+        "{} -> {}{}\n{}",
         input.display(),
         model.display(),
-        repacked.textures.len(),
-        if repacked.textures.len() == 1 {
-            ""
-        } else {
-            "s"
-        },
-        directory.display(),
+        written,
         repacked.report.trim_end()
     ))
 }
