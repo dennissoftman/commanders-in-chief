@@ -74,7 +74,8 @@ struct GBufferOutput {
     @location(1) normal_roughness: vec4<f32>,
     // Geometry coverage: below 0.5 nothing drew, 1.0 is opaque geometry, and anything above 1.0
     // carries that much emissive strength. Terrain never emits, so it writes exactly 1.0.
-    @location(2) coverage: f32,
+    // Coverage in red, baked occlusion in green. Terrain bakes none, so green is one.
+    @location(2) coverage: vec2<f32>,
     // Texture-coordinate motion since the previous frame. Written unconditionally, and read only by the
     // temporal resolve -- so with that resolve off this costs the write and nothing else.
     @location(3) motion: vec2<f32>,
@@ -385,7 +386,7 @@ fn gbuffer_fragment(input: VertexOutput) -> GBufferOutput {
     // Roughness is per layer and blended by the same weights as the colour, so a gravel layer and a
     // wet-asphalt layer can meet on one fragment and each contribute its own specular response.
     output.normal_roughness = vec4<f32>(normal, surface_value.w);
-    output.coverage = 1.0;
+    output.coverage = vec2<f32>(1.0, 1.0);
     output.motion = motion_vector(
         input.current_clip,
         input.previous_clip,

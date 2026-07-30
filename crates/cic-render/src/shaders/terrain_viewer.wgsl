@@ -26,7 +26,7 @@ struct GBufferOutput {
     @location(1) normal_roughness: vec4<f32>,
     // Geometry coverage: 1.0 wherever opaque geometry drew. World position is no longer stored;
     // the deferred passes reconstruct it from scene depth.
-    @location(2) coverage: f32,
+    @location(2) coverage: vec2<f32>,
 }
 
 @group(0) @binding(0) var terrain_texture: texture_2d<f32>;
@@ -121,7 +121,7 @@ fn surface_output(input: VertexOutput) -> GBufferOutput {
     var output: GBufferOutput;
     output.albedo = terrain_sample(input.uv, input.world_position);
     output.normal_roughness = vec4<f32>(normal, 0.88);
-    output.coverage = 1.0;
+    output.coverage = vec2<f32>(1.0, 1.0);
     return output;
 }
 

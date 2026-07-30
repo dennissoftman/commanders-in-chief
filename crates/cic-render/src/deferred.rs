@@ -79,9 +79,28 @@ pub const ALBEDO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSr
 /// banding across the smooth gradients terrain is mostly made of.
 pub const NORMAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
-/// Geometry coverage, with values above one carrying emissive strength — hence a float format rather
-/// than unorm, which would clamp exactly the range that encodes emission.
-pub const COVERAGE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R16Float;
+/// Geometry coverage in red, with values above one carrying emissive strength, and a material's baked
+/// ambient occlusion in green.
+///
+/// A float format rather than unorm, because red's range above one is exactly what encodes emission and
+/// unorm would clamp it away.
+///
+/// # Why two channels, when the whole point was that one was enough
+///
+/// Green was added for baked occlusion because there was nowhere else to put it. Every other channel of
+/// this G-buffer is claimed: albedo carries the metallic factor in its alpha — which its own comment
+/// records as the last channel available at no bandwidth cost — normals carry roughness in `w`, and motion
+/// uses both of its. Occlusion has to reach the *lighting* pass rather than being applied here, because
+/// glTF scopes it to indirect light and the ambient term is computed there; folding it into albedo instead
+/// would darken direct lighting too, which is a different and wrong picture.
+///
+/// The cost is two bytes per pixel written and read, about 8 MiB per frame at 2560x1600 — measured at
+/// under a tenth of a millisecond on an M1 Pro, and worth stating rather than assuming.
+///
+/// Green is 1.0 for every surface with no baked occlusion, and [`crate::shader`]'s lighting pass combines
+/// it with the screen-space term by `min`. So a scene with no occlusion maps renders exactly as it did
+/// before this channel existed, which is what keeps the committed reference captures valid.
+pub const COVERAGE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg16Float;
 
 /// Ambient occlusion, a single unsigned channel.
 pub const AO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;

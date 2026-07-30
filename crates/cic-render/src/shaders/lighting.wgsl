@@ -90,10 +90,21 @@ fn lighting_fragment(input: FullscreenOutput) -> @location(0) vec4<f32> {
         let trust = smoothstep(0.0, SHADOW_INCIDENCE_FADE, incidence);
         primary_visibility = mix(1.0, primary_visibility, trust);
     }
+    // The screen-space term and the material's baked one, combined by `min` and floored once.
+    //
+    // `min` rather than a product, because the two describe the *same* occlusion by different means: a
+    // crevice a baked map darkens is a crevice the depth buffer also sees, so multiplying them darkens it
+    // twice. Taking the stronger of the two keeps a baked map authoritative where it is more confident --
+    // it knows about geometry too small to survive into the depth buffer -- without compounding.
+    //
+    // One floor over the combination rather than one each, so a baked map cannot reach past the floor that
+    // exists to stop shaded surfaces going black. And because the G-buffer's green is 1.0 wherever nothing
+    // baked occlusion, this reduces to the screen-space term exactly on content that has none.
+    let baked_occlusion = textureLoad(g_coverage, pixel, 0).g;
     let occlusion = mix(
         AO_AMBIENT_FLOOR,
         1.0,
-        textureLoad(ambient_occlusion, pixel, 0).r
+        min(textureLoad(ambient_occlusion, pixel, 0).r, baked_occlusion)
     );
     var color = vec3<f32>(0.0);
     for (var index = 0; index < LIGHT_COUNT; index += 1) {
