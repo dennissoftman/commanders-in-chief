@@ -26,8 +26,8 @@ use cic_render::terrain::LayerColour;
 use cic_render::terrain_virtual::VirtualPageView;
 use cic_render::{
     Antialiasing, Capture, CaptureTarget, Clouds, DeferredFrame, DeferredRenderer, DeferredTargets,
-    DisplaySettings, Environment, Fog, GpuContext, LayerMaterial, TerrainRenderer, TextureImage,
-    TimedPass, WaterBody, WaterMaterial, WaterSurface, Weather,
+    DisplaySettings, Environment, Fog, FrameTimings, GpuContext, LayerMaterial, TerrainRenderer,
+    TextureImage, TimedPass, WaterBody, WaterMaterial, WaterSurface, Weather,
 };
 
 const WIDTH: u32 = 720;
@@ -130,13 +130,13 @@ fn pose(terrain: &Terrain) -> CameraPose {
     }
 }
 
-/// A camera close enough to the ground that the *near* shadow cascade has casters in it.
+/// A camera close enough to the ground to run *out* of scene before it runs out of shadow distance.
 ///
-/// [`pose`] does not, and that is not a defect in either of them: cascade 0 covers the first 5.5% of the
-/// 1,600-unit shadow distance, about 88 units, so a camera 614 units up has it entirely in the air. This one
-/// stands a little way above the low ground at the near corner — which sits at roughly 229 units there, from
-/// the base 200 plus the undulation and the tail of the spire — and looks steeply down, so the ground is
-/// well inside those 88 units. It exists to be the control for the empty-cascade case.
+/// The other half of the cascade fit from [`pose`], which is bounded at its near end. This one stands a
+/// little way above the low ground at the near corner — roughly 229 units there, from the base 200 plus the
+/// undulation and the tail of the spire — and looks steeply down, so its frustum drops through the terrain's
+/// floor around 430 units out and the whole 1,600-unit shadow distance past that has nothing left to shade.
+/// It existed first as the control for a near cascade with casters in it, back when [`pose`] had none.
 fn ground_level_pose(terrain: &Terrain) -> CameraPose {
     let [extent_x, extent_y] = terrain.world_extent();
     let eye = [extent_x * 0.25, extent_y * 0.25, 300.0];
@@ -1229,52 +1229,37 @@ fn per_pass_timing_attributes_the_frame_to_the_passes_that_ran() {
     eprintln!("{timings}");
 
     // Every pass with geometry in it, and the antialias pass, which ran because the settings asked for it.
-    for pass in [
-        TimedPass::ShadowCascade1,
-        TimedPass::ShadowCascade3,
-        TimedPass::Gbuffer,
-        TimedPass::Occlusion,
-        TimedPass::OcclusionBlur,
-        TimedPass::Lighting,
-        TimedPass::Composite,
-        TimedPass::Antialias,
-    ] {
-        let elapsed = timings
-            .get(pass)
-            .unwrap_or_else(|| panic!("{pass:?} was not timed"));
-        // A pass that drew a 720x480 frame on real hardware is neither instant nor a tenth of a second.
-        // Loose by design: this is a plausibility bound, and a tight one would fail on the next GPU.
-        assert!(
-            elapsed > Duration::ZERO && elapsed < Duration::from_millis(100),
-            "{pass:?} took {elapsed:?}, which is not a plausible pass time"
-        );
-    }
+    // All four cascades are in that list now: they are fitted over the scene the camera can see, so each
+    // one has ground in it. Before that they were fitted from the near plane, and the first covered 88
+    // units of air over an eye 614 units up -- an empty pass, cleared and rasterized for nothing.
+    every_pass_is_plausible(
+        &timings,
+        &[
+            TimedPass::ShadowCascade0,
+            TimedPass::ShadowCascade1,
+            TimedPass::ShadowCascade2,
+            TimedPass::ShadowCascade3,
+            TimedPass::Gbuffer,
+            TimedPass::Occlusion,
+            TimedPass::OcclusionBlur,
+            TimedPass::Lighting,
+            TimedPass::Composite,
+            TimedPass::Antialias,
+        ],
+    );
 
-    // Two passes are absent, for two different reasons, and neither absence is a claim about cost. This is
-    // the half a fixed slot layout has to earn: reporting water at 0.000ms in a scene with no water would
-    // be a claim about what water costs rather than about there being none.
+    // One pass is absent, and the absence is not a claim about cost. This is the half a fixed slot layout
+    // has to earn: reporting water at 0.000ms in a scene with no water would be a claim about what water
+    // costs rather than about there being none.
     assert_eq!(
         timings.get(TimedPass::Water),
         None,
         "no water was drawn, so the water pass must not appear at all"
     );
-    // The near cascade is the other reason. Its pass *was* recorded — the clear is what stops the layer
-    // reading as last frame's depth — but its frustum caught no chunk, so it drew nothing and was not
-    // timed. That is arithmetic, not chance: `pose` puts the eye 614 units up, while cascade 0 covers only
-    // the first 5.5% of the 1,600-unit shadow distance, which is about 88 units of empty air. A pass that
-    // rasterises nothing also cannot be timed on Metal, where the end-of-pass timestamp is sampled at the
-    // end of the fragment stage — so timing it anyway reported "did not run" about a pass that did, and
-    // reported it on one backend and not another. The control below is the same scene from a camera low
-    // enough to put casters in that cascade.
-    assert_eq!(
-        timings.get(TimedPass::ShadowCascade0),
-        None,
-        "the near cascade caught no chunk from this camera, so it has nothing to attribute"
-    );
-    assert_eq!(timings.entries().len(), TimedPass::ALL.len() - 2);
+    assert_eq!(timings.entries().len(), TimedPass::ALL.len() - 1);
 
-    // The cascades that did draw drew the terrain over again, so their total is a real share of the frame
-    // rather than a rounding error -- which is the first number the outstanding terrain LOD work wants.
+    // The cascades drew the terrain over again, so their total is a real share of the frame rather than a
+    // rounding error -- which is the first number the outstanding terrain LOD work wants.
     // Asserted as a share of the sum, not in milliseconds, so it holds on any device.
     let shadow_share = harness_share(timings.shadow_total(), timings.sum());
     eprintln!(
@@ -1287,9 +1272,9 @@ fn per_pass_timing_attributes_the_frame_to_the_passes_that_ran() {
          terrain they are supposed to be drawing"
     );
 
-    // The control. Same renderer, same terrain, same settings; the one thing that changes is that the near
-    // cascade now has ground in it. Without this the assertion above would pass just as happily on a
-    // renderer that had stopped timing cascade 0 altogether.
+    // The other camera the fit is bounded differently for: this one runs out of scene rather than starting
+    // late in it, and its cascades are packed into the 430 units it can see. Every cascade still has ground
+    // in it, which is the property both cameras now share and used to disagree about.
     let low = DeferredFrame::new(ground_level_pose(&harness.terrain), WIDTH, HEIGHT);
     let _ = render(context, &harness, low);
     let from_the_ground = harness
@@ -1298,22 +1283,63 @@ fn per_pass_timing_attributes_the_frame_to_the_passes_that_ran() {
         .expect("timing is on")
         .expect("read the breakdown");
     eprintln!("from the ground: {from_the_ground}");
-    let near = from_the_ground
-        .get(TimedPass::ShadowCascade0)
-        .expect("the near cascade has casters in it from the ground, so it must be timed");
-    assert!(
-        near > Duration::ZERO && near < Duration::from_millis(100),
-        "the near cascade took {near:?}, which is not a plausible pass time"
-    );
+    every_pass_is_plausible(&from_the_ground, TimedPass::CASCADES);
     assert_eq!(
         from_the_ground.entries().len(),
         TimedPass::ALL.len() - 1,
         "every cascade has casters from the ground, so water is the only absence left"
     );
 
+    // The control for the *absent* cascade, which no camera looking at this terrain produces any more --
+    // every cascade is fitted over ground it can see. Collapsing the shadow distance is what still empties
+    // them: it is the same lever `shadows_darken_the_ground_they_fall_on` pulls to turn shadowing off, and
+    // it leaves four cascades fitted into two units of air in front of the eye.
+    //
+    // Without this the assertions above would pass just as happily on a renderer that had gone back to
+    // timing passes that rasterise nothing -- which cannot be timed at all on Metal, where the end-of-pass
+    // timestamp is sampled at the end of the fragment stage, so timing one anyway reported "did not run"
+    // about a pass that did, on one backend and not another.
+    let mut collapsed = DeferredFrame::new(pose(&harness.terrain), WIDTH, HEIGHT);
+    collapsed.shadow_distance = 0.5;
+    let _ = render(context, &harness, collapsed);
+    let without_casters = harness
+        .deferred
+        .timings(context)
+        .expect("timing is on")
+        .expect("read the breakdown");
+    eprintln!("with the shadow distance collapsed: {without_casters}");
+    for cascade in TimedPass::CASCADES {
+        assert_eq!(
+            without_casters.get(*cascade),
+            None,
+            "{cascade:?} caught no chunk, so it has nothing to attribute"
+        );
+    }
+    assert_eq!(
+        without_casters.entries().len(),
+        TimedPass::ALL.len() - 1 - TimedPass::CASCADES.len(),
+        "water and all four cascades are absent, and nothing else is"
+    );
+
     // Turning it off stops the reporting rather than leaving stale numbers reachable.
     assert!(!harness.deferred.set_timing(context, false));
     assert!(harness.deferred.timings(context).is_none());
+}
+
+/// Asserts every listed pass was timed, and that its duration is physically plausible.
+///
+/// The bound is loose by design: this is a plausibility check, and a tight one would fail on the next
+/// GPU. A pass that drew a 720x480 frame on real hardware is neither instant nor a tenth of a second.
+fn every_pass_is_plausible(timings: &FrameTimings, passes: &[TimedPass]) {
+    for pass in passes {
+        let elapsed = timings
+            .get(*pass)
+            .unwrap_or_else(|| panic!("{pass:?} was not timed"));
+        assert!(
+            elapsed > Duration::ZERO && elapsed < Duration::from_millis(100),
+            "{pass:?} took {elapsed:?}, which is not a plausible pass time"
+        );
+    }
 }
 
 /// One duration as a share of another, with a zero denominator answering zero.

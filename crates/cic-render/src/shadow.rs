@@ -26,6 +26,30 @@
 //! moves every sample. Quantising the light-space centre to whole texels means panning moves the
 //! frustum in texel steps, so a given world point keeps landing in the same texel until it moves a
 //! whole one. Without this, the sphere fit alone still crawls.
+//!
+//! # Why the splits are measured over the scene and not the view ray
+//!
+//! The cascades divide the stretch of the view ray where the frustum overlaps the scene's own bounds,
+//! not the whole shadow distance. Measured from the near plane instead, a camera looking down at
+//! terrain from altitude spends its near cascades on air: with the shipped splits and shadow distance
+//! the first covers about the first 88 units of the view ray, which for an eye 614 units up is empty
+//! sky, and the second is not much better. Two of the four 2,048-square depth layers were then cleared
+//! and rasterized every frame for geometry nothing could sample, while two thirds of the visible ground
+//! was shaded by the coarsest cascade.
+//!
+//! The bound comes from the scene's box rather than from the heightfield, and the difference matters:
+//! the box's ceiling is the tallest peak on the map, so a camera *below* that peak already overlaps the
+//! box at the near plane and the near bound does nothing for it. What that camera gets instead is the
+//! *far* bound — the depth at which the frustum drops out of the box's floor, past which nothing
+//! visible remains to shade.
+//!
+//! # Why the span is quantised
+//!
+//! A span read off the scene moves as the camera moves, and an extent that moves is the crawl the
+//! bounding sphere exists to prevent: a radius that drifts a little each frame rescales the texel grid
+//! each frame, so the snapping above quantises against a ruler that is itself sliding. Rounding the
+//! span outward onto a fixed ladder turns that continuous drift into occasional steps, so the extent
+//! holds still through the camera motions between them.
 
 use crate::view::{Projection, look_at, multiply, orthographic};
 
@@ -45,11 +69,62 @@ const CASCADE_RESOLUTION_F32: f32 = 2_048.0;
 
 /// How the shadowed range is divided between cascades.
 ///
-/// Fractions of the shadow distance, each the *outer* bound of its cascade. Ratios rather than
-/// distances so the split adapts to whatever shadow distance a caller sets. The progression is
-/// roughly geometric because perspective means near pixels cover far less world area than far ones,
-/// so equal-depth splits would waste the near cascades' resolution on almost nothing.
+/// Fractions of the *shadowed span* — the stretch of the view ray that [`shadowed_span`] finds worth
+/// covering — each the outer bound of its cascade. Ratios rather than distances so the split adapts to
+/// whatever shadow distance a caller sets. The progression is roughly geometric because perspective
+/// means near pixels cover far less world area than far ones, so equal-depth splits would waste the
+/// near cascades' resolution on almost nothing.
+///
+/// These are unchanged from when they were fractions of the shadow distance itself. That is
+/// deliberate: re-anchoring the span and re-tuning the division between cascades are two changes, and
+/// keeping the ratios fixed means a shadow that got sharper did so because the span narrowed onto the
+/// scene rather than because the numbers were nudged.
 const CASCADE_SPLITS: [f32; CASCADE_COUNT] = [0.055, 0.16, 0.42, 1.0];
+
+/// Steps per doubling on the ladder the shadowed span is rounded onto.
+///
+/// Four, so each step is a factor of about 1.19: fine enough that the fit gives up little of the span
+/// it measured, coarse enough that ordinary camera motion crosses a step rarely rather than every
+/// frame. See the module documentation for what a span that moved every frame would do to the texel
+/// snapping.
+const SPAN_STEPS_PER_DOUBLING: f32 = 4.0;
+
+/// The world box holding everything a cascade has to record or shade.
+///
+/// One box rather than the caster height it replaces, because the fit needs two things from the scene
+/// and separate parameters would let them disagree: how far a cascade reaches toward the light, which
+/// is set by the box's vertical extent, and which stretch of the view ray is worth spending cascades
+/// on, which is set by where the view frustum meets the box at all.
+///
+/// Callers build it from the terrain's own chunk decomposition, which is also what the cascades are
+/// culled against — so a cascade the fit placed over the scene and a cascade the culler finds chunks
+/// for are the same cascade, rather than two answers from two sources.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShadowedBounds {
+    /// The low corner.
+    pub minimum: [f32; 3],
+    /// The high corner.
+    pub maximum: [f32; 3],
+}
+
+impl ShadowedBounds {
+    /// Returns the box with its ceiling raised to `top`, if that stands higher.
+    ///
+    /// For the models standing on terrain: one reaches higher than the ground it stands on, and a box
+    /// sized from the ground alone would neither reach far enough toward the light to record it as an
+    /// occluder nor count the air it occupies as worth covering.
+    #[must_use]
+    pub fn raised_to(mut self, top: f32) -> Self {
+        self.maximum[2] = self.maximum[2].max(top);
+        self
+    }
+
+    /// World units between the box's floor and its ceiling.
+    #[must_use]
+    pub fn height(&self) -> f32 {
+        (self.maximum[2] - self.minimum[2]).max(0.0)
+    }
+}
 
 /// One fitted cascade.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -92,9 +167,10 @@ impl Cascade {
 /// while shadows only need to reach as far as they are legible, and stretching cascades to the far
 /// plane would waste all of their resolution.
 ///
-/// `caster_height` is the world-space vertical extent of anything that can cast — for terrain, its
-/// elevation range. It sets how far each frustum reaches toward the light, so a tall occluder at a low
-/// sun is still recorded. See the module documentation for what happens when it is too small.
+/// `bounds` is the world box everything that can cast or receive stands inside. Its vertical extent
+/// sets how far each frustum reaches toward the light, so a tall occluder at a low sun is still
+/// recorded — see the module documentation for what happens when that is too small — and the box as a
+/// whole decides which stretch of the view ray the cascades divide.
 #[must_use]
 pub fn fit_cascades(
     eye: [f32; 3],
@@ -102,24 +178,106 @@ pub fn fit_cascades(
     projection: Projection,
     light_direction: [f32; 3],
     shadow_distance: f32,
-    caster_height: f32,
+    bounds: ShadowedBounds,
 ) -> [Cascade; CASCADE_COUNT] {
     let forward = normalize(subtract(focus, eye));
     let light = normalize(light_direction);
     let mut cascades = [Cascade::empty(); CASCADE_COUNT];
 
-    let distance = shadow_distance.max(1.0);
-    // How far along the light axis a caster of `caster_height` can stand and still shade this slice.
-    // `light[2]` is the sine of the sun's elevation for a Z-up world; clamped so a sun on the horizon
-    // asks for a finite frustum rather than an infinite one.
-    let caster_reach = caster_height.max(0.0) / light[2].abs().max(0.12);
-    let mut near = projection.near.max(0.01);
+    // How far along the light axis a caster spanning the box's height can stand and still shade a
+    // slice. `light[2]` is the sine of the sun's elevation for a Z-up world; clamped so a sun on the
+    // horizon asks for a finite frustum rather than an infinite one.
+    let caster_reach = bounds.height() / light[2].abs().max(0.12);
+    let (start, end) = shadowed_span(eye, forward, projection, bounds, shadow_distance);
+    let mut near = start;
     for (index, ratio) in CASCADE_SPLITS.iter().enumerate() {
-        let far = (distance * ratio).max(near + 0.01);
+        let far = (start + (end - start) * ratio).max(near + 0.01);
         cascades[index] = fit_one(eye, forward, projection, light, near, far, caster_reach);
         near = far;
     }
     cascades
+}
+
+/// The stretch of the view ray the cascades divide: where the view frustum meets `bounds`.
+///
+/// Clamped to the near plane and the shadow distance, so it never reaches for geometry the camera
+/// cannot see or shadows the caller did not ask to be cast.
+///
+/// The frustum is measured by the world-axis-aligned box around its cross-section, which grows
+/// linearly with depth — a conservative stand-in for the cross-section itself, and conservative in the
+/// direction that matters: it reports the frustum meeting the scene no later and leaving it no earlier
+/// than the frustum really does, so no receiver is left outside every cascade. Each world axis then
+/// contributes two linear inequalities in depth, and the span is where all six hold at once.
+///
+/// A camera looking away from the scene entirely leaves them with no common solution. That answers
+/// itself: nothing is shadowed at all, so the whole distance is fitted as before, which keeps the
+/// matrices finite and the cascades ordered for everything downstream that assumes both.
+fn shadowed_span(
+    eye: [f32; 3],
+    forward: [f32; 3],
+    projection: Projection,
+    bounds: ShadowedBounds,
+    shadow_distance: f32,
+) -> (f32, f32) {
+    let near = projection.near.max(0.01);
+    let far = shadow_distance.max(near + 1.0);
+
+    // The camera's own basis, read off the view it will be rasterized with rather than rebuilt from
+    // the forward vector, so the cross-section measured here is the one the camera actually has. The
+    // up vector matches the one `crate::view` builds every camera with; a different one here would
+    // measure a rolled frustum the renderer never draws.
+    let view = look_at(eye, add(eye, forward), [0.0, 0.0, 1.0]);
+    let right = [view[0][0], view[1][0], view[2][0]];
+    let up = [view[0][1], view[1][1], view[2][1]];
+    let half_vertical = (projection.vertical_fov * 0.5).tan().max(1.0e-6);
+    let half_horizontal = half_vertical * projection.aspect_ratio.max(1.0e-6);
+
+    let (mut start, mut end) = (near, far);
+    for axis in 0..3 {
+        // How far the cross-section reaches along this world axis per unit of depth, so the frustum
+        // spans `eye + depth * (forward -+ spread)` on it.
+        let spread = half_horizontal * right[axis].abs() + half_vertical * up[axis].abs();
+        // Overlap needs the frustum's low edge under the box's ceiling and its high edge over its
+        // floor. Both are `rate * depth <= limit` once the second is negated, which is why the pair is
+        // written this way rather than as two mirrored branches.
+        for (rate, limit) in [
+            (forward[axis] - spread, bounds.maximum[axis] - eye[axis]),
+            (-forward[axis] - spread, eye[axis] - bounds.minimum[axis]),
+        ] {
+            if rate > 0.0 {
+                end = end.min(limit / rate);
+            } else if rate < 0.0 {
+                start = start.max(limit / rate);
+            } else if limit < 0.0 {
+                // The frustum neither grows nor moves along this axis and already sits outside the
+                // box, so no depth satisfies it.
+                return (near, far);
+            }
+        }
+    }
+
+    if !start.is_finite() || !end.is_finite() || end <= start {
+        return (near, far);
+    }
+    // Clamped back into the window after rounding. Both bounds are constants, so a span that lands on
+    // one is as still as one that lands on the ladder.
+    (
+        quantise_span(start, f32::floor).max(near),
+        quantise_span(end, f32::ceil).min(far),
+    )
+}
+
+/// Rounds a span bound onto a fixed geometric ladder, in the direction `round` takes it.
+///
+/// Multiplicative rather than a fixed step in world units, because what has to hold still is the ratio
+/// the fit turns into a radius: a 20-unit step is most of the near cascade and nothing to the far one.
+/// Callers round *outward* — the near bound down and the far bound up — so quantising only ever widens
+/// the span and cannot drop scene the unrounded span covered.
+fn quantise_span(depth: f32, round: fn(f32) -> f32) -> f32 {
+    if !depth.is_finite() || depth <= 0.0 {
+        return depth;
+    }
+    (round(depth.log2() * SPAN_STEPS_PER_DOUBLING) / SPAN_STEPS_PER_DOUBLING).exp2()
 }
 
 /// Fits one cascade around the frustum slice between `near` and `far`.
@@ -258,7 +416,10 @@ mod tests {
     // where the quantity is computed.
     #![allow(clippy::float_cmp)]
 
-    use super::{CASCADE_COUNT, CASCADE_RESOLUTION_F32, Cascade, fit_cascades};
+    use super::{
+        CASCADE_COUNT, CASCADE_RESOLUTION_F32, Cascade, ShadowedBounds, fit_cascades, shadowed_span,
+    };
+    use crate::culling::Frustum;
     use crate::view::{Projection, transform};
 
     fn projection() -> Projection {
@@ -267,6 +428,19 @@ mod tests {
 
     /// A tall occluder, so the fit has something to reach toward the light for.
     const CASTER_HEIGHT: f32 = 320.0;
+
+    /// The scene the fixture camera looks at.
+    ///
+    /// Broad enough in `x` and `y` that only its ceiling and floor bound the span within the fixture's
+    /// shadow distance, which is what lets the rotation test below still isolate what it is about: the
+    /// vertical bound depends on the eye's height and pitch and not on which way it faces, so turning
+    /// the camera cannot move it.
+    fn bounds() -> ShadowedBounds {
+        ShadowedBounds {
+            minimum: [-2_000.0, -2_000.0, -CASTER_HEIGHT * 0.5],
+            maximum: [2_000.0, 2_000.0, CASTER_HEIGHT * 0.5],
+        }
+    }
 
     fn sun() -> [f32; 3] {
         [-0.45, -0.30, 0.84]
@@ -279,7 +453,7 @@ mod tests {
             projection(),
             sun(),
             1_200.0,
-            CASTER_HEIGHT,
+            bounds(),
         )
     }
 
@@ -360,11 +534,188 @@ mod tests {
 
     #[test]
     fn the_last_cascade_covers_the_shadow_distance() {
+        // The fixture's scene still spans the whole distance from this camera, so nothing about
+        // measuring the span over the scene may shorten the outermost cascade here. The case where the
+        // scene *does* run out first is the test below.
         let cascades = fit();
         assert!(
             (cascades[CASCADE_COUNT - 1].far_distance - 1_200.0).abs() < 1.0,
             "the outermost cascade should reach the requested distance, got {}",
             cascades[CASCADE_COUNT - 1].far_distance
+        );
+    }
+
+    #[test]
+    fn every_cascade_covers_part_of_the_scene() {
+        // The defect the shadowed span exists to remove, stated as the invariant it breaks. Fitted from
+        // the near plane, the near cascades of a camera looking down from altitude enclose spheres of
+        // air above the scene: their passes are cleared and rasterized every frame, no chunk falls in
+        // them to draw and no receiver falls in them to sample.
+        //
+        // The test is the culler's own box test, against boxes the size the culler sees: the scene cut
+        // into chunk-sized columns rather than tested whole. That matters, because the plane test admits
+        // a box it does not really touch when the box is far larger than the frustum, and the scene whole
+        // is far larger than a near cascade. A cascade that passes here is one
+        // `DeferredRenderer::cull_terrain` can find chunks for.
+        let cascades = fit();
+        let ShadowedBounds { minimum, maximum } = bounds();
+        let columns = 16u16;
+        let width = (maximum[0] - minimum[0]) / f32::from(columns);
+        let depth = (maximum[1] - minimum[1]) / f32::from(columns);
+        for (index, cascade) in cascades.iter().enumerate() {
+            let frustum = Frustum::from_view_projection(&cascade.view_projection);
+            let covered = (0..columns).any(|x| {
+                (0..columns).any(|y| {
+                    let low = [
+                        minimum[0] + f32::from(x) * width,
+                        minimum[1] + f32::from(y) * depth,
+                        minimum[2],
+                    ];
+                    frustum.intersects_box(low, [low[0] + width, low[1] + depth, maximum[2]])
+                })
+            });
+            assert!(
+                covered,
+                "cascade {index} covers no part of the scene, so its pass draws and shades nothing; \
+                 it reaches out to {}",
+                cascade.far_distance
+            );
+        }
+    }
+
+    #[test]
+    fn the_span_stops_where_the_view_leaves_the_scene() {
+        // A camera pitched steeply down runs out of scene long before it runs out of shadow distance:
+        // past the depth where the frustum drops through the box's floor there is nothing left to
+        // shade. Spending the outer cascades on it is the same waste as spending the near ones on air,
+        // and it costs the near ones their resolution, since the splits are fractions of the span.
+        let steep = fit_cascades(
+            [0.0, 0.0, 300.0],
+            [40.0, 40.0, 0.0],
+            projection(),
+            sun(),
+            4_000.0,
+            bounds(),
+        );
+        let outermost = steep[CASCADE_COUNT - 1].far_distance;
+        assert!(
+            outermost < 1_500.0,
+            "the view leaves a {}-unit-tall scene from 300 units up well inside 4,000 units, so the \
+             outermost cascade must stop short of it, not at {outermost}",
+            bounds().height()
+        );
+        assert!(
+            outermost > 300.0,
+            "the span must still cover the ground the camera can see, and it stopped at {outermost}"
+        );
+    }
+
+    #[test]
+    fn a_camera_looking_away_from_the_scene_still_fits_usable_cascades() {
+        // Nothing is shadowed at all from here, so where the cascades land does not matter -- but that
+        // they are well-formed does. Everything downstream assumes four finite, ordered matrices,
+        // including the uniform upload, which has no way to express "there is no cascade".
+        let skyward = fit_cascades(
+            [0.0, 0.0, 4_000.0],
+            [0.0, 400.0, 5_000.0],
+            projection(),
+            sun(),
+            1_200.0,
+            bounds(),
+        );
+        let mut previous = 0.0;
+        for (index, cascade) in skyward.iter().enumerate() {
+            for column in cascade.view_projection {
+                for value in column {
+                    assert!(value.is_finite(), "cascade {index} matrix has {value}");
+                }
+            }
+            assert!(
+                cascade.far_distance > previous,
+                "cascade {index} must still extend past its predecessor, got {} after {previous}",
+                cascade.far_distance
+            );
+            previous = cascade.far_distance;
+        }
+        assert!(
+            (previous - 1_200.0).abs() < 1.0,
+            "with no scene to measure against the whole distance is fitted, not {previous}"
+        );
+    }
+
+    #[test]
+    fn the_span_brackets_where_the_frustum_meets_the_scene() {
+        // The arithmetic on a geometry simple enough to check by hand: looking along +y at a 200-unit
+        // cube centred 1,000 units away, with the frustum's spread contributing nothing to the y axis,
+        // the frustum meets the box at 900 and leaves it at 1,100.
+        //
+        // Bracketing rather than equalling, because the span is rounded outward onto the quantisation
+        // ladder. Which direction it rounds is the part worth pinning: rounding the near bound *up* or
+        // the far bound *down* would exclude scene the unrounded span covered, and the receivers there
+        // would fall outside every cascade and read as lit.
+        let (start, end) = shadowed_span(
+            [0.0, -1_000.0, 0.0],
+            [0.0, 1.0, 0.0],
+            projection(),
+            ShadowedBounds {
+                minimum: [-100.0, -100.0, -100.0],
+                maximum: [100.0, 100.0, 100.0],
+            },
+            4_000.0,
+        );
+        assert!(
+            (700.0..=900.0).contains(&start),
+            "the span should start just below the 900 units where the frustum meets the box, not at \
+             {start}"
+        );
+        assert!(
+            (1_100.0..1_400.0).contains(&end),
+            "the span should end just past the 1,100 units where the frustum leaves the box, not at \
+             {end}"
+        );
+    }
+
+    #[test]
+    fn camera_motion_resizes_a_cascade_rarely_and_by_little() {
+        // What the quantisation buys, and the reason it is there rather than the span being used as
+        // measured. A span read off the scene moves with the camera, and a cascade extent that moves
+        // rescales the texel grid the snapping quantises against -- which is the crawl the bounding
+        // sphere fit exists to prevent, reintroduced by a different route.
+        //
+        // Climbing is the motion that moves the near bound, since the frustum meets the scene's ceiling
+        // later the higher the eye stands. Unquantised, this sweep resizes the near cascade on 300 of
+        // its 400 steps; the assertions below are what a ladder turns that into.
+        let mut extents: Vec<f32> = Vec::new();
+        for step in 0..400u16 {
+            let height = 200.0 + f32::from(step) * 2.0;
+            extents.push(
+                fit_cascades(
+                    [0.0, -600.0, height],
+                    [0.0, 0.0, 0.0],
+                    projection(),
+                    sun(),
+                    1_200.0,
+                    bounds(),
+                )[0]
+                .texel_world,
+            );
+        }
+        for pair in extents.windows(2) {
+            let step = (pair[1] / pair[0]).max(pair[0] / pair[1]);
+            assert!(
+                step < 1.25,
+                "one step of camera motion resized the near cascade by {step}x, which regrids every \
+                 shadow texel it covers"
+            );
+        }
+        let mut distinct = extents.clone();
+        distinct.sort_by(f32::total_cmp);
+        distinct.dedup_by(|a, b| (*a - *b).abs() < 1.0e-6);
+        assert!(
+            distinct.len() < 20,
+            "the near cascade took {} distinct extents over 400 steps of climbing, so it is resizing \
+             as the camera moves rather than holding still between steps",
+            distinct.len()
         );
     }
 
@@ -422,7 +773,7 @@ mod tests {
                 projection(),
                 sun(),
                 1_200.0,
-                CASTER_HEIGHT,
+                bounds(),
             );
             extents.push(cascades[0].texel_world);
         }
@@ -447,7 +798,7 @@ mod tests {
             projection,
             sun(),
             1_200.0,
-            CASTER_HEIGHT,
+            bounds(),
         )[0];
         // Nudge the camera by a small fraction of a texel.
         let nudged = fit_cascades(
@@ -456,7 +807,7 @@ mod tests {
             projection,
             sun(),
             1_200.0,
-            CASTER_HEIGHT,
+            bounds(),
         )[0];
         let probe = [12.0, 34.0, 0.0];
         let before = project(&baseline, probe);
@@ -480,7 +831,7 @@ mod tests {
             projection(),
             [0.0, 0.0, 1.0],
             1_200.0,
-            CASTER_HEIGHT,
+            bounds(),
         );
         for cascade in &cascades {
             for column in cascade.view_projection {
@@ -512,7 +863,7 @@ mod tests {
             projection(),
             low_sun,
             1_200.0,
-            CASTER_HEIGHT,
+            bounds(),
         );
         // At this elevation an occluder of CASTER_HEIGHT stands this far along the light axis.
         let reach = CASTER_HEIGHT / 0.32;
