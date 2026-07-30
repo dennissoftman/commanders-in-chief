@@ -46,6 +46,8 @@ from an author's PNG to the GPU without any stage guessing what the bytes mean.
    the ORM image and both slots repointed at it; and every image becomes a 1x1 placeholder so the container
    slims while keeping the named-image link a sidecar is found by.
 8. **A material's baked occlusion is applied**, to the ambient term only, from the red of the ORM image.
+9. **A model's textures go inside its container by default**, as `MSFT_texture_dds`. Sidecars remain for
+   terrain, which has no container, and for a package deliberately sharing one texture between models.
 
 ## Rationale
 
@@ -174,6 +176,26 @@ occluded and an unoccluded frame are identical to the byte.
 
 The screen-space and baked terms combine by `min` rather than by multiplying, because they describe the
 *same* occlusion by different means and multiplying darkens a crevice twice.
+
+**Embedding, having first chosen sidecars.** The sidecar was the right call when the alternative was
+hand-parsing an extension for a format nothing here could yet read. Once a DDS reader and a GLB writer
+existed, the balance changed: `MSFT_texture_dds` costs about a hundred lines and removes a convention that
+must not be broken — a renamed image silently loses its texture, and nothing fails loudly when it does.
+
+The extension's own design is what makes it safe to ship. A texture keeps its ordinary `source`, so a reader
+that has never heard of the extension sees an ordinary textured glTF rather than an untextured one. It is a
+vendor extension rather than a Khronos one, which matters less than it appears: the *fallback* is what other
+tools see, and it is a conformant glTF.
+
+What it does not remove is the sidecar path. Terrain has no container to live in, and a package sharing one
+texture between several models should hold one copy rather than one per model.
+
+**And a limitation of the arrangement, which is a property of the crate rather than the extension.** The
+extension assumes a reader decodes only the images it uses; the `gltf` crate decodes all of them eagerly and
+knows PNG and JPEG. So a container with an embedded DDS is refused over an image no material would have
+sampled, and reading one means rewriting the document first — which is why the GLB container module sits in
+`cic-assets` and not only in the tool. Every import does it, `import_model` included, because a function that
+refuses a valid model is a trap regardless of whether its caller wanted the textures.
 
 ## Consequences
 

@@ -39,15 +39,13 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
+use cic_assets::glb::{DDS_MIME_TYPE, Glb};
 use cic_assets::image::{ColourSpace, decode_in, encode_in, mip_chain, resample};
 use cic_assets::texture::{BlockFormat, TextureAsset, TextureLimits};
-use cic_assets::{Model, ModelLimits, import_model};
+use cic_assets::{DDS_EXTENSION, Model, ModelLimits, import_model};
 use serde_json::{Map, Value};
 
 use crate::encode;
-
-/// Where the sidecars go by default, matching the directory the runtime looks in.
-pub const TEXTURE_DIRECTORY: &str = cic_assets::TEXTURE_DIRECTORY;
 
 /// What a glTF image is read as, and therefore how it converts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -124,11 +122,11 @@ pub struct Repacked {
 /// Returns a message when the container will not parse or import, an image is referenced through
 /// disagreeing slots, an ORM merge would join two images sampled at different texture coordinates, or the
 /// rewrite cannot preserve something it does not understand.
-pub fn repack(bytes: &[u8], stem: &str) -> Result<Repacked, String> {
+pub fn repack(bytes: &[u8], stem: &str, embed: bool) -> Result<Repacked, String> {
     let model = import_model(bytes, ModelLimits::default()).map_err(|error| error.to_string())?;
-    let (mut json, bin) = split_glb(bytes)?;
+    let mut glb = Glb::split(bytes).map_err(|error| error.to_string())?;
 
-    let plans = plan(&json, &model, stem)?;
+    let plans = plan(&glb.document, &model, stem)?;
     let mut report = String::new();
     let mut textures = Vec::new();
     for conversion in &plans.conversions {
@@ -168,8 +166,8 @@ pub fn repack(bytes: &[u8], stem: &str) -> Result<Repacked, String> {
         textures.push((conversion.name.clone(), encoded));
     }
 
-    rewrite(&mut json, &plans)?;
-    let glb = assemble_glb(&json, &bin, &plans)?;
+    rewrite(&mut glb.document, &plans)?;
+    let glb = assemble_glb(glb, &plans, if embed { &textures } else { &[] })?;
     // An image whose only reader was a slot that has been merged away is now unreferenced. It stays in the
     // container as a placeholder rather than being removed, because removing one renumbers every later
     // image and every texture's `source` with it -- a rewrite with more ways to go wrong than the hundred
@@ -189,15 +187,20 @@ pub fn repack(bytes: &[u8], stem: &str) -> Result<Repacked, String> {
     }
     let _ = writeln!(
         report,
-        "  glb {:.1} KiB -> {:.1} KiB, {} image{} replaced by a 1x1 placeholder",
+        "  glb {:.1} KiB -> {:.1} KiB, {} image{} replaced by a 1x1 placeholder{}",
         kib(bytes.len()),
         kib(glb.len()),
         plans.image_count,
-        if plans.image_count == 1 { "" } else { "s" }
+        if plans.image_count == 1 { "" } else { "s" },
+        if embed {
+            " and the DDS embedded beside it"
+        } else {
+            ""
+        }
     );
     Ok(Repacked {
         glb,
-        textures,
+        textures: if embed { Vec::new() } else { textures },
         report,
     })
 }
@@ -461,75 +464,6 @@ fn array<'a>(json: &'a Value, key: &str) -> &'a [Value] {
     json.get(key).and_then(Value::as_array).map_or(&[], |v| v)
 }
 
-// ------------------------------------------------------------------ the container
-
-// Spelled from the bytes rather than written as hex, the way `cic_assets::terrain` spells its own magic.
-// The hex is not reviewable -- the first version of this file had `glTF` as `0x4674_6C67`, one nibble out,
-// and it was the `gltf` crate refusing the *fixture* that found it rather than anything reading the hex.
-/// GLB magic, `"glTF"`.
-const GLB_MAGIC: u32 = u32::from_le_bytes(*b"glTF");
-/// The JSON chunk's type.
-const CHUNK_JSON: u32 = u32::from_le_bytes(*b"JSON");
-/// The binary chunk's type.
-const CHUNK_BIN: u32 = u32::from_le_bytes(*b"BIN\0");
-
-/// Splits a GLB into its parsed JSON chunk and its binary chunk.
-///
-/// A GLB is a twelve-byte header and then length-tagged chunks, each padded to four bytes. The JSON is
-/// parsed into an untyped tree rather than into typed structures on purpose: everything this does not touch
-/// has to survive the round trip byte for byte, and an untyped tree cannot silently drop an extension it
-/// does not know about.
-fn split_glb(bytes: &[u8]) -> Result<(Value, Vec<u8>), String> {
-    let word = |offset: usize| -> Result<u32, String> {
-        bytes
-            .get(offset..offset + 4)
-            .and_then(|slice| slice.try_into().ok())
-            .map(u32::from_le_bytes)
-            .ok_or_else(|| format!("the container ends inside its header at byte {offset}"))
-    };
-    if word(0)? != GLB_MAGIC {
-        return Err("not a binary glTF: the magic is not `glTF`".to_owned());
-    }
-    let version = word(4)?;
-    if version != 2 {
-        return Err(format!(
-            "glTF binary version {version} is not 2, and a version bump can change what fields mean"
-        ));
-    }
-
-    let mut json = None;
-    let mut bin = Vec::new();
-    let mut offset = 12usize;
-    while offset + 8 <= bytes.len() {
-        let length = word(offset)? as usize;
-        let kind = word(offset + 4)?;
-        let start = offset + 8;
-        let payload = bytes.get(start..start + length).ok_or_else(|| {
-            format!("a chunk at byte {offset} declares {length} bytes it does not have")
-        })?;
-        match kind {
-            CHUNK_JSON => {
-                json = Some(
-                    serde_json::from_slice::<Value>(payload)
-                        .map_err(|error| format!("the JSON chunk will not parse: {error}"))?,
-                );
-            }
-            CHUNK_BIN => bin = payload.to_vec(),
-            // An unknown chunk is skipped by the specification, and dropping one on rewrite would be a
-            // silent loss -- so this refuses rather than pretending it round-tripped.
-            other => {
-                return Err(format!(
-                    "the container holds a chunk of type {other:#010x} this rewriter would drop"
-                ));
-            }
-        }
-        // Chunks are four-byte aligned; the padding is part of the container.
-        offset = start + length + ((4 - length % 4) % 4);
-    }
-    json.ok_or_else(|| "the container has no JSON chunk".to_owned())
-        .map(|json| (json, bin))
-}
-
 /// A 1x1 opaque-white PNG, the placeholder every image entry is pointed at.
 fn placeholder_png() -> Vec<u8> {
     let mut out = Vec::new();
@@ -664,9 +598,16 @@ fn rewrite(json: &mut Value, plans: &Plans) -> Result<(), String> {
 /// view is dropped and every kept view's offset is rewritten. Accessors reference views by *index* and the
 /// indices do not move, so nothing else has to change — and each kept view is placed at a four-byte
 /// boundary, which is the strictest alignment any accessor component needs.
+/// `embedded` names the DDS payloads to place inside the container, in conversion order, or is empty when
+/// the textures are being written beside it instead.
 #[allow(clippy::too_many_lines)]
-fn assemble_glb(json: &Value, bin: &[u8], plans: &Plans) -> Result<Vec<u8>, String> {
-    let mut json = json.clone();
+fn assemble_glb(
+    glb: Glb,
+    plans: &Plans,
+    embedded: &[(String, Vec<u8>)],
+) -> Result<Vec<u8>, String> {
+    let bin = glb.binary;
+    let mut json = glb.document;
     let object = json
         .as_object_mut()
         .ok_or("the JSON chunk is not an object")?;
@@ -782,45 +723,77 @@ fn assemble_glb(json: &Value, bin: &[u8], plans: &Plans) -> Result<Vec<u8>, Stri
         }
     }
 
-    // One buffer, whose length is the compacted chunk's.
-    let mut buffer = Map::new();
-    buffer.insert(
-        "byteLength".to_owned(),
-        Value::Number(serde_json::Number::from(compacted.len())),
-    );
-    object.insert(
-        "buffers".to_owned(),
-        Value::Array(vec![Value::Object(buffer)]),
-    );
-    let _ = plans;
+    // And out through the shared container writer, which sets the buffer length from the bytes rather than
+    // from whatever the document happened to say.
+    let mut rebuilt = Glb {
+        document: Value::Object(object.clone()),
+        binary: compacted,
+    };
 
-    // And out as a container: header, JSON chunk, binary chunk, each padded to four bytes.
-    let mut text = serde_json::to_vec(&json).map_err(|error| error.to_string())?;
-    while !text.len().is_multiple_of(4) {
-        text.push(b' '); // JSON pads with spaces, the binary chunk with zeroes.
+    // The DDS payloads, embedded as `MSFT_texture_dds`. A texture keeps its ordinary `source` -- now the 1x1
+    // placeholder -- so a reader that has never heard of the extension still sees a complete glTF, which is
+    // what makes shipping this safe.
+    if !embedded.is_empty() {
+        rebuilt.declare_extension(DDS_EXTENSION);
+        let mut attachments: Vec<(usize, usize)> = Vec::new();
+        for ((_, payload), conversion) in embedded.iter().zip(&plans.conversions) {
+            let view = rebuilt
+                .push_view(payload)
+                .map_err(|error| error.to_string())?;
+            let images = rebuilt
+                .document
+                .as_object_mut()
+                .and_then(|object| object.get_mut("images"))
+                .and_then(Value::as_array_mut)
+                .ok_or("`images` is not an array")?;
+            let mut entry = Map::new();
+            entry.insert("bufferView".to_owned(), Value::Number(view.into()));
+            entry.insert(
+                "mimeType".to_owned(),
+                Value::String(DDS_MIME_TYPE.to_owned()),
+            );
+            entry.insert("name".to_owned(), Value::String(conversion.name.clone()));
+            images.push(Value::Object(entry));
+            let dds_image = images.len() - 1;
+
+            // Which texture reads it: the one whose `source` is the image this conversion came from, or the
+            // texture the merge created.
+            let fallback = conversion.reuses;
+            attachments.push((dds_image, fallback.unwrap_or(usize::MAX)));
+        }
+
+        let textures = rebuilt
+            .document
+            .as_object_mut()
+            .and_then(|object| object.get_mut("textures"))
+            .and_then(Value::as_array_mut)
+            .ok_or("`textures` is not an array")?;
+        for (dds_image, fallback) in attachments {
+            // A merged conversion has no source image, so it is the texture the rewrite appended -- the last
+            // one that names no fallback of its own.
+            let target = if fallback == usize::MAX {
+                textures.len().checked_sub(1)
+            } else {
+                textures.iter().position(|texture| {
+                    texture.get("source").and_then(Value::as_u64) == Some(fallback as u64)
+                })
+            };
+            let Some(target) = target else { continue };
+            if let Some(entry) = textures.get_mut(target).and_then(Value::as_object_mut) {
+                let extensions = entry
+                    .entry("extensions")
+                    .or_insert_with(|| Value::Object(Map::new()));
+                if let Some(extensions) = extensions.as_object_mut() {
+                    let mut extension = Map::new();
+                    extension.insert("source".to_owned(), Value::Number(dds_image.into()));
+                    extensions.insert(DDS_EXTENSION.to_owned(), Value::Object(extension));
+                }
+            }
+        }
     }
-    while !compacted.len().is_multiple_of(4) {
-        compacted.push(0);
-    }
-    let total = 12 + 8 + text.len() + 8 + compacted.len();
-    let mut out = Vec::with_capacity(total);
-    out.extend_from_slice(&GLB_MAGIC.to_le_bytes());
-    out.extend_from_slice(&2u32.to_le_bytes());
-    out.extend_from_slice(
-        &u32::try_from(total)
-            .map_err(|_| "the rewritten container does not fit a 32-bit length")?
-            .to_le_bytes(),
-    );
-    for (payload, kind) in [(&text, CHUNK_JSON), (&compacted, CHUNK_BIN)] {
-        out.extend_from_slice(
-            &u32::try_from(payload.len())
-                .map_err(|_| "a chunk does not fit a 32-bit length")?
-                .to_le_bytes(),
-        );
-        out.extend_from_slice(&kind.to_le_bytes());
-        out.extend_from_slice(payload);
-    }
-    Ok(out)
+
+    let _ = plans;
+    rebuilt.assemble().map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -829,7 +802,7 @@ mod tests {
     // unchanged, so exact comparison is the assertion -- an epsilon would hide precisely the buffer-offset
     // mistake these tests exist to catch.
     #![allow(clippy::float_cmp)]
-    use super::{Slot, repack, split_glb};
+    use super::{Slot, repack};
     use cic_assets::texture::{BlockFormat, TextureLimits, decode_dds};
     use cic_assets::{ModelLimits, import_model};
     use serde_json::{Value, json};
@@ -942,7 +915,7 @@ mod tests {
     fn a_separate_occlusion_map_is_merged_and_both_slots_repointed() {
         // The whole point. Before: occlusion in one image, metallic-roughness in another, which the
         // renderer reads as "no occlusion". After: one ORM image both slots name, so it reads all three.
-        let repacked = repack(&separate_occlusion_glb(true), "hull").expect("repack");
+        let repacked = repack(&separate_occlusion_glb(true), "hull", false).expect("repack");
         let model = import_model(&repacked.glb, ModelLimits::default()).expect("reimport");
         let material = &model.materials[0];
         assert_eq!(
@@ -988,7 +961,7 @@ mod tests {
         // No filename heuristics: the material says which slot each image is read through, so the format
         // follows from the reference. The base colour is sRGB and the ORM is linear, and getting that pair
         // wrong is the quiet mistake the whole slot design exists to prevent.
-        let repacked = repack(&separate_occlusion_glb(true), "hull").expect("repack");
+        let repacked = repack(&separate_occlusion_glb(true), "hull", false).expect("repack");
         let formats: Vec<(String, BlockFormat)> = repacked
             .textures
             .iter()
@@ -1016,7 +989,7 @@ mod tests {
         // An unnamed image cannot be resolved at all -- the name *is* the key. So the rewrite invents one
         // from the model's own file stem, which is also what keeps two models in one package from both
         // claiming `textures/basecolor.dds`.
-        let repacked = repack(&separate_occlusion_glb(false), "tank").expect("repack");
+        let repacked = repack(&separate_occlusion_glb(false), "tank", false).expect("repack");
         let model = import_model(&repacked.glb, ModelLimits::default()).expect("reimport");
         let base = model.materials[0]
             .base_color_texture
@@ -1033,6 +1006,75 @@ mod tests {
     }
 
     #[test]
+    fn an_embedded_repack_reads_back_through_the_extension() {
+        // The round trip this change exists for: one file in, one file out, and the runtime finds its
+        // compressed textures inside it with no sidecar and no naming convention to keep.
+        let repacked = repack(&separate_occlusion_glb(true), "hull", true).expect("repack");
+        assert!(
+            repacked.textures.is_empty(),
+            "an embedded repack writes no sidecars"
+        );
+        assert!(
+            cic_assets::has_embedded_textures(&repacked.glb),
+            "the container must declare the extension"
+        );
+
+        let (model, textures) = cic_assets::import_model_with_textures(
+            &repacked.glb,
+            ModelLimits::default(),
+            TextureLimits::default(),
+        )
+        .expect("import with embedded textures");
+
+        // A material names its *fallback* image, and the texture resolves against that index -- which is
+        // what lets the renderer's existing lookup work unchanged for an embedded texture and a sidecar
+        // alike.
+        let base = model.materials[0]
+            .base_color_texture
+            .expect("a base colour");
+        let asset = textures.get(base).expect("an embedded base colour");
+        assert_eq!(asset.format(), BlockFormat::Bc7UnormSrgb);
+        assert_eq!(
+            model.images[base].width, 1,
+            "the fallback stays a placeholder"
+        );
+
+        let orm = model.materials[0].occlusion_texture.expect("an ORM");
+        assert_eq!(
+            model.materials[0].metallic_roughness_texture,
+            Some(orm),
+            "both slots still name one image"
+        );
+        let merged = textures.get(orm).expect("an embedded ORM");
+        assert_eq!(merged.format(), BlockFormat::Bc7Unorm);
+        let texel = merged.decode();
+        assert!(
+            texel[0].abs_diff(64) <= 2,
+            "red is still the occlusion map's, got {}",
+            texel[0]
+        );
+
+        // And a reader that ignores the extension still sees a complete glTF -- which is what the fallback
+        // is for, and what makes shipping this safe.
+        let plain = import_model(&repacked.glb, ModelLimits::default())
+            .expect("a reader without the extension must still cope");
+        assert_eq!(plain.materials[0].name, "hull");
+    }
+
+    #[test]
+    fn a_container_with_no_extension_imports_with_no_textures() {
+        // The ordinary state of a model that has not been converted: not an error, and not a special path.
+        let (model, textures) = cic_assets::import_model_with_textures(
+            &separate_occlusion_glb(true),
+            ModelLimits::default(),
+            TextureLimits::default(),
+        )
+        .expect("import");
+        assert!(textures.is_empty());
+        assert_eq!(model.materials.len(), 1);
+    }
+
+    #[test]
     fn the_rewritten_model_keeps_its_geometry_and_shrinks() {
         // The rewrite drops every image's buffer view and compacts the binary chunk, which means rewriting
         // the offset of every view kept. An accessor references a view by index and the indices do not
@@ -1040,7 +1082,7 @@ mod tests {
         // rather than assumed.
         let original = separate_occlusion_glb(true);
         let before = import_model(&original, ModelLimits::default()).expect("import");
-        let repacked = repack(&original, "hull").expect("repack");
+        let repacked = repack(&original, "hull", false).expect("repack");
         let after = import_model(&repacked.glb, ModelLimits::default()).expect("reimport");
 
         assert_eq!(after.primitives.len(), before.primitives.len());
@@ -1070,23 +1112,5 @@ mod tests {
                 "an image was left at full size"
             );
         }
-    }
-
-    #[test]
-    fn a_container_it_cannot_faithfully_rewrite_is_refused() {
-        // Refusing beats a silent loss. An unknown chunk would be dropped by this rewriter, and the
-        // specification says a reader should skip one -- so skipping is right for a *reader* and wrong for
-        // something that writes the file back out.
-        let mut with_extra = separate_occlusion_glb(true);
-        with_extra.extend_from_slice(&4u32.to_le_bytes());
-        with_extra.extend_from_slice(&u32::from_le_bytes(*b"ZOOM").to_le_bytes());
-        with_extra.extend_from_slice(&[0u8; 4]);
-        let error = split_glb(&with_extra).expect_err("an unknown chunk must be refused");
-        assert!(error.contains("would drop"), "got {error}");
-
-        assert!(
-            split_glb(b"not a glb at all").is_err(),
-            "and so must bytes that are not a container"
-        );
     }
 }
