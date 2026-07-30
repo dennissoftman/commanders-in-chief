@@ -224,13 +224,24 @@ What works:
   clock. That is what makes a capture of moving water or drifting cloud reproducible.
 - **Per-pass GPU timing** ([`timing`](crates/cic-render/src/timing.rs)), because every performance question
   here is workload-dependent: a total says something is slow, a breakdown says which pass. Each pass owns a
-  fixed pair of timestamp queries, a skipped pass reads back as absent rather than as zero, and the
-  tick-to-duration arithmetic is a pure function with its own tests. Optional, since `TIMESTAMP_QUERY` is —
-  a device without it renders identically and reports nothing.
+  fixed pair of timestamp queries, a pass with nothing to attribute — skipped, or recorded over no geometry
+  — reads back as absent rather than as zero, and the tick-to-duration arithmetic is a pure function with
+  its own tests. Optional, since `TIMESTAMP_QUERY` is — a device without it renders identically and reports
+  nothing.
   - It refuted its own premise immediately. The terrain's two million unculled vertices a frame were the
     reason to build it, and at 1920x1200 the four cascades were 7% of the frame while ambient occlusion was
     58%. Measured at 720x480 the same code said the cascades were 36%, because the cascades cost the same at
     every window size and a small target leaves nothing to compare them against.
+  - **A pass that draws nothing is not timed**, because the two backends disagreed about what to say when
+    one did. Vulkan records timestamp commands at the pass boundaries, which run whatever the pass contains;
+    Metal declares them as *stage* boundaries, and a pass that rasterises nothing never reaches the end of
+    the fragment stage, so its end timestamp is never written and the pair reads as "did not run". The near
+    cascade is that pass routinely — it covers the first 5.5% of the shadow distance, about 88 units, so any
+    camera an appreciable height above the ground has it sitting in empty air and catching no chunk. The two
+    answers for the same empty cascade were 8.7ms on llvmpipe (a real 2048² depth clear, on a CPU) and
+    "absent" on an M1 Pro. Declining the pair up front makes it absent on both, at the cost of the clear
+    going unattributed — beneath the noise floor on hardware, and not actionable without deleting the
+    cascade.
 - **Terrain frustum culling** ([`culling`](crates/cic-render/src/culling.rs)), over a decomposition into
   32-cell chunks. The camera and each fitted cascade cull against their own frustum and the survivors draw
   as instanced runs — the instance index *is* the chunk index, so this needed no new binding, buffer or
@@ -476,7 +487,7 @@ having to pretend.
 ## Gate status
 
 Formatting, strict lints (`clippy::all` and `clippy::pedantic` as errors, plus `-D warnings` as CI runs
-it), and the full test suite all passes on the pinned toolchain: **846 tests across ten crates**, up from
+it), and the full test suite all passes on the pinned toolchain: **847 tests across ten crates**, up from
 782 across eight. The ninth crate is `cic-math` — ADR 0007's arithmetic, extracted from `cic-script` so the
 kernel can share it — and its five new tests are its own copy of the decision-8 restriction scan plus a
 documentation example; the ten series tests moved with the code rather than being duplicated. The tenth is

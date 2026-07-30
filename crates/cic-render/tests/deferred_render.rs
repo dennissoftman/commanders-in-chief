@@ -130,6 +130,26 @@ fn pose(terrain: &Terrain) -> CameraPose {
     }
 }
 
+/// A camera close enough to the ground that the *near* shadow cascade has casters in it.
+///
+/// [`pose`] does not, and that is not a defect in either of them: cascade 0 covers the first 5.5% of the
+/// 1,600-unit shadow distance, about 88 units, so a camera 614 units up has it entirely in the air. This one
+/// stands a little way above the low ground at the near corner — which sits at roughly 229 units there, from
+/// the base 200 plus the undulation and the tail of the spire — and looks steeply down, so the ground is
+/// well inside those 88 units. It exists to be the control for the empty-cascade case.
+fn ground_level_pose(terrain: &Terrain) -> CameraPose {
+    let [extent_x, extent_y] = terrain.world_extent();
+    let eye = [extent_x * 0.25, extent_y * 0.25, 300.0];
+    let focus = [eye[0] + 25.0, eye[1] + 25.0, 229.0];
+    CameraPose {
+        eye,
+        focus,
+        // The eye-to-focus delta itself. `pose` states its forward the same way, unnormalised: what the
+        // camera uses is the direction, and dividing by the length here would only hide the arithmetic.
+        forward: [focus[0] - eye[0], focus[1] - eye[1], focus[2] - eye[2]],
+    }
+}
+
 fn capture_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
 }
@@ -1208,9 +1228,9 @@ fn per_pass_timing_attributes_the_frame_to_the_passes_that_ran() {
         .expect("read the breakdown");
     eprintln!("{timings}");
 
-    // Every unconditional pass ran, and the antialias pass ran because the settings asked for it.
+    // Every pass with geometry in it, and the antialias pass, which ran because the settings asked for it.
     for pass in [
-        TimedPass::ShadowCascade0,
+        TimedPass::ShadowCascade1,
         TimedPass::ShadowCascade3,
         TimedPass::Gbuffer,
         TimedPass::Occlusion,
@@ -1230,19 +1250,32 @@ fn per_pass_timing_attributes_the_frame_to_the_passes_that_ran() {
         );
     }
 
-    // And the conditional pass that did *not* run is absent rather than zero. This is the half a fixed
-    // slot layout has to earn: reporting water at 0.000ms in a scene with no water would be a claim about
-    // its cost rather than about its absence.
+    // Two passes are absent, for two different reasons, and neither absence is a claim about cost. This is
+    // the half a fixed slot layout has to earn: reporting water at 0.000ms in a scene with no water would
+    // be a claim about what water costs rather than about there being none.
     assert_eq!(
         timings.get(TimedPass::Water),
         None,
         "no water was drawn, so the water pass must not appear at all"
     );
-    assert_eq!(timings.entries().len(), TimedPass::ALL.len() - 1);
+    // The near cascade is the other reason. Its pass *was* recorded — the clear is what stops the layer
+    // reading as last frame's depth — but its frustum caught no chunk, so it drew nothing and was not
+    // timed. That is arithmetic, not chance: `pose` puts the eye 614 units up, while cascade 0 covers only
+    // the first 5.5% of the 1,600-unit shadow distance, which is about 88 units of empty air. A pass that
+    // rasterises nothing also cannot be timed on Metal, where the end-of-pass timestamp is sampled at the
+    // end of the fragment stage — so timing it anyway reported "did not run" about a pass that did, and
+    // reported it on one backend and not another. The control below is the same scene from a camera low
+    // enough to put casters in that cascade.
+    assert_eq!(
+        timings.get(TimedPass::ShadowCascade0),
+        None,
+        "the near cascade caught no chunk from this camera, so it has nothing to attribute"
+    );
+    assert_eq!(timings.entries().len(), TimedPass::ALL.len() - 2);
 
-    // The four cascades draw the terrain four more times over, so their total is a real share of the
-    // frame rather than a rounding error -- which is the first number the outstanding terrain LOD work
-    // wants. Asserted as a share of the sum, not in milliseconds, so it holds on any device.
+    // The cascades that did draw drew the terrain over again, so their total is a real share of the frame
+    // rather than a rounding error -- which is the first number the outstanding terrain LOD work wants.
+    // Asserted as a share of the sum, not in milliseconds, so it holds on any device.
     let shadow_share = harness_share(timings.shadow_total(), timings.sum());
     eprintln!(
         "shadow cascades are {:.1}% of the summed passes",
@@ -1250,8 +1283,32 @@ fn per_pass_timing_attributes_the_frame_to_the_passes_that_ran() {
     );
     assert!(
         shadow_share > 0.01,
-        "the four cascades came to {shadow_share:.4} of the frame, which would mean they are not \
-         drawing the terrain they are supposed to be drawing"
+        "the cascades came to {shadow_share:.4} of the frame, which would mean they are not drawing the \
+         terrain they are supposed to be drawing"
+    );
+
+    // The control. Same renderer, same terrain, same settings; the one thing that changes is that the near
+    // cascade now has ground in it. Without this the assertion above would pass just as happily on a
+    // renderer that had stopped timing cascade 0 altogether.
+    let low = DeferredFrame::new(ground_level_pose(&harness.terrain), WIDTH, HEIGHT);
+    let _ = render(context, &harness, low);
+    let from_the_ground = harness
+        .deferred
+        .timings(context)
+        .expect("timing is on")
+        .expect("read the breakdown");
+    eprintln!("from the ground: {from_the_ground}");
+    let near = from_the_ground
+        .get(TimedPass::ShadowCascade0)
+        .expect("the near cascade has casters in it from the ground, so it must be timed");
+    assert!(
+        near > Duration::ZERO && near < Duration::from_millis(100),
+        "the near cascade took {near:?}, which is not a plausible pass time"
+    );
+    assert_eq!(
+        from_the_ground.entries().len(),
+        TimedPass::ALL.len() - 1,
+        "every cascade has casters from the ground, so water is the only absence left"
     );
 
     // Turning it off stops the reporting rather than leaving stale numbers reachable.

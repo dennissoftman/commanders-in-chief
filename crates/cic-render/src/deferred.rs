@@ -1123,9 +1123,12 @@ impl DeferredRenderer {
 
     /// Records the four depth-only cascade passes.
     ///
-    /// Terrain and every model are submitted to each of them, so this is four more full geometry
+    /// Terrain and every model are submitted to each of them, so this is up to four more full geometry
     /// submissions on top of the G-buffer's — the figure the outstanding terrain level-of-detail work
     /// exists to bring down, and the one [`TimedPass::CASCADES`] makes measurable.
+    ///
+    /// *Up to* four, because a cascade's frustum can catch no chunk at all. That cascade is still recorded,
+    /// for the clear, and is deliberately not timed — see [`Self::time_if`].
     fn record_shadows(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -1142,12 +1145,17 @@ impl DeferredRenderer {
             .zip(TimedPass::CASCADES)
             .zip(&visible.cascades)
         {
+            // A cascade with no casters still gets its pass, because the clear is what makes the layer
+            // read as unoccluded instead of as last frame's depth — but it does not get timed. See
+            // [`Self::time_if`]: a pass that rasterises nothing cannot be timed at all on Metal, and a
+            // near cascade with nothing in it is routine rather than exotic.
+            let casts = !runs.is_empty() || !models.is_empty();
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("cic-render shadow cascade"),
                 color_attachments: &[],
                 depth_stencil_attachment: Some(depth_attachment(layer)),
                 multiview_mask: None,
-                timestamp_writes: self.time(recorded, *cascade),
+                timestamp_writes: self.time_if(casts, recorded, *cascade),
                 occlusion_query_set: None,
             });
             pass.set_pipeline(&self.shadow_pipeline);
@@ -1180,8 +1188,9 @@ impl DeferredRenderer {
 
     /// Returns the timestamp writes for one pass, noting that it was recorded.
     ///
-    /// `None` when timing is off, which is the only reason a pass descriptor would carry no writes — so a
-    /// pass whose slot stays cleared did not run, rather than having been forgotten here.
+    /// `None` when timing is off. That and [`Self::time_if`] declining a pass with nothing to draw are the
+    /// only reasons a pass descriptor carries no writes — so a pass whose slot stays cleared either did not
+    /// run or had no work in it, rather than having been forgotten here.
     fn time(
         &self,
         recorded: &mut Vec<TimedPass>,
@@ -1190,6 +1199,44 @@ impl DeferredRenderer {
         let timer = self.timer.as_ref()?;
         recorded.push(pass);
         Some(timer.writes(pass))
+    }
+
+    /// The same, for a pass that only sometimes has anything to draw.
+    ///
+    /// **A pass that issues no draw cannot be timed on every backend, and asking anyway produces a false
+    /// claim rather than a missing one.** The two backends realise a pass's timestamp pair differently:
+    /// Vulkan writes them with commands recorded at the pass boundaries, which run whatever the pass
+    /// contains, while Metal declares them as *stage* boundaries on the pass descriptor — the beginning at
+    /// the start of the vertex stage and the end at the end of the fragment stage. A pass that rasterises
+    /// nothing never reaches the second one, so on Metal the beginning lands, the end stays at the zero the
+    /// resolve buffer was cleared to, and [`crate::timing::timings_from_ticks`] reads the pair as a pass
+    /// that did not run. Timing it anyway therefore says "did not run" about a pass that did, on one backend
+    /// and not the other. Declining the pair up front makes the absence mean the same thing everywhere:
+    /// this pass had nothing to draw.
+    ///
+    /// A shadow cascade is why this exists. The near cascade covers the first few percent of the shadow
+    /// distance, so any camera an appreciable height above the ground has one whose frustum sits entirely
+    /// in the air and catches no chunk — the common case for this game's camera, not a corner of it. That
+    /// it is *absent* rather than reported at nearly zero is the more useful answer anyway: it says the
+    /// cascade found no casters, which is a thing worth knowing about a shadow distance.
+    ///
+    /// What this gives up, stated plainly: the clear itself stops being attributed to anything, so
+    /// [`crate::timing::FrameTimings::sum`] under-counts the frame by it. On hardware that is not a real
+    /// figure — a cascade holding geometry measures a tenth of a millisecond on an M1 Pro, and the clear
+    /// alone is beneath that. On llvmpipe it is 8.7ms, because clearing four million depth values on a CPU
+    /// is genuine work. The trade is deliberate: a breakdown that means the same thing on every backend is
+    /// worth more than one that accounts for a clear nobody can act on without deleting the cascade.
+    fn time_if(
+        &self,
+        draws: bool,
+        recorded: &mut Vec<TimedPass>,
+        pass: TimedPass,
+    ) -> Option<wgpu::RenderPassTimestampWrites<'_>> {
+        if draws {
+            self.time(recorded, pass)
+        } else {
+            None
+        }
     }
 
     /// Records the two passes that turn the HDR scene into the caller's image.
