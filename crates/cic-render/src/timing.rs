@@ -63,10 +63,14 @@ const RESOLVE_ALIGNMENT: u64 = 256;
 pub enum TimedPass {
     /// The first shadow cascade, nearest the camera.
     ///
-    /// Absent when its frustum caught no caster, which is ordinary rather than exceptional for this one: it
-    /// covers only the first few percent of the shadow distance, so a camera any height above the ground
-    /// has it sitting in the air over the terrain. A cascade with nothing in it is recorded — the clear
-    /// still has to happen — but not timed, since there is nothing to attribute.
+    /// Absent when its frustum caught no caster. A cascade with nothing in it is still recorded — the
+    /// clear has to happen — but not timed, since there is nothing to attribute.
+    ///
+    /// This used to be the ordinary case for the near cascade rather than the exceptional one, because
+    /// the cascades were fitted from the near plane and a camera at any altitude had the first one
+    /// sitting in the air. [`crate::shadow::fit_cascades`] now measures them over the scene the camera
+    /// can see, so an absence here means what it says for every cascade: nothing in front of the camera
+    /// casts within the shadow distance.
     ShadowCascade0,
     /// The second shadow cascade. Absent when it caught no caster, as [`Self::ShadowCascade0`] explains.
     ShadowCascade1,

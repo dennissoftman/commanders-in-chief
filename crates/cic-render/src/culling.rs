@@ -229,6 +229,24 @@ impl ChunkGrid {
         ))
     }
 
+    /// The world box every chunk lies inside.
+    ///
+    /// The union of [`Self::bounds`] over the whole grid, and the box a shadow cascade fit is measured
+    /// against — taken from here rather than recomputed so the fit and the cull cannot disagree about
+    /// where the terrain is. It carries the same elevation range every chunk box does, and so the same
+    /// exposure documented on this type: a height written after construction that pushes the terrain
+    /// above the recorded range is not reflected here either.
+    #[must_use]
+    pub fn world_bounds(&self) -> ([f32; 3], [f32; 3]) {
+        // Cell counts are bounded by the terrain's own validated dimensions, far inside exact f32 range.
+        #[allow(clippy::cast_precision_loss)]
+        let scaled = |cells: u32| cells as f32 * self.spacing;
+        (
+            [0.0, 0.0, self.lowest],
+            [scaled(self.cells_x), scaled(self.cells_y), self.highest],
+        )
+    }
+
     /// Appends the chunks a frustum can see to `visible`, clearing it first.
     ///
     /// Takes the buffer rather than returning one, so a caller culling five frusta a frame reuses one

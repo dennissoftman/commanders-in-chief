@@ -64,7 +64,7 @@ use crate::display::{DisplaySettings, jitter_offset};
 use crate::environment::Environment;
 use crate::gpu::{DEPTH_FORMAT, GpuContext};
 use crate::model::{ModelBatch, buffer_layouts};
-use crate::shadow::{CASCADE_COUNT, CASCADE_RESOLUTION, Cascade, fit_cascades};
+use crate::shadow::{CASCADE_COUNT, CASCADE_RESOLUTION, Cascade, ShadowedBounds, fit_cascades};
 use crate::terrain::{Animation, DirectionalLight, Motion, TerrainRenderer};
 use crate::timing::{FrameTimings, PassTimer, TimedPass};
 use crate::view::{Projection, invert, look_at, multiply, perspective};
@@ -833,19 +833,30 @@ impl DeferredRenderer {
             motion,
         );
 
+        let (lowest, highest) = terrain.chunks().world_bounds();
         let cascades = fit_cascades(
             frame.pose.eye,
             frame.pose.focus,
             frame.projection,
             frame.light.direction,
             frame.shadow_distance,
-            // The tallest caster, not the tallest terrain. A model standing on terrain reaches higher
-            // than the terrain does, and a cascade sized from terrain alone would fail to record it as
-            // an occluder at a low sun.
-            models
-                .iter()
-                .map(ModelBatch::world_top)
-                .fold(terrain.height_range(), f32::max),
+            // The terrain's own box, raised to the tallest caster rather than left at the tallest
+            // terrain. A model standing on terrain reaches higher than the terrain does, and a cascade
+            // sized from terrain alone would fail to record it as an occluder at a low sun.
+            //
+            // Taken from the chunk grid, which is also what `cull_terrain` tests the fitted cascades
+            // against, so the box the cascades are placed over and the boxes they are then culled
+            // against are the same measurement rather than two that can drift.
+            ShadowedBounds {
+                minimum: lowest,
+                maximum: highest,
+            }
+            .raised_to(
+                models
+                    .iter()
+                    .map(ModelBatch::world_top)
+                    .fold(f32::NEG_INFINITY, f32::max),
+            ),
         );
 
         let queue = context.queue();

@@ -100,7 +100,7 @@ pub use resource::{TextureId, TextureResourceManager};
 pub use scene::{TerrainFrame, capture_terrain, render_terrain_into};
 pub use scenery::{SwayProfile, sway_phase};
 pub use shader::{PROGRAMS, Program, compose};
-pub use shadow::{CASCADE_COUNT, Cascade, fit_cascades};
+pub use shadow::{CASCADE_COUNT, Cascade, ShadowedBounds, fit_cascades};
 pub use terrain::{
     Animation, DirectionalLight, LayerAlbedo, LayerColour, LayerMaterial, TerrainRenderer,
 };

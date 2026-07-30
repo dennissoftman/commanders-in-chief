@@ -346,7 +346,6 @@ pub struct TerrainRenderer {
     palette: [[f32; 4]; MAX_LAYERS],
     /// Per layer: world units per albedo repeat.
     detail_scale: [f32; MAX_LAYERS],
-    height_range: f32,
     /// The chunk decomposition the deferred passes cull and draw against.
     ///
     /// Built once from the terrain's own dimensions and elevation range. It survives a height write
@@ -470,14 +469,6 @@ impl TerrainRenderer {
             layer_count: u32::try_from(terrain.layers().len()).unwrap_or(0),
             palette,
             detail_scale,
-            // Kept so the shadow fit can size each cascade's reach toward the light without the
-            // caller having to know or remember to supply it.
-            height_range: terrain
-                .elevations()
-                .iter()
-                .copied()
-                .max()
-                .map_or(0.0, |peak| f32::from(peak) * terrain.vertical_scale()),
             chunks: ChunkGrid::new(terrain),
         })
     }
@@ -661,15 +652,6 @@ impl TerrainRenderer {
     #[must_use]
     pub const fn bind_group_layout(&self) -> &wgpu::BindGroupLayout {
         &self.bind_group_layout
-    }
-
-    /// Returns the world-space elevation of the terrain's highest sample.
-    ///
-    /// Used to size how far a shadow cascade reaches toward the light, since the tallest thing in the
-    /// scene bounds how far away a caster can be.
-    #[must_use]
-    pub const fn height_range(&self) -> f32 {
-        self.height_range
     }
 
     /// Returns the number of vertices a full terrain draw submits.
