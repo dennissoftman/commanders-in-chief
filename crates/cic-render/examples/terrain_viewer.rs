@@ -1291,10 +1291,17 @@ impl ApplicationHandler for Viewer {
         };
         let albedo = terrain_renderer.layer_albedo();
         eprintln!(
-            "terrain layers: {} slices at {:?}, {} mip levels",
+            "terrain layers: {} slices at {:?}, {} mip levels, {}",
             albedo.layer_count(),
             albedo.size(),
-            albedo.mip_level_count()
+            albedo.mip_level_count(),
+            // Which upload path the array took. Worth printing rather than inferring: the two produce an
+            // array a shader binds identically, so nothing about the frame says which one ran -- and the
+            // answer depends on both the content and the adapter.
+            match albedo.block_format() {
+                Some(format) => format.name(),
+                None => "uncompressed RGBA8",
+            }
         );
         let size = window.inner_size();
         let surface = match SurfaceRenderer::new(

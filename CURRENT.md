@@ -368,9 +368,11 @@ validation caught before any pixel did.
 so `textures/grass.dds` is the resolution the renderer has always done, reaching the package. This is where
 the format pays most — a detail texture is sampled by up to eight layers in one fragment across the whole
 visible map — and it is the easiest fit, because detail textures are authored to one size and tiled. A
-terrain rendered through a compressed layer array is byte-identical to the same terrain through the RGBA8
-one. What has *not* been exercised is a real map package carrying converted textures, because none has been
-authored yet; the chain is covered by tests from the zip inward.
+terrain rendered through a compressed layer array matches the same terrain through the RGBA8 one to within a
+bit, and **the viewer has been run against a real `.cicmap` carrying three converted layer textures** —
+sand, grass and rock, authored as PNGs, converted by `cic-texconv`, resolved by layer name out of the
+package, and reported by the viewer as `3 slices at (256, 256), 9 mip levels, BC7_UNORM_SRGB`. That was the
+one check this work could not make when it landed.
 
 ## Next verified step
 
