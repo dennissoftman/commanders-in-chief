@@ -364,6 +364,18 @@ to the same model through the RGBA8 path, on an M1 Pro with the hardware decoder
 that check found was a copy extent given in logical rather than block-aligned texels, which `wgpu`
 validation caught before any pixel did.
 
+**A model's own textures convert in one step, and its baked occlusion now lights.**
+`cic-texconv --from-glb` reads a `.glb`, works out from the material references which slot every image is
+read through — no filename heuristics — converts them all, merges a separate occlusion map into the ORM
+image and repoints both slots at it, and rewrites the model with 1x1 placeholders. Verified on a real
+container: four images in, three sidecars out, `occlusionStrength` intact, geometry byte-identical through a
+compacted binary chunk, and the base colour reaching the GPU as `BC7_UNORM_SRGB`.
+
+The occlusion the merge makes readable is now applied, to the *ambient* term only — where glTF scopes it.
+That needed a G-buffer channel and every one was claimed, so `COVERAGE_FORMAT` widened to two channels at
+about 8 MiB per frame. A test asserts that with the ambient light zeroed the occluded and unoccluded frames
+are identical to the byte, which is the mistake — folding occlusion into albedo — that the cost buys off.
+
 **Terrain layers use the same path**, and needed nothing new to do it: a layer's name was already the key,
 so `textures/grass.dds` is the resolution the renderer has always done, reaching the package. This is where
 the format pays most — a detail texture is sampled by up to eight layers in one fragment across the whole

@@ -41,6 +41,11 @@ from an author's PNG to the GPU without any stage guessing what the bytes mean.
    the oracle the converter's encoders are measured against.
 6. **`cic-texconv` converts PNG to DDS**, with hand-written encoders and mip chains generated in the
    slot's colour space by the same code the renderer uses.
+7. **`--from-glb` converts a model's own textures and rewrites it.** The slot of every image is *derived*
+   from the material references rather than guessed from a filename; a separate occlusion map is merged into
+   the ORM image and both slots repointed at it; and every image becomes a 1x1 placeholder so the container
+   slims while keeping the named-image link a sidecar is found by.
+8. **A material's baked occlusion is applied**, to the ambient term only, from the red of the ORM image.
 
 ## Rationale
 
@@ -119,6 +124,41 @@ empty subset. Mode 6 alone is complete, exact and verifiable, and it is a real i
 same bitrate as BC3. The cost is measured and pinned by a test rather than assumed: 49.6 dB on a collinear
 block against 31.0 dB on one straddling a hard edge, which is what a partitioned mode would recover.
 
+**Deriving the slot rather than guessing it.** A glTF material states which slot each image is read
+through, so the block format and the colour space follow with certainty. A filename convention would be a
+second, weaker source of the same fact — and the two would disagree on the first asset whose author named
+files unhelpfully. An image referenced through slots that disagree is reported, because there is no single
+answer and picking one silently is how a normal map ends up in sRGB.
+
+**Merging occlusion, and why that forces the model to be rewritten.** This engine reads occlusion from the
+red of the metallic-roughness image, because a fourth array slot and a fourth slice index in a material
+record with one float left are not free. glTF permits the two to be separate images, so the merge is what
+makes such a model readable — and once two images become one, both material slots have to point at it,
+which is a change to the glTF and not to a texture. That is why conversion and rewriting are one operation.
+
+A channel with no source is **255** rather than whatever the other image carried. glTF leaves red unused in
+a metallic-roughness image, so carrying its contents into the occlusion channel would darken the surface by
+an arbitrary amount — the kind of wrong that looks like a lighting bug.
+
+**Placeholders rather than deleted images.** The container cannot carry the DDS itself, and the images
+cannot simply go: a material's slot reference is how the runtime knows which sidecar belongs to which slot,
+and a named image entry is that link. A 1x1 placeholder keeps it for a hundred bytes. An image left
+unreferenced by a merge stays as a placeholder too and is *reported*, because removing it would renumber
+every later image and every texture that names one — a rewrite with more ways to go wrong than the bytes are
+worth.
+
+**Applying occlusion in the lighting pass.** glTF scopes occlusion to indirect light: a baked crevice is
+dark because less skylight reaches it, not because the sun stopped shining on it. So it has to reach the
+pass that computes the ambient term, which needed a G-buffer channel — and every one was claimed, albedo's
+alpha having taken the last at no cost. `COVERAGE_FORMAT` therefore widens from `R16Float` to `Rg16Float`:
+two bytes per pixel, about 8 MiB per frame at 2560x1600, measured under a tenth of a millisecond on an
+M1 Pro. The alternative, folding occlusion into albedo in the G-buffer, is cheaper and wrong — it would
+darken the direct term too, which a test now pins shut by asserting that with the ambient light zeroed an
+occluded and an unoccluded frame are identical to the byte.
+
+The screen-space and baked terms combine by `min` rather than by multiplying, because they describe the
+*same* occlusion by different means and multiplying darkens a crevice twice.
+
 ## Consequences
 
 - Five formats in `cic-assets` instead of four, and the first one with an encoder anywhere in the tree
@@ -147,6 +187,14 @@ block against 31.0 dB on one straddling a hard edge, which is what a partitioned
 - Both `resolve_model_textures` and `resolve_terrain_textures` are wrappers over one
   `resolve_named_textures`. The convention is a single definition rather than two that must agree, and
   `TextureResolveError` is named for the operation rather than for whichever caller came first.
+- Green in the coverage target is 1.0 wherever nothing baked occlusion, so a scene with no occlusion maps
+  renders exactly as it did before the channel existed — which is what kept every committed reference
+  capture valid through the widening, and they all still pass.
+- The rewriter is a GLB *writer*, which the `gltf` crate does not provide, so this tree now has one. It
+  parses the JSON chunk into an untyped tree specifically so that anything it does not touch — including an
+  extension it has never heard of — survives; and it refuses a container holding an unknown *chunk* rather
+  than dropping it, because skipping one is right for a reader and wrong for something writing the file back
+  out.
 - **A hardware BC decoder is not required to be bit-exact, and they are not.** Measured on the same flat
   mode-6 block: Apple's Metal decoder reconstructs it exactly, and Mesa's `llvmpipe` — which CI runs on, and
   which does advertise `TEXTURE_COMPRESSION_BC` — rounds one least-significant bit differently across a

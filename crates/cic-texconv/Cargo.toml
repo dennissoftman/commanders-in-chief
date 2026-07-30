@@ -11,6 +11,9 @@ license.workspace = true
 # crate's encoders against: an encoder verified only against itself is verified against nothing.
 cic-assets.workspace = true
 png = "0.18"
+# The glb rewriter parses the JSON chunk into an untyped tree so that everything it does not touch --
+# including an extension it has never heard of -- survives the round trip.
+serde_json.workspace = true
 
 [dev-dependencies]
 # The round-trip test writes the decoded result out as a PNG to be looked at, which is this project's
