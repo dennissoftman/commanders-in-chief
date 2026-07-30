@@ -19,10 +19,11 @@ genuinely serves, one real thing it is wrong about, and an internal wing that th
 is a mistake. Institutions here cause harm through process rather than malice; a form filed correctly
 should be able to kill people. The register is restrained and procedural, never comic and never "dark".
 
-| | **AEC** | **Concord** | **Authority** |
+| | **AEC** | **Concord** | **Meridian** |
 |---|---|---|---|
-| Full form | Allied Expeditionary Command | Continental Concord | Corridor Authority |
-| Names itself after | a command structure | a civilisation | a jurisdiction |
+| Full form | Allied Expeditionary Command | Continental Concord | Meridian Council |
+| Colour *(campaign)* | blue | green | yellow |
+| Names itself after | a command structure | a civilisation | a line of connection |
 | Claim to legitimacy | mandate, legality, coalition consent | delivered outcomes — the road exists | presence, and the consent of people on the road |
 | What it cannot admit | that it is a foreign army | that order is being imposed | that it needs the war |
 | Production | **Logistics.** Force arrives off-map via pads and drop zones | **Industry.** Few huge factories, batch delivery, permanent infrastructure | **Occupation.** Converts existing map buildings into production |
@@ -30,6 +31,9 @@ should be able to kill people. The register is restrained and procedural, never 
 | Army | small, exact, drone-repaired | mass with attrition tolerance | salvaged enemy hulls at degraded reliability |
 | Buys | **vision** — ISR sweeps on cooldown | **permanence** — graded roads, depots | **ambiguity** — tunnels, false signatures |
 | Breaks against | air denial, EW and GPS denial | anything it did not plan for | being observed and pinned |
+
+Those colours are the campaign's. Skirmish and multiplayer let a player pick their own, unique within
+the game, because a match can field two seats of the same faction and ownership still has to be legible.
 
 Every faction covers every tactical role. Divergence is in *how* a role is filled, never in whether it
 exists — no faction is helpless against anything.

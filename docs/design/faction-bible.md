@@ -68,6 +68,7 @@ missing any of these four is under-written.
 | | **AEC** | **Concord** | **Meridian** |
 | --- | --- | --- | --- |
 | Full form | Allied Expeditionary Command | Continental Concord | Meridian Council |
+| Colour *(campaign)* | blue — cold, printed, institutional | green — deep, painted, permanent | yellow — high-visibility, brushed on |
 | Names itself after | a command structure | a civilisation | a line of connection |
 | Claim to legitimacy | mandate, legality, coalition consent | order, continuity, development | consent of the people on the road |
 | Sees the war as | a stabilisation problem | a continuity problem | a recognition problem |
@@ -82,6 +83,24 @@ one after a civilisation, one after the line that connects them. Meridian does
 not name a territory it owns. It names the road, exchange, and dependence
 between larger powers. That tells you what each thinks it is before a single
 line of dialogue.
+
+**Colour is a campaign system.** In the campaign the three colours above are
+canonical: insignia, map markers, briefing plates and UI accents all key off
+them, and a player learns to read the war by colour before reading a label. In
+skirmish and multiplayer the player picks a colour instead, unique within the
+game, because a match can field two AEC seats and ownership has to stay legible
+where faction does not distinguish it. The two systems answer different
+questions — the campaign colour says *who this is*, the skirmish colour says
+*which one is mine* — and neither derives from the other. Neither is allowed to
+silently stand in for the other either: a campaign mission must not renumber its
+factions into seat colours, and a skirmish must not quietly hand a player the
+colour of the faction they picked.
+
+Keep Concord and Meridian separated by **value**, not hue. Green and yellow are
+the pair that collapses under the common colour-vision deficiencies, so Concord
+sits dark and Meridian sits bright, and the same rule constrains whatever palette
+skirmish offers. A set of colours that reads as three factions only for players
+with unimpaired colour vision has failed at the one job colour has here.
 
 ---
 
@@ -160,6 +179,11 @@ prefab. Nothing built to last, because it isn't meant to. Everything stencilled,
 numbered and inventoried. The camp looks like it could be gone in seventy-two
 hours, and everyone knows it.
 
+Its blue arrives *printed* rather than painted: stencils, placards, lanyards and
+the header of a form. A cold, desaturated grey-blue, the blue of a procurement
+catalogue and an identity badge, and never heraldic — nothing here is claiming
+ancestry. It is applied by a machine that also numbered the thing it is on.
+
 ### Internal fault lines *(for CiC 2)*
 
 - **Theatre command vs. the political authority behind it.** The people fighting
@@ -225,6 +249,12 @@ Heavy, permanent, deliberately impressive. Poured concrete, rail, gantries,
 substations, banners with schedules on them. Everything looks like it intends to
 still be there in fifty years, because that is the argument. Where AEC stencils
 serial numbers, Concord carves completion dates.
+
+Its green is deep and laid on thick: ministry signage, rolling stock, painted
+structural steel, recoated so many times the edges have gone soft. Dark enough
+to read as weight rather than growth — this is institutional green, not
+landscape — and dark by requirement, since Meridian's yellow is what it has to
+stay separable from.
 
 ### Internal fault lines *(for CiC 2)*
 
@@ -333,6 +363,14 @@ Improvised but *administrative*. Weighbridges, barriers, painted route numbers,
 a desk in a shipping container with a stamp on it. Salvaged vehicles wearing two
 sets of markings, one badly painted over. Order asserted with paint and paper
 rather than concrete.
+
+Its yellow is high-visibility and cheap: barrier paint, hazard chevrons,
+weighbridge kerbs, the yellow of a permit and a hi-vis vest. It is the only
+faction colour applied *over* another's. A recovered hull carries Meridian
+yellow brushed across AEC blue or Concord green, and the covered coat still
+shows at the panel edges and the door seams. That is the misidentification
+engine in paint, and it should never be tidied up: the faction that asserts
+order with a brush is the faction whose markings are always one coat thick.
 
 ### Financing
 

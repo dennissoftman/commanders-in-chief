@@ -25,10 +25,10 @@ upstream of writable terrain textures. Three of its mechanics constrain the desi
   *cost*, and the costs must be editable at runtime, because paving the map is the faction's identity.
   The render side already treats route grading as a texture write; the simulation side needs the
   equivalent.
-- **The Authority digs tunnels and holds crossings.** Some objects must make ground passable that the
+- **Meridian digs tunnels and holds crossings.** Some objects must make ground passable that the
   terrain says is not — a bridge over water, a tunnel through a cliff, a ramp over a ditch.
-- **Structures stand on the map and deny the ground they stand on** — for every faction, and for the
-  Authority's converted buildings especially, where whether to level a structure is a real decision.
+- **Structures stand on the map and deny the ground they stand on** — for every faction, and for
+  Meridian's converted buildings especially, where whether to level a structure is a real decision.
 
 Direction set by Denys, 2026-07-30: passability is **derived** from the terrain, not authored; objects
 carry **occluder** and **passer** properties (a building occludes, a bridge grants passage); the
