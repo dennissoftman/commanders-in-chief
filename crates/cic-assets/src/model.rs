@@ -26,9 +26,9 @@
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
-use cic_vfs::{ResourceReadError, Vfs, VirtualPath};
+use cic_vfs::Vfs;
 
-use crate::texture::{TextureAsset, TextureError, TextureLimits, decode_dds};
+use crate::texture::{TextureAsset, TextureLimits, TextureResolveError, resolve_named_textures};
 
 /// Explicit bounds applied while importing an untrusted model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -333,13 +333,6 @@ impl Model {
     }
 }
 
-/// Directory a model's block-compressed textures are looked up in, relative to the mount root.
-///
-/// One directory for the whole package rather than one beside each model, because glTF image names are
-/// already the sharing mechanism: two models that name the same image are meant to get the same texture,
-/// and a per-model directory would silently give them two.
-pub const TEXTURE_DIRECTORY: &str = "textures";
-
 /// Block-compressed textures found for a model's images, parallel to [`Model::images`] by index.
 ///
 /// # Why an override table rather than a second shape for `ModelImage`
@@ -353,6 +346,10 @@ pub const TEXTURE_DIRECTORY: &str = "textures";
 /// anything in between having to look at them, and a caller that does not know about block compression
 /// keeps working exactly as it did. The index parallelism is the same invariant `base_color_texture`
 /// already relies on.
+///
+/// A terrain layer needs none of this and does not have it: its albedo is read in exactly one place, so
+/// [`crate::terrain::TerrainLayer`]'s texture goes into the material directly. See
+/// [`crate::texture::resolve_named_textures`], which both paths share.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ModelTextures {
     assets: Vec<Option<TextureAsset>>,
@@ -407,93 +404,17 @@ impl ModelTextures {
 ///
 /// # Errors
 ///
-/// An *absent* sidecar is not an error — that is the ordinary case for a model whose textures have not
-/// been converted. A sidecar that exists and will not read is: it means a converted texture is being
-/// silently rendered from its placeholder, which is exactly the failure a content author needs told
-/// about rather than left to notice.
+/// As [`resolve_named_textures`]: an absent sidecar is not an error, and one that exists but will not read
+/// is.
 pub fn resolve_model_textures(
     model: &Model,
     vfs: &Vfs,
     limits: TextureLimits,
-) -> Result<ModelTextures, ModelTextureError> {
-    let mut assets = Vec::with_capacity(model.images.len());
-    for image in &model.images {
-        if image.name.is_empty() {
-            assets.push(None);
-            continue;
-        }
-        let path = format!("{TEXTURE_DIRECTORY}/{}.dds", image.name);
-        let virtual_path = VirtualPath::new(&path).map_err(|error| ModelTextureError::Path {
-            path: path.clone(),
-            error,
-        })?;
-        let Some(entry) = vfs.resolve(&virtual_path) else {
-            assets.push(None);
-            continue;
-        };
-        let bytes = entry
-            .read(limits.maximum_bytes)
-            .map_err(|error| ModelTextureError::Read {
-                path: path.clone(),
-                error,
-            })?;
-        let texture = decode_dds(&bytes, limits)
-            .map_err(|error| ModelTextureError::Texture { path, error })?;
-        assets.push(Some(texture));
-    }
-    Ok(ModelTextures::new(assets))
-}
-
-/// A structured failure while resolving a model's block-compressed sidecars.
-#[derive(Debug)]
-pub enum ModelTextureError {
-    /// An image name did not form a safe virtual path.
-    Path {
-        /// The path that was attempted.
-        path: String,
-        /// The underlying normalization failure.
-        error: cic_vfs::PathError,
-    },
-    /// A sidecar existed but could not be read.
-    Read {
-        /// Mount-relative path of the sidecar.
-        path: String,
-        /// The underlying read failure.
-        error: ResourceReadError,
-    },
-    /// A sidecar was read but is not a texture this engine can upload.
-    Texture {
-        /// Mount-relative path of the sidecar.
-        path: String,
-        /// The underlying container or format failure.
-        error: TextureError,
-    },
-}
-
-impl Display for ModelTextureError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Path { path, error } => {
-                write!(formatter, "texture path `{path}` is unusable: {error}")
-            }
-            Self::Read { path, error } => {
-                write!(formatter, "texture `{path}` could not be read: {error}")
-            }
-            Self::Texture { path, error } => {
-                write!(formatter, "texture `{path}` is unusable: {error}")
-            }
-        }
-    }
-}
-
-impl Error for ModelTextureError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Path { error, .. } => Some(error),
-            Self::Read { error, .. } => Some(error),
-            Self::Texture { error, .. } => Some(error),
-        }
-    }
+) -> Result<ModelTextures, TextureResolveError> {
+    let names = model.images.iter().map(|image| image.name.as_str());
+    Ok(ModelTextures::new(resolve_named_textures(
+        names, vfs, limits,
+    )?))
 }
 
 /// Imports a `.glb` or self-contained `.gltf` model from bytes.

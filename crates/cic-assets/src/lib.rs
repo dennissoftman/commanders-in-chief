@@ -28,16 +28,20 @@ pub mod texture;
 pub use image::ColourSpace;
 pub use model::{
     AlphaMode, DEFAULT_ALPHA_CUTOFF, Model, ModelError, ModelImage, ModelLimits, ModelMaterial,
-    ModelPrimitive, ModelTextures, ModelVertex, TEXTURE_DIRECTORY, import_model,
-    resolve_model_textures,
+    ModelPrimitive, ModelTextures, ModelVertex, import_model, resolve_model_textures,
 };
 pub use package::{MapPackage, PackageError, PackageLimits};
 pub use scenario::{
     ObjectPlacement, PlayerSlot, Position, Scenario, ScenarioError, TerrainReference, Waypoint,
 };
 pub use templates::{Template, TemplateError, TemplateKind, TemplateSet};
-pub use terrain::{Terrain, TerrainError, TerrainLayer, TerrainLimits, decode_terrain};
-pub use texture::{BlockFormat, TextureAsset, TextureError, TextureLimits, decode_dds};
+pub use terrain::{
+    Terrain, TerrainError, TerrainLayer, TerrainLimits, decode_terrain, resolve_terrain_textures,
+};
+pub use texture::{
+    BlockFormat, TEXTURE_DIRECTORY, TextureAsset, TextureError, TextureLimits, TextureResolveError,
+    decode_dds, resolve_named_textures,
+};
 
 #[cfg(test)]
 mod model_tests {
@@ -350,8 +354,10 @@ mod model_tests {
 mod model_texture_tests {
     use cic_vfs::{Vfs, VirtualPath};
 
-    use crate::model::{ModelTextureError, TEXTURE_DIRECTORY, resolve_model_textures};
-    use crate::texture::{BlockFormat, TextureAsset, TextureLimits};
+    use crate::model::resolve_model_textures;
+    use crate::texture::{
+        BlockFormat, TEXTURE_DIRECTORY, TextureAsset, TextureLimits, TextureResolveError,
+    };
     use crate::{Model, ModelImage};
 
     /// A model carrying named images and nothing else: the sidecar lookup reads only the names.
@@ -459,7 +465,125 @@ mod model_texture_tests {
         )
         .expect_err("a malformed sidecar must be reported");
         assert!(
-            matches!(&error, ModelTextureError::Texture { path, .. } if path.contains("hull_basecolor")),
+            matches!(&error, TextureResolveError::Texture { path, .. } if path.contains("hull_basecolor")),
+            "got {error:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod terrain_texture_tests {
+    use cic_vfs::{Vfs, VirtualPath};
+
+    use crate::terrain::{Terrain, TerrainLayer, resolve_terrain_textures};
+    use crate::texture::{
+        BlockFormat, TEXTURE_DIRECTORY, TextureAsset, TextureLimits, TextureResolveError,
+    };
+
+    fn terrain(layers: &[&str]) -> Terrain {
+        Terrain::new(
+            4,
+            4,
+            10.0,
+            0.5,
+            vec![100u16; 16],
+            layers
+                .iter()
+                .map(|name| TerrainLayer {
+                    name: (*name).to_owned(),
+                    weights: vec![255; 16],
+                })
+                .collect(),
+        )
+        .expect("valid terrain")
+    }
+
+    fn vfs(members: &[(&str, Vec<u8>)]) -> Vfs {
+        let mut vfs = Vfs::new();
+        vfs.mount_memory(
+            "textures",
+            members
+                .iter()
+                .map(|(path, bytes)| (VirtualPath::new(path).expect("path"), bytes.clone()))
+                .collect::<Vec<_>>(),
+        )
+        .expect("mount");
+        vfs
+    }
+
+    fn dds(format: BlockFormat) -> Vec<u8> {
+        TextureAsset::solid(16, 16, format, [u8::MAX; 4], TextureLimits::default())
+            .expect("solid texture")
+            .encode()
+    }
+
+    #[test]
+    fn a_layer_is_textured_by_the_file_named_after_it() {
+        // The layer name has always been the key -- the container carries names and weights, never
+        // pixels, and the renderer has always resolved the name against a material set. This makes it
+        // resolve against the package too, in layer order so it indexes alongside `Terrain::layers`.
+        let terrain = terrain(&["grass", "rock", "sand"]);
+        let vfs = vfs(&[
+            (
+                &format!("{TEXTURE_DIRECTORY}/grass.dds"),
+                dds(BlockFormat::Bc7UnormSrgb),
+            ),
+            (
+                &format!("{TEXTURE_DIRECTORY}/sand.dds"),
+                dds(BlockFormat::Bc1RgbaUnormSrgb),
+            ),
+        ]);
+        let textures =
+            resolve_terrain_textures(&terrain, &vfs, TextureLimits::default()).expect("resolve");
+
+        assert_eq!(textures.len(), 3, "one entry per layer, in layer order");
+        assert_eq!(
+            textures[0].as_ref().map(TextureAsset::format),
+            Some(BlockFormat::Bc7UnormSrgb)
+        );
+        assert!(
+            textures[1].is_none(),
+            "a layer with no file renders as its palette colour, as it always has"
+        );
+        assert_eq!(
+            textures[2].as_ref().map(TextureAsset::format),
+            Some(BlockFormat::Bc1RgbaUnormSrgb),
+            "the format is the file's, not a per-terrain choice"
+        );
+    }
+
+    #[test]
+    fn a_terrain_with_no_layers_or_no_files_resolves_to_nothing_rather_than_failing() {
+        // Both are ordinary: an unconverted map, and a heightfield with no layer set at all.
+        assert!(
+            resolve_terrain_textures(&terrain(&[]), &vfs(&[]), TextureLimits::default())
+                .expect("no layers is not a failure")
+                .is_empty()
+        );
+        let textures = resolve_terrain_textures(
+            &terrain(&["grass"]),
+            &vfs(&[("elsewhere/grass.dds", dds(BlockFormat::Bc7UnormSrgb))]),
+            TextureLimits::default(),
+        )
+        .expect("an absent file is not a failure");
+        assert_eq!(textures, vec![None]);
+    }
+
+    #[test]
+    fn a_layer_texture_that_will_not_read_is_reported_against_its_layer_name() {
+        // The distinction: absent means "not converted"; broken means a converted texture is silently
+        // rendering as a flat colour, and the error has to name which layer so it is actionable.
+        let error = resolve_terrain_textures(
+            &terrain(&["grass"]),
+            &vfs(&[(
+                &format!("{TEXTURE_DIRECTORY}/grass.dds"),
+                b"not a dds".to_vec(),
+            )]),
+            TextureLimits::default(),
+        )
+        .expect_err("a malformed layer texture must be reported");
+        assert!(
+            matches!(&error, TextureResolveError::Texture { path, .. } if path.contains("grass")),
             "got {error:?}"
         );
     }
@@ -631,6 +755,45 @@ mod package_tests {
         assert_eq!(
             package.thumbnail(1_024).expect("thumbnail"),
             Some(b"not really a png".to_vec())
+        );
+    }
+
+    #[test]
+    fn a_layer_texture_travels_in_the_package_and_resolves_through_its_mount() {
+        // The whole chain a map actually uses: a zip holding a scenario, a terrain declaring a layer
+        // named `grass`, and `textures/grass.dds` beside them. Opening the package mounts it, and the
+        // layer name resolves against that mount -- so nothing in between has to be told where textures
+        // live.
+        use crate::terrain::resolve_terrain_textures;
+        use crate::texture::{BlockFormat, TextureAsset, TextureLimits};
+
+        let grass = TextureAsset::solid(
+            16,
+            16,
+            BlockFormat::Bc7UnormSrgb,
+            [201, 199, 87, 255],
+            TextureLimits::default(),
+        )
+        .expect("solid texture");
+        let bytes = zip(&[
+            (SCENARIO_PATH, scenario().to_json().expect("serialize")),
+            ("terrain/alpine.cict", terrain().encode()),
+            ("textures/grass.dds", grass.encode()),
+        ]);
+        let package = MapPackage::open(&bytes, PackageLimits::default()).expect("open");
+        assert_eq!(package.terrain().layers()[0].name, "grass");
+
+        let textures = resolve_terrain_textures(
+            package.terrain(),
+            package.contents(),
+            TextureLimits::default(),
+        )
+        .expect("resolve through the package mount");
+        assert_eq!(textures.len(), 1, "one entry per layer");
+        assert_eq!(
+            textures[0].as_ref(),
+            Some(&grass),
+            "the texture that came out is the one that went in"
         );
     }
 

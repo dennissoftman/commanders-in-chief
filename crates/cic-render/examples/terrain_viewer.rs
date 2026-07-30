@@ -66,7 +66,8 @@ use std::time::Instant;
 use cic_assets::model::{Model, ModelImage, ModelMaterial, ModelPrimitive, ModelVertex};
 use cic_assets::scenario::{ObjectPlacement, PlayerSlot, Position, Scenario, TerrainReference};
 use cic_assets::templates::{Template, TemplateKind, TemplateSet};
-use cic_assets::{MapPackage, PackageLimits, Terrain, TerrainLayer};
+use cic_assets::texture::{TextureAsset, TextureLimits};
+use cic_assets::{MapPackage, PackageLimits, Terrain, TerrainLayer, resolve_terrain_textures};
 use cic_camera::{RtsCamera, RtsCameraProfile};
 use cic_render::detail::TerrainDetailRequest;
 use cic_render::display::{MAX_RESOLUTION_SCALE, MIN_RESOLUTION_SCALE};
@@ -144,15 +145,18 @@ const RESOLUTION_SCALE_STEP: f32 = 0.25;
 const TIMING_REPORT_SECONDS: f32 = 1.0;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let (terrain, activation) = if let Some(path) = std::env::args().nth(1) {
+    let (terrain, layer_textures, activation) = if let Some(path) = std::env::args().nth(1) {
         // A loaded package carries a scenario but no template set yet, so its placements stay
         // undrawn until packages do — the demo path below is what that will reuse when they do.
-        (load_package(&path)?, None)
+        let (terrain, textures) = load_package(&path)?;
+        (terrain, textures, None)
     } else {
         eprintln!("no map given; generating a terrain and a scenario to activate on it");
         let terrain = generated_terrain();
         let activation = demo_scenario(&terrain);
-        (terrain, Some(activation))
+        // A generated terrain has no package to carry textures, so its layers use the procedural
+        // surfaces.
+        (terrain, Vec::new(), Some(activation))
     };
     eprintln!(
         "terrain {}x{} samples, {:?} world units, peak {:.0}",
@@ -164,7 +168,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = Viewer::new(terrain, activation);
+    let mut app = Viewer::new(terrain, layer_textures, activation);
     event_loop.run_app(&mut app)?;
     if let Some(error) = app.failure {
         return Err(error.into());
@@ -172,12 +176,30 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Opens a map package and returns its terrain.
-fn load_package(path: &str) -> Result<Terrain, Box<dyn Error>> {
+/// A terrain and the block-compressed texture, if any, each of its layers is surfaced with.
+type LoadedTerrain = (Terrain, Vec<Option<TextureAsset>>);
+
+/// Opens a map package and returns its terrain and whatever layer textures it carries.
+///
+/// The textures are resolved here rather than later because this is the only place holding the package,
+/// and the package owns the mount they are read through. A map with no `textures/` directory yields an
+/// empty set and the layers fall back to the procedural surfaces below — which is what every map in the
+/// tree does today, since none has been authored with converted textures yet.
+fn load_package(path: &str) -> Result<LoadedTerrain, Box<dyn Error>> {
     let bytes = std::fs::read(path)?;
     let package = MapPackage::open(&bytes, PackageLimits::default())?;
-    eprintln!("loaded {} from {path}", package.scenario().name);
-    Ok(package.terrain().clone())
+    let textures = resolve_terrain_textures(
+        package.terrain(),
+        package.contents(),
+        TextureLimits::default(),
+    )?;
+    let converted = textures.iter().filter(|texture| texture.is_some()).count();
+    eprintln!(
+        "loaded {} from {path}: {} layers, {converted} with a block-compressed texture",
+        package.scenario().name,
+        package.terrain().layers().len(),
+    );
+    Ok((package.terrain().clone(), textures))
 }
 
 /// A terrain with a ridge, a spire, and a bowl, so lighting and shadows have something to work on.
@@ -419,7 +441,30 @@ fn roof_image() -> ModelImage {
 }
 
 /// Terrain layer surfaces, one per weight layer, at the world scale each tiles at.
-fn layer_materials() -> Vec<LayerMaterial> {
+///
+/// A layer with a converted texture in the package uses it, at the scale the procedural stand-in was
+/// tiling at; a layer without one keeps the stand-in. That is the ordinary mixed state of content being
+/// converted a texture at a time, and the renderer resolves it per array — see
+/// `TerrainRenderer::with_materials`.
+fn layer_materials(terrain: &Terrain, textures: &[Option<TextureAsset>]) -> Vec<LayerMaterial> {
+    let procedural = procedural_layer_materials();
+    let count = terrain.layers().len().max(procedural.len());
+    (0..count)
+        .map(|index| {
+            let base = procedural.get(index).cloned().unwrap_or_default();
+            match textures.get(index).and_then(Option::as_ref) {
+                Some(texture) => {
+                    let scale = base.detail_scale;
+                    base.with_compressed_albedo(texture.clone(), scale)
+                }
+                None => base,
+            }
+        })
+        .collect()
+}
+
+/// The generated surfaces a layer falls back to when the package carries no texture for it.
+fn procedural_layer_materials() -> Vec<LayerMaterial> {
     vec![
         LayerMaterial::colour([1.0; 3])
             .with_albedo(grain_image(96, [0.78, 0.70, 0.49], 0.22, 7), 14.0)
@@ -958,6 +1003,8 @@ struct Active {
 
 struct Viewer {
     terrain: Terrain,
+    /// Block-compressed layer textures the package carried, by layer. Empty for a generated terrain.
+    layer_textures: Vec<Option<TextureAsset>>,
     camera: RtsCamera,
     input: InputState,
     active: Option<Active>,
@@ -988,7 +1035,11 @@ struct Viewer {
 }
 
 impl Viewer {
-    fn new(terrain: Terrain, activation: Option<(Scenario, TemplateSet)>) -> Self {
+    fn new(
+        terrain: Terrain,
+        layer_textures: Vec<Option<TextureAsset>>,
+        activation: Option<(Scenario, TemplateSet)>,
+    ) -> Self {
         let [extent_x, extent_y] = terrain.world_extent();
         let camera = RtsCamera::new(
             RtsCameraProfile::default(),
@@ -997,6 +1048,7 @@ impl Viewer {
         );
         Self {
             terrain,
+            layer_textures,
             camera,
             input: InputState::default(),
             active: None,
@@ -1229,17 +1281,27 @@ impl ApplicationHandler for Viewer {
         };
         eprintln!("adapter: {}", context.adapter_info().name);
 
-        let terrain_renderer =
-            match TerrainRenderer::with_materials(&context, &self.terrain, &layer_materials()) {
-                Ok(renderer) => renderer,
-                Err(error) => return self.fail(event_loop, error.to_string()),
-            };
+        let terrain_renderer = match TerrainRenderer::with_materials(
+            &context,
+            &self.terrain,
+            &layer_materials(&self.terrain, &self.layer_textures),
+        ) {
+            Ok(renderer) => renderer,
+            Err(error) => return self.fail(event_loop, error.to_string()),
+        };
         let albedo = terrain_renderer.layer_albedo();
         eprintln!(
-            "terrain layers: {} slices at {:?}, {} mip levels",
+            "terrain layers: {} slices at {:?}, {} mip levels, {}",
             albedo.layer_count(),
             albedo.size(),
-            albedo.mip_level_count()
+            albedo.mip_level_count(),
+            // Which upload path the array took. Worth printing rather than inferring: the two produce an
+            // array a shader binds identically, so nothing about the frame says which one ran -- and the
+            // answer depends on both the content and the adapter.
+            match albedo.block_format() {
+                Some(format) => format.name(),
+                None => "uncompressed RGBA8",
+            }
         );
         let size = window.inner_size();
         let surface = match SurfaceRenderer::new(

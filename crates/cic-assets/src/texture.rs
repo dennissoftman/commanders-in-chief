@@ -22,6 +22,7 @@
 //! | Normal | **BC5** | Two independent 8-bit channels at 8 bpp, each compressed like a greyscale image with no shared endpoints. `z` is rebuilt in the shader from `xy`, so the third channel was never needed. |
 //! | Occlusion / roughness / metallic | **BC7** linear | Three unrelated measurements in R, G and B — exactly glTF's own packing, so nothing in the shader changes. |
 //! | Anything flat or masked | **BC1** | 4 bpp. One RGB endpoint pair per block with three-bit-per-texel interpolation, so it couples the channels; fine for colour, wrong for packed data. |
+//! | Terrain detail layer | **BC7** sRGB, or **BC1** | A tiled colour, so the base-colour reasoning applies — and this is where it pays most, being sampled by up to eight layers in one fragment across the whole visible map. |
 //!
 //! **BC5 cannot hold ORM.** It is two BC4 blocks, red and green, and there is no third channel — so a
 //! packed occlusion/roughness/metallic map goes in BC7 (same 8 bpp, all three channels, and the
@@ -43,6 +44,8 @@
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
+
+use cic_vfs::{ResourceReadError, Vfs, VirtualPath};
 
 use crate::bc;
 use crate::image::{ColourSpace, halve};
@@ -408,6 +411,118 @@ impl TextureAsset {
             out.extend_from_slice(level);
         }
         out
+    }
+}
+
+/// Directory block-compressed textures are looked up in, relative to the mount root.
+///
+/// One directory for the whole package rather than one beside each asset, because the *name* is already
+/// the sharing mechanism: two models that reference an image of the same name, or a model and a terrain
+/// layer that do, are meant to get the same texture, and a per-asset directory would silently give them
+/// several.
+pub const TEXTURE_DIRECTORY: &str = "textures";
+
+/// Looks up `textures/<name>.dds` for each of a list of names.
+///
+/// The one place the sidecar convention lives, shared by
+/// [`crate::model::resolve_model_textures`] and [`crate::terrain::resolve_terrain_textures`]. Both ask the
+/// same question of different names — a glTF image's name in one case, a terrain layer's in the other —
+/// and neither should own the answer.
+///
+/// An empty name resolves to `None` without a lookup: there is no key, and deriving one from the
+/// entry's position would silently give two different assets the same texture.
+///
+/// # Errors
+///
+/// An **absent** sidecar is not an error. That is the ordinary state of content that has not been
+/// converted, and the caller has working pixels either way.
+///
+/// A sidecar that **exists and will not read** is an error, and deliberately so: it means a converted
+/// texture is being silently rendered from whatever stood in for it, which is exactly the failure a
+/// content author needs told about rather than left to notice.
+pub fn resolve_named_textures<'a>(
+    names: impl IntoIterator<Item = &'a str>,
+    vfs: &Vfs,
+    limits: TextureLimits,
+) -> Result<Vec<Option<TextureAsset>>, TextureResolveError> {
+    let mut assets = Vec::new();
+    for name in names {
+        if name.is_empty() {
+            assets.push(None);
+            continue;
+        }
+        let path = format!("{TEXTURE_DIRECTORY}/{name}.dds");
+        let virtual_path = VirtualPath::new(&path).map_err(|error| TextureResolveError::Path {
+            path: path.clone(),
+            error,
+        })?;
+        let Some(entry) = vfs.resolve(&virtual_path) else {
+            assets.push(None);
+            continue;
+        };
+        let bytes =
+            entry
+                .read(limits.maximum_bytes)
+                .map_err(|error| TextureResolveError::Read {
+                    path: path.clone(),
+                    error,
+                })?;
+        let texture = decode_dds(&bytes, limits)
+            .map_err(|error| TextureResolveError::Texture { path, error })?;
+        assets.push(Some(texture));
+    }
+    Ok(assets)
+}
+
+/// A structured failure while resolving a block-compressed sidecar.
+#[derive(Debug)]
+pub enum TextureResolveError {
+    /// A name did not form a safe virtual path.
+    Path {
+        /// The path that was attempted.
+        path: String,
+        /// The underlying normalization failure.
+        error: cic_vfs::PathError,
+    },
+    /// A sidecar existed but could not be read.
+    Read {
+        /// Mount-relative path of the sidecar.
+        path: String,
+        /// The underlying read failure.
+        error: ResourceReadError,
+    },
+    /// A sidecar was read but is not a texture this engine can upload.
+    Texture {
+        /// Mount-relative path of the sidecar.
+        path: String,
+        /// The underlying container or format failure.
+        error: TextureError,
+    },
+}
+
+impl Display for TextureResolveError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Path { path, error } => {
+                write!(formatter, "texture path `{path}` is unusable: {error}")
+            }
+            Self::Read { path, error } => {
+                write!(formatter, "texture `{path}` could not be read: {error}")
+            }
+            Self::Texture { path, error } => {
+                write!(formatter, "texture `{path}` is unusable: {error}")
+            }
+        }
+    }
+}
+
+impl Error for TextureResolveError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Path { error, .. } => Some(error),
+            Self::Read { error, .. } => Some(error),
+            Self::Texture { error, .. } => Some(error),
+        }
     }
 }
 

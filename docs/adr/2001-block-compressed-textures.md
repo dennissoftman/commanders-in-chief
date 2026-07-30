@@ -28,12 +28,14 @@ from an author's PNG to the GPU without any stage guessing what the bytes mean.
 2. **The slot decides the format, and there is no other knob.** Base colour is BC7 sRGB; a tangent-space
    normal map is BC5; a packed occlusion/roughness/metallic map is BC7 linear; BC1 is available for flat
    colour and masks at half the bytes.
-3. **A texture is a sidecar keyed by its glTF image name.** A model's image named `hull_basecolor` is
-   overridden by `textures/hull_basecolor.dds`. An absent sidecar is not an error; a present-but-broken
-   one is.
-4. **The decision to use the compressed upload path is made per array slot, and it is all-or-nothing.**
-   Either every image a slot is read through has a usable sidecar of one format and size, or that slot
-   stays on the RGBA8 path.
+3. **A texture is a sidecar keyed by a name the asset already carries.** A model's image named
+   `hull_basecolor` is overridden by `textures/hull_basecolor.dds`; a terrain layer named `grass` is
+   surfaced by `textures/grass.dds`. One `resolve_named_textures` answers both. An absent sidecar is not an
+   error; a present-but-broken one is.
+4. **The decision to use the compressed upload path is made per array, and it is all-or-nothing.** For a
+   model that means per material slot, since its three slots are three arrays; for terrain it means the one
+   layer array. Either every texture the array needs is compressed and they agree on format and size, or
+   that array stays on the RGBA8 path.
 5. **A software decoder for all three formats lives in `cic-assets`**, exact to the published
    specifications, and is used both as the fallback for devices without `TEXTURE_COMPRESSION_BC` and as
    the oracle the converter's encoders are measured against.
@@ -132,9 +134,19 @@ block against 31.0 dB on one straddling a hard edge, which is what a partitioned
 - A flat colour is **not** exactly representable in BC7 mode 6 unless its channels agree on their low bit,
   because the parity bit is per endpoint rather than per channel. The identity values the renderer fills
   unused array slices with are chosen from the set that is exact.
-- Terrain layer textures still take the uncompressed path. They are the largest single texture budget in
-  the engine and the obvious next adopter; `TextureArray::new_blocks` is public and general, and what
-  terrain additionally needs is a way for a layer to name a texture, which it does not have yet.
+- Terrain layer textures use the same path, and needed nothing new to do it. A layer's *name* was already
+  the key — the `.cict` container has never held layer pixels, only names and weights, and the renderer has
+  always resolved a name against a material set it was handed — so `textures/<layer>.dds` is that same
+  resolution reaching the package. This is where the format pays most: a detail texture is sampled by up to
+  eight layers in one fragment across the whole visible map, and detail textures are authored to one size
+  and tiled, so the uniform-size requirement of a compressed array costs nothing.
+- The all-or-nothing rule applies per *array* for terrain and per *material slot* for a model, which is the
+  same rule in both cases — one array holds one format at one size. An untextured terrain layer is not an
+  obstacle to it: it takes a flat white slice in the array's own format, so a partly-textured map still
+  takes the fast path.
+- Both `resolve_model_textures` and `resolve_terrain_textures` are wrappers over one
+  `resolve_named_textures`. The convention is a single definition rather than two that must agree, and
+  `TextureResolveError` is named for the operation rather than for whichever caller came first.
 - **A hardware BC decoder is not required to be bit-exact, and they are not.** Measured on the same flat
   mode-6 block: Apple's Metal decoder reconstructs it exactly, and Mesa's `llvmpipe` — which CI runs on, and
   which does advertise `TEXTURE_COMPRESSION_BC` — rounds one least-significant bit differently across a

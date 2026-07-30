@@ -22,6 +22,7 @@ mod support;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+use cic_assets::texture::{BlockFormat, TextureAsset, TextureLimits};
 use cic_assets::{Terrain, TerrainLayer};
 use cic_render::detail::TerrainDetailRequest;
 use cic_render::terrain::LayerColour;
@@ -257,6 +258,188 @@ fn capture_with(context: &GpuContext, terrain: &Terrain, materials: &[LayerMater
     );
     render_terrain_into(context, &target, &renderer).expect("pass");
     target.resolve(context, encoder(context)).expect("resolve")
+}
+
+/// A flat-coloured layer texture, block-compressed, at the size the array will use.
+///
+/// Flat on purpose: a flat block has exactly one encoding, so a comparison against the same colour as an
+/// RGBA8 image measures the *upload* — row pitch, mip extent, layer origin — rather than a compressor's
+/// choices. Detail textures are the largest budget here, and a wrong row pitch on one would scramble the
+/// whole map rather than shade it slightly differently.
+fn compressed_layer(colour: [u8; 4]) -> TextureAsset {
+    TextureAsset::solid(
+        64,
+        64,
+        BlockFormat::Bc7UnormSrgb,
+        colour,
+        TextureLimits::default(),
+    )
+    .expect("a flat texture is always encodable")
+}
+
+/// The colour every layer of the comparison below uses. All four channels are odd, so they agree on the
+/// low bit BC7 mode 6 shares between an endpoint's channels and the block is exact — which is what lets
+/// the comparison assert equality instead of a tolerance.
+const COMPRESSED_LAYER_COLOUR: [u8; 4] = [201, 199, 87, 255];
+
+#[test]
+fn block_compressed_layers_render_the_same_terrain_as_uncompressed_ones() {
+    // Terrain is where block compression pays most: a detail texture is sampled by up to eight layers in
+    // one fragment across the whole visible map. This is the claim that adopting it changed nothing about
+    // the picture -- the same frame through two upload paths.
+    //
+    // On an adapter without TEXTURE_COMPRESSION_BC the compressed materials still render, by decoding to
+    // RGBA8, so this exercises the fallback rather than skipping it.
+    let Some(context) = context() else { return };
+    let terrain = test_terrain();
+
+    let image = TextureImage::solid(64, 64, COMPRESSED_LAYER_COLOUR);
+    let uncompressed: Vec<LayerMaterial> = palette()
+        .into_iter()
+        .map(|colour| LayerMaterial::colour(colour.0).with_albedo(image.clone(), 32.0))
+        .collect();
+    let compressed: Vec<LayerMaterial> = palette()
+        .into_iter()
+        .map(|colour| {
+            LayerMaterial::colour(colour.0)
+                .with_compressed_albedo(compressed_layer(COMPRESSED_LAYER_COLOUR), 32.0)
+        })
+        .collect();
+
+    let plain = capture_with(context, &terrain, &uncompressed);
+    let blocks = capture_with(context, &terrain, &compressed);
+    write_capture("terrain-uncompressed-layers.png", &plain);
+    write_capture("terrain-block-compressed-layers.png", &blocks);
+
+    let took_the_fast_path = context.supports_block_compression();
+    let renderer = TerrainRenderer::with_materials(context, &terrain, &compressed)
+        .expect("compressed renderer");
+    assert_eq!(
+        renderer.layer_albedo().block_format(),
+        took_the_fast_path.then_some(BlockFormat::Bc7UnormSrgb),
+        "the path taken must follow the device's capability, not chance"
+    );
+    assert_eq!(
+        renderer.layer_albedo().mip_level_count(),
+        7,
+        "a 64-pixel detail texture reaches 1x1 in seven levels, whichever path uploaded it"
+    );
+
+    // Bounded per channel rather than byte-identical, and the bound is the point: **no channel anywhere may
+    // move by more than one least-significant bit.**
+    //
+    // Exact equality was the first version of this assertion and it was wrong. A hardware or driver BC
+    // decoder is not required to be bit-exact: Apple's reconstructs this mode-6 block exactly, and Mesa's
+    // `llvmpipe` — which CI runs on, and which does advertise `TEXTURE_COMPRESSION_BC` — rounds one
+    // least-significant bit differently across a quarter of the frame. That is the format working as
+    // specified, not a fault, and it is the same reason this project's reference captures are already named
+    // per adapter.
+    //
+    // The bound is still strictly stronger than "few pixels differ", because it catches what this path can
+    // actually get wrong. A mistaken row pitch, mip extent or layer origin does not shift a frame by a
+    // shade — it scrambles it, and every such mistake made while writing this produced either a `wgpu`
+    // validation error or deltas in the tens.
+    let mut differing = 0usize;
+    let mut worst = 0u8;
+    for (bare, compressed) in plain
+        .rgba()
+        .chunks_exact(4)
+        .zip(blocks.rgba().chunks_exact(4))
+    {
+        if bare != compressed {
+            differing += 1;
+        }
+        for channel in 0..4 {
+            worst = worst.max(bare[channel].abs_diff(compressed[channel]));
+        }
+    }
+    eprintln!(
+        "block compression: fast path {took_the_fast_path}, {differing} of {} pixels differ, worst channel delta {worst}",
+        plain.rgba().len() / 4
+    );
+    assert!(
+        worst <= 1,
+        "the two upload paths disagree by {worst} of 255 over {differing} pixels, which is more than a \
+         decoder's rounding"
+    );
+
+    // And the terrain actually drew, which every equality test has to rule out separately: two frames of
+    // nothing agree perfectly.
+    assert!(
+        plain.luminance_deviation() > 0.0,
+        "the terrain did not draw"
+    );
+}
+
+#[test]
+fn one_uncompressed_layer_puts_the_whole_array_back_on_the_slow_path() {
+    // One array holds one format, so this is not a per-layer decision. A half-converted layer set must
+    // still load -- and must still use the converted textures, decoded, because those are the ones the
+    // author intended.
+    let Some(context) = context() else { return };
+    let terrain = test_terrain();
+    let colours = palette();
+
+    let mixed: Vec<LayerMaterial> = vec![
+        LayerMaterial::colour(colours[0].0)
+            .with_compressed_albedo(compressed_layer([201, 199, 87, 255]), 32.0),
+        LayerMaterial::colour(colours[1].0).with_albedo(striped(64, 4), 32.0),
+        LayerMaterial::colour(colours[2].0),
+    ];
+    let renderer =
+        TerrainRenderer::with_materials(context, &terrain, &mixed).expect("a mixed set must load");
+    assert_eq!(
+        renderer.layer_albedo().block_format(),
+        None,
+        "one RGBA8 layer among them is the whole array's format"
+    );
+    assert_eq!(
+        renderer.layer_albedo().layer_count(),
+        3,
+        "every layer still gets a slice, so a weight still pairs with its own surface"
+    );
+
+    // Compressed textures at different sizes are the other rejected case, for the same reason: a
+    // compressed array cannot resample a slice.
+    let mismatched: Vec<LayerMaterial> = vec![
+        LayerMaterial::colour(colours[0].0)
+            .with_compressed_albedo(compressed_layer([201, 199, 87, 255]), 32.0),
+        LayerMaterial::colour(colours[1].0).with_compressed_albedo(
+            TextureAsset::solid(
+                32,
+                32,
+                BlockFormat::Bc7UnormSrgb,
+                [99, 99, 99, 255],
+                TextureLimits::default(),
+            )
+            .expect("solid"),
+            32.0,
+        ),
+        LayerMaterial::colour(colours[2].0),
+    ];
+    let renderer = TerrainRenderer::with_materials(context, &terrain, &mismatched)
+        .expect("mismatched sizes must load");
+    assert_eq!(renderer.layer_albedo().block_format(), None);
+
+    // And an untextured layer is *not* an obstacle: it takes a flat white slice in the array's own
+    // format, so a partly-textured map still takes the fast path. This is the assertion that keeps the
+    // two above about real disagreements rather than about the feature never engaging.
+    let with_a_bare_layer: Vec<LayerMaterial> = vec![
+        LayerMaterial::colour(colours[0].0)
+            .with_compressed_albedo(compressed_layer([201, 199, 87, 255]), 32.0),
+        LayerMaterial::colour(colours[1].0),
+        LayerMaterial::colour(colours[2].0)
+            .with_compressed_albedo(compressed_layer([87, 199, 201, 255]), 32.0),
+    ];
+    let renderer = TerrainRenderer::with_materials(context, &terrain, &with_a_bare_layer)
+        .expect("a partly textured set");
+    assert_eq!(
+        renderer.layer_albedo().block_format(),
+        context
+            .supports_block_compression()
+            .then_some(BlockFormat::Bc7UnormSrgb)
+    );
+    assert_eq!(renderer.layer_albedo().size(), (64, 64));
 }
 
 #[test]

@@ -375,8 +375,15 @@ to the same model through the RGBA8 path, on an M1 Pro with the hardware decoder
 that check found was a copy extent given in logical rather than block-aligned texels, which `wgpu`
 validation caught before any pixel did.
 
-Terrain layers still take the uncompressed path — they are the largest texture budget here and the obvious
-next adopter, and what they additionally need is a way for a layer to name a texture.
+**Terrain layers use the same path**, and needed nothing new to do it: a layer's name was already the key,
+so `textures/grass.dds` is the resolution the renderer has always done, reaching the package. This is where
+the format pays most — a detail texture is sampled by up to eight layers in one fragment across the whole
+visible map — and it is the easiest fit, because detail textures are authored to one size and tiled. A
+terrain rendered through a compressed layer array matches the same terrain through the RGBA8 one to within a
+bit, and **the viewer has been run against a real `.cicmap` carrying three converted layer textures** —
+sand, grass and rock, authored as PNGs, converted by `cic-texconv`, resolved by layer name out of the
+package, and reported by the viewer as `3 slices at (256, 256), 9 mip levels, BC7_UNORM_SRGB`. That was the
+one check this work could not make when it landed.
 
 ## Next verified step
 
