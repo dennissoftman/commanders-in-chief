@@ -34,6 +34,7 @@
 use std::ops::Range;
 
 use cic_assets::Terrain;
+use cic_assets::texture::TextureAsset;
 
 use crate::RenderError;
 use crate::culling::{CHUNK_CELLS, ChunkGrid};
@@ -190,8 +191,70 @@ pub struct LayerMaterial {
     pub roughness: f32,
     /// World units one repeat of `albedo` covers. Larger is coarser.
     pub detail_scale: f32,
-    /// The layer's albedo image, tiled across the map, or `None` for a flat colour.
-    pub albedo: Option<TextureImage>,
+    /// The layer's detail texture, tiled across the map. See [`LayerAlbedo`].
+    pub albedo: LayerAlbedo,
+}
+
+/// What a terrain layer's surface is, and therefore how it reaches the GPU.
+///
+/// # Why an enum here and an override table for models
+///
+/// A model's images are read through three material slots and by several existing callers, so widening
+/// the image type there would have made every reader branch — and the branch is a decode. A terrain
+/// layer's albedo is read in exactly one place, [`TerrainRenderer::with_materials`], and written by
+/// exactly one kind of caller: whoever decides what a layer looks like. Naming the three possibilities
+/// makes the mixed case unrepresentable per layer, which is what the array actually needs.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum LayerAlbedo {
+    /// No texture: the layer renders as its flat palette colour.
+    #[default]
+    None,
+    /// An RGBA8 image, resampled and mipped at upload.
+    ///
+    /// What procedural and placeholder content uses, and what a layer whose texture has not been
+    /// converted still uses.
+    Image(TextureImage),
+    /// A block-compressed texture with its mip chain already in it.
+    ///
+    /// The fast path: these blocks reach the texture unit unchanged. See
+    /// [`cic_assets::resolve_terrain_textures`] for where one comes from.
+    Blocks(TextureAsset),
+}
+
+impl LayerAlbedo {
+    /// Whether this layer has a texture at all.
+    #[must_use]
+    pub const fn is_none(&self) -> bool {
+        matches!(self, Self::None)
+    }
+
+    /// The compressed texture, when that is what this is.
+    #[must_use]
+    pub const fn blocks(&self) -> Option<&TextureAsset> {
+        match self {
+            Self::Blocks(asset) => Some(asset),
+            _ => None,
+        }
+    }
+
+    /// This layer's surface as an RGBA8 image, decoding a compressed one if that is what it holds.
+    ///
+    /// `None` only for [`Self::None`], which the caller fills with an opaque-white slice so the layer's
+    /// palette colour multiplies through unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RenderError::InvalidTexture`] when a decoded texture's dimensions and byte length
+    /// disagree, which a `TextureAsset` already refuses at construction.
+    pub fn to_image(&self) -> Result<Option<TextureImage>, RenderError> {
+        match self {
+            Self::None => Ok(None),
+            Self::Image(image) => Ok(Some(image.clone())),
+            Self::Blocks(asset) => {
+                TextureImage::new(asset.width(), asset.height(), asset.decode()).map(Some)
+            }
+        }
+    }
 }
 
 impl Default for LayerMaterial {
@@ -200,7 +263,7 @@ impl Default for LayerMaterial {
             colour: [0.5, 0.5, 0.5],
             roughness: DEFAULT_LAYER_ROUGHNESS,
             detail_scale: DEFAULT_DETAIL_SCALE,
-            albedo: None,
+            albedo: LayerAlbedo::None,
         }
     }
 }
@@ -215,10 +278,21 @@ impl LayerMaterial {
         }
     }
 
-    /// Returns the material with an albedo image tiled at a world-space scale.
+    /// Returns the material with an RGBA8 albedo image tiled at a world-space scale.
     #[must_use]
     pub fn with_albedo(mut self, albedo: TextureImage, detail_scale: f32) -> Self {
-        self.albedo = Some(albedo);
+        self.albedo = LayerAlbedo::Image(albedo);
+        self.detail_scale = detail_scale;
+        self
+    }
+
+    /// Returns the material with a block-compressed albedo tiled at a world-space scale.
+    ///
+    /// The layer then takes the compressed upload path, provided every *other* textured layer does too —
+    /// one array cannot hold two formats. See [`TerrainRenderer::with_materials`].
+    #[must_use]
+    pub fn with_compressed_albedo(mut self, albedo: TextureAsset, detail_scale: f32) -> Self {
+        self.albedo = LayerAlbedo::Blocks(albedo);
         self.detail_scale = detail_scale;
         self
     }
@@ -329,21 +403,13 @@ impl TerrainRenderer {
         let weight_texture = upload_weights(device, queue, terrain)?;
 
         // One slice per weight layer, in the same order, so the shader indexes both with the same
-        // number and cannot pair a weight with another layer's surface. A layer with no image takes
-        // an opaque-white slice, which multiplies its colour through unchanged.
+        // number and cannot pair a weight with another layer's surface.
         let slice_count = terrain.layers().len().max(1);
         let default = LayerMaterial::default();
-        let slices: Vec<TextureImage> = (0..slice_count)
-            .map(|index| {
-                materials
-                    .get(index)
-                    .unwrap_or(&default)
-                    .albedo
-                    .clone()
-                    .unwrap_or_else(|| TextureImage::solid(1, 1, [u8::MAX; 4]))
-            })
+        let layer_albedo: Vec<&LayerAlbedo> = (0..slice_count)
+            .map(|index| &materials.get(index).unwrap_or(&default).albedo)
             .collect();
-        let albedo = TextureArray::new(context, "cic-render terrain layer albedo", &slices)?;
+        let albedo = upload_layer_albedo(context, &layer_albedo)?;
 
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("cic-render terrain uniforms"),
@@ -1202,6 +1268,95 @@ fn build_render_pipeline(
 }
 
 /// Uploads elevations into an integer height texture.
+/// Uploads the layer albedo array, block-compressed where every textured layer allows it.
+///
+/// # Why the choice is per array rather than per layer
+///
+/// One array holds one format at one size, so this is not a per-layer decision even though the materials
+/// state it per layer. The compressed path is taken when **every** layer that has a texture at all has a
+/// *compressed* one, and those agree on format, size and mip count. A single RGBA8 layer among them puts
+/// the whole array back on the uncompressed path — where a compressed layer is still used, decoded, which
+/// is the texture the author intended rather than a placeholder.
+///
+/// This is the same all-or-nothing rule the model path applies per material slot, and it is the same
+/// reason: a compressed array has no resample available, because resampling blocks means decoding,
+/// resampling and re-encoding them — the offline tool's work, at load time, for a worse result than
+/// converting at the right size.
+///
+/// A layer with **no** texture is not an obstacle to either path. It takes an opaque-white slice, so its
+/// palette colour multiplies through unchanged; on the compressed path that slice is a flat block of white
+/// at the array's own size, which is exact in every format here.
+fn upload_layer_albedo(
+    context: &GpuContext,
+    layers: &[&LayerAlbedo],
+) -> Result<TextureArray, RenderError> {
+    if let Some(slices) = compressed_layer_slices(context, layers) {
+        let borrowed: Vec<&TextureAsset> = slices.iter().collect();
+        return TextureArray::new_blocks(context, "cic-render terrain layer albedo", &borrowed);
+    }
+    // A layer with no texture takes an opaque-white slice, which multiplies its colour through unchanged.
+    let slices: Vec<TextureImage> = layers
+        .iter()
+        .map(|albedo| {
+            Ok(albedo
+                .to_image()?
+                .unwrap_or_else(|| TextureImage::solid(1, 1, [u8::MAX; 4])))
+        })
+        .collect::<Result<_, RenderError>>()?;
+    TextureArray::new(context, "cic-render terrain layer albedo", &slices)
+}
+
+/// The compressed slices for the whole array, or `None` when the set does not allow the compressed path.
+///
+/// See [`upload_layer_albedo`] for the rule and why it is what it is.
+fn compressed_layer_slices(
+    context: &GpuContext,
+    layers: &[&LayerAlbedo],
+) -> Option<Vec<TextureAsset>> {
+    if !context.supports_block_compression() {
+        return None;
+    }
+    // Every textured layer must be compressed, and they must agree. An untextured layer abstains.
+    let mut textured = layers.iter().filter(|albedo| !albedo.is_none()).peekable();
+    textured.peek()?;
+    let mut shape = None;
+    for albedo in textured {
+        let asset = albedo.blocks()?;
+        let this = (
+            asset.format(),
+            asset.width(),
+            asset.height(),
+            asset.level_count(),
+        );
+        if *shape.get_or_insert(this) != this {
+            return None;
+        }
+    }
+    let (format, width, height, _) = shape?;
+
+    // The white slice an untextured layer takes, in the array's own format and size. One flat block
+    // repeated, so this costs a copy rather than a compression pass.
+    let mut blank = None;
+    layers
+        .iter()
+        .map(|albedo| match albedo.blocks() {
+            Some(asset) => Some(asset.clone()),
+            None => blank
+                .get_or_insert_with(|| {
+                    TextureAsset::solid(
+                        width,
+                        height,
+                        format,
+                        [u8::MAX; 4],
+                        cic_assets::TextureLimits::default(),
+                    )
+                    .ok()
+                })
+                .clone(),
+        })
+        .collect()
+}
+
 fn upload_heights(device: &wgpu::Device, queue: &wgpu::Queue, terrain: &Terrain) -> wgpu::Texture {
     let width = terrain.width();
     let height = terrain.height();

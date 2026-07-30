@@ -101,7 +101,9 @@ pub use scene::{TerrainFrame, capture_terrain, render_terrain_into};
 pub use scenery::{SwayProfile, sway_phase};
 pub use shader::{PROGRAMS, Program, compose};
 pub use shadow::{CASCADE_COUNT, Cascade, fit_cascades};
-pub use terrain::{Animation, DirectionalLight, LayerColour, LayerMaterial, TerrainRenderer};
+pub use terrain::{
+    Animation, DirectionalLight, LayerAlbedo, LayerColour, LayerMaterial, TerrainRenderer,
+};
 pub use terrain_page::TerrainPageCache;
 pub use text::{Coverage, Font, Glyph, GlyphAtlas, Placed};
 pub use texture::{ColourSpace, TextureArray, TextureImage, array_format, block_array_format};

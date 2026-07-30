@@ -80,6 +80,30 @@ An image with no name is never looked up. An **absent** sidecar is not an error 
 that has not been converted. A sidecar that **exists and will not read** is an error, because it means a
 converted texture is being silently rendered from its placeholder.
 
+## How a terrain layer finds its texture
+
+The same convention, keyed on the layer's name:
+
+```text
+alpine.cicmap  (a zip)
+  map.json
+  terrain/alpine.cict          declares layers named `grass`, `rock`, `sand`
+  textures/grass.dds           BC7 sRGB, tiled in world space
+  textures/rock.dds
+```
+
+Nothing new was needed for this. `TerrainLayer::name` has always been the key — the `.cict` container
+carries names and weights, never pixels, and the renderer has always resolved a name against a material set
+it was handed. `resolve_terrain_textures` makes that name resolve against the package too, returning one
+entry per layer in layer order.
+
+A layer with no file renders as its flat palette colour, exactly as an untextured layer always has.
+
+Terrain is where the format pays most: a detail texture is sampled by up to eight layers in one fragment
+across the whole visible map, so it is both the largest texture budget here and the most
+bandwidth-sensitive. It is also the easiest fit, because detail textures are authored to one size and tiled,
+so a compressed array's uniform-size requirement costs nothing.
+
 ## What the renderer does with them
 
 Per array slot, and all-or-nothing:
@@ -98,6 +122,11 @@ size.
 
 Per slot rather than per model is what lets a model whose base colour is BC7 and whose normal is BC5 use
 both at once.
+
+For **terrain** the same rule applies per *array*, since a terrain layer has one surface rather than three
+slots: the compressed path is taken when every layer that has a texture at all has a compressed one, and
+those agree. A layer with **no** texture abstains rather than blocking it — it takes a flat white slice in
+the array's own format, so a partly-textured map still takes the fast path.
 
 A device without `TEXTURE_COMPRESSION_BC` — a software rasteriser, which is what CI runs on — decodes every
 block on the CPU and uploads RGBA8. The picture is the same; the memory and the load time are not.

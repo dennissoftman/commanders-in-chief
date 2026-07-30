@@ -29,6 +29,9 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
 use cic_core::{BinaryError, BinaryReader};
+use cic_vfs::Vfs;
+
+use crate::texture::{TextureAsset, TextureLimits, TextureResolveError, resolve_named_textures};
 
 /// Container magic.
 pub const MAGIC: &[u8; 4] = b"CICT";
@@ -75,6 +78,40 @@ pub struct TerrainLayer {
     pub name: String,
     /// One weight per sample, in row-major order, `0` absent and `255` fully covering.
     pub weights: Vec<u8>,
+}
+
+/// Looks up a block-compressed sidecar for each of a terrain's layers.
+///
+/// # The convention
+///
+/// A layer named `grass` is textured by `textures/grass.dds`. The layer name is the key, which is what
+/// [`TerrainLayer::name`] has always been for — the container has never held layer *pixels*, only the name
+/// and the weights, and the renderer has always resolved that name against a material set it was handed.
+/// This makes the name resolve against the package as well.
+///
+/// Terrain is where block compression pays most. A detail texture is sampled by up to eight layers in one
+/// fragment across the whole visible map, so it is both the largest texture budget here and the most
+/// bandwidth-sensitive; and detail textures are authored to one size and tiled, so the uniform-size
+/// requirement of a compressed array costs nothing.
+///
+/// Returns one entry per layer, in layer order, so the result indexes alongside
+/// [`Terrain::layers`] and the material set the renderer takes.
+///
+/// # Errors
+///
+/// As [`resolve_named_textures`]: an absent sidecar is not an error — that is a layer that renders as its
+/// flat palette colour, which is what an unconverted or deliberately untextured layer has always done —
+/// and one that exists but will not read is.
+pub fn resolve_terrain_textures(
+    terrain: &Terrain,
+    vfs: &Vfs,
+    limits: TextureLimits,
+) -> Result<Vec<Option<TextureAsset>>, TextureResolveError> {
+    resolve_named_textures(
+        terrain.layers().iter().map(|layer| layer.name.as_str()),
+        vfs,
+        limits,
+    )
 }
 
 /// A decoded terrain heightfield with its texture layers.
