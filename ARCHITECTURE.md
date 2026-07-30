@@ -9,13 +9,14 @@ cic-core          (no dependencies)
    │             ├── cic-render   (+ cic-camera, cic-ui, wgpu, png, sha2;
    │             │                   naga for shader validation in tests,
    │             │                   cic-sim in examples and tests only)
-   │             ├── cic-sim
+   │             ├── cic-sim       (+ cic-script)
    │             └── cic-texconv  (+ png; an offline binary, not a library)
    └── cic-audio  (+ serde, serde_json)
 
 cic-camera        (no dependencies)
 cic-math          (no dependencies)
    └── cic-script
+          └── cic-sim
 cic-ui            (+ serde, serde_json)
 ```
 
@@ -28,6 +29,13 @@ tests measure its encoders against. Nothing depends on it, and the runtime carri
 scenario activation reads the authored formats, and assets never know about simulation. It takes
 `cic-math` the day a subsystem needs a transcendental — the direction the extraction anticipated. What
 it must never take is anything that renders, plays, or reads a clock.
+
+It also takes `cic-script`, because [ADR 7002](docs/adr/7002-script-events.md) puts the event
+dispatcher in the kernel: the thing that decides which scripts hear which events, in what order, is
+part of the state transition and is hashed with everything else. The direction never reverses.
+`cic-script` still depends on `cic-math` and nothing else, which is what keeps the sandbox a property
+of this graph rather than of what the interpreter happens not to call — a language that could reach the
+kernel could not be argued safe, only tested.
 
 Four crates deliberately depend on nothing of this project's: `cic-core`, because bounded reading is a
 primitive; `cic-camera`, because the same camera must drive the game, the editor, and any debug viewer

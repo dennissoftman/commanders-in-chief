@@ -44,6 +44,8 @@ pub struct PackageLimits {
     pub maximum_scenario_bytes: usize,
     /// Maximum bytes read for the terrain container.
     pub maximum_terrain_bytes: usize,
+    /// Maximum bytes read for one script member.
+    pub maximum_script_bytes: usize,
 }
 
 impl Default for PackageLimits {
@@ -53,6 +55,9 @@ impl Default for PackageLimits {
             terrain: TerrainLimits::default(),
             maximum_scenario_bytes: 16 * 1_024 * 1_024,
             maximum_terrain_bytes: 512 * 1_024 * 1_024,
+            // A script is hand-written text. The language's own parse limit is a megabyte of source,
+            // so anything larger is not a script that was going to compile.
+            maximum_script_bytes: 1_024 * 1_024,
         }
     }
 }
@@ -147,6 +152,45 @@ impl MapPackage {
         }
     }
 
+    /// Reads the scenario's scripts, in authored order, as source text.
+    ///
+    /// The paths come from the scenario's `scripts` array and nothing else: there is no directory
+    /// scan, so a script the scenario does not name is not read however it got into the archive. The
+    /// order is preserved because it is the dispatch order — see
+    /// [ADR 7002](../../../docs/adr/7002-script-events.md).
+    ///
+    /// Returns the paths alongside their text so a compile diagnostic can name the file. Compiling is
+    /// deliberately not done here: this crate knows nothing about the language, and the interface a
+    /// script compiles against belongs to whatever is going to run it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PackageError::MissingScript`] for a listed path the package does not contain,
+    /// [`PackageError::Read`] for a member that will not read within the limit, and
+    /// [`PackageError::ScriptEncoding`] for one that is not UTF-8.
+    pub fn scripts(&self, limits: PackageLimits) -> Result<Vec<(String, String)>, PackageError> {
+        let mut sources = Vec::with_capacity(self.scenario.scripts.len());
+        for declared in &self.scenario.scripts {
+            let path = virtual_path(declared)?;
+            let bytes = self
+                .vfs
+                .resolve(&path)
+                .ok_or_else(|| PackageError::MissingScript(declared.clone()))?
+                .read(limits.maximum_script_bytes)
+                .map_err(|error| PackageError::Read {
+                    member: declared.clone(),
+                    error,
+                })?;
+            // Refused rather than replaced with U+FFFD: a lossy conversion turns a mis-encoded file
+            // into a compile error somewhere else, pointing at a character the author never wrote.
+            let source = String::from_utf8(bytes).map_err(|_| PackageError::ScriptEncoding {
+                member: declared.clone(),
+            })?;
+            sources.push((declared.clone(), source));
+        }
+        Ok(sources)
+    }
+
     /// Verifies every authored position sits within the terrain's world extent.
     ///
     /// This is the cross-check neither format can do alone: the scenario knows where things are, the
@@ -212,6 +256,13 @@ pub enum PackageError {
     MissingMember(&'static str),
     /// The scenario named a terrain member the package does not contain.
     MissingTerrain(String),
+    /// The scenario named a script member the package does not contain.
+    MissingScript(String),
+    /// A script member was not valid UTF-8.
+    ScriptEncoding {
+        /// Package-relative member path.
+        member: String,
+    },
     /// A member existed but could not be read.
     Read {
         /// Package-relative member path.
@@ -248,6 +299,13 @@ impl Display for PackageError {
                 formatter,
                 "the scenario names terrain {path}, which the package does not contain"
             ),
+            Self::MissingScript(path) => write!(
+                formatter,
+                "the scenario names script {path}, which the package does not contain"
+            ),
+            Self::ScriptEncoding { member } => {
+                write!(formatter, "script {member} is not valid UTF-8")
+            }
             Self::Read { member, error } => write!(formatter, "{member}: {error}"),
             Self::Scenario(error) => Display::fmt(error, formatter),
             Self::Terrain(error) => Display::fmt(error, formatter),

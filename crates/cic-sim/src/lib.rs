@@ -8,6 +8,8 @@
 //! - [`activation`] — a scenario's players and placements constructed into kernel state, in
 //!   authored order.
 //! - [`units`] — the first verbs: spawn, move, stop, with deterministic straight-line movement.
+//! - [`scripts`] — the event dispatcher: a scenario's scripts, in authored order, and the mission
+//!   state they keep on this side of the host boundary.
 //! - [`subsystem`] — the [`Subsystem`] trait and the [`TickContext`] a tick hands one.
 //! - [`command`] — the tick-stamped input stream, recorded so every run is reproducible.
 //! - [`random`] — named, versioned, seeded streams; drawing is part of the state transition.
@@ -45,6 +47,7 @@ pub mod hash;
 pub mod id;
 pub mod kernel;
 pub mod random;
+pub mod scripts;
 pub mod subsystem;
 pub mod tick;
 pub mod units;
@@ -57,6 +60,7 @@ pub use kernel::{
     Divergence, Kernel, KernelConfig, KernelError, SubsystemHash, TickHashes, first_divergence,
 };
 pub use random::{Stream, Streams};
+pub use scripts::{Mission, ScriptFault, ScriptLoadError, Scripts};
 pub use subsystem::{Subsystem, TickContext};
 pub use tick::TickAccumulator;
 pub use units::{Unit, Units, move_command, spawn_command, stop_command};

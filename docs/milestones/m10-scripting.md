@@ -3,8 +3,10 @@
 Behaviour in data: a deterministic, sandboxed language for scenario logic, campaign missions, and
 whatever a mod wants to do that placements cannot express.
 
-**Status:** Charter met as a language and a machine. What is outstanding is the half that cannot exist
-yet — the host verbs a simulation kernel would supply, since [M5](m5-simulation.md) has not been built.
+**Status:** Charter met as a language and a machine, and the scripts of a scenario now *run*: the event
+dispatcher landed in the kernel as `cic_sim::scripts`, with [ADR
+7002](../adr/7002-script-events.md)'s binding model. What is outstanding is the verbs that reach
+another subsystem — see [Remaining](#remaining).
 
 ## Charter
 
@@ -19,7 +21,8 @@ yet — the host verbs a simulation kernel would supply, since [M5](m5-simulatio
   absence of a heap bounds space.
 - **Diagnostics an author can act on**: a line number and what was expected. **Done**, at both compile
   and run time.
-- **Host verbs for the simulation.** **Not done, and not yet possible** — see [Remaining](#remaining).
+- **Host verbs for the simulation.** **Partly done** — the mission verbs and the event dispatch are in;
+  the verbs that reach another subsystem are not. See [Remaining](#remaining).
 
 ## Landed
 
@@ -87,12 +90,23 @@ yet — the host verbs a simulation kernel would supply, since [M5](m5-simulatio
 
 ## Remaining
 
-- **The host verbs a scenario actually needs** — spawn, order, count, query a zone, set an objective,
-  show a briefing. Every one of them is a call into a simulation kernel that does not exist yet, so this
-  is blocked on [M5](m5-simulation.md) rather than deferred. The seam is ready: a kernel declares them
-  on an `Interface` and implements one trait.
-- **Scripts in the map package.** The [package format](../formats/package.md) has no entry for them yet,
-  and adding one is a format change rather than a language one.
+- **The host verbs a scenario actually needs.** **Partly done.** The mission verbs are in, as
+  `cic_sim::scripts`: flags, counters and timers, plus the standard set. They were the ones reachable
+  first because they touch only mission state, which lives on the kernel's side of the host boundary
+  precisely so it is hashed and replayed ([ADR 7002](../adr/7002-script-events.md) decision 7).
+  - **What is left is the verbs that reach another subsystem** — spawn, order, count, query a zone,
+    set an objective, show a briefing. Those are no longer blocked on M5, which has landed; they are
+    blocked on a question M5 did not have to answer, namely how one subsystem reaches another's state
+    during a tick. The answer must not be "a script forges a player's command", which would put
+    scripted and human orders in the same channel and make a mod indistinguishable from a player.
+- **Scripts in the map package.** **Done.** `map.json` carries an ordered `scripts` array, every entry
+  is compiled at load against the kernel's interface, and dispatch order is authored order — see the
+  [scenario format](../formats/scenario.md#scripts). A script the scenario does not name does not run,
+  so there is no directory scan for a mod to drop a file into.
+- **The events a scenario can handle.** **Done for what a kernel can raise**: `start`, `tick` and
+  `timer_elapsed`. `zone_entered` and `zone_exited` are designed in ADR 7002 and deliberately *not*
+  declared until something can raise them, because an event declared early compiles and then silently
+  never fires — the exact failure the closed event set exists to prevent.
 - **One implementation of the transcendentals, not two.** **Done, ahead of M5.** The implementation
   moved to `cic-math` — Denys's choice of home, 2026-07-29 — a crate below both this one and the kernel
   to come, and this crate now consumes it rather than owning it. The bit-pinning tests moved with the
@@ -109,9 +123,17 @@ yet — the host verbs a simulation kernel would supply, since [M5](m5-simulatio
 A scenario's behaviour can be written in a file, loaded from a package, and produce identical results
 from identical inputs — checked in CI rather than by hand.
 
-**Partly met.** The language, the sandbox, the arithmetic and the bounds are in and covered by 98 tests.
-What is not met is the "loaded from a package" half and the cross-platform half of the determinism
-claim, both for the reasons above.
+**Met, except for the cross-platform half of the determinism claim.** The language, the sandbox, the
+arithmetic and the bounds were already in. What this milestone was missing — "loaded from a package" —
+now runs end to end and is checked in CI rather than by hand: `tests/scripted_package.rs` in `cic-sim`
+builds a `.cicmap`, opens it, compiles the scripts its scenario names, dispatches `start`, `tick` and
+`timer_elapsed` across ninety ticks, and requires the whole run to replay to identical per-tick hashes.
+The same test proves a script reaching for a verb the engine does not offer fails the *load*, naming
+the file.
+
+What remains is the standard the [determinism invariants](../invariants/determinism.md) set: a recorded
+run replayed on a *different platform* reproducing the same hashes. That still needs CI runners on more
+than one platform, and it is the same outstanding item M5 carries — not a scripting-specific gap.
 
 ## Design notes
 

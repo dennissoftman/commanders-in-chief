@@ -115,6 +115,14 @@ pub struct Scenario {
     /// Named positions.
     #[serde(default)]
     pub waypoints: Vec<Waypoint>,
+    /// Package-relative paths of the scripts this scenario runs, in dispatch order.
+    ///
+    /// Ordered because the order is the contract: when several scripts handle the same event they
+    /// run in this sequence, so it is something a designer changes deliberately rather than
+    /// something derived from a directory listing. A script not named here does not run, however it
+    /// got into the package — see [ADR 7002](../../../docs/adr/7002-script-events.md).
+    #[serde(default)]
+    pub scripts: Vec<String>,
 }
 
 impl Scenario {
@@ -188,6 +196,18 @@ impl Scenario {
             })?;
         }
 
+        let mut scripts = BTreeSet::new();
+        for (index, path) in self.scripts.iter().enumerate() {
+            if path.trim().is_empty() {
+                return Err(ScenarioError::EmptyScriptPath(index));
+            }
+            // A repeat would compile and dispatch the same handlers twice, which is never what an
+            // author meant and is invisible in the run -- the events simply fire twice.
+            if !scripts.insert(path.as_str()) {
+                return Err(ScenarioError::DuplicateScript(path.clone()));
+            }
+        }
+
         for (index, object) in self.objects.iter().enumerate() {
             if object.template.trim().is_empty() {
                 return Err(ScenarioError::EmptyTemplate(index));
@@ -248,6 +268,10 @@ pub enum ScenarioError {
     DuplicateWaypoint(String),
     /// A placement named a blank template.
     EmptyTemplate(usize),
+    /// A script entry was blank.
+    EmptyScriptPath(usize),
+    /// The same script was listed twice.
+    DuplicateScript(String),
     /// A placement was owned by a player the scenario does not declare.
     UnknownOwner {
         /// Zero-based placement index.
@@ -282,6 +306,10 @@ impl Display for ScenarioError {
             Self::EmptyTemplate(index) => {
                 write!(formatter, "object {index} names an empty template")
             }
+            Self::EmptyScriptPath(index) => {
+                write!(formatter, "script {index} has an empty path")
+            }
+            Self::DuplicateScript(path) => write!(formatter, "duplicate script path {path}"),
             Self::UnknownOwner { index, owner } => {
                 write!(
                     formatter,
@@ -369,6 +397,7 @@ mod tests {
                     z: 0.0,
                 },
             }],
+            scripts: vec!["scripts/mission.cics".to_owned()],
         }
     }
 
@@ -407,6 +436,54 @@ mod tests {
         assert_eq!(scenario.objects[0].scale, 1.0, "scale defaults to 1");
         assert_eq!(scenario.objects[0].rotation, 0.0);
         assert!(scenario.waypoints.is_empty());
+        assert!(
+            scenario.scripts.is_empty(),
+            "a scenario without scripts is the ordinary case, not an error"
+        );
+    }
+
+    #[test]
+    fn keeps_the_authored_script_order() {
+        // The order is the dispatch order, so it must survive a round trip unsorted.
+        let json = br#"{
+            "format_version": 1,
+            "name": "Scripted",
+            "terrain": { "path": "t.cict" },
+            "players": [
+                { "id": "a", "name": "A", "faction": "f", "start": { "x": 0.0, "y": 0.0 } }
+            ],
+            "scripts": ["scripts/zulu.cics", "scripts/alpha.cics"]
+        }"#;
+        let scenario = Scenario::from_json(json).expect("parse");
+        assert_eq!(
+            scenario.scripts,
+            ["scripts/zulu.cics", "scripts/alpha.cics"]
+        );
+        let reparsed =
+            Scenario::from_json(&scenario.to_json().expect("serialize")).expect("reparse");
+        assert_eq!(reparsed.scripts, scenario.scripts);
+    }
+
+    #[test]
+    fn rejects_a_blank_or_repeated_script_path() {
+        let mut scenario = sample();
+        scenario.scripts = vec!["  ".to_owned()];
+        assert!(matches!(
+            scenario.validate(),
+            Err(ScenarioError::EmptyScriptPath(0))
+        ));
+
+        // Listing one twice would compile and dispatch its handlers twice, invisibly.
+        scenario.scripts = vec![
+            "scripts/mission.cics".to_owned(),
+            "scripts/mission.cics".to_owned(),
+        ];
+        let error = scenario.validate().expect_err("must refuse");
+        assert!(matches!(error, ScenarioError::DuplicateScript(_)));
+        assert_eq!(
+            error.to_string(),
+            "duplicate script path scripts/mission.cics"
+        );
     }
 
     #[test]
