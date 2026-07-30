@@ -5,6 +5,7 @@
 //! | Data | Format | Why |
 //! |---|---|---|
 //! | Models, props, units | **glTF 2.0** (`.glb`) | A published standard every DCC tool exports. Writing a mesh format would mean writing a Blender exporter first. |
+//! | Textures | **DDS** with BC1/BC5/BC7 blocks | Stays compressed in video memory and carries its own mip chain, so the upload is a copy. Every texture tool writes it. |
 //! | Terrain heightfield and layers | **custom chunked binary** (`.cict`) | A regular numeric grid. No standard describes one well, and `u16` elevations upload directly as a baseline `R16Uint` GPU texture. |
 //! | Scenario: placements, players, waypoints | **JSON** (`map.json`) | Diffable, reviewable, hand-fixable. The bulk numerics are elsewhere, so the size argument for a binary encoding does not apply. |
 //! | A whole map | **zip** (`.cicmap`) | Already has a directory, per-member compression, and universal tooling. |
@@ -13,6 +14,8 @@
 //! when one is crossed, and reports a structured error naming what it found and what it expected.
 //! Nothing panics on hostile input.
 
+pub mod bc;
+pub mod image;
 pub mod model;
 pub mod package;
 pub mod scenario;
@@ -20,10 +23,13 @@ pub mod templates;
 pub mod terrain;
 #[cfg(test)]
 mod testing;
+pub mod texture;
 
+pub use image::ColourSpace;
 pub use model::{
     AlphaMode, DEFAULT_ALPHA_CUTOFF, Model, ModelError, ModelImage, ModelLimits, ModelMaterial,
-    ModelPrimitive, ModelVertex, import_model,
+    ModelPrimitive, ModelTextures, ModelVertex, TEXTURE_DIRECTORY, import_model,
+    resolve_model_textures,
 };
 pub use package::{MapPackage, PackageError, PackageLimits};
 pub use scenario::{
@@ -31,6 +37,7 @@ pub use scenario::{
 };
 pub use templates::{Template, TemplateError, TemplateKind, TemplateSet};
 pub use terrain::{Terrain, TerrainError, TerrainLayer, TerrainLimits, decode_terrain};
+pub use texture::{BlockFormat, TextureAsset, TextureError, TextureLimits, decode_dds};
 
 #[cfg(test)]
 mod model_tests {
@@ -336,6 +343,125 @@ mod model_tests {
                 .expect_err("truncation must refuse");
             assert!(matches!(error, ModelError::Gltf(_)), "got {error:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod model_texture_tests {
+    use cic_vfs::{Vfs, VirtualPath};
+
+    use crate::model::{ModelTextureError, TEXTURE_DIRECTORY, resolve_model_textures};
+    use crate::texture::{BlockFormat, TextureAsset, TextureLimits};
+    use crate::{Model, ModelImage};
+
+    /// A model carrying named images and nothing else: the sidecar lookup reads only the names.
+    fn model(names: &[&str]) -> Model {
+        Model {
+            name: "fixture".to_owned(),
+            primitives: Vec::new(),
+            materials: Vec::new(),
+            images: names
+                .iter()
+                .map(|name| ModelImage {
+                    width: 1,
+                    height: 1,
+                    // A placeholder, which is exactly what an author leaves in the container once the
+                    // sidecar exists.
+                    rgba: vec![0, 0, 0, 255],
+                    name: (*name).to_owned(),
+                })
+                .collect(),
+            has_skin: false,
+            has_animation: false,
+        }
+    }
+
+    fn vfs(members: &[(&str, Vec<u8>)]) -> Vfs {
+        let mut vfs = Vfs::new();
+        vfs.mount_memory(
+            "textures",
+            members
+                .iter()
+                .map(|(path, bytes)| (VirtualPath::new(path).expect("path"), bytes.clone()))
+                .collect::<Vec<_>>(),
+        )
+        .expect("mount");
+        vfs
+    }
+
+    fn dds(format: BlockFormat) -> Vec<u8> {
+        TextureAsset::solid(8, 8, format, [u8::MAX; 4], TextureLimits::default())
+            .expect("solid texture")
+            .encode()
+    }
+
+    #[test]
+    fn finds_a_sidecar_named_after_the_image_and_leaves_the_others_alone() {
+        // The whole convention in one assertion: the glTF image's own name is the key, so the link is
+        // authored in the DCC tool rather than derived from a filename the container may not carry.
+        let model = model(&["hull_basecolor", "hull_normal"]);
+        let vfs = vfs(&[(
+            &format!("{TEXTURE_DIRECTORY}/hull_basecolor.dds"),
+            dds(BlockFormat::Bc7UnormSrgb),
+        )]);
+        let textures =
+            resolve_model_textures(&model, &vfs, TextureLimits::default()).expect("resolve");
+        assert_eq!(textures.resolved_count(), 1);
+        assert_eq!(
+            textures.get(0).map(TextureAsset::format),
+            Some(BlockFormat::Bc7UnormSrgb)
+        );
+        assert!(
+            textures.get(1).is_none(),
+            "an image with no sidecar keeps the pixels the container carried"
+        );
+    }
+
+    #[test]
+    fn a_model_with_no_sidecars_at_all_resolves_to_an_empty_table() {
+        // The ordinary case for a model whose textures have not been converted, and it must not be an
+        // error: the container's own images are a working answer.
+        let textures = resolve_model_textures(
+            &model(&["hull_basecolor"]),
+            &vfs(&[("other/thing.dds", vec![1, 2, 3])]),
+            TextureLimits::default(),
+        )
+        .expect("an absent sidecar is not a failure");
+        assert!(textures.is_empty());
+        assert_eq!(textures.resolved_count(), 0);
+    }
+
+    #[test]
+    fn an_unnamed_image_is_never_looked_up() {
+        // There is no key to look up, and guessing one from the image's position would silently give two
+        // models the same texture.
+        let textures = resolve_model_textures(
+            &model(&[""]),
+            &vfs(&[(".dds", dds(BlockFormat::Bc7Unorm))]),
+            TextureLimits::default(),
+        )
+        .expect("resolve");
+        assert!(textures.is_empty());
+    }
+
+    #[test]
+    fn a_sidecar_that_exists_but_will_not_read_is_a_failure_rather_than_a_shrug() {
+        // The distinction this function draws. An *absent* sidecar means "not converted yet"; a broken
+        // one means a converted texture is being silently rendered from its placeholder, and a content
+        // author needs telling rather than left to notice.
+        let error = resolve_model_textures(
+            &model(&["hull_basecolor"]),
+            &vfs(&[(
+                &format!("{TEXTURE_DIRECTORY}/hull_basecolor.dds"),
+                b"not a dds at all".to_vec(),
+            )]),
+            TextureLimits::default(),
+        )
+        .expect_err("a malformed sidecar must be reported");
+        assert!(
+            matches!(&error, ModelTextureError::Texture { path, .. } if path.contains("hull_basecolor")),
+            "got {error:?}"
+        );
     }
 }
 

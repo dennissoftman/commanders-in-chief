@@ -383,6 +383,8 @@ fn wall_image() -> ModelImage {
         }
     }
     ModelImage {
+        // Unnamed, so no block-compressed sidecar is looked up for it.
+        name: String::new(),
         width: SIZE,
         height: SIZE,
         rgba,
@@ -408,6 +410,8 @@ fn roof_image() -> ModelImage {
         }
     }
     ModelImage {
+        // Unnamed, so no block-compressed sidecar is looked up for it.
+        name: String::new(),
         width: SIZE,
         height: SIZE,
         rgba,

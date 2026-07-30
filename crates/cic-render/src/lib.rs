@@ -104,7 +104,7 @@ pub use shadow::{CASCADE_COUNT, Cascade, fit_cascades};
 pub use terrain::{Animation, DirectionalLight, LayerColour, LayerMaterial, TerrainRenderer};
 pub use terrain_page::TerrainPageCache;
 pub use text::{Coverage, Font, Glyph, GlyphAtlas, Placed};
-pub use texture::{ColourSpace, TextureArray, TextureImage};
+pub use texture::{ColourSpace, TextureArray, TextureImage, array_format, block_array_format};
 pub use timing::{FrameTimings, PassTimer, TimedPass};
 pub use ui::{DrawList, UiMetrics, UiRenderer, atlas_sizes};
 pub use view::{Projection, view_projection};
@@ -117,6 +117,23 @@ pub enum RenderError {
     InvalidTexture,
     /// A texture, or the texture set as a whole, exceeded its explicit byte budget.
     TextureTooLarge,
+    /// A block-compressed upload was asked of a device without `TEXTURE_COMPRESSION_BC`.
+    ///
+    /// Not a fault in the asset. The caller should ask
+    /// [`GpuContext::supports_block_compression`](gpu::GpuContext::supports_block_compression) first and
+    /// decode to RGBA8 instead, which is what the model path does.
+    BlockCompressionUnsupported,
+    /// Block-compressed slices of one array disagreed on their size, format or mip count.
+    ///
+    /// The uncompressed path resamples a mismatched slice; this one cannot, because resampling blocks
+    /// means decoding and re-encoding them. See
+    /// [`TextureArray::new_blocks`](texture::TextureArray::new_blocks).
+    MismatchedTextureSlices {
+        /// The first slice's dimensions, which the rest must match.
+        expected: [u32; 2],
+        /// The offending slice's dimensions.
+        found: [u32; 2],
+    },
     /// No adapter, native or fallback, could be acquired.
     RequestAdapter(wgpu::RequestAdapterError),
     /// An adapter was found but no device could be created from it.
@@ -191,6 +208,15 @@ impl Display for RenderError {
             Self::InvalidTexture => {
                 formatter.write_str("texture dimensions or byte length are invalid")
             }
+            Self::BlockCompressionUnsupported => formatter.write_str(
+                "this device cannot sample block-compressed textures; decode to RGBA8 instead",
+            ),
+            Self::MismatchedTextureSlices { expected, found } => write!(
+                formatter,
+                "a compressed array slice is {}x{} where the array is {}x{}, and compressed slices \
+                 cannot be resampled",
+                found[0], found[1], expected[0], expected[1]
+            ),
             Self::TextureTooLarge => {
                 formatter.write_str("texture exceeds its explicit byte budget")
             }

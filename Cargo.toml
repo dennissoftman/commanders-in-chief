@@ -9,6 +9,7 @@ members = [
     "crates/cic-render",
     "crates/cic-script",
     "crates/cic-sim",
+    "crates/cic-texconv",
     "crates/cic-ui",
     "crates/cic-vfs",
 ]
@@ -50,6 +51,7 @@ cic-core = { path = "crates/cic-core" }
 cic-math = { path = "crates/cic-math" }
 cic-script = { path = "crates/cic-script" }
 cic-sim = { path = "crates/cic-sim" }
+cic-texconv = { path = "crates/cic-texconv" }
 cic-ui = { path = "crates/cic-ui" }
 cic-vfs = { path = "crates/cic-vfs" }
 
