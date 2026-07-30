@@ -342,6 +342,31 @@ from a test. Verified by running it: 256 pages compose on the frame the key is p
 indistinguishable from the direct blend, which is what it should be at a camera height where no page is
 minified.
 
+**Textures load block-compressed.** A `.dds` in `textures/` named after a glTF image now overrides that
+image's pixels ([ADR 2001](docs/adr/2001-block-compressed-textures.md),
+[the format](docs/formats/texture.md)): base colour as BC7 sRGB, normals as BC5, packed
+occlusion/roughness/metallic as BC7 linear. Blocks reach the texture unit as they are, mips already in the
+file — which is the successor ADR 0004 named for its own CPU mip pass. `cic-texconv` converts a PNG per
+slot, and the slot is the only knob, because the two ways to get a colour space wrong are both quiet.
+
+Two things are worth carrying forward from building it. **The decoder was written from the published
+specifications and the exercise paid for itself twice**: BC1's and BC4's interior colours are truncating
+integer division rather than rounded, and a BC7 mode with no alpha bits has alpha *overridden* to 1.0
+rather than derived — which otherwise yields 247, invisible on an opaque pass and wrong the moment such a
+material is blended. **And the encoder's own first version was 13 dB worse than it should have been**,
+because it fitted each block's line to the colour bounding box; on an anti-correlated block that diagonal
+runs across the data instead of along it, and the least-squares refinement then extrapolates rather than
+recovering. The principal axis fixed it, and the number is pinned by a test — a threshold set by intuition
+had passed the broken version.
+
+Verified where it counts: a model whose base colour comes through a BC7 sidecar renders **byte-identical**
+to the same model through the RGBA8 path, on an M1 Pro with the hardware decoder doing the work. The bug
+that check found was a copy extent given in logical rather than block-aligned texels, which `wgpu`
+validation caught before any pixel did.
+
+Terrain layers still take the uncompressed path — they are the largest texture budget here and the obvious
+next adopter, and what they additionally need is a way for a layer to name a texture.
+
 ## Next verified step
 
 **[M5, the simulation](docs/milestones/m5-simulation.md), is complete: the kernel mechanics and now

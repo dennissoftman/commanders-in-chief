@@ -9,7 +9,8 @@ cic-core          (no dependencies)
    │             ├── cic-render   (+ cic-camera, cic-ui, wgpu, png, sha2;
    │             │                   naga for shader validation in tests,
    │             │                   cic-sim in examples and tests only)
-   │             └── cic-sim
+   │             ├── cic-sim
+   │             └── cic-texconv  (+ png; an offline binary, not a library)
    └── cic-audio  (+ serde, serde_json)
 
 cic-camera        (no dependencies)
@@ -17,6 +18,11 @@ cic-math          (no dependencies)
    └── cic-script
 cic-ui            (+ serde, serde_json)
 ```
+
+`cic-texconv` is a tool rather than a stage of the engine: it converts authored PNGs to the
+block-compressed DDS textures the renderer uploads ([ADR 2001](docs/adr/2001-block-compressed-textures.md)).
+It depends on `cic-assets` for the container writer and — deliberately — for the block *decoders*, which its
+tests measure its encoders against. Nothing depends on it, and the runtime carries no compressor.
 
 `cic-sim` consumes `cic-assets` for the same reason and in the same direction as the renderer does:
 scenario activation reads the authored formats, and assets never know about simulation. It takes
