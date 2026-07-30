@@ -437,6 +437,7 @@ mod tests {
                     z: 0.0,
                 },
             }],
+            scripts: Vec::new(),
         }
     }
 

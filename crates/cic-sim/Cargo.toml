@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 cic-assets.workspace = true
+cic-script.workspace = true
 
 [lints]
 workspace = true

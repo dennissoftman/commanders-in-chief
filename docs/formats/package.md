@@ -9,11 +9,14 @@ alpine.cicmap
   map.json                 the scenario -- store uncompressed so diff tools reach it
   terrain/alpine.cict      the terrain container
   models/*.glb             map-specific models, if any
+  scripts/*.cics           scenario logic, if any -- store uncompressed for the same reason
   thumbnail.png            lobby preview, optional
 ```
 
 `map.json` is required and must be at that exact path. The terrain path is whatever `map.json`'s
-`terrain.path` names, so a package may organise its terrain however it likes.
+`terrain.path` names, so a package may organise its terrain however it likes. Scripts work the same
+way: the paths come from `map.json`'s `scripts` array, and **a script the scenario does not name does
+not run**, however it got into the archive — there is no directory scan to drop a file into.
 
 ## Why zip
 

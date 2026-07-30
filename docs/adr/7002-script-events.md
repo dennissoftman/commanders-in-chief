@@ -1,6 +1,6 @@
 # ADR 7002: Script events — subscription is a handler, and scripts arrive with the scenario
 
-**Status:** proposed
+**Status:** accepted
 
 ## Context
 
@@ -137,4 +137,71 @@ without letting one broken mod handler take the mission logic down with it.
 
 ## What implementing it established
 
-*To be written when it is.*
+The dispatcher is `cic_sim::scripts`, and `map.json` carries the `scripts` array. Eight of the nine
+decisions landed as written. What the implementation changed, found, or had to decide is below —
+including the two places this record was wrong.
+
+**Decision 4 was too eager, and the fix is the rule the record already contains.** The initial event
+set is declared as three, not five: `start`, `tick` and `timer_elapsed`. Declaring `zone_entered` and
+`zone_exited` before anything can raise them would make `on zone_entered(zone, unit)` *compile* and
+then never fire — which is precisely the silent no-op decision 1 and ADR 7001 exist to prevent, and
+is indistinguishable from a handler whose body is wrong. Undeclared, it is a compile error naming the
+line and listing what does exist. The record's own note that adding an event later is
+backwards-compatible is what makes waiting free; the zone signatures stay in the table above as the
+design the scenario format and the host verbs are built against. **An event is declared when it can
+be raised, not when it is designed.**
+
+**A `str` argument cannot be synthesized, so decision 5 needed a mechanism it did not name.** A
+string in this language is an index into the program's constant table and there is no heap, so the
+kernel cannot manufacture one. `timer_elapsed(timer)` therefore resolves the name against *each
+receiving program's own table*, and a script whose source never writes that name is not raised to.
+This is the faithful reading of decision 5's parenthesis — a comparison is an index test — but the
+consequence is worth stating plainly: **a script hears about a timer only if it names it.** The
+alternative was handing a handler a value it could not compare against any of its own literals, which
+spends fuel to accomplish nothing. It is also visible in the source rather than hidden, which is the
+property the closed surface is for.
+
+**Timers needed an ordering rule the record left open.** Three sub-decisions, all of them forced by
+determinism rather than taste:
+
+- Timers fall due **after** the tick handlers, so arming one and reacting to one are never the same
+  pass.
+- A timer **never fires in the tick that armed it**, even at zero seconds. Otherwise a handler
+  re-arming itself loops within one tick until it exhausts its fuel — a hang expressed as a fault
+  rather than as behaviour.
+- Due timers are collected **before** any handler runs, and in name order. Name order is what makes
+  the sequence identical on every machine; collecting first is what lets a handler re-arm its own
+  name without the new timer being consumed by the pass that delivered the old one.
+
+**Fuel is per handler, and is deliberately not hashed.** Each raise gets a fresh budget, so one
+expensive handler cannot starve the next script in authored order. The peak is *reported*, for the
+tuning M10 argued for, but kept out of the hash: fuel is the interpreter's accounting rather than the
+mission's state, and hashing it would make every recorded replay depend on how many instructions this
+crate's compiler happens to emit.
+
+**Refusal and fault turned out to be two different responses, and the split matters.** A runtime
+fault disables the script (decision 8). But a verb given a nonsensical *argument* — a negative
+duration, most likely computed rather than written — only refuses, returns `false`, and increments a
+counter that **is** hashed. Taking a script out of the run for arithmetic that came out wrong is
+heavier than the mistake deserves; leaving the refusal invisible is what the counter prevents. This is
+`Units::rejected`'s lesson applied one layer up: a machine that refused a different number of verbs
+diverges on the tick it happened. A counter that would *overflow* is the other way round — a fault,
+because a counter that silently stops counting is a mission rule that silently stops firing.
+
+**Decision 7 landed as the thing that makes the rest cheap.** Because mission memory is kernel state,
+the dispatcher needed no new hashing machinery, no snapshot path, and nothing at all in the replay
+format: flags, counters and timers fold into the existing per-subsystem hash, and a script that
+behaves differently on two machines diverges on the tick it happened, attributed to `scripts`. A test
+plants exactly that and reads the tick back.
+
+**`cic-sim` now depends on `cic-script`**, which is a new edge in the dependency graph and the
+direction the ADR implies: the kernel owns the dispatcher, so the kernel takes the language. Nothing
+reverses — `cic-script` still depends on `cic-math` and nothing else, which is what keeps the sandbox
+a property of the graph rather than of what the VM happens not to call.
+
+**What is still outstanding**, and why it is not here: the host verbs that reach *other* subsystems —
+spawn, order, count, query a zone. The mission verbs in this dispatcher touch only mission state, so
+they need nothing but `&mut self`. A verb that spawns a unit has to reach the `units` subsystem from
+inside another subsystem's tick, which is a kernel question about cross-subsystem access during a
+tick rather than a scripting one, and it is deliberately not answered by pretending a script may
+forge a player's command.

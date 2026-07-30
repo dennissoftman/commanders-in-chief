@@ -934,6 +934,7 @@ mod package_tests {
                     z: 0.0,
                 },
             }],
+            scripts: Vec::new(),
         }
     }
 
@@ -943,6 +944,92 @@ mod package_tests {
             ("terrain/alpine.cict", terrain.encode()),
             ("thumbnail.png", b"not really a png".to_vec()),
         ])
+    }
+
+    /// A package whose scenario names two scripts, carrying both.
+    fn scripted_package_bytes() -> Vec<u8> {
+        let mut scenario = scenario();
+        scenario.scripts = vec![
+            "scripts/mission.cics".to_owned(),
+            "scripts/reinforce.cics".to_owned(),
+        ];
+        zip(&[
+            (SCENARIO_PATH, scenario.to_json().expect("serialize")),
+            ("terrain/alpine.cict", terrain().encode()),
+            (
+                "scripts/mission.cics",
+                b"on start() { sys.log(\"go\"); }".to_vec(),
+            ),
+            ("scripts/reinforce.cics", b"on tick(e) { }".to_vec()),
+            // Present in the archive but not named by the scenario, so it must not be read.
+            ("scripts/stowaway.cics", b"on start() { }".to_vec()),
+        ])
+    }
+
+    #[test]
+    fn reads_the_scripts_the_scenario_names_in_authored_order() {
+        let bytes = scripted_package_bytes();
+        let package = MapPackage::open(&bytes, PackageLimits::default()).expect("open");
+        let sources = package
+            .scripts(PackageLimits::default())
+            .expect("read scripts");
+
+        let paths: Vec<&str> = sources.iter().map(|(path, _)| path.as_str()).collect();
+        assert_eq!(
+            paths,
+            ["scripts/mission.cics", "scripts/reinforce.cics"],
+            "authored order is dispatch order, and the stowaway is not among them"
+        );
+        assert!(sources[0].1.contains("on start()"));
+    }
+
+    #[test]
+    fn a_named_script_the_package_does_not_carry_is_refused() {
+        let mut scenario = scenario();
+        scenario.scripts = vec!["scripts/absent.cics".to_owned()];
+        let bytes = zip(&[
+            (SCENARIO_PATH, scenario.to_json().expect("serialize")),
+            ("terrain/alpine.cict", terrain().encode()),
+        ]);
+        let package = MapPackage::open(&bytes, PackageLimits::default()).expect("open");
+        let error = package
+            .scripts(PackageLimits::default())
+            .expect_err("must refuse");
+        assert!(matches!(error, PackageError::MissingScript(_)));
+        assert_eq!(
+            error.to_string(),
+            "the scenario names script scripts/absent.cics, which the package does not contain"
+        );
+    }
+
+    #[test]
+    fn a_script_that_is_not_utf8_is_refused_rather_than_mangled() {
+        // A lossy conversion would turn a mis-encoded file into a compile error somewhere else,
+        // pointing at a character the author never wrote.
+        let mut scenario = scenario();
+        scenario.scripts = vec!["scripts/broken.cics".to_owned()];
+        let bytes = zip(&[
+            (SCENARIO_PATH, scenario.to_json().expect("serialize")),
+            ("terrain/alpine.cict", terrain().encode()),
+            ("scripts/broken.cics", vec![0xff, 0xfe, 0x00]),
+        ]);
+        let package = MapPackage::open(&bytes, PackageLimits::default()).expect("open");
+        let error = package
+            .scripts(PackageLimits::default())
+            .expect_err("must refuse");
+        assert!(matches!(error, PackageError::ScriptEncoding { .. }));
+    }
+
+    #[test]
+    fn a_script_larger_than_its_limit_is_refused_before_it_is_read() {
+        let bytes = scripted_package_bytes();
+        let package = MapPackage::open(&bytes, PackageLimits::default()).expect("open");
+        let limits = PackageLimits {
+            maximum_script_bytes: 4,
+            ..PackageLimits::default()
+        };
+        let error = package.scripts(limits).expect_err("must refuse");
+        assert!(matches!(error, PackageError::Read { .. }));
     }
 
     #[test]

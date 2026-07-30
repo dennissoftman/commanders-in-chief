@@ -728,6 +728,7 @@ fn demo_scenario(terrain: &Terrain) -> (Scenario, TemplateSet) {
         ],
         objects,
         waypoints: Vec::new(),
+        scripts: Vec::new(),
     };
     let template = |id: &str, kind, model: Option<&str>| Template {
         id: id.to_owned(),

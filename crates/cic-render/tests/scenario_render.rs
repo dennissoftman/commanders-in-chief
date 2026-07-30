@@ -184,6 +184,7 @@ fn demo(terrain: &Terrain) -> (Scenario, TemplateSet) {
             place("prop/pine", None, 0.57, 0.55, 240.0),
         ],
         waypoints: Vec::new(),
+        scripts: Vec::new(),
     };
     let template = |id: &str, kind, model: Option<&str>| Template {
         id: id.to_owned(),

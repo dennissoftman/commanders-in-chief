@@ -46,8 +46,27 @@ appending them at the end contradicted its own claim to be ordered by dependency
 compiled to bytecode, with a closed host surface resolved at compile time, no heap, and fuel-metered
 execution. **Its arithmetic is [ADR 0007](docs/adr/0007-simulation-arithmetic.md)'s, unchanged** — an
 earlier draft gave it a fixed-point arithmetic of its own, which was a mistake and is written up as one
-in [ADR 7001](docs/adr/7001-scripting-language.md). The game verbs a scenario would call are blocked on a
-simulation kernel that does not exist yet.
+in [ADR 7001](docs/adr/7001-scripting-language.md).
+
+**A scenario's scripts now run.** The event dispatcher landed in the kernel as `cic_sim::scripts`,
+implementing [ADR 7002](docs/adr/7002-script-events.md): `map.json` carries an ordered `scripts` array,
+the package reads what it names, every entry is compiled at load against a closed set of verbs and
+events, and dispatch order is authored order. A handler *is* the subscription — there is no registration
+call and no binding table, so a misspelled event is a compile error rather than a handler that silently
+never fires. Mission memory — flags, counters, timers — lives on the kernel's side of the host boundary,
+which is what puts scripted behaviour inside the determinism claim instead of beside it: a script that
+behaves differently on two machines diverges on the tick it happened, attributed to `scripts`.
+
+Two things the implementation settled that the record had wrong. The initial event set is **three, not
+five**: `zone_entered` and `zone_exited` are designed but not declared, because an event declared before
+anything raises it compiles and then never fires, which is the exact silent no-op the closed set exists
+to prevent. And a `str` handler argument **cannot be synthesized** — a string is an index into the
+program's constant table and there is no heap — so a timer's name resolves against each receiving
+script's own constants, and a script hears about a timer only if it names it.
+
+What is left is the verbs that reach *another* subsystem — spawn, order, count. Those are no longer
+blocked on the kernel, which exists; they are blocked on how one subsystem reaches another's state
+during a tick, and the answer must not be "a script forges a player's command".
 
 Landing M3's last five renderer items turned up a defect every committed reference had been rendered
 through, so **ten of the twenty-two references changed** — see the antialiasing entry below.
