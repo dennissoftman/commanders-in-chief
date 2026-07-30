@@ -375,6 +375,16 @@ to the same model through the RGBA8 path, on an M1 Pro with the hardware decoder
 that check found was a copy extent given in logical rather than block-aligned texels, which `wgpu`
 validation caught before any pixel did.
 
+**A model's compressed textures live inside its own `.glb`.** `MSFT_texture_dds` puts the DDS in the
+container beside the model that uses it, so there is no naming convention to keep and nothing to lose track
+of; the extension's fallback image means a reader that has never heard of it still sees a complete glTF.
+Sidecars stay for terrain, which has no container, and for a package sharing one texture between models.
+
+Reading it needed the GLB container reader moved into `cic-assets`, because the `gltf` crate decodes every
+image eagerly and knows only PNG and JPEG — so it refuses a container over a DDS image no material would
+have sampled. Every import now lifts those out of its way, `import_model` included, since a function that
+refuses a valid model is a trap whether or not its caller wanted the textures.
+
 **A model's own textures convert in one step, and its baked occlusion now lights.**
 `cic-texconv --from-glb` reads a `.glb`, works out from the material references which slot every image is
 read through — no filename heuristics — converts them all, merges a separate occlusion map into the ORM

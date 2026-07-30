@@ -15,6 +15,7 @@
 //! Nothing panics on hostile input.
 
 pub mod bc;
+pub mod glb;
 pub mod image;
 pub mod model;
 pub mod package;
@@ -25,10 +26,12 @@ pub mod terrain;
 mod testing;
 pub mod texture;
 
+pub use glb::{Glb, GlbError};
 pub use image::ColourSpace;
 pub use model::{
-    AlphaMode, DEFAULT_ALPHA_CUTOFF, Model, ModelError, ModelImage, ModelLimits, ModelMaterial,
-    ModelPrimitive, ModelTextures, ModelVertex, import_model, resolve_model_textures,
+    AlphaMode, DDS_EXTENSION, DEFAULT_ALPHA_CUTOFF, Model, ModelError, ModelImage, ModelLimits,
+    ModelMaterial, ModelPrimitive, ModelTextures, ModelVertex, has_embedded_textures, import_model,
+    import_model_with_textures, resolve_model_textures,
 };
 pub use package::{MapPackage, PackageError, PackageLimits};
 pub use scenario::{
@@ -340,12 +343,19 @@ mod model_tests {
 
     #[test]
     fn refuses_a_truncated_container() {
+        // Refused, and now refused *earlier* and more precisely than it used to be: every import first
+        // walks the container's chunks to lift out any embedded DDS, so a truncation is caught there --
+        // naming the chunk and the bytes it declared -- rather than surfacing as a wrapped third-party
+        // error. Either is a refusal; what matters is that half a model never imports.
         let glb = triangle_glb(TriangleOptions::default());
         for fraction in [2, 4, 8] {
             let cut = glb.len() / fraction;
             let error = import_model(&glb[..cut], ModelLimits::default())
                 .expect_err("truncation must refuse");
-            assert!(matches!(error, ModelError::Gltf(_)), "got {error:?}");
+            assert!(
+                matches!(error, ModelError::Container(_) | ModelError::Gltf(_)),
+                "got {error:?}"
+            );
         }
     }
 }
@@ -466,6 +476,201 @@ mod model_texture_tests {
         .expect_err("a malformed sidecar must be reported");
         assert!(
             matches!(&error, TextureResolveError::Texture { path, .. } if path.contains("hull_basecolor")),
+            "got {error:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod embedded_texture_tests {
+    use serde_json::{Value, json};
+
+    use crate::glb::{DDS_MIME_TYPE, Glb};
+    use crate::model::{DDS_EXTENSION, ModelLimits, has_embedded_textures, import_model};
+    use crate::texture::{BlockFormat, TextureAsset, TextureLimits};
+    use crate::{ModelError, import_model_with_textures};
+
+    /// A solid RGBA PNG, which is what a container's fallback image is.
+    fn png(size: u32, colour: [u8; 4]) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut out, size, size);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().expect("header");
+            writer
+                .write_image_data(&colour.repeat((size * size) as usize))
+                .expect("pixels");
+            writer.finish().expect("finish");
+        }
+        out
+    }
+
+    fn dds(colour: [u8; 4]) -> Vec<u8> {
+        TextureAsset::solid(
+            8,
+            8,
+            BlockFormat::Bc7UnormSrgb,
+            colour,
+            TextureLimits::default(),
+        )
+        .expect("solid")
+        .encode()
+    }
+
+    /// A triangle whose one texture carries a fallback PNG and an embedded DDS.
+    ///
+    /// `wire` decides whether the extension is attached, so the same fixture covers a converted container
+    /// and an unconverted one.
+    fn embedded_glb(wire: bool) -> Vec<u8> {
+        let positions: [f32; 9] = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let mut glb = Glb {
+            document: json!({"asset": {"version": "2.0"}}),
+            binary: positions.iter().flat_map(|v| v.to_le_bytes()).collect(),
+        };
+        let geometry = 0usize;
+        glb.document = json!({
+            "asset": {"version": "2.0"},
+            "scene": 0, "scenes": [{"nodes": [0]}], "nodes": [{"mesh": 0}],
+            "meshes": [{"primitives": [{"attributes": {"POSITION": 0}, "material": 0}]}],
+            "accessors": [{
+                "bufferView": geometry, "componentType": 5126, "count": 3, "type": "VEC3",
+                "min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, 0.0]
+            }],
+            "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": 36}],
+            "buffers": [{"byteLength": 36}],
+            "images": [], "textures": [], "materials": [{
+                "name": "hull",
+                "pbrMetallicRoughness": {"baseColorTexture": {"index": 0}}
+            }]
+        });
+
+        let fallback_view = glb.push_view(&png(1, [255, 255, 255, 255])).expect("push");
+        // An unconverted container carries no DDS image at all, which is why this is not simply the same
+        // document with the extension removed.
+        let images = if wire {
+            let dds_view = glb.push_view(&dds([201, 199, 87, 255])).expect("push");
+            json!([
+                {"bufferView": fallback_view, "mimeType": "image/png", "name": "hull_basecolor"},
+                {"bufferView": dds_view, "mimeType": DDS_MIME_TYPE, "name": "hull_basecolor"}
+            ])
+        } else {
+            json!([{"bufferView": fallback_view, "mimeType": "image/png", "name": "hull_basecolor"}])
+        };
+        let texture = if wire {
+            json!({"source": 0, "extensions": {DDS_EXTENSION: {"source": 1}}})
+        } else {
+            json!({"source": 0})
+        };
+        if let Some(object) = glb.document.as_object_mut() {
+            object.insert("images".to_owned(), images);
+            object.insert("textures".to_owned(), Value::Array(vec![texture]));
+        }
+        if wire {
+            glb.declare_extension(DDS_EXTENSION);
+        }
+        glb.assemble().expect("assemble")
+    }
+
+    #[test]
+    fn an_embedded_texture_resolves_against_the_image_a_material_names() {
+        // The property that lets the renderer stay unchanged: a material names its *fallback* image, so the
+        // texture table is keyed by that index and an embedded texture and a sidecar are the same thing by
+        // the time anything uploads one.
+        let bytes = embedded_glb(true);
+        assert!(has_embedded_textures(&bytes));
+        let (model, textures) =
+            import_model_with_textures(&bytes, ModelLimits::default(), TextureLimits::default())
+                .expect("import");
+
+        let base = model.materials[0]
+            .base_color_texture
+            .expect("a base colour");
+        assert_eq!(base, 0, "the material names the fallback, not the DDS");
+        let asset = textures.get(base).expect("the embedded texture");
+        assert_eq!(asset.format(), BlockFormat::Bc7UnormSrgb);
+        assert_eq!((asset.width(), asset.height()), (8, 8));
+        assert!(
+            asset
+                .decode()
+                .chunks_exact(4)
+                .all(|t| t == [201, 199, 87, 255]),
+            "the payload that came out is the one that went in"
+        );
+        assert_eq!(
+            (model.images[base].width, model.images[base].height),
+            (1, 1),
+            "the fallback is still the placeholder it was"
+        );
+    }
+
+    #[test]
+    fn the_plain_importer_reads_a_container_it_has_no_use_for_the_extension_in() {
+        // `MSFT_texture_dds` is designed so a reader ignorant of it falls back to the PNG. That holds for a
+        // reader which decodes only the images it uses -- and the `gltf` crate decodes *every* entry
+        // eagerly, so without the pre-pass it refuses the whole container over an image no material would
+        // ever have sampled. This is the assertion that keeps the simpler function from being a trap.
+        let model = import_model(&embedded_glb(true), ModelLimits::default())
+            .expect("a plain import must still work");
+        assert_eq!(model.materials[0].name, "hull");
+        assert_eq!(model.primitives[0].vertices.len(), 3);
+    }
+
+    #[test]
+    fn a_container_without_the_extension_yields_no_textures_rather_than_an_error() {
+        let (model, textures) = import_model_with_textures(
+            &embedded_glb(false),
+            ModelLimits::default(),
+            TextureLimits::default(),
+        )
+        .expect("import");
+        assert!(textures.is_empty());
+        assert_eq!(model.materials.len(), 1);
+    }
+
+    #[test]
+    fn a_dds_image_no_texture_names_is_reported_rather_than_left_to_the_crate() {
+        // Only the extension makes a DDS image legal glTF, so one nothing references is outside the
+        // contract. Left alone it surfaces as the `gltf` crate's opaque "unsupported image encoding" over an
+        // image no material would have sampled -- which tells an author nothing.
+        let mut glb = Glb::split(&embedded_glb(true)).expect("split");
+        if let Some(textures) = glb
+            .document
+            .get_mut("textures")
+            .and_then(Value::as_array_mut)
+            && let Some(entry) = textures.get_mut(0).and_then(Value::as_object_mut)
+        {
+            entry.remove("extensions");
+        }
+        let error = import_model_with_textures(
+            &glb.assemble().expect("assemble"),
+            ModelLimits::default(),
+            TextureLimits::default(),
+        )
+        .expect_err("an orphan DDS image must be named");
+        assert!(
+            matches!(error, ModelError::UnreferencedEmbeddedTexture { image: 1 }),
+            "got {error:?}"
+        );
+    }
+
+    #[test]
+    fn an_embedded_payload_that_will_not_read_is_reported_against_its_image() {
+        // A converted texture silently rendering as its placeholder is exactly what an author needs told
+        // about, so a broken payload is an error rather than a fallback.
+        let mut glb = Glb::split(&embedded_glb(true)).expect("split");
+        let broken = glb.push_view(b"not a dds at all").expect("push");
+        if let Some(images) = glb.document.get_mut("images").and_then(Value::as_array_mut)
+            && let Some(entry) = images.get_mut(1).and_then(Value::as_object_mut)
+        {
+            entry.insert("bufferView".to_owned(), Value::Number(broken.into()));
+        }
+        let bytes = glb.assemble().expect("assemble");
+        let error =
+            import_model_with_textures(&bytes, ModelLimits::default(), TextureLimits::default())
+                .expect_err("a broken payload must be reported");
+        assert!(
+            matches!(error, ModelError::EmbeddedTexture { image: 1, .. }),
             "got {error:?}"
         );
     }
