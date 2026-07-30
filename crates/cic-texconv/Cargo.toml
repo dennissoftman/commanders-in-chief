@@ -1,0 +1,21 @@
+[package]
+name = "cic-texconv"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+# The container writer and the block decoders. The decoders are what the round-trip tests measure this
+# crate's encoders against: an encoder verified only against itself is verified against nothing.
+cic-assets.workspace = true
+png = "0.18"
+
+[dev-dependencies]
+# The round-trip test writes the decoded result out as a PNG to be looked at, which is this project's
+# standing rule for anything that produces an image.
+png = "0.18"
+
+[lints]
+workspace = true

@@ -349,6 +349,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cic-texconv"
+version = "0.1.0"
+dependencies = [
+ "cic-assets",
+ "png",
+]
+
+[[package]]
 name = "cic-ui"
 version = "0.1.0"
 dependencies = [

@@ -26,6 +26,10 @@
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
+use cic_vfs::{ResourceReadError, Vfs, VirtualPath};
+
+use crate::texture::{TextureAsset, TextureError, TextureLimits, decode_dds};
+
 /// Explicit bounds applied while importing an untrusted model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModelLimits {
@@ -73,6 +77,12 @@ pub struct ModelImage {
     pub height: u32,
     /// Row-major RGBA bytes from the top-left, `width * height * 4` long.
     pub rgba: Vec<u8>,
+    /// The name the container gave this image, or an empty string when it gave none.
+    ///
+    /// Carried for one purpose: it is the key a block-compressed sidecar is found under. See
+    /// [`resolve_model_textures`], and [`ModelTextures`] for why the override is a separate table rather
+    /// than a second shape this struct can take.
+    pub name: String,
 }
 
 /// One imported vertex.
@@ -323,6 +333,169 @@ impl Model {
     }
 }
 
+/// Directory a model's block-compressed textures are looked up in, relative to the mount root.
+///
+/// One directory for the whole package rather than one beside each model, because glTF image names are
+/// already the sharing mechanism: two models that name the same image are meant to get the same texture,
+/// and a per-model directory would silently give them two.
+pub const TEXTURE_DIRECTORY: &str = "textures";
+
+/// Block-compressed textures found for a model's images, parallel to [`Model::images`] by index.
+///
+/// # Why an override table rather than a second shape for `ModelImage`
+///
+/// The alternative is a `ModelImage` that holds *either* RGBA8 pixels or compressed blocks. That reads
+/// well until something has to consume it: every existing reader of `.rgba` would have to branch, and
+/// the branch is a decode — so the type that was supposed to describe an image would be the thing
+/// deciding when the CPU spends a pass on one.
+///
+/// Keeping the override beside the model instead means the compressed bytes reach the uploader without
+/// anything in between having to look at them, and a caller that does not know about block compression
+/// keeps working exactly as it did. The index parallelism is the same invariant `base_color_texture`
+/// already relies on.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModelTextures {
+    assets: Vec<Option<TextureAsset>>,
+}
+
+impl ModelTextures {
+    /// Wraps an override per image index, for a caller that resolved them some other way.
+    ///
+    /// [`resolve_model_textures`] is the ordinary way in. This exists for the same reason
+    /// [`ModelPrimitive::with_generated_tangents`] is public: a `Model` is a plain struct that procedural
+    /// content, the map editor and test fixtures all build directly, and such a caller should not have to
+    /// mount a virtual filesystem to say which textures its images have.
+    ///
+    /// The vector is parallel to [`Model::images`] by index; entries past its end are simply never found.
+    #[must_use]
+    pub const fn new(assets: Vec<Option<TextureAsset>>) -> Self {
+        Self { assets }
+    }
+
+    /// Returns the compressed texture found for one image index, if any.
+    #[must_use]
+    pub fn get(&self, image: usize) -> Option<&TextureAsset> {
+        self.assets.get(image)?.as_ref()
+    }
+
+    /// Whether any image at all was overridden.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.assets.iter().all(Option::is_none)
+    }
+
+    /// How many of the model's images were overridden.
+    #[must_use]
+    pub fn resolved_count(&self) -> usize {
+        self.assets.iter().filter(|asset| asset.is_some()).count()
+    }
+}
+
+/// Looks up a block-compressed sidecar for each of a model's images.
+///
+/// # The convention
+///
+/// A glTF image named `hull_basecolor` is overridden by `textures/hull_basecolor.dds`. The name is the
+/// glTF image's own `name`, so the link is authored in the DCC tool rather than derived from a filename
+/// the container may not carry — and an unnamed image is simply never overridden.
+///
+/// The `.glb` still declares its images, because `gltf::import_slice` refuses a `uri` pointing outside
+/// the container and *must*: following one would read the host filesystem from an untrusted asset. So an
+/// author has two working arrangements, and both are supported by this being an override rather than a
+/// replacement: keep the authored PNG embedded and let the sidecar win at runtime, or embed a 1x1
+/// placeholder once the sidecar exists and pay nothing for it.
+///
+/// # Errors
+///
+/// An *absent* sidecar is not an error — that is the ordinary case for a model whose textures have not
+/// been converted. A sidecar that exists and will not read is: it means a converted texture is being
+/// silently rendered from its placeholder, which is exactly the failure a content author needs told
+/// about rather than left to notice.
+pub fn resolve_model_textures(
+    model: &Model,
+    vfs: &Vfs,
+    limits: TextureLimits,
+) -> Result<ModelTextures, ModelTextureError> {
+    let mut assets = Vec::with_capacity(model.images.len());
+    for image in &model.images {
+        if image.name.is_empty() {
+            assets.push(None);
+            continue;
+        }
+        let path = format!("{TEXTURE_DIRECTORY}/{}.dds", image.name);
+        let virtual_path = VirtualPath::new(&path).map_err(|error| ModelTextureError::Path {
+            path: path.clone(),
+            error,
+        })?;
+        let Some(entry) = vfs.resolve(&virtual_path) else {
+            assets.push(None);
+            continue;
+        };
+        let bytes = entry
+            .read(limits.maximum_bytes)
+            .map_err(|error| ModelTextureError::Read {
+                path: path.clone(),
+                error,
+            })?;
+        let texture = decode_dds(&bytes, limits)
+            .map_err(|error| ModelTextureError::Texture { path, error })?;
+        assets.push(Some(texture));
+    }
+    Ok(ModelTextures::new(assets))
+}
+
+/// A structured failure while resolving a model's block-compressed sidecars.
+#[derive(Debug)]
+pub enum ModelTextureError {
+    /// An image name did not form a safe virtual path.
+    Path {
+        /// The path that was attempted.
+        path: String,
+        /// The underlying normalization failure.
+        error: cic_vfs::PathError,
+    },
+    /// A sidecar existed but could not be read.
+    Read {
+        /// Mount-relative path of the sidecar.
+        path: String,
+        /// The underlying read failure.
+        error: ResourceReadError,
+    },
+    /// A sidecar was read but is not a texture this engine can upload.
+    Texture {
+        /// Mount-relative path of the sidecar.
+        path: String,
+        /// The underlying container or format failure.
+        error: TextureError,
+    },
+}
+
+impl Display for ModelTextureError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Path { path, error } => {
+                write!(formatter, "texture path `{path}` is unusable: {error}")
+            }
+            Self::Read { path, error } => {
+                write!(formatter, "texture `{path}` could not be read: {error}")
+            }
+            Self::Texture { path, error } => {
+                write!(formatter, "texture `{path}` is unusable: {error}")
+            }
+        }
+    }
+}
+
+impl Error for ModelTextureError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Path { error, .. } => Some(error),
+            Self::Read { error, .. } => Some(error),
+            Self::Texture { error, .. } => Some(error),
+        }
+    }
+}
+
 /// Imports a `.glb` or self-contained `.gltf` model from bytes.
 ///
 /// # Errors
@@ -340,7 +513,14 @@ pub fn import_model(bytes: &[u8], limits: ModelLimits) -> Result<Model, ModelErr
             maximum: limits.maximum_materials,
         });
     }
-    let images = import_images(&images, limits)?;
+    // Names come from the document and the pixels from the decoded data, and the two are parallel by
+    // index. Collected together here because a `ModelImage` needs both and only the document has the
+    // name — which is the key a block-compressed sidecar is found under.
+    let names: Vec<String> = document
+        .images()
+        .map(|image| image.name().unwrap_or_default().to_owned())
+        .collect();
+    let images = import_images(&images, &names, limits)?;
 
     let materials = document
         .materials()
@@ -432,6 +612,7 @@ pub fn import_model(bytes: &[u8], limits: ModelLimits) -> Result<Model, ModelErr
 /// would silently shift every later material onto the wrong picture.
 fn import_images(
     images: &[gltf::image::Data],
+    names: &[String],
     limits: ModelLimits,
 ) -> Result<Vec<ModelImage>, ModelError> {
     if images.len() > limits.maximum_images {
@@ -443,7 +624,7 @@ fn import_images(
     }
     let mut total = 0usize;
     let mut output = Vec::with_capacity(images.len());
-    for image in images {
+    for (index, image) in images.iter().enumerate() {
         let width = usize::try_from(image.width).unwrap_or(usize::MAX);
         let height = usize::try_from(image.height).unwrap_or(usize::MAX);
         if image.width > limits.maximum_image_dimension
@@ -469,6 +650,7 @@ fn import_images(
             width: image.width,
             height: image.height,
             rgba: to_rgba8(image, pixels)?,
+            name: names.get(index).cloned().unwrap_or_default(),
         });
     }
     Ok(output)

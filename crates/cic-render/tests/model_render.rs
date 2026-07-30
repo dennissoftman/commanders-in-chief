@@ -21,7 +21,10 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use cic_assets::Terrain;
-use cic_assets::model::{AlphaMode, Model, ModelImage, ModelMaterial, ModelPrimitive, ModelVertex};
+use cic_assets::model::{
+    AlphaMode, Model, ModelImage, ModelMaterial, ModelPrimitive, ModelTextures, ModelVertex,
+};
+use cic_assets::texture::{BlockFormat, TextureAsset, TextureLimits};
 use cic_camera::CameraPose;
 use cic_render::{
     Capture, CaptureTarget, DeferredFrame, DeferredRenderer, DeferredTargets, GpuContext,
@@ -213,6 +216,8 @@ fn checkerboard(size: u32, squares: u32, dark: [u8; 3], light: [u8; 3]) -> Model
         }
     }
     ModelImage {
+        // Unnamed, so no block-compressed sidecar is looked up for it.
+        name: String::new(),
         width: size,
         height: size,
         rgba,
@@ -513,6 +518,254 @@ fn a_model_without_geometry_is_refused() {
     );
 }
 
+/// Encodes a flat colour as a block-compressed texture at a given size, with a full mip chain.
+///
+/// Flat rather than patterned, and that is the point: a flat block has exactly one encoding, so this
+/// fixture can state the colour the frame must show without depending on a compressor's choices. What is
+/// under test is the *upload* — that blocks reach the texture unit with the right row pitch, the right mip
+/// level and the right layer — not how well anything compresses.
+fn compressed_solid(size: u32, format: BlockFormat, colour: [u8; 4]) -> TextureAsset {
+    TextureAsset::solid(size, size, format, colour, TextureLimits::default())
+        .expect("a flat texture is always encodable")
+}
+
+#[test]
+fn a_block_compressed_base_colour_renders_the_same_frame_as_an_uncompressed_one() {
+    // The end-to-end claim of ADR 2001: the same picture through two upload paths. A flat colour is used
+    // precisely so the two are comparable — the compressed path cannot resample or re-mip, so any
+    // difference here is the upload itself rather than a compression loss.
+    //
+    // On an adapter without TEXTURE_COMPRESSION_BC this still runs and still asserts, because the
+    // compressed model falls back to decoding the sidecar to RGBA8. That is the fallback being tested
+    // rather than skipped.
+    let Some(context) = context() else { return };
+    let harness = harness(context);
+    let instances = instances(&harness.terrain);
+    let colour = [201u8, 199, 87, 255];
+
+    // The uncompressed control: the same flat colour as a plain image.
+    let control_model = textured_box_model(
+        40.0,
+        70.0,
+        vec![ModelImage {
+            width: 32,
+            height: 32,
+            rgba: colour.repeat(32 * 32),
+            // Unnamed, so no block-compressed sidecar is looked up for it.
+            name: String::new(),
+        }],
+        [Some(0), Some(0)],
+    );
+    let control = ModelBatch::new(
+        context,
+        &control_model,
+        &instances,
+        harness.deferred.material_layout(),
+    )
+    .expect("uncompressed batch");
+    assert_eq!(
+        control.base_colour().block_format(),
+        None,
+        "a plain image must take the RGBA8 path"
+    );
+
+    // The same model, its one image overridden by a BC7 sRGB sidecar.
+    let mut compressed_model = control_model.clone();
+    compressed_model.images[0].name = "hull_basecolor".to_owned();
+    let textures = ModelTextures::new(vec![Some(compressed_solid(
+        32,
+        BlockFormat::Bc7UnormSrgb,
+        colour,
+    ))]);
+    let compressed = ModelBatch::with_textures(
+        context,
+        &compressed_model,
+        &textures,
+        &instances,
+        harness.deferred.material_layout(),
+    )
+    .expect("compressed batch");
+
+    let took_the_fast_path = context.supports_block_compression();
+    assert_eq!(
+        compressed.base_colour().block_format(),
+        took_the_fast_path.then_some(BlockFormat::Bc7UnormSrgb),
+        "the path taken must follow the device's capability, not chance"
+    );
+    assert_eq!(
+        compressed.base_colour().mip_level_count(),
+        6,
+        "a 32-pixel texture reaches 1x1 in six levels, whichever path uploaded it"
+    );
+
+    let frame = frame_with_low_sun(&harness.terrain);
+    let plain = render(context, &harness, std::slice::from_ref(&control), frame);
+    let blocks = render(context, &harness, std::slice::from_ref(&compressed), frame);
+    write_capture("model-uncompressed-control.png", &plain);
+    write_capture("model-block-compressed.png", &blocks);
+
+    // Bounded per channel: **no channel anywhere may move by more than one least-significant bit.**
+    //
+    // Not byte-for-byte equality, though it is byte-for-byte equal on some adapters. A hardware or driver BC
+    // decoder is not required to be bit-exact, and they are not: Apple's reconstructs this mode-6 block
+    // exactly, and Mesa's `llvmpipe` — which CI runs on, and which does advertise
+    // `TEXTURE_COMPRESSION_BC` — rounds one least-significant bit differently. That is the format behaving
+    // as specified, and it is the same reason this project's reference captures are already named per
+    // adapter.
+    //
+    // The bound is still far stronger than "few pixels differ", because it catches what this path can
+    // actually get wrong: a mistaken row pitch, mip extent or layer origin does not shift a frame by a
+    // shade, it scrambles it. The bug found while writing this was exactly one of those — a copy extent
+    // given in logical rather than block-aligned texels — and `wgpu` validation caught it before any pixel
+    // did.
+    let mut differing = 0usize;
+    let mut worst = 0u8;
+    for (control_texel, block_texel) in plain
+        .rgba()
+        .chunks_exact(4)
+        .zip(blocks.rgba().chunks_exact(4))
+    {
+        if control_texel != block_texel {
+            differing += 1;
+        }
+        for channel in 0..4 {
+            worst = worst.max(control_texel[channel].abs_diff(block_texel[channel]));
+        }
+    }
+    eprintln!(
+        "block compression: fast path {took_the_fast_path}, {differing} of {} pixels differ, worst channel delta {worst}",
+        plain.rgba().len() / 4
+    );
+    assert!(
+        worst <= 1,
+        "the two upload paths disagree by {worst} of 255 over {differing} pixels, which is more than a \
+         decoder's rounding"
+    );
+
+    // And the frame is not simply empty, which every tolerance test has to rule out separately: a pass
+    // that drew nothing would agree with another pass that drew nothing, perfectly.
+    let lit = blocks
+        .rgba()
+        .chunks_exact(4)
+        .filter(|texel| texel[0] > 40 || texel[1] > 40)
+        .count();
+    assert!(
+        lit > 1_000,
+        "only {lit} texels are lit; the models did not draw"
+    );
+}
+
+#[test]
+fn a_slot_whose_sidecars_disagree_falls_back_rather_than_refusing() {
+    // The rule ADR 2001 sets, exercised where it bites: two base-colour images, one converted. A
+    // compressed array cannot mix a compressed slice with an uncompressed one, and it has no resample
+    // available -- so the slot waits, on a path that works, rather than failing the model load.
+    let Some(context) = context() else { return };
+    let harness = harness(context);
+    let model = textured_box_model(
+        40.0,
+        70.0,
+        vec![
+            ModelImage {
+                width: 32,
+                height: 32,
+                rgba: [200u8, 60, 60, 255].repeat(32 * 32),
+                name: "converted".to_owned(),
+            },
+            ModelImage {
+                width: 32,
+                height: 32,
+                rgba: [60u8, 60, 200, 255].repeat(32 * 32),
+                // Unnamed, so no block-compressed sidecar is looked up for it.
+                name: String::new(),
+            },
+        ],
+        [Some(0), Some(1)],
+    );
+
+    let half_converted = ModelTextures::new(vec![
+        Some(compressed_solid(
+            32,
+            BlockFormat::Bc7UnormSrgb,
+            [200, 60, 60, 255],
+        )),
+        None,
+    ]);
+    let batch = ModelBatch::with_textures(
+        context,
+        &model,
+        &half_converted,
+        &instances(&harness.terrain),
+        harness.deferred.material_layout(),
+    )
+    .expect("a half-converted slot must load, not fail");
+    assert_eq!(
+        batch.base_colour().block_format(),
+        None,
+        "one image of two converted is not a compressed array"
+    );
+    assert_eq!(
+        batch.base_colour().layer_count(),
+        2,
+        "both images still get a slice, so a material index still means what it did"
+    );
+
+    // Sidecars at different sizes are the other rejected case, and it is rejected for the same reason:
+    // resampling blocks would mean decoding and re-encoding them at load time.
+    let mismatched = ModelTextures::new(vec![
+        Some(compressed_solid(
+            32,
+            BlockFormat::Bc7UnormSrgb,
+            [200, 60, 60, 255],
+        )),
+        Some(compressed_solid(
+            16,
+            BlockFormat::Bc7UnormSrgb,
+            [60, 60, 200, 255],
+        )),
+    ]);
+    let batch = ModelBatch::with_textures(
+        context,
+        &model,
+        &mismatched,
+        &instances(&harness.terrain),
+        harness.deferred.material_layout(),
+    )
+    .expect("mismatched sizes must load, not fail");
+    assert_eq!(batch.base_colour().block_format(), None);
+
+    // And when they agree, the slot does take the fast path -- so the two assertions above are about the
+    // disagreement rather than about the feature never working.
+    let both = ModelTextures::new(vec![
+        Some(compressed_solid(
+            32,
+            BlockFormat::Bc7UnormSrgb,
+            [200, 60, 60, 255],
+        )),
+        Some(compressed_solid(
+            32,
+            BlockFormat::Bc7UnormSrgb,
+            [60, 60, 200, 255],
+        )),
+    ]);
+    let mut named = model.clone();
+    named.images[1].name = "also_converted".to_owned();
+    let batch = ModelBatch::with_textures(
+        context,
+        &named,
+        &both,
+        &instances(&harness.terrain),
+        harness.deferred.material_layout(),
+    )
+    .expect("a fully converted slot");
+    assert_eq!(
+        batch.base_colour().block_format(),
+        context
+            .supports_block_compression()
+            .then_some(BlockFormat::Bc7UnormSrgb)
+    );
+}
+
 #[test]
 fn a_base_colour_texture_reaches_the_frame() {
     let Some(context) = context() else { return };
@@ -731,6 +984,8 @@ fn pyramid_normals(size: u32, cells: u32, tilt: f32) -> ModelImage {
         }
     }
     ModelImage {
+        // Unnamed, so no block-compressed sidecar is looked up for it.
+        name: String::new(),
         width: size,
         height: size,
         rgba,
@@ -740,6 +995,8 @@ fn pyramid_normals(size: u32, cells: u32, tilt: f32) -> ModelImage {
 /// A metallic-roughness map, uniform in both channels. Roughness is green, metallic is blue.
 fn metallic_roughness(size: u32, roughness: u8, metallic: u8) -> ModelImage {
     ModelImage {
+        // Unnamed, so no block-compressed sidecar is looked up for it.
+        name: String::new(),
         width: size,
         height: size,
         rgba: [0, roughness, metallic, 255].repeat((size * size) as usize),
@@ -768,6 +1025,8 @@ fn circle_cutout(size: u32, colour: [u8; 3]) -> ModelImage {
         }
     }
     ModelImage {
+        // Unnamed, so no block-compressed sidecar is looked up for it.
+        name: String::new(),
         width: size,
         height: size,
         rgba,

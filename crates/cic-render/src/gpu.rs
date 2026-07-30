@@ -39,12 +39,21 @@ pub struct GpuContext {
 
 /// Optional features requested when the adapter offers them, and silently skipped when it does not.
 ///
-/// `TIMESTAMP_QUERY` is the whole list. It is what [`crate::timing`] needs to attribute frame time to
-/// individual passes, and it is *optional* on purpose: a software rasteriser may not offer it, and the
-/// answer to that is a renderer that draws without timing rather than one that refuses to start. Asking
-/// for a feature the adapter lacks fails device creation outright, so the request is intersected with
-/// what is actually available rather than assumed.
-const OPTIONAL_FEATURES: wgpu::Features = wgpu::Features::TIMESTAMP_QUERY;
+/// Both entries are *optional* on purpose, and for the same reason: asking for a feature the adapter
+/// lacks fails device creation outright, so the request is intersected with what is available rather
+/// than assumed. A renderer that refused to start on a software adapter would be a renderer CI cannot
+/// run.
+///
+/// `TIMESTAMP_QUERY` is what [`crate::timing`] needs to attribute frame time to individual passes; the
+/// answer to its absence is a renderer that draws without timing.
+///
+/// `TEXTURE_COMPRESSION_BC` is what [`crate::texture::TextureArray::new_blocks`] needs to hand a `.dds`
+/// straight to the texture unit. Every desktop GPU has it and `llvmpipe` does not, so the answer to its
+/// absence is the software decode in [`cic_assets::bc`] and the uncompressed upload path — the same
+/// picture, built the slow way. Ask [`GpuContext::supports_block_compression`] rather than assuming
+/// either.
+const OPTIONAL_FEATURES: wgpu::Features =
+    wgpu::Features::TIMESTAMP_QUERY.union(wgpu::Features::TEXTURE_COMPRESSION_BC);
 
 /// Builds the instance both entry points share, honouring `WGPU_BACKEND` and the other `WGPU_*`
 /// variables.
@@ -193,6 +202,20 @@ impl GpuContext {
         self.device
             .features()
             .contains(wgpu::Features::TIMESTAMP_QUERY)
+    }
+
+    /// Whether this device can sample block-compressed textures.
+    ///
+    /// False is a normal answer, not a fault, and it changes what a caller *does* rather than whether it
+    /// succeeds: a `.dds` still loads, but its blocks are decoded on the CPU and uploaded as RGBA8
+    /// instead of being copied. The picture is the same; the memory and the load time are not. Every
+    /// desktop GPU has this feature and the software rasteriser CI runs on does not, so both paths are
+    /// live and both need to work.
+    #[must_use]
+    pub fn supports_block_compression(&self) -> bool {
+        self.device
+            .features()
+            .contains(wgpu::Features::TEXTURE_COMPRESSION_BC)
     }
 }
 

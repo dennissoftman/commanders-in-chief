@@ -63,7 +63,10 @@
 //! Splitting the *indices* rather than the vertices is what keeps this free: an index is absolute, so
 //! grouping them costs a reorder of a `u32` list at upload and nothing at all per frame.
 
-use cic_assets::{AlphaMode, Model, ModelMaterial};
+use std::collections::BTreeSet;
+
+use cic_assets::texture::TextureAsset;
+use cic_assets::{AlphaMode, Model, ModelMaterial, ModelTextures};
 
 use crate::RenderError;
 use crate::scenery::{SwayProfile, sway_phase};
@@ -253,15 +256,43 @@ impl ModelBatch {
         })
     }
 
-    /// Uploads a model and its instances.
+    /// Uploads a model and its instances, using whatever images the container carried.
+    ///
+    /// See [`Self::with_textures`] to supply block-compressed sidecars found for those images.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::with_textures`].
+    pub fn new(
+        context: &crate::GpuContext,
+        model: &Model,
+        instances: &[ModelInstance],
+        material_layout: &wgpu::BindGroupLayout,
+    ) -> Result<Self, RenderError> {
+        Self::with_textures(
+            context,
+            model,
+            &ModelTextures::default(),
+            instances,
+            material_layout,
+        )
+    }
+
+    /// Uploads a model and its instances, preferring block-compressed textures where they were found.
+    ///
+    /// `textures` is the table [`cic_assets::resolve_model_textures`] built, parallel to
+    /// [`Model::images`] by index. An entry present *and* usable for a slot makes that slot a
+    /// straight block copy; anything else leaves the slot on the RGBA8 path. See
+    /// [`upload_arrays`] for what "usable" means and why the decision is per slot.
     ///
     /// # Errors
     ///
     /// Returns [`RenderError::EmptyModel`] when the model has no geometry, or
     /// [`RenderError::ModelTooLarge`] when its vertex or index count exceeds the addressable range.
-    pub fn new(
+    pub fn with_textures(
         context: &crate::GpuContext,
         model: &Model,
+        textures: &ModelTextures,
         instances: &[ModelInstance],
         material_layout: &wgpu::BindGroupLayout,
     ) -> Result<Self, RenderError> {
@@ -278,7 +309,7 @@ impl ModelBatch {
         // A model with no images at all still gets a one-slice array holding that slot's identity value —
         // every material then names slice 0 and discards what it reads, which keeps the sampling call
         // unconditional. See the module note on why the branch that looks cheaper is not available.
-        let [base_colour, normal, metallic_roughness] = upload_arrays(context, model)?;
+        let [base_colour, normal, metallic_roughness] = upload_arrays(context, model, textures)?;
         let materials = pack_materials(model, base_colour.layer_count());
 
         let mut instance_bytes = pack_instances(instances);
@@ -478,8 +509,41 @@ impl ModelBatch {
     }
 }
 
+/// One of the three arrays a model's materials index into.
+struct Slot {
+    /// Debug label for the uploaded array.
+    label: &'static str,
+    /// The space this slot's bytes are in, which decides both the uncompressed format and whether a
+    /// compressed texture found for it is the right kind of thing.
+    space: ColourSpace,
+    /// The value a slice this slot never samples is filled with: the identity for what the slot means.
+    identity: [u8; 4],
+}
+
+/// The three slots, in the order the bind group binds them.
+const SLOTS: [Slot; 3] = [
+    Slot {
+        label: "cic-render model base colour",
+        space: ColourSpace::Srgb,
+        // Opaque white, which multiplies a material colour through unchanged.
+        identity: [u8::MAX; 4],
+    },
+    Slot {
+        label: "cic-render model normal",
+        space: ColourSpace::Linear,
+        identity: FLAT_NORMAL,
+    },
+    Slot {
+        label: "cic-render model metallic roughness",
+        space: ColourSpace::Linear,
+        // White, so a material with no map has its factors multiplied by one rather than by zero.
+        identity: [u8::MAX; 4],
+    },
+];
+
 /// Uploads a model's images as the three arrays its materials index into: base colour, normal, and
-/// combined metallic-roughness.
+/// combined metallic-roughness (which is also where an occlusion map lives, since glTF packs occlusion in
+/// the red channel of the same image).
 ///
 /// Every image in source order in each array, so a material's recorded image index *is* its slice index
 /// whichever slot it is read through. Compacting a list to only the images that slot references would shift
@@ -494,42 +558,143 @@ impl ModelBatch {
 /// material then names slice 0 and discards what it reads, which keeps the sampling call unconditional. See
 /// the module note on why the branch that looks cheaper is not available.
 ///
+/// # How a slot decides to take the compressed path
+///
+/// Per slot, not per model, and not per image. A slot goes compressed only when *every image that slot is
+/// actually read through* has a sidecar, and those sidecars agree on format, size and mip count. Then the
+/// slices the slot never samples are filled with a flat block of its identity value, so the whole array is
+/// one format at one size — which is what a compressed array requires, having no resample available.
+///
+/// Any other combination leaves that slot on the RGBA8 path, where a sidecar is still not wasted: its base
+/// level is decoded and used, which is better pixels than the placeholder the container carried. The two
+/// requirements this rejects are worth naming, because both are ordinary content mistakes rather than
+/// corruption:
+///
+/// - **A slot half converted.** Three of a model's four base colours have sidecars. Mixing a compressed
+///   slice with an uncompressed one in a single array is not expressible, so the slot waits until the set
+///   is complete.
+/// - **Sidecars at different sizes.** A 2048 hull and a 512 decal. The uncompressed path resamples the
+///   decal up; this one would have to decode, resample and re-encode it, which is the offline tool's work
+///   done at load time to produce a worse image than converting at the right size would have.
+///
+/// A sidecar whose colour space disagrees with its slot — a `BC7_UNORM_SRGB` base colour found for the
+/// normal slot — is not usable *there*, which is the same case as not having one. That is how a model whose
+/// base colour is BC7 sRGB and whose normal is BC5 gets both: each slot accepts only what it can read.
+///
 /// # Errors
 ///
 /// Returns a structured [`RenderError`] when an image is malformed or the arrays exceed their byte budget.
 fn upload_arrays(
     context: &crate::GpuContext,
     model: &Model,
+    textures: &ModelTextures,
 ) -> Result<[TextureArray; 3], RenderError> {
-    let images: Vec<TextureImage> = model
+    // Which image indices each slot is genuinely read through, across every material. Occlusion joins the
+    // metallic-roughness slot because glTF puts it in the same image's red channel.
+    let mut referenced: [BTreeSet<usize>; 3] = Default::default();
+    for material in &model.materials {
+        referenced[0].extend(material.base_color_texture);
+        referenced[1].extend(material.normal_texture);
+        referenced[2].extend(material.metallic_roughness_texture);
+        referenced[2].extend(material.occlusion_texture);
+    }
+
+    let mut arrays = Vec::with_capacity(SLOTS.len());
+    for (slot, used) in SLOTS.iter().zip(&referenced) {
+        arrays.push(
+            if let Some(slices) = compressed_slices(context, model, textures, slot, used) {
+                let borrowed: Vec<&TextureAsset> = slices.iter().collect();
+                TextureArray::new_blocks(context, slot.label, &borrowed)?
+            } else {
+                let images = decoded_images(model, textures)?;
+                TextureArray::new_in(context, slot.label, &images, slot.space, slot.identity)?
+            },
+        );
+    }
+    // Three slots in, three arrays out; the `try_into` cannot fail and says so once rather than at each use.
+    arrays
+        .try_into()
+        .map_err(|_: Vec<TextureArray>| RenderError::InvalidTexture)
+}
+
+/// The compressed slices for one slot, or `None` when that slot cannot take the compressed path.
+///
+/// See [`upload_arrays`] for the rules and why they are what they are.
+fn compressed_slices(
+    context: &crate::GpuContext,
+    model: &Model,
+    textures: &ModelTextures,
+    slot: &Slot,
+    used: &BTreeSet<usize>,
+) -> Option<Vec<TextureAsset>> {
+    if !context.supports_block_compression() || used.is_empty() {
+        return None;
+    }
+    // Every image this slot reads must have a sidecar it can actually read, and they must all agree.
+    let mut usable = used.iter().map(|index| {
+        textures
+            .get(*index)
+            .filter(|asset| asset.format().colour_space() == slot.space)
+    });
+    let first = usable.next().flatten()?;
+    let shape = (
+        first.format(),
+        first.width(),
+        first.height(),
+        first.level_count(),
+    );
+    if !usable.all(|asset| {
+        asset.is_some_and(|asset| {
+            (
+                asset.format(),
+                asset.width(),
+                asset.height(),
+                asset.level_count(),
+            ) == shape
+        })
+    }) {
+        return None;
+    }
+
+    let (format, width, height, _) = shape;
+    // The slices this slot never samples still occupy a layer, because a material's image index is its
+    // slice index in all three arrays. A flat block of the slot's identity value is what belongs there.
+    let filler = TextureAsset::solid(
+        width,
+        height,
+        format,
+        slot.identity,
+        cic_assets::TextureLimits::default(),
+    )
+    .ok()?;
+    Some(
+        (0..model.images.len())
+            .map(|index| match textures.get(index) {
+                Some(asset) if used.contains(&index) => asset.clone(),
+                _ => filler.clone(),
+            })
+            .collect(),
+    )
+}
+
+/// A model's images as RGBA8, preferring a sidecar's decoded base level over the container's own pixels.
+///
+/// The uncompressed path, and the reason a sidecar is never wasted even on a device that cannot sample
+/// blocks: the `.dds` holds the authored texture and the container may hold only a placeholder, so
+/// decoding the sidecar is both the better picture and the one the author intended.
+fn decoded_images(
+    model: &Model,
+    textures: &ModelTextures,
+) -> Result<Vec<TextureImage>, RenderError> {
+    model
         .images
         .iter()
-        .map(|image| TextureImage::new(image.width, image.height, image.rgba.clone()))
-        .collect::<Result<_, _>>()?;
-    Ok([
-        TextureArray::new_in(
-            context,
-            "cic-render model base colour",
-            &images,
-            ColourSpace::Srgb,
-            [u8::MAX; 4],
-        )?,
-        TextureArray::new_in(
-            context,
-            "cic-render model normal",
-            &images,
-            ColourSpace::Linear,
-            FLAT_NORMAL,
-        )?,
-        TextureArray::new_in(
-            context,
-            "cic-render model metallic roughness",
-            &images,
-            ColourSpace::Linear,
-            // White, so a material with no map has its factors multiplied by one rather than by zero.
-            [u8::MAX; 4],
-        )?,
-    ])
+        .enumerate()
+        .map(|(index, image)| match textures.get(index) {
+            Some(asset) => TextureImage::new(asset.width(), asset.height(), asset.decode()),
+            None => TextureImage::new(image.width, image.height, image.rgba.clone()),
+        })
+        .collect()
 }
 
 /// The vertex and instance buffer layouts, in the order the pipelines expect them.

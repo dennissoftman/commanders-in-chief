@@ -13,6 +13,7 @@ game's format, because nothing here reads one.
 | `strings.<language>.json` | Display text, keyed, so no layout holds a literal | [ui-layout.md](ui-layout.md) |
 | `*.cicbank.json` | Sound bank: what a sound *event* is | [sound-bank.md](sound-bank.md) |
 | `*.cics` | Script: behaviour in data — scenario logic and objectives | [script.md](script.md) |
+| `.dds` | Textures: BC1, BC5 or BC7 blocks with their mip chains | [texture.md](texture.md) |
 | `.glb` | Models, props, units | [glTF 2.0](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html) |
 | `.wav` | Audio clips | [RIFF/WAVE](https://learn.microsoft.com/en-us/windows/win32/xaudio2/resource-interchange-file-format--riff-) |
 | `.zip`, `.tar` | Content containers | Their own published specifications |
@@ -37,6 +38,11 @@ with its own notice entry, decoding to the same in-memory clip. See [M9](../mile
 **Geometry uses a standard.** glTF is published, versioned, and exported by every content tool that
 matters. A custom mesh format would mean writing an exporter before anyone could author an asset —
 paying a large cost to solve an already-solved problem.
+
+**Textures use a standard, and a *hardware* format inside it.** A block-compressed texture stays compressed
+in video memory and is decompressed by the texture unit on read, so the format is chosen by what the GPU
+samples rather than by what compresses best. DDS is the container every texture tool already writes, and its
+header is fixed-offset fields that need no dependency to parse. See [texture.md](texture.md).
 
 ## What every decoder guarantees
 
