@@ -65,21 +65,42 @@ missing any of these four is under-written.
 
 ## 2. The Three Factions at a Glance
 
-| | **AEC** | **Concord** | **Authority** |
-|---|---|---|---|
-| Full form | Allied Expeditionary Command | Continental Concord | Corridor Authority |
-| Names itself after | a command structure | a civilisation | a jurisdiction |
+| | **AEC** | **Concord** | **Meridian** |
+| --- | --- | --- | --- |
+| Full form | Allied Expeditionary Command | Continental Concord | Meridian Council |
+| Colour *(campaign)* | blue — cold, printed, institutional | green — deep, painted, permanent | yellow — high-visibility, brushed on |
+| Names itself after | a command structure | a civilisation | a line of connection |
 | Claim to legitimacy | mandate, legality, coalition consent | order, continuity, development | consent of the people on the road |
 | Sees the war as | a stabilisation problem | a continuity problem | a recognition problem |
 | Sees itself as | the reluctant adult | the patient adult | the only local adult |
 | Core fear | attribution and political collapse at home | disorder spreading inward | irrelevance the moment the road is legal |
-| Institutional metaphor | a task force | a public works ministry | a customs house |
+| Institutional metaphor | a task force | a public works ministry | a supply chain with a seal |
 | Time horizon | one rotation | one generation | this season |
 | What it cannot admit | that it is a foreign army | that order is being imposed | that it needs the war |
 
 The contrast is the point. One faction names itself after a filing structure,
-one after a civilisation, one after a jurisdiction it does not legally hold.
-That tells you what each thinks it is before a single line of dialogue.
+one after a civilisation, one after the line that connects them. Meridian does
+not name a territory it owns. It names the road, exchange, and dependence
+between larger powers. That tells you what each thinks it is before a single
+line of dialogue.
+
+**Colour is a campaign system.** In the campaign the three colours above are
+canonical: insignia, map markers, briefing plates and UI accents all key off
+them, and a player learns to read the war by colour before reading a label. In
+skirmish and multiplayer the player picks a colour instead, unique within the
+game, because a match can field two AEC seats and ownership has to stay legible
+where faction does not distinguish it. The two systems answer different
+questions — the campaign colour says *who this is*, the skirmish colour says
+*which one is mine* — and neither derives from the other. Neither is allowed to
+silently stand in for the other either: a campaign mission must not renumber its
+factions into seat colours, and a skirmish must not quietly hand a player the
+colour of the faction they picked.
+
+Keep Concord and Meridian separated by **value**, not hue. Green and yellow are
+the pair that collapses under the common colour-vision deficiencies, so Concord
+sits dark and Meridian sits bright, and the same rule constrains whatever palette
+skirmish offers. A set of colours that reads as three factions only for players
+with unimpaired colour vision has failed at the one job colour has here.
 
 ---
 
@@ -88,11 +109,11 @@ That tells you what each thinks it is before a single line of dialogue.
 Belligerents do not agree on each other's names. This costs nothing and does
 enormous tonal work. Never let a faction use another faction's preferred term.
 
-| Speaker | Refers to AEC as | Refers to Concord as | Refers to Authority as |
-|---|---|---|---|
+| Speaker | Refers to AEC as | Refers to Concord as | Refers to Meridian as |
+| --- | --- | --- | --- |
 | **AEC** | "the coalition", "Command" | "Concord forces", "the Concord" | "irregulars", "hostile elements", "the Group" |
 | **Concord** | "the coalition" (with contempt), "the expedition" | "the Concord", "we" | "the bandit administration", "the tax gangs" |
-| **Authority** | "the foreigners", "the airfield" | "the roadbuilders", "the company" | "the Authority", "the Office", "the Column" |
+| **Meridian** | "the foreigners", "the airfield" | "the roadbuilders", "the company" | "Meridian", "the Council", "the Chain" |
 
 Additional register notes:
 
@@ -100,8 +121,9 @@ Additional register notes:
   assessment*, *shaping operations*, *permissive environment*.
 - Concord speaks in infrastructure and duty: *the corridor*, *continuity*,
   *the schedule*, *rectification*, *the province*.
-- Authority speaks in administration: *permit*, *manifest*, *duty*, *the
-  register*, *cleared*, *held pending*.
+- Meridian speaks in administration: *permit*, *manifest*, *duty*, *the
+  register*, *cleared*, *held pending*. The Council is polished and speaks for
+  publication. The Chain is terse, local, and unconcerned with presentation.
 
 A useful test: if you swapped the speaker attribution on a line, would anyone
 notice? If not, rewrite it.
@@ -157,6 +179,11 @@ prefab. Nothing built to last, because it isn't meant to. Everything stencilled,
 numbered and inventoried. The camp looks like it could be gone in seventy-two
 hours, and everyone knows it.
 
+Its blue arrives *printed* rather than painted: stencils, placards, lanyards and
+the header of a form. A cold, desaturated grey-blue, the blue of a procurement
+catalogue and an identity badge, and never heraldic — nothing here is claiming
+ancestry. It is applied by a machine that also numbered the thing it is on.
+
 ### Internal fault lines *(for CiC 2)*
 
 - **Theatre command vs. the political authority behind it.** The people fighting
@@ -181,7 +208,7 @@ hours, and everyone knows it.
 
 A civilisational project, not an army. It sees itself as the party that builds
 things and the only one thinking in generations. It regards AEC as tourists with
-firepower and the Authority as weather — a condition to be engineered around
+firepower and Meridian as weather — a condition to be engineered around
 rather than an enemy with a case.
 
 Its legitimacy claim is *delivered outcomes*: the road exists, the power stays
@@ -223,6 +250,12 @@ substations, banners with schedules on them. Everything looks like it intends to
 still be there in fifty years, because that is the argument. Where AEC stencils
 serial numbers, Concord carves completion dates.
 
+Its green is deep and laid on thick: ministry signage, rolling stock, painted
+structural steel, recoated so many times the edges have gone soft. Dark enough
+to read as weight rather than growth — this is institutional green, not
+landscape — and dark by requirement, since Meridian's yellow is what it has to
+stay separable from.
+
 ### Internal fault lines *(for CiC 2)*
 
 - **Civil authority vs. theatre command.** The war is a project with a budget
@@ -241,22 +274,36 @@ serial numbers, Concord carves completion dates.
 
 ---
 
-## 6. Authority — Corridor Authority
+## 6. Meridian — Meridian Council
 
 ### Self-conception
 
-Not an army. An *administration*. It issues transit permits, stamps manifests,
-runs courts, hears disputes and collects duties on the road. It does not want to
-conquer anything; it wants passage to be conditional and itself to be the
+Not an army. A *council for the road*. It issues transit permits, stamps
+manifests, runs courts, hears disputes and collects duties. It does not want to
+conquer the corridor; it wants passage to be conditional and itself to be the
 condition. It regards both other factions as foreign parties negotiating over
-property that isn't theirs.
+a connection neither can use alone.
 
 Its legitimacy claim is *presence and consent*: it was here, it is here, it
 settles disputes people actually bring to it. That claim is partly true, which
 is what makes it dangerous.
 
-Referred to in dialogue as "the Authority". Its own people use "the Office" and
-"the Column" for the two wings.
+The name is deliberately non-territorial. A meridian is a line of relation: it
+connects distant points without claiming to be either endpoint. The faction
+occupies the same position between AEC and Concord. It is smaller than both,
+but the road, supply chain, records and local institutions joining them pass
+through it.
+
+**Naming register:**
+
+- **Meridian Council** is the formal name used on seals, notices and claims to
+  legal standing.
+- **Meridian** is the ordinary name for the faction.
+- **The Council** is its civil-facing wing: courts, permits, registers,
+  negotiators and public notices.
+- **The Chain** is its distributed material wing: route-holders, haulers,
+  workshops, suppliers, salvage crews and armed road groups. The name means
+  both a chain of local nodes and the supply chain that keeps them useful.
 
 > **Craft note.** A faction that hands you paperwork before it kills you is far
 > more unsettling than a warlord with a rocket. Lead with the bureaucracy. The
@@ -264,10 +311,12 @@ Referred to in dialogue as "the Authority". Its own people use "the Office" and
 
 ### What it is wrong about
 
-That it can become legitimate without ceasing to be what it is. Its authority
-is manufactured by the war; a legal corridor is a corridor it cannot tax
-off-book. It is structurally incapable of achieving its stated goal, and the
-part of it that understands this is losing.
+That it can become legitimate without ceasing to be what the war made it. The
+Council wants legal standing and understands that standing eventually means
+stopping. The Chain is the war economy: peace, standardized passage and lawful
+accounting would dismantle the arrangements that keep it alive. Meridian can
+become what it claims to be only by losing the machinery that made the claim
+enforceable.
 
 ### Voice
 
@@ -275,8 +324,8 @@ Administrative, courteous, and unhurried. Permits, duties, registers, schedules
 of fees. Threats phrased as procedure — *your manifest is held pending review*.
 Never raises its voice. Uses "we" to mean the road and the people on it.
 
-The two wings sound different. The Office is polished and speaks for
-publication. The Column is terse, local, and does not care how it sounds.
+The two wings sound different. The Council is polished and speaks for
+publication. The Chain is terse, local, and does not care how it sounds.
 
 ### Doctrine and mechanical identity
 
@@ -286,8 +335,10 @@ capacity is a function of what is standing nearby, which forces the other
 factions into the question of whether to level a town to kill a drone shop.
 
 **Economy: taxed throughput.** Holds route nodes and earns from traffic passing
-through, including the enemy's. Optional bonus income in contested places, never
-a gate on the other factions' economies — greed, not homework.
+through, including the enemy's. This is the Chain in its most literal form:
+every workshop, weighbridge, hauler and permit desk is one link. Optional bonus
+income in contested places, never a gate on the other factions' economies —
+greed, not homework.
 
 **Army: captured, not built.** Salvage is doctrine, not a bonus. Recovered
 hulls of AEC and Concord equipment, fielded at degraded reliability, keeping the
@@ -296,7 +347,7 @@ long time* — and it is the engine of misidentification.
 
 **Defence: concealment, not armour.** Tunnels, camouflage, false signatures,
 illegal grid taps and generators. Terrifying while unobserved, brittle once
-fixed in place. Where the others buy vision, the Authority buys ambiguity.
+fixed in place. Where the others buy vision, Meridian buys ambiguity.
 
 **Mass: cheap drones.** Small-workshop loitering munitions in quantity. Where a
 human-delivered charge appears, it is rare, expensive, and treated on the radio
@@ -313,27 +364,37 @@ a desk in a shipping container with a stamp on it. Salvaged vehicles wearing two
 sets of markings, one badly painted over. Order asserted with paint and paper
 rather than concrete.
 
+Its yellow is high-visibility and cheap: barrier paint, hazard chevrons,
+weighbridge kerbs, the yellow of a permit and a hi-vis vest. It is the only
+faction colour applied *over* another's. A recovered hull carries Meridian
+yellow brushed across AEC blue or Concord green, and the covered coat still
+shows at the panel edges and the door seams. That is the misidentification
+engine in paint, and it should never be tidied up: the faction that asserts
+order with a brush is the faction whose markings are always one coat thick.
+
 ### Financing
 
 A state sponsor, laundered through freight companies. The load-bearing fact for
-later plot work: **both** AEC and Concord have funded them, at different times,
-for different reasons. Reference obliquely; do not explain.
+later plot work: **both** AEC and Concord have funded Meridian, at different
+times, for different reasons. Reference obliquely; do not explain.
 
 ### Internal fault lines *(for CiC 2)*
 
-- **The Office vs. the Column.** The Office wants recognition and understands
-  that recognition means eventually stopping. The Column *is* the war economy
-  and cannot survive peace. Every insurgency approaching statehood has this
-  fight, and the war economy usually wins.
+- **The Council vs. the Chain.** The Council wants recognition and understands
+  that recognition means eventually stopping. The Chain joins the workshops,
+  haulers, route crews, local suppliers and armed protection that make passage
+  possible. It is both a supply chain and the war economy, and cannot survive
+  peace in its present form. Every irregular administration approaching
+  statehood has this fight, and the war economy usually wins.
 - **Regional route-holders.** Individual sections of road are held by groups
   with their own kin networks and their own idea of the correct duty rate.
   Central taxation is theoretical in several districts.
 - **The sponsor's handlers.** Foreign money arrives with conditions. Whoever
   controls the relationship controls the movement, and everyone knows it.
-- **The media arm.** Produces the Authority's legitimacy. Its interests diverge
+- **The media arm.** Produces Meridian's legitimacy. Its interests diverge
   from the fighters' whenever the truth is inconvenient in the wrong direction.
 - **The courts.** The judicial function is the most genuinely popular thing the
-  Authority does, and the most constrained by the Column's needs.
+  Council does, and the most constrained by the Chain's needs.
 
 ---
 
@@ -341,10 +402,10 @@ for different reasons. Reference obliquely; do not explain.
 
 - **Everybody wants the road open.** All three. The war exists because "open" has
   three incompatible definitions. Never write a faction that benefits from
-  closure — except the Column, and that is a secret, not a premise.
+  closure — except parts of the Chain, and that is a secret, not a premise.
 - **Nobody is fighting for territory.** They are fighting over the terms of
   passage.
-- **Everyone has funded the Authority.** At some point, for some reason.
+- **Everyone has funded Meridian.** At some point, for some reason.
 - **Every faction has a wing that wants this to stop** and is losing the
   argument to a wing that cannot afford to.
 - **Every faction covers every tactical role.** Divergence is in *how* a role is
