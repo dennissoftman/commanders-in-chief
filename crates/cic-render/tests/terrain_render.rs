@@ -325,20 +325,31 @@ fn block_compressed_layers_render_the_same_terrain_as_uncompressed_ones() {
         "a 64-pixel detail texture reaches 1x1 in seven levels, whichever path uploaded it"
     );
 
-    // Exact equality, not a tolerance: the colour's channels agree on the parity bit BC7 mode 6 shares
-    // between them, so the block is exact and the two frames must match byte for byte. What that rules
-    // out is the failure this path really has -- a wrong row pitch or mip offset does not shade a frame
-    // slightly differently, it scrambles it.
-    let differing = plain
+    // Diagnostic first, so a failure says *how* the two disagree rather than only that they do. A wrong row
+    // pitch or mip offset scrambles a frame; a decoder that rounds differently shifts it by a shade.
+    let mut differing = 0usize;
+    let mut worst = 0u8;
+    for (bare, compressed) in plain
         .rgba()
         .chunks_exact(4)
         .zip(blocks.rgba().chunks_exact(4))
-        .filter(|(bare, compressed)| bare != compressed)
-        .count();
+    {
+        if bare != compressed {
+            differing += 1;
+        }
+        for channel in 0..4 {
+            worst = worst.max(bare[channel].abs_diff(compressed[channel]));
+        }
+    }
+    eprintln!(
+        "block compression: fast path {took_the_fast_path}, {differing} of {} pixels differ, worst channel delta {worst}",
+        plain.rgba().len() / 4
+    );
     assert_eq!(
         differing, 0,
-        "{differing} pixels differ between the two upload paths"
+        "{differing} pixels differ between the two upload paths, worst channel delta {worst}"
     );
+
     // And the terrain actually drew, which every equality test has to rule out separately: two frames of
     // nothing agree perfectly.
     assert!(

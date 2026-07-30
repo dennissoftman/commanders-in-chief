@@ -1003,6 +1003,30 @@ mod tests {
     }
 
     #[test]
+    fn probe_solid_chain() {
+        // Does a solid BC7 texture decode to the colour at *every* level?
+        let colour = [201u8, 199, 87, 255];
+        let texture = TextureAsset::solid(
+            64,
+            64,
+            BlockFormat::Bc7UnormSrgb,
+            colour,
+            TextureLimits::default(),
+        )
+        .expect("solid");
+        println!("levels: {}", texture.level_count());
+        for level in 0..texture.level_count() {
+            let decoded = texture.decode_level(level).expect("level");
+            let first = &decoded[..4];
+            let uniform = decoded.chunks_exact(4).all(|t| t == first);
+            println!(
+                "  level {level} {:?}: first {first:?} uniform {uniform}",
+                texture.level_size(level)
+            );
+        }
+    }
+
+    #[test]
     fn a_written_container_reads_back_identically() {
         // The round trip is the whole claim of the container half of this module: every field the reader
         // needs is one the writer set, at the offset the specification puts it.
