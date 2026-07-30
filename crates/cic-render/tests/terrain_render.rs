@@ -325,8 +325,20 @@ fn block_compressed_layers_render_the_same_terrain_as_uncompressed_ones() {
         "a 64-pixel detail texture reaches 1x1 in seven levels, whichever path uploaded it"
     );
 
-    // Diagnostic first, so a failure says *how* the two disagree rather than only that they do. A wrong row
-    // pitch or mip offset scrambles a frame; a decoder that rounds differently shifts it by a shade.
+    // Bounded per channel rather than byte-identical, and the bound is the point: **no channel anywhere may
+    // move by more than one least-significant bit.**
+    //
+    // Exact equality was the first version of this assertion and it was wrong. A hardware or driver BC
+    // decoder is not required to be bit-exact: Apple's reconstructs this mode-6 block exactly, and Mesa's
+    // `llvmpipe` — which CI runs on, and which does advertise `TEXTURE_COMPRESSION_BC` — rounds one
+    // least-significant bit differently across a quarter of the frame. That is the format working as
+    // specified, not a fault, and it is the same reason this project's reference captures are already named
+    // per adapter.
+    //
+    // The bound is still strictly stronger than "few pixels differ", because it catches what this path can
+    // actually get wrong. A mistaken row pitch, mip extent or layer origin does not shift a frame by a
+    // shade — it scrambles it, and every such mistake made while writing this produced either a `wgpu`
+    // validation error or deltas in the tens.
     let mut differing = 0usize;
     let mut worst = 0u8;
     for (bare, compressed) in plain
@@ -345,9 +357,10 @@ fn block_compressed_layers_render_the_same_terrain_as_uncompressed_ones() {
         "block compression: fast path {took_the_fast_path}, {differing} of {} pixels differ, worst channel delta {worst}",
         plain.rgba().len() / 4
     );
-    assert_eq!(
-        differing, 0,
-        "{differing} pixels differ between the two upload paths, worst channel delta {worst}"
+    assert!(
+        worst <= 1,
+        "the two upload paths disagree by {worst} of 255 over {differing} pixels, which is more than a \
+         decoder's rounding"
     );
 
     // And the terrain actually drew, which every equality test has to rule out separately: two frames of

@@ -128,8 +128,14 @@ slots: the compressed path is taken when every layer that has a texture at all h
 those agree. A layer with **no** texture abstains rather than blocking it — it takes a flat white slice in
 the array's own format, so a partly-textured map still takes the fast path.
 
-A device without `TEXTURE_COMPRESSION_BC` — a software rasteriser, which is what CI runs on — decodes every
-block on the CPU and uploads RGBA8. The picture is the same; the memory and the load time are not.
+A device without `TEXTURE_COMPRESSION_BC` decodes every block on the CPU and uploads RGBA8. The picture is
+the same; the memory and the load time are not.
+
+**Two adapters need not agree to the last bit.** A hardware or driver BC decoder is not required to be
+bit-exact, and measurably is not: on the same flat BC7 mode-6 block, Apple's Metal decoder reconstructs the
+colour exactly while Mesa's `llvmpipe` rounds one least-significant bit differently. Nothing here depends on
+more than that, and the tests comparing the two upload paths bound the per-channel difference at one bit
+rather than demanding equality — the same reason reference captures are named per adapter.
 
 ## Container details
 

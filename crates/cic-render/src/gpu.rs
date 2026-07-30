@@ -48,10 +48,11 @@ pub struct GpuContext {
 /// answer to its absence is a renderer that draws without timing.
 ///
 /// `TEXTURE_COMPRESSION_BC` is what [`crate::texture::TextureArray::new_blocks`] needs to hand a `.dds`
-/// straight to the texture unit. Every desktop GPU has it and `llvmpipe` does not, so the answer to its
-/// absence is the software decode in [`cic_assets::bc`] and the uncompressed upload path — the same
-/// picture, built the slow way. Ask [`GpuContext::supports_block_compression`] rather than assuming
-/// either.
+/// straight to the texture unit. Every desktop GPU has it, and so does Mesa's `llvmpipe`, which
+/// decompresses in software — so the CI runner takes the compressed path too. The answer to its absence is
+/// the decode in [`cic_assets::bc`] and the uncompressed upload path: the same picture, built the slow way.
+/// Ask [`GpuContext::supports_block_compression`] rather than assuming either, because *which* adapters
+/// have it is not a thing to hold in your head.
 const OPTIONAL_FEATURES: wgpu::Features =
     wgpu::Features::TIMESTAMP_QUERY.union(wgpu::Features::TEXTURE_COMPRESSION_BC);
 
@@ -207,10 +208,14 @@ impl GpuContext {
     /// Whether this device can sample block-compressed textures.
     ///
     /// False is a normal answer, not a fault, and it changes what a caller *does* rather than whether it
-    /// succeeds: a `.dds` still loads, but its blocks are decoded on the CPU and uploaded as RGBA8
-    /// instead of being copied. The picture is the same; the memory and the load time are not. Every
-    /// desktop GPU has this feature and the software rasteriser CI runs on does not, so both paths are
-    /// live and both need to work.
+    /// succeeds: a `.dds` still loads, but its blocks are decoded on the CPU and uploaded as RGBA8 instead
+    /// of being copied. The picture is the same to within a bit; the memory and the load time are not.
+    ///
+    /// Both paths are live and both need to work, which is why this is asked rather than assumed. It is
+    /// *not* a proxy for "is this a real GPU": Mesa's `llvmpipe` reports true and decompresses in software,
+    /// so the CI runner exercises the compressed path — and its decompression is not bit-identical to a
+    /// hardware one, which is a property of the format rather than a fault. See
+    /// [`crate::texture::TextureArray::new_blocks`].
     #[must_use]
     pub fn supports_block_compression(&self) -> bool {
         self.device

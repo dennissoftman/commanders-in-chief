@@ -147,6 +147,12 @@ block against 31.0 dB on one straddling a hard edge, which is what a partitioned
 - Both `resolve_model_textures` and `resolve_terrain_textures` are wrappers over one
   `resolve_named_textures`. The convention is a single definition rather than two that must agree, and
   `TextureResolveError` is named for the operation rather than for whichever caller came first.
+- **A hardware BC decoder is not required to be bit-exact, and they are not.** Measured on the same flat
+  mode-6 block: Apple's Metal decoder reconstructs it exactly, and Mesa's `llvmpipe` — which CI runs on, and
+  which does advertise `TEXTURE_COMPRESSION_BC` — rounds one least-significant bit differently across a
+  quarter of the frame. So a test comparing the compressed and uncompressed upload paths bounds the
+  per-channel difference at one bit rather than demanding equality. This is consistent with a decision
+  already made here: reference captures are named per adapter for the same reason.
 - Content that has not been converted keeps working unchanged, and converted content keeps working on a
   device that cannot sample blocks. Neither is a fallback in the sense of being worse than nothing: the
   first is the old path and the second is the same picture built the slow way.

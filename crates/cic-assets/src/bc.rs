@@ -5,10 +5,11 @@
 //! Block compression is a *hardware* format: the texture unit decompresses it on read, so the whole
 //! point is that these bytes reach the GPU untouched. This module is what happens when they cannot.
 //!
-//! 1. **Adapters without `TEXTURE_COMPRESSION_BC`.** The headless test suite runs on a software
-//!    rasteriser, and `wgpu` correctly refuses a format the adapter does not advertise. A renderer that
-//!    could only draw block-compressed textures on real hardware would be a renderer whose textures CI
-//!    cannot check — the same argument that made headless capture come before any window.
+//! 1. **Adapters without `TEXTURE_COMPRESSION_BC`.** `wgpu` correctly refuses a format the adapter does not
+//!    advertise, and a renderer that could only draw block-compressed textures where the hardware
+//!    decompresses them would be a renderer that cannot run everywhere it is asked to. (The CI runner is
+//!    *not* such an adapter, as it happens — Mesa's `llvmpipe` advertises the feature and decompresses in
+//!    software — but a device that lacks it is an ordinary thing rather than a hypothetical one.)
 //! 2. **Being able to assert on pixels.** A test can say what colour a block decodes to. It cannot say
 //!    what a texture unit did, and the reference captures in `cic-render` are the wrong instrument for
 //!    "is this block encoded correctly" because they answer it through six other passes.
