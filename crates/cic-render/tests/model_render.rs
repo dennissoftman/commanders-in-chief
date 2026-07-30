@@ -994,12 +994,22 @@ fn pyramid_normals(size: u32, cells: u32, tilt: f32) -> ModelImage {
 
 /// A metallic-roughness map, uniform in both channels. Roughness is green, metallic is blue.
 fn metallic_roughness(size: u32, roughness: u8, metallic: u8) -> ModelImage {
+    orm(size, u8::MAX, roughness, metallic)
+}
+
+/// A flat ORM map: occlusion in red, roughness in green, metallic in blue, as glTF packs them.
+///
+/// Red defaults to 255 in [`metallic_roughness`] rather than to zero, and the difference is not cosmetic:
+/// red *is* the occlusion channel, so a fixture carrying zero there describes a fully occluded surface. It
+/// changes nothing while a material leaves `occlusion_texture` unset, and would darken every such fixture
+/// the moment one set it — a trap laid for whoever did that next.
+fn orm(size: u32, occlusion: u8, roughness: u8, metallic: u8) -> ModelImage {
     ModelImage {
         // Unnamed, so no block-compressed sidecar is looked up for it.
         name: String::new(),
         width: size,
         height: size,
-        rgba: [0, roughness, metallic, 255].repeat((size * size) as usize),
+        rgba: [occlusion, roughness, metallic, 255].repeat((size * size) as usize),
     }
 }
 
@@ -1329,6 +1339,111 @@ fn a_normal_map_perturbs_the_shading_without_moving_the_silhouette() {
     assert!(
         moved * 500 < touched,
         "a normal map must not move geometry: {moved} of {touched} touched pixels changed coverage"
+    );
+}
+
+#[test]
+fn a_baked_occlusion_map_darkens_ambient_light_and_leaves_direct_light_alone() {
+    // The property that decides where occlusion is applied, and the reason it travels to the lighting pass
+    // instead of being folded into the G-buffer's albedo. glTF scopes occlusion to *indirect* light: a
+    // baked crevice is dark because less skylight reaches it, not because the sun stopped shining on it.
+    // Applying it to albedo would darken both and is the mistake this pins shut.
+    let Some(context) = context() else { return };
+    let harness = harness(context);
+    let placement = instances(&harness.terrain);
+
+    // Occlusion and metallic-roughness are the *same* image, which is what an ORM map is and the
+    // arrangement this renderer reads. Red is what differs between the two batches.
+    let build = |occlusion: u8, wire_occlusion: bool| {
+        let mut model = box_model(40.0, 70.0);
+        model.images = vec![orm(4, occlusion, 200, 0)];
+        for material in &mut model.materials {
+            material.metallic_roughness_texture = Some(0);
+            material.occlusion_texture = wire_occlusion.then_some(0);
+            material.occlusion_strength = 1.0;
+            material.metallic = 1.0;
+            material.roughness = 1.0;
+        }
+        ModelBatch::new(
+            context,
+            &model,
+            &placement,
+            harness.deferred.material_layout(),
+        )
+        .expect("batch")
+    };
+    // Deeply occluded, and the control: the same image, its occlusion simply not wired up.
+    let occluded = build(40, true);
+    let control = build(40, false);
+
+    // With no ambient light at all, occlusion has nothing to scale and the two must be *identical*. This
+    // is the assertion that would fail if occlusion were applied to albedo or to the direct term.
+    let mut sunlit = frame_with_low_sun(&harness.terrain);
+    sunlit.light.ambient = [0.0; 3];
+    let direct_only = render(context, &harness, std::slice::from_ref(&occluded), sunlit);
+    let direct_only_control = render(context, &harness, std::slice::from_ref(&control), sunlit);
+    write_capture("model-occlusion-direct-only.png", &direct_only);
+    let differing = direct_only
+        .rgba()
+        .chunks_exact(4)
+        .zip(direct_only_control.rgba().chunks_exact(4))
+        .filter(|(a, b)| a != b)
+        .count();
+    assert_eq!(
+        differing, 0,
+        "{differing} pixels changed with no ambient light to occlude, so occlusion is reaching \
+         something it must not"
+    );
+
+    // And with ambient light present it must darken -- otherwise the assertion above passes trivially on a
+    // channel nothing reads.
+    let ambient = frame_with_low_sun(&harness.terrain);
+    let lit = render(context, &harness, std::slice::from_ref(&occluded), ambient);
+    let lit_control = render(context, &harness, std::slice::from_ref(&control), ambient);
+    write_capture("model-occlusion-ambient.png", &lit);
+    write_capture("model-occlusion-ambient-control.png", &lit_control);
+
+    let luminance = |capture: &Capture| -> f64 {
+        let pixels = capture.rgba();
+        let total: f64 = pixels
+            .chunks_exact(4)
+            .map(|texel| {
+                0.2126 * f64::from(texel[0])
+                    + 0.7152 * f64::from(texel[1])
+                    + 0.0722 * f64::from(texel[2])
+            })
+            .sum();
+        total / (pixels.len() / 4) as f64
+    };
+    let (dark, bright) = (luminance(&lit), luminance(&lit_control));
+    eprintln!("occluded {dark:.2} against unoccluded {bright:.2}");
+    assert!(
+        dark < bright,
+        "a baked occlusion map must darken the ambient term: {dark:.2} against {bright:.2}"
+    );
+
+    // A material whose occlusion is a *different* image from its metallic-roughness is the arrangement this
+    // renderer does not read -- one image, one slice, one sample. It renders as though unoccluded, which is
+    // what it did before the channel existed, and `cic-texconv --from-glb` is how such a model is merged
+    // into the supported form. Pinned so that stops being silent if the support ever widens.
+    let mut separate = box_model(40.0, 70.0);
+    separate.images = vec![orm(4, u8::MAX, 200, 0), orm(4, 40, 200, 0)];
+    for material in &mut separate.materials {
+        material.metallic_roughness_texture = Some(0);
+        material.occlusion_texture = Some(1);
+        material.occlusion_strength = 1.0;
+    }
+    let unmerged = ModelBatch::new(
+        context,
+        &separate,
+        &placement,
+        harness.deferred.material_layout(),
+    )
+    .expect("batch");
+    let unmerged_frame = render(context, &harness, std::slice::from_ref(&unmerged), ambient);
+    assert!(
+        (luminance(&unmerged_frame) - bright).abs() < 0.5,
+        "a separate occlusion image is not read, so it must render as the unoccluded control"
     );
 }
 

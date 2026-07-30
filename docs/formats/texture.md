@@ -14,6 +14,7 @@ the slot fixes both.
 | Base colour, albedo | `BC7_UNORM_SRGB` | sRGB | RGB + alpha | 8 |
 | Tangent-space normal | `BC5_UNORM` | linear | `x`, `y` — `z` is rebuilt in the shader | 8 |
 | Occlusion / roughness / metallic | `BC7_UNORM` | linear | R, G, B in glTF's order | 8 |
+| Emissive | `BC7_UNORM_SRGB` | sRGB | RGB | 8 |
 | Flat or low-detail colour | `BC1_UNORM_SRGB` | sRGB | RGB + punch-through alpha | 4 |
 | Linear mask or single channel | `BC1_UNORM` | linear | RGB + punch-through alpha | 4 |
 
@@ -22,8 +23,14 @@ occlusion/roughness/metallic map goes in BC7, at the same 8 bpp, with all three 
 fit three channels in half the space and shares one RGB endpoint pair between them, so a roughness gradient
 drags the metallic channel with it.
 
-The ORM channel order is glTF's own: **R occlusion, G roughness, B metallic**. Nothing in the shader
-changes for a converted texture.
+The ORM channel order is glTF's own: **R occlusion, G roughness, B metallic**, and all three are read —
+occlusion included, which the renderer applies to the ambient term only, honouring the material's
+`occlusionStrength`. That is where glTF scopes it: a baked crevice is dark because less skylight reaches it,
+not because the sun stopped shining on it.
+
+Occlusion is read from the red of the **metallic-roughness image**, so the two must be one image. A material
+whose occlusion is a separate image reports no occlusion and renders unoccluded;
+[`--from-glb`](#converting-a-models-own-textures) is what merges such a model into the readable arrangement.
 
 ## Converting
 
@@ -79,6 +86,46 @@ work:
 An image with no name is never looked up. An **absent** sidecar is not an error — that is simply a texture
 that has not been converted. A sidecar that **exists and will not read** is an error, because it means a
 converted texture is being silently rendered from its placeholder.
+
+## Converting a model's own textures
+
+A `.glb` carries its textures inside it, and `--from-glb` converts all of them at once:
+
+```bash
+cic-texconv --from-glb models/hull.glb
+```
+
+```text
+hull.glb -> hull.glb and 3 textures in textures
+  hull_orm.dds                  128x128       21.5 KiB  BC7_UNORM (merged for occlusion/roughness/metallic)
+  hull_basecolor.dds            128x128       21.5 KiB  BC7_UNORM_SRGB
+  hull_normal.dds               128x128       21.5 KiB  BC5_UNORM
+  2 images are no longer referenced by any material, left as a placeholder
+  glb 2.7 KiB -> 1.6 KiB, 4 images replaced by a 1x1 placeholder
+```
+
+**No `--slot` here, and no filename heuristics.** A glTF material states which slot every image is read
+through, so the format and the colour space are *derived*. An image read as a base colour by one material
+and as a normal map by another has no single answer and is reported rather than resolved by guessing.
+
+JPEG sources work as well as PNG, because glTF permits both and the importer decodes both.
+
+**It merges a separate occlusion map into the ORM image.** glTF permits occlusion and metallic-roughness to
+be two different images; this engine reads all three channels from one. So red comes from the occlusion map,
+green and blue from the metallic-roughness map, and both material slots are repointed at the result — which
+is why this rewrites the model rather than only writing textures. A channel with no source is **255**, not
+whatever the other image happened to carry there: glTF leaves red unused in a metallic-roughness image, and
+reading it as occlusion would darken the surface for no reason.
+
+**It slims the container.** Every image becomes a 1×1 placeholder and the binary chunk is compacted. The
+images are not *removed*, because a material's slot references are how the runtime knows which sidecar
+belongs to which slot — a named image entry is the link. An image whose only reader was a merged-away slot
+stays as a placeholder too, and is reported so it can be pruned at the source; removing it would renumber
+every later image and every texture that references one.
+
+The rewrite preserves everything it does not deliberately change, including a texture reference's
+`strength`, its `texCoord` and any extension on it — and refuses a container holding a chunk it does not
+understand rather than dropping it.
 
 ## How a terrain layer finds its texture
 

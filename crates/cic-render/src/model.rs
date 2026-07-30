@@ -998,9 +998,35 @@ fn push_material(bytes: &mut Vec<u8>, material: &ModelMaterial, slice_count: u32
         material.normal_scale,
         cutoff,
         emissive_strength(material),
-        0.0,
+        baked_occlusion_strength(material),
     ] {
         bytes.extend_from_slice(&value.to_le_bytes());
+    }
+}
+
+/// How strongly this material's baked occlusion applies, or zero when it has none this renderer can read.
+///
+/// # Why the occlusion map has to *be* the metallic-roughness map
+///
+/// glTF puts occlusion in a texture's red and metallic-roughness in another's green and blue, and permits
+/// those to be two different images. Reading a separate one would need a fourth array slot and a fourth
+/// slice index in a material record that has one float left — so what is supported is the arrangement
+/// glTF content overwhelmingly already uses: *one* image carrying all three, which is what "ORM" means.
+///
+/// A material whose occlusion is a different image from its metallic-roughness reports zero here and its
+/// occlusion is not applied. That is the same as before this channel existed rather than a regression, and
+/// `cic-texconv --from-glb` is how such a model is converted into the supported arrangement: it merges the
+/// two images and repoints both slots at the result.
+///
+/// Zero doubles as "no map" and as "a map applied at zero strength" because those render identically —
+/// glTF's own formula is `1 + strength * (sampled - 1)`, which is the identity at strength zero.
+fn baked_occlusion_strength(material: &ModelMaterial) -> f32 {
+    let shared = material.occlusion_texture.is_some()
+        && material.occlusion_texture == material.metallic_roughness_texture;
+    if shared {
+        material.occlusion_strength.clamp(0.0, 1.0)
+    } else {
+        0.0
     }
 }
 

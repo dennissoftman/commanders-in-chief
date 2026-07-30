@@ -29,6 +29,7 @@
 //! that name is the key the runtime looks it up by. See `cic_assets::resolve_model_textures`.
 
 mod encode;
+mod repack;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -86,10 +87,11 @@ impl Slot {
 }
 
 const USAGE: &str = "\
-cic-texconv — convert an authored PNG texture to block-compressed DDS
+cic-texconv — convert authored textures to block-compressed DDS
 
 usage:
     cic-texconv --slot <slot> <input.png> [-o <output.dds>]
+    cic-texconv --from-glb <model.glb> [-o <output.glb>] [--textures <dir>]
 
 slots:
     base         base colour or albedo      BC7, sRGB, alpha kept
@@ -100,6 +102,13 @@ slots:
 
 The output defaults to the input path with a .dds extension. Name it after the glTF
 image it belongs to: that name is the key the runtime looks it up by.
+
+--from-glb needs no slot: a glTF material says which slot every image is read
+through, so each one's format and colour space are derived rather than guessed.
+It converts them all, merges a separate occlusion map into the ORM image, writes
+the sidecars to --textures (default: ./textures), and rewrites the model with 1x1
+placeholder images. Run it from the package root so the sidecars land where the
+runtime looks for them.
 ";
 
 fn main() -> ExitCode {
@@ -123,10 +132,18 @@ fn run(arguments: Vec<String>) -> Result<String, String> {
     let mut slot = None;
     let mut input: Option<PathBuf> = None;
     let mut output: Option<PathBuf> = None;
+    let mut textures: Option<PathBuf> = None;
+    let mut from_glb = false;
     let mut rest = arguments.into_iter();
     while let Some(argument) = rest.next() {
         match argument.as_str() {
             "--help" | "-h" => return Ok(USAGE.to_owned()),
+            "--from-glb" => from_glb = true,
+            "--textures" => {
+                textures = Some(PathBuf::from(
+                    rest.next().ok_or("--textures needs a directory")?,
+                ));
+            }
             "--slot" | "-s" => {
                 let name = rest.next().ok_or("--slot needs a value")?;
                 slot = Some(
@@ -145,8 +162,22 @@ fn run(arguments: Vec<String>) -> Result<String, String> {
         }
     }
 
-    let slot = slot.ok_or_else(|| format!("--slot is required\n\n{USAGE}"))?;
     let input = input.ok_or_else(|| format!("an input path is required\n\n{USAGE}"))?;
+    if from_glb {
+        if slot.is_some() {
+            return Err(
+                "--from-glb derives every slot from the model's materials, so --slot would \
+                        only be a way to contradict it"
+                    .to_owned(),
+            );
+        }
+        return repack_model(&input, output.as_deref(), textures.as_deref());
+    }
+    if textures.is_some() {
+        return Err("--textures applies to --from-glb, which writes several files".to_owned());
+    }
+
+    let slot = slot.ok_or_else(|| format!("--slot is required\n\n{USAGE}"))?;
     let output = output.unwrap_or_else(|| input.with_extension("dds"));
 
     let bytes = std::fs::read(&input).map_err(|error| format!("{}: {error}", input.display()))?;
@@ -158,6 +189,52 @@ fn run(arguments: Vec<String>) -> Result<String, String> {
     let summary = summarize(&input, &output, slot, &texture, rgba.len(), encoded.len());
     std::fs::write(&output, &encoded).map_err(|error| format!("{}: {error}", output.display()))?;
     Ok(summary)
+}
+
+/// Converts every texture a `.glb` carries and rewrites the model to reference the sidecars.
+///
+/// # Errors
+///
+/// Returns a message when the model cannot be read or rewritten, or a file cannot be written.
+fn repack_model(
+    input: &Path,
+    output: Option<&Path>,
+    textures: Option<&Path>,
+) -> Result<String, String> {
+    let bytes = std::fs::read(input).map_err(|error| format!("{}: {error}", input.display()))?;
+    // The model's own file stem names any texture the container left unnamed, so two models converted into
+    // one package cannot collide on `textures/basecolor.dds`.
+    let stem = input
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .ok_or_else(|| format!("{} has no usable file name", input.display()))?;
+    let repacked =
+        repack::repack(&bytes, stem).map_err(|error| format!("{}: {error}", input.display()))?;
+
+    let directory = textures.unwrap_or_else(|| Path::new(repack::TEXTURE_DIRECTORY));
+    std::fs::create_dir_all(directory)
+        .map_err(|error| format!("{}: {error}", directory.display()))?;
+    for (name, dds) in &repacked.textures {
+        let path = directory.join(format!("{name}.dds"));
+        std::fs::write(&path, dds).map_err(|error| format!("{}: {error}", path.display()))?;
+    }
+    let model = output.map_or_else(|| input.to_path_buf(), Path::to_path_buf);
+    std::fs::write(&model, &repacked.glb)
+        .map_err(|error| format!("{}: {error}", model.display()))?;
+
+    Ok(format!(
+        "{} -> {} and {} texture{} in {}\n{}",
+        input.display(),
+        model.display(),
+        repacked.textures.len(),
+        if repacked.textures.len() == 1 {
+            ""
+        } else {
+            "s"
+        },
+        directory.display(),
+        repacked.report.trim_end()
+    ))
 }
 
 /// Compresses one decoded image into a mipped block-compressed texture.

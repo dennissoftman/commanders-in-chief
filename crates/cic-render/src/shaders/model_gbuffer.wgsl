@@ -45,7 +45,8 @@ struct Uniforms {
 /// `factors` holds the metallic factor, the roughness factor, the base-colour array slice, and whether
 /// that slice holds anything. `maps` holds the normal slice and its presence, then the
 /// metallic-roughness slice and its presence. `surface` holds the normal-map scale, the alpha cutoff
-/// (zero meaning never discard), the emissive strength, and one reserved slot.
+/// (zero meaning never discard), the emissive strength, and the baked-occlusion strength — zero for a
+/// material with no occlusion this renderer can read. See `baked_occlusion_strength` in `model.rs`.
 struct Material {
     base_color: vec4<f32>,
     factors: vec4<f32>,
@@ -120,7 +121,8 @@ struct VertexOutput {
 struct GBufferOutput {
     @location(0) albedo: vec4<f32>,
     @location(1) normal_roughness: vec4<f32>,
-    @location(2) coverage: f32,
+    // Coverage in red, baked ambient occlusion in green. See `COVERAGE_FORMAT`.
+    @location(2) coverage: vec2<f32>,
     // Texture-coordinate motion since the previous frame.
     @location(3) motion: vec2<f32>,
 }
@@ -202,6 +204,10 @@ struct Surface {
     alpha: f32,
     cutoff: f32,
     emissive: f32,
+    /// Baked ambient occlusion in `0..=1`, one meaning unoccluded. Passed to the lighting pass rather
+    /// than applied here: glTF scopes occlusion to *indirect* light, and the ambient term is computed
+    /// there.
+    occlusion: f32,
 }
 
 /// Reads every map and resolves the material into a surface.
@@ -252,6 +258,16 @@ fn resolve_surface(input: VertexOutput) -> Surface {
     let mr = select(vec2<f32>(1.0), mr_sample.bg, material.maps.w > 0.5);
     output.metallic = clamp(material.factors.x * mr.x, 0.0, 1.0);
     output.roughness = clamp(material.factors.y * mr.y, 0.0, 1.0);
+
+    // Occlusion is the *red* of the same image the metallic-roughness came from -- that is what an ORM
+    // map is, and reading it needs no extra slice or sample. glTF's formula is
+    // `1 + strength * (sampled - 1)`, which is this mix, and which is the identity at strength zero: a
+    // material with no occlusion map reports zero strength and comes out unoccluded exactly.
+    output.occlusion = clamp(
+        mix(1.0, mr_sample.r, material.surface.w),
+        0.0,
+        1.0
+    );
     return output;
 }
 
@@ -309,8 +325,9 @@ fn write_surface(surface: Surface, input: VertexOutput) -> GBufferOutput {
     // eight bits is ample for a quantity that is 0 or 1 on almost every real material.
     output.albedo = vec4<f32>(surface.albedo, surface.metallic);
     output.normal_roughness = vec4<f32>(surface.normal, surface.roughness);
-    // Coverage is 1.0 for opaque geometry and carries emissive strength above that. See `lighting.wgsl`.
-    output.coverage = 1.0 + surface.emissive;
+    // Coverage is 1.0 for opaque geometry and carries emissive strength above that; green carries the
+    // baked occlusion for the lighting pass to fold into its ambient term. See `lighting.wgsl`.
+    output.coverage = vec2<f32>(1.0 + surface.emissive, surface.occlusion);
     return output;
 }
 
