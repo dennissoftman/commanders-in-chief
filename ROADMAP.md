@@ -21,7 +21,8 @@ be chartered in dependency order, and M9 was not.
 | [M7](docs/milestones/m7-network.md) | Network: lockstep, replay, desync diagnosis | M5 | Planned |
 | [M8](docs/milestones/m8-tooling.md) | Tooling: map editor, asset pipeline | M2, M4 | Planned |
 | [M9](docs/milestones/m9-audio.md) | Audio: mixer, spatialisation, DSP, music, cues | M1 | Charter met — device layer outstanding |
-| [M10](docs/milestones/m10-scripting.md) | Scripting: deterministic sandboxed language | M0 | Language complete — host verbs need M5 |
+| [M10](docs/milestones/m10-scripting.md) | Scripting: deterministic sandboxed language | M0 | Language and dispatch complete — cross-subsystem verbs open |
+| [M11](docs/milestones/m11-persistence.md) | Persistence: match saves, settings | M6 | Planned |
 
 M9 and M10 both sit early in the dependency order and were chartered late, which is the honest reason the
 ladder is now a graph rather than a line. Neither needed a renderer or a kernel: audio needs bytes from the

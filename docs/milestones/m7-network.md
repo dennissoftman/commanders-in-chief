@@ -27,6 +27,15 @@ Lockstep rather than state replication, because the simulation is already determ
 bandwidth cost is a function of player count rather than of world size. An RTS with thousands of units
 cannot afford to replicate state.
 
+Transport rides an established reliability layer over UDP, not raw sockets in either flavour. Raw
+TCP is out because one lost packet stalls every byte behind it — head-of-line blocking is the worst
+possible property for tick-paced command delivery, and it is what makes TCP's effective throughput
+collapse on a lossy link. Raw UDP is out because commands must arrive, and hand-rolling
+acknowledgement, retransmission, and ordering means re-earning a decade of someone else's bug fixes.
+The candidates are the well-worn ones — QUIC via `quinn`, or the ENet lineage — and the selection is
+an ADR when this milestone starts, weighed on dependency surface, pure-Rust preference, and behaviour
+as a link degrades.
+
 Desync diagnosis is a first-class deliverable, not a debugging afterthought. A desync that reports only
 "clients diverged" costs days; one that reports "pathfinding, tick 4,182" costs minutes. This is the
 whole return on M5's per-subsystem hashing, and it is why that work is specified there rather than
