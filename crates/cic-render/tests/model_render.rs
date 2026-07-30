@@ -604,25 +604,42 @@ fn a_block_compressed_base_colour_renders_the_same_frame_as_an_uncompressed_one(
     write_capture("model-uncompressed-control.png", &plain);
     write_capture("model-block-compressed.png", &blocks);
 
-    // Byte-for-byte equality, not a tolerance -- and the colour is chosen to make that available. All four
-    // of its channels are odd, so they agree on the low bit BC7 mode 6 shares between them, and the block
-    // reproduces the colour exactly. A colour whose channels disagreed would be within one
-    // least-significant bit instead, and this assertion would have to soften to a tolerance that could hide
-    // things.
+    // Bounded per channel: **no channel anywhere may move by more than one least-significant bit.**
     //
-    // What it rules out is the failure this path really has: a wrong row pitch, a wrong mip extent or a
-    // wrong layer origin. None of those shifts a frame by a shade — they scramble it. The bug found while
-    // writing this was exactly one of them, a copy extent given in logical rather than block-aligned
-    // texels, and `wgpu` validation caught it before any pixel did.
-    let differing = plain
+    // Not byte-for-byte equality, though it is byte-for-byte equal on some adapters. A hardware or driver BC
+    // decoder is not required to be bit-exact, and they are not: Apple's reconstructs this mode-6 block
+    // exactly, and Mesa's `llvmpipe` — which CI runs on, and which does advertise
+    // `TEXTURE_COMPRESSION_BC` — rounds one least-significant bit differently. That is the format behaving
+    // as specified, and it is the same reason this project's reference captures are already named per
+    // adapter.
+    //
+    // The bound is still far stronger than "few pixels differ", because it catches what this path can
+    // actually get wrong: a mistaken row pitch, mip extent or layer origin does not shift a frame by a
+    // shade, it scrambles it. The bug found while writing this was exactly one of those — a copy extent
+    // given in logical rather than block-aligned texels — and `wgpu` validation caught it before any pixel
+    // did.
+    let mut differing = 0usize;
+    let mut worst = 0u8;
+    for (control_texel, block_texel) in plain
         .rgba()
         .chunks_exact(4)
         .zip(blocks.rgba().chunks_exact(4))
-        .filter(|(control_texel, block_texel)| control_texel != block_texel)
-        .count();
-    assert_eq!(
-        differing, 0,
-        "{differing} texels differ between the two upload paths"
+    {
+        if control_texel != block_texel {
+            differing += 1;
+        }
+        for channel in 0..4 {
+            worst = worst.max(control_texel[channel].abs_diff(block_texel[channel]));
+        }
+    }
+    eprintln!(
+        "block compression: fast path {took_the_fast_path}, {differing} of {} pixels differ, worst channel delta {worst}",
+        plain.rgba().len() / 4
+    );
+    assert!(
+        worst <= 1,
+        "the two upload paths disagree by {worst} of 255 over {differing} pixels, which is more than a \
+         decoder's rounding"
     );
 
     // And the frame is not simply empty, which every tolerance test has to rule out separately: a pass

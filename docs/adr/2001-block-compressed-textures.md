@@ -135,6 +135,12 @@ block against 31.0 dB on one straddling a hard edge, which is what a partitioned
 - Terrain layer textures still take the uncompressed path. They are the largest single texture budget in
   the engine and the obvious next adopter; `TextureArray::new_blocks` is public and general, and what
   terrain additionally needs is a way for a layer to name a texture, which it does not have yet.
+- **A hardware BC decoder is not required to be bit-exact, and they are not.** Measured on the same flat
+  mode-6 block: Apple's Metal decoder reconstructs it exactly, and Mesa's `llvmpipe` — which CI runs on, and
+  which does advertise `TEXTURE_COMPRESSION_BC` — rounds one least-significant bit differently across a
+  quarter of the frame. So a test comparing the compressed and uncompressed upload paths bounds the
+  per-channel difference at one bit rather than demanding equality. This is consistent with a decision
+  already made here: reference captures are named per adapter for the same reason.
 - Content that has not been converted keeps working unchanged, and converted content keeps working on a
   device that cannot sample blocks. Neither is a fallback in the sense of being worse than nothing: the
   first is the old path and the second is the same picture built the slow way.
