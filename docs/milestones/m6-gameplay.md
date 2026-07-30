@@ -22,7 +22,9 @@ consumers exactly as the deferral intended.
   is what proves the command-to-motion pipe end to end. The template set gained `speed`, the first
   field to arrive with the mechanic that reads it.
 - Pathfinding over the heightfield, with terrain passability, dynamic obstruction from structures, and
-  local avoidance between units.
+  local avoidance between units. **Decided, not yet built** — [ADR 3001](../adr/3001-pathfinding.md):
+  passability derived from the heightfield, occluder and passage footprints on templates, and A* on an
+  integer-cost grid.
 - Combat: weapons, ranges, damage types, armour classes, health, death.
 - Economy: a resource, gatherers, and a rate that makes expansion a real decision.
 - Construction: build sites, placement validity, progress, cancellation.
@@ -45,6 +47,8 @@ makes vision a rendering artefact and vision-based orders non-deterministic.
 Pathfinding is the subsystem most likely to break determinism, because the tempting implementations use
 hashed containers and floating-point heuristics. It follows the same rules as everything else in the
 kernel: ordered containers, pinned arithmetic, stable tie-breaking by object identifier.
+[ADR 3001](../adr/3001-pathfinding.md) is that rule applied, and then some: the search runs in integer
+arithmetic entirely, so the accumulation questions floats would pose are not managed but absent.
 
 The AI is scoped as a test harness rather than as a good opponent. Being able to run a full match
 unattended, repeatably, is worth more at this stage than being challenging.
