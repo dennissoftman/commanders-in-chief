@@ -12,8 +12,8 @@ consumers exactly as the deferral intended.
   see [the specification](../formats/templates.md): identifier, kind, model, display-name key, with
   scenario activation resolving every placement and faction against the set. Health, cost and
   weapons arrive with the mechanics that read them, for the same reason the format itself waited;
-  `speed` arrived with movement and `footprint` and `passage` with the grid stamps, which is that
-  rule working three times rather than a promise about it.
+  `speed` arrived with movement, `footprint` and `passage` with the grid stamps, and `radius` with
+  local avoidance, which is that rule working four times rather than a promise about it.
 - Selection and orders: move, attack, attack-move, stop, hold, patrol, and formation movement.
   **The movement half is done** — spawn, move, stop, and now **formation movement**
   ([ADR 3003](../adr/3003-formation-movement.md)): `move_group` names a set of units and one

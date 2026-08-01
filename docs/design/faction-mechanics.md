@@ -16,7 +16,7 @@ declared as one.
 
 ## 1. How to read the sections
 
-Each faction gets nine fields, in this order:
+Each faction answers nine questions, in this order:
 
 | Field | Question it answers |
 |---|---|
@@ -29,6 +29,10 @@ Each faction gets nine fields, in this order:
 | **Signature** | The one thing only it can do |
 | **Failure mode** | How this faction gets designed badly, stated so it can be watched for |
 | **Counterplay** | What an opponent does about it |
+
+The questions are the frame, not the headings: a faction may add a section where its doctrine needs
+one — AEC's contracted-haulage fallback, Meridian's captured army — and Meridian answers information
+and defence together, because for it they are one subject.
 
 The **failure mode** field exists because the bible has one for character and mechanics need the same
 guard. Each faction has a specific way of drifting into being either the obvious best pick or a
@@ -436,7 +440,7 @@ never a unit type in a build menu and never a joke.
 
 ### Failure mode
 
-Three, and Meridian is the faction where all three are live:
+Four, and Meridian is the faction where all four are live:
 
 - **The gimmick.** Concealment and salvage are novel enough to carry a faction that is not actually
   good at anything, and a player who cannot win a straight fight will not play it twice. Meridian
@@ -497,3 +501,8 @@ choosing to fight somewhere quiet.
 - **Whether the three factions' carriers should be visually distinguishable at combat range.** They
   must be for readability; Meridian's recovered hulls argue the opposite. Readability wins where they
   conflict, and this is the one place it is not obvious.
+- **Whether Concord needs a fallback acquisition.** The [mechanics.md §2.5](mechanics.md#25-the-three-acquisitions)
+  table leaves its fallback cell empty under a section built on "no faction may be helpless". Its
+  candidate answers are already in its kit — repair speed, the committed wave, roads nobody can
+  un-build — but nothing has established they are enough under sustained interdiction, and if they
+  are, the empty cell should say so rather than read as an omission.

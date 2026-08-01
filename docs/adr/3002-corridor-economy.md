@@ -92,8 +92,8 @@ reasonable simplifications.
     and queue slots, converted buildings still standing.
 
 14. **A map's economic figures are published in its own metadata.** Gate count and rate, yard count,
-    route node count, convertible buildings. Two of three factions have their ceiling set by map
-    authoring, so a map is a balance surface and has to declare itself.
+    route node count, convertible buildings. Both of Meridian's ceilings — income and production —
+    are set by map authoring, so a map is a balance surface and has to declare itself.
 
 15. **A link where something is being harmed carries no freight.** The trigger is **damage dealt to a
     unit or structure that has an owner**, within the link's radius, held for a duration after the
@@ -368,7 +368,8 @@ flattens Concord's entire economic identity. A cell's class also ranks paths onl
 to rise as it paves, the same class has to reach the movement rate. And decision 4 leaves open whether
 an object stamps a footprint or a cost class, which the obstruction rule settles: a wreck stamps a
 **cost class**, because one dead truck is not a wall. All three are recorded as amendments on that
-record and carry this one's `proposed` status.
+record and were accepted with this one on 2026-08-01; A and B are built, and C waits on combat
+producing a wreck.
 
 **The best property here was not designed.** Decision 15 meeting Meridian's already-written economy
 produces a faction whose two income sources move in *opposite* directions along one axis: duty falls as

@@ -117,8 +117,8 @@ to a truck.
 
 #### The corridor's condition is a scale, and only deliberate acts move it
 
-Road quality is one continuous quantity — the cell cost class — running from metalled through graded,
-plain, cratered and up to rubble. Grading moves a stretch up the scale; ordnance moves it down. The
+Road quality is one quantity — the cell cost class, five discrete rungs: metalled, graded, plain,
+mud, rubble. Grading moves a stretch toward metalled; ordnance moves it toward rubble. The
 link's carrying capacity follows the scale, so this single number is where Concord's rising income and
 everyone else's answer to it both live.
 
@@ -131,10 +131,10 @@ The tiers matter, because damaged and destroyed are not the same thing:
 
 | Act | Effect on the road | Effect on the link |
 |---|---|---|
-| **Grading** | Up the scale, permanently and publicly | Capacity rises |
-| **Cratering** — artillery, rockets, charges | Down the scale. Still passable, slower | Capacity falls, proportionally |
+| **Grading** | Toward metalled, permanently and publicly | Capacity rises |
+| **Cratering** — artillery, rockets, charges | Toward rubble. Still passable, slower | Capacity falls, proportionally |
 | **Demolition of a structure** — a bridge, a culvert, a cut | Impassable at that point | Capacity zero until rebuilt |
-| **Repair** | Back up the scale | Capacity recovers |
+| **Repair** | Back toward metalled | Capacity recovers |
 
 **A cratered road is not a closed road.** It carries less and it carries slower, and a player who wants
 a link *shut* has to either destroy a structure on it or go and fight there. That is the distinction
@@ -178,6 +178,10 @@ Three authored site kinds, all neutral and none destructible:
   contested yard finds it worth taking.
 - **Nodes.** The vertices of the route graph. Crossing one is what Meridian assesses duty on
   ([§2.5](#25-the-three-acquisitions)). Otherwise inert.
+
+Bridges are deliberately not a fourth kind: a bridge is a neutral **structure** standing on a link —
+destructible, severable, rebuildable ([§2.6](#26-what-stops-a-link)) — where these three are sites,
+fixed and indestructible.
 
 Gates being indestructible and neutral is the valve that prevents the resource-death stalemate. The
 flow never stops **permanently** — a link stops while it is being fought over
@@ -304,8 +308,8 @@ stops the model collapsing into "shoot near the road, road closes":
 | | Cause | Shape | Clears when |
 |---|---|---|---|
 | **Interdiction** | Fighting — harm to an owned asset near the link | Binary: shut or open | The fighting stops |
-| **Condition** | Deliberate ordnance or grading ([§2.2](#22-the-three-layers-of-a-supply-chain)) | Continuous: capacity scales with the road | Somebody repairs it |
-| **Obstruction** | Wreckage accumulating on the roadway | Continuous, and can reach zero | Wrecks decay, or are cleared |
+| **Condition** | Deliberate ordnance or grading ([§2.2](#22-the-three-layers-of-a-supply-chain)) | Graduated: capacity scales with the road | Somebody repairs it |
+| **Obstruction** | Wreckage accumulating on the roadway | Graduated, and can reach zero | Wrecks decay, or are cleared |
 
 A battle on a road produces the first immediately and the third afterwards. It never produces the
 second.
@@ -489,6 +493,12 @@ Resolution per shot: range check, cooldown check, seeded accuracy roll from a na
 lookup, integer subtract. Nothing else. No physics decides anything ([ADR
 0008](../adr/0008-physics-engine.md) — the engine is *told* the answer).
 
+One addition is expected, recorded here so "nothing else" stays honest: **area of effect is an open
+decision.** The table below describes blast as artillery's damage type and frag as airburst — both
+name area weapons — while the list above resolves a shot against a single target. Whether a shot
+gains an area lookup (more integer reads inside the same resolution, never physics) is settled with
+combat's first pass, not silently by it.
+
 ### 3.2 Damage types and armour classes
 
 Four damage types against five armour classes, as integer percentages:
@@ -614,9 +624,10 @@ grounds that an unannounced loss condition is indistinguishable from a bug.
 
 ## 7. What a map author controls
 
-The economy is authored, which means a map is a balance surface and has to be treated as one. Four
-knobs, and all four are **published in the map's own metadata** so a player can read them before
-choosing to play it:
+The economy is authored, which means a map is a balance surface and has to be treated as one. Five
+knobs, and all five are **published in the map's own metadata** so a player can read them before
+choosing to play it. [ADR 3002](../adr/3002-corridor-economy.md) decision 14 names the first four;
+the bridges row is this document extending the record's list:
 
 | Knob | Effect | Failure if wrong |
 |---|---|---|
@@ -632,8 +643,9 @@ ground of their choosing ([§2.6](#26-what-stops-a-link)), so where the detours 
 fights will be. A corridor with exactly one alternate path per crossing is a map with legible, arguable
 chokepoints; a lattice has none, and a single chain is a map decided by whoever blows the first bridge.
 
-The third and fourth rows are why per-map balance cannot be an afterthought: two of the three factions
-have their ceiling set by map authoring rather than by their own build order. A tournament map set has
+The third and fourth rows are why per-map balance cannot be an afterthought: both of Meridian's
+ceilings — income, from route nodes, and production, from convertible buildings — are set by map
+authoring rather than by its own build order. A tournament map set has
 to state these figures, and a stock map that departs from the reference values has to say so.
 
 ---

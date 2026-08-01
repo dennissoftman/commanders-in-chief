@@ -14,10 +14,10 @@ be chartered in dependency order, and M9 was not.
 | [M0](docs/milestones/m0-foundation.md) | Foundation: workspace, invariants, gate | — | Complete |
 | [M1](docs/milestones/m1-resources.md) | Resource layer: mounts, overlays, containers | M0 | Complete |
 | [M2](docs/milestones/m2-assets.md) | Asset formats: models, terrain, scenarios | M1 | Complete (read path) |
-| [M3](docs/milestones/m3-renderer.md) | Renderer: terrain, models, water, lighting, presentation | M2 | **Complete** — terrain level of detail closed by amendment |
+| [M3](docs/milestones/m3-renderer.md) | Renderer: terrain, models, water, lighting, presentation | M2 | **Complete** — terrain level of detail closed by amendment; a view-driven detail request stays recorded in its Remaining section |
 | [M4](docs/milestones/m4-interface.md) | Interface: layout, widgets, shell | M3 | **Complete** |
 | [M5](docs/milestones/m5-simulation.md) | Simulation: deterministic fixed-tick kernel | M2 | **Complete** |
-| [M6](docs/milestones/m6-gameplay.md) | Gameplay: units, orders, combat, economy | M5, M9, M10 | **In progress** — templates, the first verbs, and pathfinding's grid and search |
+| [M6](docs/milestones/m6-gameplay.md) | Gameplay: units, orders, combat, economy | M5, M10 | **In progress** — templates, the first verbs, and pathfinding's grid and search |
 | [M7](docs/milestones/m7-network.md) | Network: lockstep, replay, desync diagnosis | M5 | Planned |
 | [M8](docs/milestones/m8-tooling.md) | Tooling: map editor, asset pipeline | M2, M4 | Planned |
 | [M9](docs/milestones/m9-audio.md) | Audio: mixer, spatialisation, DSP, music, cues | M1 | Charter met — device layer outstanding |
@@ -26,9 +26,10 @@ be chartered in dependency order, and M9 was not.
 
 M9 and M10 both sit early in the dependency order and were chartered late, which is the honest reason the
 ladder is now a graph rather than a line. Neither needed a renderer or a kernel: audio needs bytes from the
-resource layer, and a language needs nothing at all. Both are things M6 will need in place before it
-starts, and both would have been expensive to retrofit — the audio backend boundary and the script sandbox
-are shapes rather than features.
+resource layer, and a language needs nothing at all. Both would have been expensive to retrofit — the audio
+backend boundary and the script sandbox are shapes rather than features — but only M10 sits on M6's
+critical path, because scripted events reach into gameplay; M6's own charter keeps audio off it
+deliberately.
 
 ## Why the milestones read as mechanics
 

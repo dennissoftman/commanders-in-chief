@@ -58,8 +58,8 @@ across the four damage types in [mechanics.md §3.2](mechanics.md#32-damage-type
 |---|---|---|
 | infantry | 125 | 0.80 |
 | light | 112.5 | 0.89 |
-| structure | 87.5 | 1.14 |
 | heavy | 81.25 | 1.23 |
+| structure | 87.5 | 1.14 |
 | air | 81.25 | 1.23 |
 
 `EHP = health × durability index`. A point of infantry health is worth less than a point of tank
@@ -68,11 +68,16 @@ health, which is correct and is what stops infantry rosters from being priced as
 ### 3.2 Combat value and cost
 
 ```
-DPS   = damage × 30 ÷ cooldown_ticks
+DPS   = damage × accuracy ÷ 100 × 30 ÷ cooldown_ticks
 EHP   = health × durability_index
 value = sqrt(DPS × EHP)
-cost  = 2.5 × value × Σ(modifiers)
+cost  = 2.5 × value × Π(modifiers)
 ```
+
+`Π(modifiers)` is the **product** of the [§3.3](#33-modifiers) column, which is what the worked
+examples have always computed. `accuracy` is [mechanics.md §3.1](mechanics.md#31-the-model)'s seeded
+roll arriving in the price: an integer hit percentage, 100 for every worked example below, so a unit
+that misses is cheaper by exactly what it fails to land.
 
 The square root is doing real work and its consequence should be understood before anyone objects to
 it: it makes **massed cheap units cost-efficient**, because value grows with the square root of
@@ -123,6 +128,14 @@ Targets, because pacing has to be a decision rather than an emergent accident:
 
 The mirror figure falls out of the anchors: `400 health ÷ (40 × 150 / 100) = 6.7 s`. That it lands
 inside the target range without tuning is the check that the anchors are consistent, not a coincidence.
+
+Two rows fail that same check today, recorded rather than smoothed over. **Wrong counter:** a line
+vehicle into a heavy tank is `1200 ÷ (40 × 50 / 100) = 60 s` one-on-one and about 26 s cost-for-cost
+(2.33 line vehicles per 700 credits), both outside the band — so either the band means
+cost-normalised TTK and should say so, or the heavy's anchors move. **Structures:** nothing anchors a
+structure's health, so the fourth row cannot be checked at all until something does. Both wait on the
+first balance pass; the bands stay as written because they are the targets, and a target the anchors
+miss is exactly what this table exists to surface.
 
 ---
 
@@ -225,7 +238,7 @@ These are set by sweeping until the stated target is met, and nobody may hand-pi
 | Salvage recovery cost and wreck decay | Salvage supplying ≤ 30% of Meridian's fielded value at 15:00 |
 | **Interdiction radius and hold duration** | A skirmish that both sides walk away from closing a link for under 30 s; a running battle keeping it shut |
 | **Upstream backlog cap** | A link shut for 60 s returning ≤ 50% of what it would have carried, as a surge |
-| **Link capacity per road condition** | A metalled link carrying ≥ 2× a cratered one, and a plain link never below the gate rate feeding it |
+| **Link capacity per road condition** | A metalled link carrying ≥ 2× the same link cratered to the worst reachable condition, and a plain link never below the gate rate feeding it |
 | **Cratering: damage per munition, and repair cost and time** | An artillery mission costing the attacker less credit than the repair costs the defender, and less time |
 | **Wreck cost class and decay** | A link needing the wreckage of ~a company before it closes, and clearing itself within ~90 s of the last loss |
 | **Bridge health, demolition cost, and rebuild cost and time** | Dropping a crossing costing meaningfully more than cratering. A rebuild long enough that an overwatching opponent gets a real chance to interrupt it, and cheap enough that being interrupted twice is not a conceded match |
@@ -269,9 +282,9 @@ deliberately into **invariants that fail a build** and **statistics that are tra
 | **Severance reroutes** | With a bridge destroyed and an alternate path present, flow continues on the longer path and does *not* accumulate upstream. Upstream accumulation happens only when the graph offers no path at all |
 | **Severance does not interdict** | Demolishing a bridge with no owned asset nearby leaves every link's interdiction state clear. A bridge is neutral, so destroying it severs without triggering the fighting rule |
 | **An interrupted rebuild keeps its progress** | Killing the engineer on a part-built crossing stops work without resetting it, and resuming continues from where it stopped. Destroying the site is what loses the investment — and unlike cancelling, it refunds nothing |
-| **Reachability** | Every template is buildable from a stock start on the reference map — no orphan tech |
+| **Reachability** | Every template is reachable from a stock start on the reference map under its faction's own rules — no orphan tech. A template gated by a mechanic rather than a structure (Meridian's recovered patterns unlock by salvage, by design) passes if its gate is reachable from a stock start, not only if it is stock-buildable |
 | **Economic benchmark** | Income at one, two and three worked yards is within tolerance of §5.2 |
-| **Role coverage** | Every faction has at least one template in every tactical role |
+| **Role coverage** | Every faction has at least one template in every tactical role — the nine roles [faction-mechanics.md §3](faction-mechanics.md#3-rules-that-apply-to-all-three) enumerates |
 
 Credit conservation is the one worth arguing for: an income bug that quietly doubles a rate is
 invisible in play until somebody notices a match is fast, and it is *exactly* the kind of defect this
@@ -314,7 +327,9 @@ The mechanism, stated concretely because it is the one thing here that has to ex
 template set carries each unit's statline and its cost, a test recomputes the cost from the formula,
 and a mismatch beyond ±10% fails unless the template carries an exception field naming a dimension and
 a reason. Changing a cost without recording why is therefore a build failure, and the annotation shows
-up in a diff where a reviewer sees it.
+up in a diff where a reviewer sees it. The exception field is a format addition
+[templates.md](../formats/templates.md) does not yet carry — it arrives with this test, under the
+format's own rule that a field arrives with its consumer.
 
 ### 7.2 When numbers change
 
@@ -326,8 +341,8 @@ up in a diff where a reviewer sees it.
 
 ### 7.3 Where the numbers live
 
-In `templates.json` ([the format](../formats/templates.md)), which is the data the game reads —
-never in this document. This file holds the anchors, the formula, the targets and the method. A
+In `templates.json` ([the format](../formats/templates.md)) — the data the game reads, once M6's
+mechanics bring the number-bearing fields with them — never in this document. This file holds the anchors, the formula, the targets and the method. A
 document holding live values is a document that goes stale silently, and the format already rejects
 unknown fields precisely so a typo is a loud error rather than a balance bug.
 
