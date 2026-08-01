@@ -575,7 +575,9 @@ mod tests {
             crate::ground::GroundRules {
                 maximum_grade: 1.0,
                 water_level: None,
-            },
+                ..crate::ground::GroundRules::default()
+            }
+            .with_sharp_corners(),
         )));
         kernel.add_subsystem(Box::new(Units::new(&templates())));
         kernel
@@ -589,7 +591,9 @@ mod tests {
             crate::ground::GroundRules {
                 maximum_grade: 1.0,
                 water_level: None,
-            },
+                ..crate::ground::GroundRules::default()
+            }
+            .with_sharp_corners(),
         );
         let mut kernel = kernel_on(&terrain);
         kernel
@@ -637,7 +641,9 @@ mod tests {
             crate::ground::GroundRules {
                 maximum_grade: 1.0,
                 water_level: None,
-            },
+                ..crate::ground::GroundRules::default()
+            }
+            .with_sharp_corners(),
         );
         let start = [2.5, 0.5];
         let route = ground.route(start, [6.5, 0.5]);

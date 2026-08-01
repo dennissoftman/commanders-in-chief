@@ -56,45 +56,91 @@ pub const GROUND: &str = "ground";
 /// The cost class of a cell nothing may enter: a cliff, or ground under water.
 pub const IMPASSABLE: u8 = 0;
 
-/// The cost class the derivation gives ordinary walkable ground.
+/// The cost class ADR 3001 decision 3 gives plain ground, and [`GroundRules`]'s default for it.
 ///
-/// The only class the derivation produces, because the terrain says nothing about roads or rubble —
-/// those are *stamps*, and a stamp arrives with the mechanic that applies it. ADR 3001 decision 3
-/// sets plain ground at `1`; its **proposed amendment A** renumbers the ladder so a metalled road
-/// can be cheaper than a field, which moves this constant and nothing else. Deliberately the only
-/// place in the tree that names the number.
+/// A default rather than a rule: the class the derivation assigns is [`GroundRules::plain_class`],
+/// and this is only what that field starts at. Decision 3 sets plain ground at `1`; its **proposed
+/// amendment A** renumbers the ladder so a metalled road can be cheaper than a field, which changes
+/// this number and nothing else — nothing in the search assumes it, because the heuristic keys off
+/// the cheapest class the grid actually holds.
 pub const PLAIN: u8 = 1;
 
-/// The cost of one orthogonal step through a cell of class `1`.
-const ORTHOGONAL: u32 = 10;
-
-/// The cost of one diagonal step through a cell of class `1`: the integer approximation of √2.
-const DIAGONAL: u32 = 14;
-
-/// What the derivation needs to know that the heightfield does not say.
+/// Every coefficient the ground layer runs on: what makes a cell impassable, what a step costs, and
+/// how sharply a route may turn.
+///
+/// **These are settings rather than constants**, and they are folded into the subsystem hash, which
+/// is the reason they are gathered in one place. A coefficient that changes where a unit may walk or
+/// which way it goes changes the simulation — two machines running one match with different grades
+/// are two different games, and a desync report should name the tick they disagreed rather than
+/// leave somebody comparing configuration files.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GroundRules {
     /// The steepest ground a unit may cross, as rise over run.
     ///
-    /// `1.0` is a rise as long as the run — 45° — which is the line this engine calls a cliff.
-    /// One mover class for now, per ADR 3001 decision 3: ground a truck cannot climb is ground
-    /// nobody climbs, and per-class interpretation waits for a mechanic that wants it.
+    /// `1.0` is a rise as long as the run — 45° — which is the line this engine calls a cliff by
+    /// default. One mover class for now, per ADR 3001 decision 3: ground a truck cannot climb is
+    /// ground nobody climbs, and per-class interpretation waits for a mechanic that wants it.
     pub maximum_grade: f64,
     /// The elevation water stands at, or `None` for a map where water blocks nothing.
     ///
     /// Comes from [`Terrain::water_level`], which presentation also floods to — one level, two
     /// readers, so what the player sees as a lake is what the simulation refuses to walk into.
     pub water_level: Option<f64>,
+    /// The cost class the derivation assigns to ground it finds walkable.
+    ///
+    /// The only class the derivation produces, because the terrain says nothing about roads or
+    /// rubble — those are *stamps*, and a stamp arrives with the mechanic that applies it.
+    pub plain_class: u8,
+    /// What one orthogonal step through a cell of class `1` costs.
+    pub orthogonal_step: u32,
+    /// What one diagonal step through a cell of class `1` costs: the integer approximation of √2
+    /// against [`Self::orthogonal_step`], `14` to `10`.
+    pub diagonal_step: u32,
+    /// How far back from a corner a route starts turning, in metres. `0.0` leaves corners sharp.
+    ///
+    /// A route's corners are cell centres, so an unrounded one turns in 45° steps at eight-metre
+    /// intervals and a unit walking it reads as clockwork. See [`Ground::route`] for what the
+    /// rounding does and what it refuses to do.
+    pub corner_radius: f64,
+    /// How many segments each rounded corner is drawn in. `1` is a plain chamfer.
+    ///
+    /// Every extra segment is another waypoint to store, hash and step through, so this buys
+    /// smoothness at a real price and four is where it stops being visible.
+    pub corner_steps: u8,
+}
+
+impl Default for GroundRules {
+    fn default() -> Self {
+        Self {
+            maximum_grade: 1.0,
+            water_level: None,
+            plain_class: PLAIN,
+            orthogonal_step: 10,
+            diagonal_step: 14,
+            corner_radius: 6.0,
+            corner_steps: 4,
+        }
+    }
 }
 
 impl GroundRules {
-    /// The rules a host uses when nothing has authored otherwise: the 45° cliff line, and the
-    /// terrain's own derived water table.
+    /// The rules a host uses when nothing has authored otherwise: the defaults, plus the terrain's
+    /// own derived water table.
     #[must_use]
     pub fn derived(terrain: &Terrain) -> Self {
         Self {
-            maximum_grade: 1.0,
             water_level: Some(f64::from(terrain.water_level())),
+            ..Self::default()
+        }
+    }
+
+    /// The rules with corner rounding switched off, which is what a test asserting on exact
+    /// waypoints wants.
+    #[must_use]
+    pub fn with_sharp_corners(self) -> Self {
+        Self {
+            corner_radius: 0.0,
+            ..self
         }
     }
 }
@@ -114,6 +160,15 @@ pub struct Ground {
     cell_size: f64,
     /// Cost class per cell, row-major. `0` is impassable.
     classes: Vec<u8>,
+    /// The coefficients this grid was derived and is searched under.
+    rules: GroundRules,
+    /// The cheapest class any cell holds, which is what the heuristic may assume and no more.
+    ///
+    /// Kept rather than recomputed because the heuristic asks for it on every cell the search
+    /// touches, and derived from the grid rather than from the rules because a stamp can introduce
+    /// a class cheaper than anything the derivation produced — a graded road being the whole point
+    /// of there being a ladder at all.
+    cheapest_class: u32,
     /// The grid folded to one number, per ADR 3001 decision 8.
     fingerprint: u64,
 }
@@ -173,19 +228,27 @@ impl Ground {
                 classes.push(if too_steep || submerged {
                     IMPASSABLE
                 } else {
-                    PLAIN
+                    rules.plain_class
                 });
             }
         }
 
-        let fingerprint = fingerprint(width, height, cell_size, &classes);
+        let fingerprint = fingerprint(width, height, cell_size, &classes, rules);
         Self {
             width,
             height,
             cell_size,
+            cheapest_class: cheapest(&classes),
             classes,
+            rules,
             fingerprint,
         }
+    }
+
+    /// The coefficients this grid runs on.
+    #[must_use]
+    pub const fn rules(&self) -> &GroundRules {
+        &self.rules
     }
 
     /// Cells along X.
@@ -266,6 +329,20 @@ impl Ground {
     /// The last waypoint is the caller's exact `to` when that point is on the map and its cell was
     /// reached, so an order to a precise position still arrives at that position rather than at the
     /// centre of the cell containing it.
+    ///
+    /// # Corners are rounded, and never through anything
+    ///
+    /// A string-pulled route still turns at cell centres, and on an eight-metre grid that means a
+    /// unit changing direction by 45° on the spot every few strides — which reads as clockwork
+    /// rather than as walking. Each interior corner is therefore cut back by
+    /// [`GroundRules::corner_radius`] and interpolated across
+    /// [`GroundRules::corner_steps`] segments of a quadratic Bézier, the original corner
+    /// serving as the control point.
+    ///
+    /// **Every segment of a rounded corner is checked against the grid, and the corner stays sharp
+    /// if any of them would clip.** That is the whole risk of smoothing a path: the search took care
+    /// not to cut a corner past an obstacle, and a rounding pass that ignored the grid would put it
+    /// straight back — precisely at the inside of the turns a unit makes to get around things.
     #[must_use]
     pub fn route(&self, from: [f64; 2], to: [f64; 2]) -> Vec<[f64; 2]> {
         let (Some(start), Some(goal)) = (self.cell_at(from), self.cell_at(to)) else {
@@ -289,16 +366,86 @@ impl Ground {
         }
 
         let chain = trace(&came_from, start, reached);
-        let mut route: Vec<[f64; 2]> = self
-            .string_pull(&chain)
-            .into_iter()
-            .skip(1)
-            .map(|cell| self.centre_of(cell % self.width, cell / self.width))
+        // The corners are rounded over the *whole* polyline, `from` included, because the first turn
+        // a unit makes is the one out of the cell it is standing in and it is as sharp as any other.
+        // The start is dropped again afterwards: a route says where to go, not where you are.
+        let mut corners: Vec<[f64; 2]> = std::iter::once(from)
+            .chain(
+                self.string_pull(&chain)
+                    .into_iter()
+                    .skip(1)
+                    .map(|cell| self.centre_of(cell % self.width, cell / self.width)),
+            )
             .collect();
-        if let Some(last) = route.last_mut() {
+        if let Some(last) = corners.last_mut() {
             *last = self.destination(to, goal, reached);
         }
+        let mut route = self.round_corners(&corners);
+        route.remove(0);
         route
+    }
+
+    /// Replaces each interior corner with a short interpolated arc, wherever the grid allows one.
+    fn round_corners(&self, corners: &[[f64; 2]]) -> Vec<[f64; 2]> {
+        let radius = self.rules.corner_radius;
+        let steps = u32::from(self.rules.corner_steps);
+        // Written positively so a radius that is not a number falls out as "do not round" rather
+        // than through a negated comparison, which for a partially ordered type reads as though NaN
+        // had been thought about when it had not.
+        let rounds = corners.len() >= 3 && radius > 0.0 && steps > 0;
+        if !rounds {
+            return corners.to_vec();
+        }
+
+        let mut rounded = vec![corners[0]];
+        for index in 1..corners.len() - 1 {
+            let (before, corner, after) = (corners[index - 1], corners[index], corners[index + 1]);
+            // Half the leg at most, so two corners sharing a short leg cannot cut past each other
+            // and turn the route inside out. The entry point also measures from where the arc
+            // *actually* left the previous corner, for the same reason.
+            let entered_at = *rounded.last().unwrap_or(&before);
+            let start = step_toward(
+                corner,
+                entered_at,
+                radius.min(distance(corner, entered_at) / 2.0),
+            );
+            let end = step_toward(corner, after, radius.min(distance(corner, after) / 2.0));
+
+            let arc: Vec<[f64; 2]> = (1..=steps)
+                .map(|step| {
+                    let t = f64::from(step) / f64::from(steps);
+                    quadratic(start, corner, end, t)
+                })
+                .collect();
+
+            // Walkability is checked over the arc as a chain, from where the unit will actually be
+            // when it starts turning. A single failure keeps the sharp corner rather than any
+            // partial rounding, because half a rounded corner is a shape nobody reasoned about.
+            let mut probe = entered_at;
+            let clear = std::iter::once(start)
+                .chain(arc.iter().copied())
+                .all(|point| {
+                    let ok = self.walkable_between(probe, point);
+                    probe = point;
+                    ok
+                });
+            if clear {
+                rounded.push(start);
+                rounded.extend(arc);
+            } else {
+                rounded.push(corner);
+            }
+        }
+        rounded.push(corners[corners.len() - 1]);
+        rounded
+    }
+
+    /// Whether a straight run between two world positions crosses only passable ground.
+    fn walkable_between(&self, from: [f64; 2], to: [f64; 2]) -> bool {
+        let (Some(from), Some(to)) = (self.cell_at(from), self.cell_at(to)) else {
+            return false;
+        };
+        self.walkable_line(self.index(from), self.index(to))
     }
 
     /// The flat index of a cell.
@@ -376,7 +523,12 @@ impl Ground {
                 if diagonal && !(self.passable(nx, y) && self.passable(x, ny)) {
                     continue;
                 }
-                let step = if diagonal { DIAGONAL } else { ORTHOGONAL } * u32::from(class);
+                let step = if diagonal {
+                    self.rules.diagonal_step
+                } else {
+                    self.rules.orthogonal_step
+                }
+                .saturating_mul(u32::from(class));
                 let neighbour = ny * self.width + nx;
                 let candidate = cost[current as usize].saturating_add(step);
                 if candidate < cost[neighbour as usize] {
@@ -393,17 +545,21 @@ impl Ground {
 
     /// The octile distance between two cells, in the same integer units as a step cost.
     ///
-    /// Admissible because it prices every step at the cheapest class there is: no cell can cost less
-    /// than [`PLAIN`] to enter, so no real path can come in under this estimate. That is the one
-    /// thing the value of `PLAIN` is load-bearing for, and why a renumbered ladder must keep the
-    /// cheapest class at `1`.
+    /// Admissible because it prices every step at the **cheapest class the grid actually holds**, so
+    /// no real path can come in under the estimate whatever the ladder is numbered. That is why the
+    /// cheapest class is measured rather than assumed: an estimate priced at class `1` on a grid
+    /// whose cheapest cell is class `3` would overestimate, and an overestimating A\* quietly stops
+    /// returning shortest paths — a bug that looks like "the routes are a bit odd" rather than like
+    /// a failure, and exactly the kind a configurable coefficient would otherwise introduce.
     fn heuristic(&self, from: u32, goal: u32) -> u32 {
         let dx = (from % self.width).abs_diff(goal % self.width);
         let dy = (from / self.width).abs_diff(goal / self.width);
         let (short, long) = (dx.min(dy), dx.max(dy));
-        DIAGONAL
+        self.rules
+            .diagonal_step
             .saturating_mul(short)
-            .saturating_add(ORTHOGONAL.saturating_mul(long - short))
+            .saturating_add(self.rules.orthogonal_step.saturating_mul(long - short))
+            .saturating_mul(self.cheapest_class)
     }
 
     /// Drops every waypoint the unit can walk past, so it crosses open ground in one straight run
@@ -547,6 +703,44 @@ fn offset(value: u32, delta: i32, limit: u32) -> Option<u32> {
     )
 }
 
+/// The distance between two world positions.
+///
+/// Subtraction, multiplication and `sqrt` — all correctly rounded, so this is inside ADR 0007's
+/// permitted set and every machine gets the same number.
+fn distance(from: [f64; 2], to: [f64; 2]) -> f64 {
+    let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
+    (dx * dx + dy * dy).sqrt()
+}
+
+/// The point `along` metres from `from` in the direction of `toward`.
+fn step_toward(from: [f64; 2], toward: [f64; 2], along: f64) -> [f64; 2] {
+    let span = distance(from, toward);
+    if span > 0.0 {
+        let scale = along / span;
+        [
+            from[0] + (toward[0] - from[0]) * scale,
+            from[1] + (toward[1] - from[1]) * scale,
+        ]
+    } else {
+        // Coincident points, or a distance that is not a number. There is no direction to step in,
+        // and staying put is the answer that cannot produce a waypoint at infinity.
+        from
+    }
+}
+
+/// A point on the quadratic Bézier through `start` and `end` with `control` pulling the middle.
+///
+/// Written as the expanded polynomial rather than as nested interpolations: both are correct, and
+/// this one is three multiplies and two adds per axis with no intermediate to reason about.
+fn quadratic(start: [f64; 2], control: [f64; 2], end: [f64; 2], t: f64) -> [f64; 2] {
+    let inverse = 1.0 - t;
+    let (a, b, c) = (inverse * inverse, 2.0 * inverse * t, t * t);
+    [
+        start[0] * a + control[0] * b + end[0] * c,
+        start[1] * a + control[1] * b + end[1] * c,
+    ]
+}
+
 /// Walks the predecessor array back from `reached` to `start`, returning the chain forwards.
 fn trace(came_from: &[u32], start: u32, reached: u32) -> Vec<u32> {
     let mut chain = vec![reached];
@@ -563,13 +757,45 @@ fn trace(came_from: &[u32], start: u32, reached: u32) -> Vec<u32> {
     chain
 }
 
-/// The grid folded to one number.
-fn fingerprint(width: u32, height: u32, cell_size: f64, classes: &[u8]) -> u64 {
+/// The cheapest class any cell holds, floored at one.
+///
+/// Floored because a class of zero is impassable rather than free, and a heuristic multiplied by
+/// zero is a heuristic of zero — admissible, but it turns A\* into Dijkstra and searches the whole
+/// map. An all-impassable grid has no cheapest class at all, and one is the honest answer there
+/// because nothing will be searched anyway.
+fn cheapest(classes: &[u8]) -> u32 {
+    classes
+        .iter()
+        .copied()
+        .filter(|class| *class != IMPASSABLE)
+        .min()
+        .map_or(1, u32::from)
+}
+
+/// The grid folded to one number, coefficients included.
+///
+/// The rules are in here because they decide what the grid *means*: two machines with the same
+/// classes and different step costs will disagree about which route is shortest on the first order
+/// that has a choice, and that disagreement should surface as a divergence on the tick it happened
+/// rather than as two players watching different units take different roads.
+fn fingerprint(width: u32, height: u32, cell_size: f64, classes: &[u8], rules: GroundRules) -> u64 {
     let mut hasher = StateHasher::new();
     hasher.write_u64(u64::from(width));
     hasher.write_u64(u64::from(height));
     hasher.write_f64(cell_size);
     hasher.write_bytes(classes);
+    hasher.write_f64(rules.maximum_grade);
+    match rules.water_level {
+        Some(level) => {
+            hasher.write_bytes(&[1]);
+            hasher.write_f64(level);
+        }
+        None => hasher.write_bytes(&[0]),
+    }
+    hasher.write_bytes(&[rules.plain_class, rules.corner_steps]);
+    hasher.write_u64(u64::from(rules.orthogonal_step));
+    hasher.write_u64(u64::from(rules.diagonal_step));
+    hasher.write_f64(rules.corner_radius);
     hasher.finish()
 }
 
@@ -600,10 +826,15 @@ mod tests {
     }
 
     fn rules() -> GroundRules {
+        // Sharp corners: these fixtures are one metre a cell and assert on exact waypoints, so the
+        // rounding pass -- which is sized in metres and tested separately -- would only obscure what
+        // they are about.
         GroundRules {
             maximum_grade: 1.0,
             water_level: None,
+            ..GroundRules::default()
         }
+        .with_sharp_corners()
     }
 
     fn flat(size: u32) -> Ground {
@@ -611,6 +842,174 @@ mod tests {
             &terrain(size, size, vec![0; (size * size) as usize]),
             rules(),
         )
+    }
+
+    /// The sharpest turn anywhere along a route, as a cosine: `1.0` is dead straight and `-1.0` is a
+    /// reversal, so a *larger* number is a smoother path.
+    fn sharpest_turn(start: [f64; 2], route: &[[f64; 2]]) -> f64 {
+        let points: Vec<[f64; 2]> = std::iter::once(start)
+            .chain(route.iter().copied())
+            .collect();
+        points
+            .windows(3)
+            .map(|window| {
+                let leg = |from: [f64; 2], to: [f64; 2]| {
+                    let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
+                    let length = (dx * dx + dy * dy).sqrt();
+                    if length > 0.0 {
+                        [dx / length, dy / length]
+                    } else {
+                        [0.0, 0.0]
+                    }
+                };
+                let (a, b) = (leg(window[0], window[1]), leg(window[1], window[2]));
+                a[0] * b[0] + a[1] * b[1]
+            })
+            .fold(1.0_f64, f64::min)
+    }
+
+    /// A right-angle detour: flat ground with a bar of raised samples forcing one corner.
+    fn cornered() -> Terrain {
+        let size = 17;
+        let mut elevations = vec![0u16; (size * size) as usize];
+        for y in 0..10 {
+            elevations[(y * size + 8) as usize] = 50;
+        }
+        terrain(size, size, elevations)
+    }
+
+    #[test]
+    fn rounding_a_corner_makes_the_turn_less_sharp() {
+        // The same route twice, from the same grid, differing only in the coefficient. Asserting
+        // against the *sharp* route rather than against a number is what makes this a statement
+        // about rounding instead of a transcription of whatever the code currently emits.
+        let start = [3.5, 1.5];
+        let target = [12.5, 1.5];
+        let sharp = Ground::derive(&cornered(), rules());
+        let round = Ground::derive(
+            &cornered(),
+            GroundRules {
+                corner_radius: 2.0,
+                corner_steps: 4,
+                ..rules()
+            },
+        );
+
+        let sharp_route = sharp.route(start, target);
+        let round_route = round.route(start, target);
+        assert!(sharp_route.len() >= 2, "the fixture needs a corner in it");
+        assert!(
+            round_route.len() > sharp_route.len(),
+            "rounding produced no extra waypoints: {round_route:?}"
+        );
+        assert!(
+            sharpest_turn(start, &round_route) > sharpest_turn(start, &sharp_route),
+            "the rounded route turns as sharply as the unrounded one"
+        );
+        assert_eq!(
+            round_route.last(),
+            sharp_route.last(),
+            "rounding moved the destination"
+        );
+    }
+
+    #[test]
+    fn a_corner_stays_sharp_when_rounding_it_would_clip() {
+        // A radius far larger than the gap the route squeezes through. The cut has to be refused:
+        // the search went out of its way not to clip that corner, and a rounding pass that ignored
+        // the grid would put the clip straight back at exactly the turns that exist to avoid things.
+        let ground = Ground::derive(
+            &cornered(),
+            GroundRules {
+                corner_radius: 40.0,
+                corner_steps: 4,
+                ..rules()
+            },
+        );
+        let start = [3.5, 1.5];
+        let route = ground.route(start, [12.5, 1.5]);
+        assert!(
+            route.len() >= 2,
+            "a route with no interior corner cannot show a corner being refused"
+        );
+
+        let mut previous = start;
+        for waypoint in &route {
+            assert!(
+                ground.walkable_between(previous, *waypoint),
+                "leg {previous:?} -> {waypoint:?} crosses impassable ground"
+            );
+            previous = *waypoint;
+        }
+    }
+
+    #[test]
+    fn a_renumbered_cost_ladder_finds_the_same_route() {
+        // Amendment A in a test: plain ground at class 3 rather than 1. Every step costs three
+        // times as much and the *ranking* is unchanged, so the route must be identical — which is
+        // only true because the heuristic prices itself against the cheapest class the grid holds
+        // rather than assuming that class is 1. An overestimating heuristic would quietly stop
+        // returning shortest paths, and this is the test that would notice.
+        let start = [3.5, 1.5];
+        let target = [12.5, 1.5];
+        let ladder = |plain_class| {
+            Ground::derive(
+                &cornered(),
+                GroundRules {
+                    plain_class,
+                    ..rules()
+                },
+            )
+            .route(start, target)
+        };
+        assert_eq!(ladder(1), ladder(3));
+        assert_eq!(ladder(1), ladder(7));
+    }
+
+    #[test]
+    fn a_coefficient_that_changes_the_game_changes_the_hash() {
+        // Two machines with the same terrain and different coefficients are playing two different
+        // games, and the point of folding the rules into the fingerprint is that they find that out
+        // on tick zero rather than by watching units take different roads.
+        let hash = |rules| {
+            let mut hasher = crate::hash::StateHasher::new();
+            Ground::derive(&cornered(), rules).write_state(&mut hasher);
+            hasher.finish()
+        };
+        let base = rules();
+        assert_ne!(
+            hash(base),
+            hash(GroundRules {
+                maximum_grade: 0.1,
+                ..base
+            })
+        );
+        assert_ne!(
+            hash(base),
+            hash(GroundRules {
+                diagonal_step: 15,
+                ..base
+            })
+        );
+        assert_ne!(
+            hash(base),
+            hash(GroundRules {
+                corner_radius: 2.0,
+                ..base
+            })
+        );
+        assert_ne!(
+            hash(base),
+            hash(GroundRules {
+                plain_class: 3,
+                ..base
+            })
+        );
+        assert_eq!(
+            hash(base),
+            hash(base),
+            "the same rules must agree with themselves"
+        );
     }
 
     #[test]
@@ -655,6 +1054,7 @@ mod tests {
             GroundRules {
                 maximum_grade: 20.0,
                 water_level: Some(5.0),
+                ..GroundRules::default()
             },
         );
         assert_eq!(

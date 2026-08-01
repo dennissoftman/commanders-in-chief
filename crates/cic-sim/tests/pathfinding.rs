@@ -79,6 +79,10 @@ fn rules() -> GroundRules {
     GroundRules {
         maximum_grade: 1.0,
         water_level: Some(40.0),
+        // Eight metres a cell here, so the default corner radius is the shape a real map gets. The
+        // invariant these tests assert -- never standing on impassable ground -- is exactly the one
+        // a rounding pass could break, so it is deliberately left switched on.
+        ..GroundRules::default()
     }
 }
 
