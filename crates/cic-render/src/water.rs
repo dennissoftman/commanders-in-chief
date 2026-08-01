@@ -11,7 +11,9 @@
 //! heightfield to understand a surface it has no use for.
 //!
 //! See [ADR 4002](../../../docs/adr/4002-water-kinds.md) for why the wave train has the shape it has
-//! and why the shading normal is damped by the pixel footprint.
+//! and why the shading normal is damped by the pixel footprint, and
+//! [ADR 4003](../../../docs/adr/4003-reflection-providers.md) for why absorption decides opacity and
+//! what a reflection provider is.
 //!
 //! # Provenance
 //!

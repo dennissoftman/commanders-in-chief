@@ -27,6 +27,7 @@
 //! | `P` | Toggle the per-pass GPU timing printout |
 //! | `V` | Toggle the virtual-texture page cache |
 //! | `J` | Cycle the water: lake, river, ocean |
+//! | `L` | Toggle screen-space reflections in the water |
 //! | `K` | Toggle the captured sky, when one was given |
 //! | `Esc` | Quit |
 //!
@@ -90,8 +91,8 @@ use cic_render::terrain_virtual::{VIRTUAL_PAGE_LAYERS, VirtualPageView};
 use cic_render::view::Projection;
 use cic_render::{
     Action, Antialiasing, DeferredFrame, DisplaySettings, Environment, GpuContext, InputState,
-    LayerMaterial, ModelBatch, ModelInstance, SurfaceRenderer, TerrainGround, TerrainPageCache,
-    TerrainRenderer, TextureImage, WaterBody, WaterKind, WaterSurface, Weather,
+    LayerMaterial, ModelBatch, ModelInstance, ReflectionProvider, SurfaceRenderer, TerrainGround,
+    TerrainPageCache, TerrainRenderer, TextureImage, WaterBody, WaterKind, WaterSurface, Weather,
 };
 use cic_sim::activation::FORCES;
 use cic_sim::units::UNITS;
@@ -1373,6 +1374,35 @@ impl Viewer {
         }
     }
 
+    /// Switches the water between reflecting the sky and reflecting the scene.
+    ///
+    /// Here for a reason the other keys share and this one has the strongest case for: what a
+    /// screen-space reflection *cannot* do is the interesting part, and every one of its three failure
+    /// modes is a motion artefact. Geometry leaving the frame takes its reflection with it as the
+    /// camera pans; a reflection occluded by something nearer pops as the occluder moves; and the
+    /// fade at the screen edge is only judgeable by watching it arrive. A still capture shows a
+    /// plausible reflection and says nothing about any of them.
+    ///
+    /// Costs a shader compile, which is why it is on a key rather than applied per frame.
+    fn toggle_reflections(&mut self) {
+        let Some(active) = &mut self.active else {
+            return;
+        };
+        let next = match active.surface.reflection() {
+            ReflectionProvider::Sky => ReflectionProvider::ScreenSpace,
+            ReflectionProvider::ScreenSpace => ReflectionProvider::Sky,
+        };
+        active.surface.set_reflection(&active.context, next);
+        eprintln!(
+            "reflections: {}",
+            match next {
+                ReflectionProvider::Sky => "sky only",
+                ReflectionProvider::ScreenSpace => "screen-space, falling back to sky",
+            }
+        );
+        active.window.request_redraw();
+    }
+
     /// Rebuilds the water table as the next kind in [`WATER_CYCLE`].
     ///
     /// Here for the same reason the weather and antialiasing keys are, and with a stronger case than
@@ -1737,6 +1767,10 @@ impl ApplicationHandler for Viewer {
                     }
                     if pressed && !event.repeat && code == KeyCode::KeyJ {
                         self.cycle_water();
+                        return;
+                    }
+                    if pressed && !event.repeat && code == KeyCode::KeyL {
+                        self.toggle_reflections();
                         return;
                     }
                     if pressed && let Some(display) = display_change(code, self.display) {

@@ -15,7 +15,7 @@ use cic_assets::Terrain;
 use cic_camera::{CameraIntent, GroundHeight};
 
 use crate::RenderError;
-use crate::deferred::{DeferredFrame, DeferredRenderer, DeferredTargets};
+use crate::deferred::{DeferredFrame, DeferredRenderer, DeferredTargets, ReflectionProvider};
 use crate::display::DisplaySettings;
 use crate::model::ModelBatch;
 use crate::sky::Sky;
@@ -123,6 +123,22 @@ impl SurfaceRenderer {
     #[must_use]
     pub const fn water_layout(&self) -> &wgpu::BindGroupLayout {
         self.deferred.water_layout()
+    }
+
+    /// Which chunk currently answers `reflection_colour` for the water pass.
+    #[must_use]
+    pub const fn reflection(&self) -> ReflectionProvider {
+        self.deferred.reflection()
+    }
+
+    /// Rebuilds the water pipeline from a different reflection provider.
+    ///
+    /// Takes the targets from the surface rather than from the caller, which is the whole reason this
+    /// delegate exists: the provider's bind group is built against a *particular* target set, and a
+    /// caller holding a stale one would bind a scene-colour texture from before the last resize.
+    pub fn set_reflection(&mut self, context: &crate::GpuContext, provider: ReflectionProvider) {
+        self.deferred
+            .set_reflection(context, provider, &self.targets);
     }
 
     /// Returns the layout a [`Sky`] binds its environment through.
