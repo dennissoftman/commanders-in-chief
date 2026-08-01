@@ -3,9 +3,12 @@
 //! ```text
 //! cargo run -p cic-render --example terrain_viewer --release
 //! cargo run -p cic-render --example terrain_viewer --release -- path/to/map.cicmap
+//! cargo run -p cic-render --example terrain_viewer --release -- sky/kloofendal.hdr
 //! ```
 //!
-//! With no argument it generates a terrain, so the viewer runs before any content exists.
+//! With no argument it generates a terrain, so the viewer runs before any content exists. An
+//! argument ending in `.hdr` is read as an equirectangular sky rather than as a map, so the two can
+//! be given in either order and neither needs a flag.
 //!
 //! # Controls
 //!
@@ -23,6 +26,7 @@
 //! | `,` `.` | Step the time of day, held to scrub the sun |
 //! | `P` | Toggle the per-pass GPU timing printout |
 //! | `V` | Toggle the virtual-texture page cache |
+//! | `K` | Toggle the captured sky, when one was given |
 //! | `Esc` | Quit |
 //!
 //! Antialiasing, the resolution scale, the weather and the hour are all here for one reason: each is a
@@ -46,6 +50,14 @@
 //! None of them is in a still. It also shows the cache running out of slots on a large map, which is the
 //! honest state of the residency request today — the ground it loses falls back to the direct blend, and
 //! where that boundary sits is what a view-driven request has to fix.
+//!
+//! `K` is here for a reason of the same shape and a stronger one. A captured sky is *rotated* to put its
+//! own sun where the scene's light is, and whether that rotation is right is a question about two things
+//! in different parts of the frame -- a bright patch of sky, and the direction every shadow falls. A
+//! still shows both and invites the eye to accept them; scrubbing the hour with `,` and `.` moves the
+//! sky and the shadows together, and a disagreement is then impossible to miss. Toggling the sky off and
+//! on is the other half: it is the only way to see what the environment is contributing to the ambient
+//! and the fog, which are changes to the *ground* rather than to the sky.
 
 // The generator clamps before converting and its inputs are bounded constants, so the width casts
 // below cannot lose anything.
@@ -65,12 +77,14 @@ use std::time::Instant;
 
 use cic_assets::model::{Model, ModelImage, ModelMaterial, ModelPrimitive, ModelVertex};
 use cic_assets::scenario::{ObjectPlacement, PlayerSlot, Position, Scenario, TerrainReference};
+use cic_assets::sky::{SkyAsset, SkyLimits, decode_radiance};
 use cic_assets::templates::{Template, TemplateKind, TemplateSet};
 use cic_assets::texture::{TextureAsset, TextureLimits};
 use cic_assets::{MapPackage, PackageLimits, Terrain, TerrainLayer, resolve_terrain_textures};
 use cic_camera::{RtsCamera, RtsCameraProfile};
 use cic_render::detail::TerrainDetailRequest;
 use cic_render::display::{MAX_RESOLUTION_SCALE, MIN_RESOLUTION_SCALE};
+use cic_render::sky::{Sky, SkySettings};
 use cic_render::terrain_virtual::{VIRTUAL_PAGE_LAYERS, VirtualPageView};
 use cic_render::view::Projection;
 use cic_render::{
@@ -145,7 +159,24 @@ const RESOLUTION_SCALE_STEP: f32 = 0.25;
 const TIMING_REPORT_SECONDS: f32 = 1.0;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let (terrain, layer_textures, activation) = if let Some(path) = std::env::args().nth(1) {
+    // Split by extension rather than by position, so the two arguments can be given in either order and
+    // neither needs a flag. A viewer is a tool, and a tool that makes someone remember which slot the
+    // sky goes in is a tool with a worse interface than the one-line match below deserves.
+    let mut map_path = None;
+    let mut sky_path = None;
+    for argument in std::env::args().skip(1) {
+        if argument.to_ascii_lowercase().ends_with(".hdr") {
+            sky_path = Some(argument);
+        } else {
+            map_path = Some(argument);
+        }
+    }
+    let sky = match sky_path {
+        Some(path) => Some(load_sky(&path)?),
+        None => None,
+    };
+
+    let (terrain, layer_textures, activation) = if let Some(path) = map_path {
         // A loaded package carries a scenario but no template set yet, so its placements stay
         // undrawn until packages do — the demo path below is what that will reuse when they do.
         let (terrain, textures) = load_package(&path)?;
@@ -168,12 +199,39 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = Viewer::new(terrain, layer_textures, activation);
+    let mut app = Viewer::new(terrain, layer_textures, activation, sky);
     event_loop.run_app(&mut app)?;
     if let Some(error) = app.failure {
         return Err(error.into());
     }
     Ok(())
+}
+
+/// Reads an equirectangular sky and reports what it will contribute.
+///
+/// Decoded here, at startup, rather than when the window appears. A malformed file is then a message
+/// before anything opens, instead of a black sky in a window that gives no reason for it.
+///
+/// The printed figures are the point of printing anything: `intensity` is the one setting a captured
+/// environment usually needs turned, and the ambient it derives is what says whether it needs turning.
+/// An HDRI whose ambient comes out at 4.0 will wash the scene out, and the number says so before the
+/// frame does.
+fn load_sky(path: &str) -> Result<SkyAsset, Box<dyn Error>> {
+    let bytes = std::fs::read(path)?;
+    let sky = decode_radiance(&bytes, SkyLimits::default())?;
+    let lighting = sky.lighting();
+    eprintln!(
+        "sky: {}x{} from {path}, horizon {:?}, ambient {:?}",
+        sky.width(),
+        sky.height(),
+        lighting
+            .horizon
+            .map(|value| (value * 100.0).round() / 100.0),
+        lighting
+            .ambient
+            .map(|value| (value * 100.0).round() / 100.0),
+    );
+    Ok(sky)
 }
 
 /// A terrain and the block-compressed texture, if any, each of its layers is surfaced with.
@@ -994,6 +1052,11 @@ struct Active {
     static_models: usize,
     simulation: Option<Simulation>,
     water: Vec<WaterBody>,
+    /// The captured sky, uploaded once the device exists.
+    ///
+    /// `None` when no `.hdr` was given, and then every pass takes the analytic branch — so the viewer
+    /// still opens in the state the committed references were captured in.
+    sky: Option<Sky>,
     /// The virtual-texture cache, when `V` has switched it on.
     ///
     /// Off by default, for the reason the environment starts at its own default: the first frame in the
@@ -1027,6 +1090,13 @@ struct Viewer {
     weather: usize,
     /// Seconds since the last per-pass breakdown was printed, or `None` when timing is off.
     timing_countdown: Option<f32>,
+    /// The sky image given on the command line, held across window rebuilds.
+    ///
+    /// The decoded asset rather than the uploaded texture, because a resize replaces the renderer and
+    /// everything built against it, and re-reading the file to recover from that would be absurd.
+    sky_asset: Option<SkyAsset>,
+    /// Whether `K` currently has the captured sky switched on. Ignored with no image loaded.
+    sky_enabled: bool,
     /// A scenario to activate into a kernel and draw, in place of the building scatter.
     ///
     /// `Some` for the generated map, `None` for a loaded package — packages do not carry a template
@@ -1040,6 +1110,7 @@ impl Viewer {
         terrain: Terrain,
         layer_textures: Vec<Option<TextureAsset>>,
         activation: Option<(Scenario, TemplateSet)>,
+        sky_asset: Option<SkyAsset>,
     ) -> Self {
         let [extent_x, extent_y] = terrain.world_extent();
         let camera = RtsCamera::new(
@@ -1064,6 +1135,10 @@ impl Viewer {
             environment: Environment::default(),
             weather: 0,
             timing_countdown: None,
+            // On from the moment a file is given, because loading one and then having to find the key
+            // that switches it on is a worse first run than the toggle is worth.
+            sky_enabled: sky_asset.is_some(),
+            sky_asset,
             activation,
             failure: None,
         }
@@ -1136,6 +1211,21 @@ impl Viewer {
             }
             KeyCode::Comma => self.environment.time_of_day -= HOUR_STEP,
             KeyCode::Period => self.environment.time_of_day += HOUR_STEP,
+            KeyCode::KeyK if !repeat => {
+                if self.sky_asset.is_none() {
+                    eprintln!("sky: no image was given; pass an .hdr on the command line");
+                    return true;
+                }
+                self.sky_enabled = !self.sky_enabled;
+                eprintln!(
+                    "sky: {}",
+                    if self.sky_enabled {
+                        "captured environment"
+                    } else {
+                        "analytic gradient"
+                    }
+                );
+            }
             _ => return false,
         }
         // Wrapped through the accessor rather than left to grow without bound, so the printed hour and
@@ -1412,6 +1502,29 @@ impl ApplicationHandler for Viewer {
             Err(error) => return self.fail(event_loop, error.to_string()),
         };
 
+        // The environment, uploaded once. Aimed at the current sun before the first frame rather
+        // than left at the file's own rotation, so the window opens with the sky and the shadows in
+        // agreement instead of requiring an hour key to be pressed to fix it.
+        let sky = match &self.sky_asset {
+            Some(asset) => match Sky::new(
+                &context,
+                surface.sky_layout(),
+                asset,
+                SkySettings::default(),
+            ) {
+                Ok(mut sky) => {
+                    sky.aim_at(&context, self.environment.sun_direction());
+                    eprintln!(
+                        "sky: bound, turned {:.0} degrees to put its sun on the light",
+                        sky.settings().yaw.to_degrees()
+                    );
+                    Some(sky)
+                }
+                Err(error) => return self.fail(event_loop, error.to_string()),
+            },
+            None => None,
+        };
+
         let static_models = models.len();
         self.active = Some(Active {
             window,
@@ -1422,6 +1535,7 @@ impl ApplicationHandler for Viewer {
             static_models,
             simulation,
             water,
+            sky,
             pages: None,
         });
     }
@@ -1591,11 +1705,26 @@ impl Viewer {
         }
 
         let (width, height) = active.surface.size();
+        // Aimed every frame rather than when the hour key fires, which is the difference between a sky
+        // that tracks a scrubbed day cycle and one that jumps when a key is released. It writes sixteen
+        // bytes to a uniform; the expensive half -- finding the image's own sun -- was done once, at
+        // upload.
+        let sky = active.sky.as_mut().filter(|_| self.sky_enabled);
+        let environment = match sky {
+            Some(sky) => {
+                sky.aim_at(&active.context, self.environment.sun_direction());
+                // Not automatic. The renderer is handed the image and the environment separately, and
+                // this is the line that makes the ground agree with what is behind it -- the ambient
+                // and the fog colour both come off the picture from here on.
+                self.environment.under_sky(sky.lighting())
+            }
+            None => self.environment,
+        };
         // `in_environment` re-derives the light, so the time-of-day keys move the sun rather than only
         // recolouring it. At the default environment this is the frame the references were captured
         // from, which is what keeps a key press the only difference between the window and them.
         let frame = DeferredFrame::new(self.camera.pose(), width, height)
-            .in_environment(self.environment)
+            .in_environment(environment)
             .at_time(self.elapsed)
             .at_jitter(self.frame_ordinal);
         active
@@ -1605,6 +1734,7 @@ impl Viewer {
                 &active.terrain_renderer,
                 &active.models,
                 &active.water,
+                active.sky.as_ref().filter(|_| self.sky_enabled),
                 frame,
             )
             .map_err(|error| error.to_string())?;

@@ -1,25 +1,13 @@
-// The sky, and later the fog and cloud terms that share its reasoning.
+// The fog and cloud terms, which share the sky's reasoning without owning it.
 //
-// A composition chunk. Requires nothing but is required by anything that shades an outdoor surface.
-
-// The sky, as the two colours everything that needs one fades between.
+// A composition chunk. Requires `scene.wgsl` for the camera and `sky.wgsl` for `TAU` and the sky
+// colours, and is required by anything that shades an outdoor surface.
 //
-// Named constants rather than literals at the point of use, because the water pass reflects this same
-// sky. A reflection of a sky that is not the sky on screen is obvious in a screenshot and invisible
-// from any assertion, so the two are made incapable of disagreeing rather than kept in step by hand.
-const SKY_ZENITH: vec3<f32> = vec3<f32>(0.025, 0.04, 0.065);
-const SKY_HORIZON: vec3<f32> = vec3<f32>(0.12, 0.20, 0.30);
-
-// Declared here rather than in `water.wgsl`, which used to own it, because the cloud gradients need it
-// too and every program that has one has the other. A shared constant living in the chunk both callers
-// already depend on is the composition step paying for itself.
-const TAU: f32 = 6.2831853;
-
-// The sky along a world direction, for a reflection. The screen gradient below is the same two colours
-// mixed by height in the frame instead, which is all a background needs.
-fn sky_colour(direction: vec3<f32>) -> vec3<f32> {
-    return mix(SKY_HORIZON, SKY_ZENITH, clamp(direction.z, 0.0, 1.0));
-}
+// The sky itself used to be the first twenty lines of this file — two constants and one mix. It moved
+// to `sky.wgsl` when a captured environment became an alternative to those constants, because that
+// alternative brings a bind group with it and this chunk is composed into passes that would then carry
+// one for no reason. What stayed here is everything the sky *implies* about the air between the camera
+// and a surface, which is a separate question with a separate answer.
 
 // -------------------------------------------------------------------------------------------------
 // Cloud shadows

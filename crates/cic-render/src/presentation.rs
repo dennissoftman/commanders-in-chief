@@ -18,6 +18,7 @@ use crate::RenderError;
 use crate::deferred::{DeferredFrame, DeferredRenderer, DeferredTargets};
 use crate::display::DisplaySettings;
 use crate::model::ModelBatch;
+use crate::sky::Sky;
 use crate::terrain::TerrainRenderer;
 use crate::water::WaterBody;
 
@@ -122,6 +123,15 @@ impl SurfaceRenderer {
     #[must_use]
     pub const fn water_layout(&self) -> &wgpu::BindGroupLayout {
         self.deferred.water_layout()
+    }
+
+    /// Returns the layout a [`Sky`] binds its environment through.
+    ///
+    /// Stable across a resize, unlike the renderer behind it — which is exactly why a caller can build
+    /// its sky once and keep it. See [`DeferredRenderer::render`].
+    #[must_use]
+    pub const fn sky_layout(&self) -> &wgpu::BindGroupLayout {
+        self.deferred.sky_layout()
     }
 
     /// Returns the format the last pass writes.
@@ -260,6 +270,7 @@ impl SurfaceRenderer {
         terrain: &TerrainRenderer,
         models: &[ModelBatch],
         water: &[WaterBody],
+        sky: Option<&Sky>,
         frame: DeferredFrame,
     ) -> Result<(), RenderError> {
         // Every non-success case here is a "skip this frame" rather than an error. A resize, a
@@ -301,7 +312,7 @@ impl SurfaceRenderer {
         self.deferred
             .set_frame(context, terrain, models, water, frame)?;
         self.deferred
-            .render(context, terrain, models, water, &self.targets, &view);
+            .render(context, terrain, models, water, sky, &self.targets, &view);
         // Presenting is the queue's operation in this API version, not the texture's.
         context.queue().present(surface_frame);
         Ok(())

@@ -1,6 +1,7 @@
 // The water surface: a bounded plane with procedural waves.
 //
-// A composition chunk. Requires `scene.wgsl`, `shadow.wgsl`, `atmosphere.wgsl` and `reflection.wgsl` --
+// A composition chunk. Requires `scene.wgsl`, `shadow.wgsl`, `sky.wgsl`, `atmosphere.wgsl` and
+// `reflection.wgsl` --
 // which is the whole reason composition exists. Before it, water had to share one file with the lighting
 // and composite passes to reach `shadow_visibility` and `world_from_depth`, because WGSL has no include
 // mechanism.
@@ -31,7 +32,7 @@ struct Water {
 @group(1) @binding(0) var<uniform> water: Water;
 
 const WATER_WAVE_COUNT: i32 = 5;
-// `TAU` comes from `atmosphere.wgsl`, which every program composing this one also composes.
+// `TAU` comes from `sky.wgsl`, which every program composing this one also composes.
 
 // Successive wave directions are advanced by the golden angle.
 //
@@ -55,6 +56,20 @@ const WATER_DIRECT_FLOOR: f32 = 0.05;
 // Water's reflectance at normal incidence. Everything about how water reads follows from this being
 // small: from overhead it is almost entirely transmissive, and at a grazing angle almost a mirror.
 const WATER_F0: f32 = 0.02;
+
+// RMS slope of the wave train, in units of crest height over dominant wavelength.
+//
+// A derived figure rather than a tuned one, and the derivation is why it is a single constant. Each of
+// the five components has amplitude `height * weights[i]` and wavenumber `TAU / (length * lengths[i])`,
+// and the two tables are built so that `weights[i] / lengths[i]` is the same 0.426 for all five --
+// which is exactly the statement that they share a steepness. So every component contributes an equal
+// slope of `0.426 * TAU * height / length`, and five independent sinusoids sum in quadrature to
+// `sqrt(5 / 2)` of one: `0.426 * 6.283 * 1.581 = 4.23`.
+const WATER_SLOPE_RMS: f32 = 4.23;
+
+// The reflection half-angle a fully rough surface spans, in radians. About twenty degrees, which is the
+// lobe the gloss exponents below describe at the rough end.
+const WATER_ROUGHNESS_CONE: f32 = 0.35;
 
 // Peak glitter strength. Deliberately above one: the sun's reflection is the brightest thing in a
 // daylit scene, and the HDR target and the composite's tone curve exist so a value like this rolls off
@@ -220,7 +235,21 @@ fn water_fragment(input: WaterVertexOutput) -> @location(0) vec4<f32> {
     // dark hole in the terrain.
     let incidence = clamp(dot(normal, view_direction), 0.0, 1.0);
     let fresnel = WATER_F0 + (1.0 - WATER_F0) * pow(1.0 - incidence, 5.0);
-    let reflected = reflection_colour(input.world_position, normal, view_direction);
+    // How wide a cone this surface reflects into, which the sky then averages over. Two contributions,
+    // and against the analytic sky neither mattered — a gradient in one variable averages to its own
+    // centre — so both arrived with the captured one.
+    //
+    // The material's roughness is the smaller. It is deliberately low on water, which is why a lake
+    // mirrors at all.
+    //
+    // The wave *slope* is the larger, and leaving it out is what renders a lake as coloured speckle:
+    // neighbouring pixels then take single texels ten degrees apart, one off the horizon and the next
+    // off the zenith. The five components are built at constant steepness, so each contributes the same
+    // slope and the RMS of the sum is `WATER_SLOPE_RMS * height / wavelength`; a mirror doubles any
+    // angle it reflects, hence the two.
+    let slope = WATER_SLOPE_RMS * water.waves.x / max(water.waves.y, 0.001);
+    let cone = max(clamp(water.waves.w, 0.0, 1.0) * WATER_ROUGHNESS_CONE, slope * 2.0);
+    let reflected = reflection_colour(input.world_position, normal, view_direction, cone);
 
     // Fogged like any other surface, and before the alpha is decided. Water that ignores fog while the
     // shore beside it fades out is the most conspicuous way to break a foggy scene.

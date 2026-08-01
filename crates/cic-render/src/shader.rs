@@ -46,6 +46,7 @@ const CHUNKS: &[(&str, &str)] = &[
     ("scene", include_str!("shaders/scene.wgsl")),
     ("scenery", include_str!("shaders/scenery.wgsl")),
     ("shadow", include_str!("shaders/shadow.wgsl")),
+    ("sky", include_str!("shaders/sky.wgsl")),
     ("taa", include_str!("shaders/taa.wgsl")),
     ("terrain_ao", include_str!("shaders/terrain_ao.wgsl")),
     (
@@ -92,7 +93,9 @@ pub const PROGRAMS: &[Program] = &[
     // Live: each of these is bound to a pipeline.
     Program {
         name: "lighting",
-        chunks: &["scene", "shadow", "atmosphere", "lighting"],
+        // `sky` before `atmosphere`, which takes `TAU` and the horizon colour from it, and before
+        // `lighting`, which asks it what a pixel with no geometry behind it shows.
+        chunks: &["scene", "shadow", "sky", "atmosphere", "lighting"],
         staged: false,
     },
     Program {
@@ -112,9 +115,16 @@ pub const PROGRAMS: &[Program] = &[
     },
     Program {
         name: "water",
-        // `reflection` after `atmosphere`, because it calls `sky_colour` from it, and before `water`,
+        // `reflection` after `sky`, because it calls `sky_reflection` from it, and before `water`,
         // which calls `reflection_colour`.
-        chunks: &["scene", "shadow", "atmosphere", "reflection", "water"],
+        chunks: &[
+            "scene",
+            "shadow",
+            "sky",
+            "atmosphere",
+            "reflection",
+            "water",
+        ],
         staged: false,
     },
     Program {
@@ -257,7 +267,7 @@ mod tests {
         let staged = PROGRAMS.iter().filter(|entry| entry.staged).count();
         assert_eq!(live, 12, "live programs");
         assert_eq!(staged, 3, "staged programs");
-        assert_eq!(CHUNKS.len(), 22);
+        assert_eq!(CHUNKS.len(), 23);
     }
 
     #[test]

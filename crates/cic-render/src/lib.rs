@@ -24,6 +24,11 @@
 //! - **Scenery sway** ([`scenery`]), the wind model a plant's vertices are displaced by. Written from
 //!   scratch with every constant derived in the file; see [LICENSING.md](../../../LICENSING.md) for why
 //!   that is stated rather than assumed.
+//! - **The sky** ([`sky`]), either the two-colour analytic gradient this renderer has always drawn or a
+//!   captured equirectangular environment behind and reflected in it. Its own bind group and its own
+//!   WGSL chunk, so which of the two is in force is one branch in one file — and so the ambient and the
+//!   fog colour can be measured off the image rather than left disagreeing with it. See
+//!   [ADR 4001](../../../docs/adr/4001-hdri-sky.md).
 //! - **Water** ([`water`]), a bounded plane with procedural waves, blended into the scene before tone
 //!   mapping. Its shoreline comes from the depth buffer rather than from an authored outline, so a
 //!   rectangle plus a heightfield already produce an arbitrarily shaped shore.
@@ -75,6 +80,7 @@ pub mod scene;
 pub mod scenery;
 pub mod shader;
 pub mod shadow;
+pub mod sky;
 pub mod terrain;
 pub mod terrain_page;
 pub mod terrain_virtual;
@@ -101,6 +107,7 @@ pub use scene::{TerrainFrame, capture_terrain, render_terrain_into};
 pub use scenery::{SwayProfile, sway_phase};
 pub use shader::{PROGRAMS, Program, compose};
 pub use shadow::{CASCADE_COUNT, Cascade, ShadowedBounds, fit_cascades};
+pub use sky::{Sky, SkySettings};
 pub use terrain::{
     Animation, DirectionalLight, LayerAlbedo, LayerColour, LayerMaterial, TerrainRenderer,
 };

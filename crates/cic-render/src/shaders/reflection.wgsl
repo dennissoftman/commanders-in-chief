@@ -1,6 +1,6 @@
 // What a surface sees looking out along its mirror direction.
 //
-// A composition chunk. Requires `atmosphere.wgsl` for `sky_colour`, and must follow it.
+// A composition chunk. Requires `sky.wgsl` for `sky_reflection`, and must follow it.
 //
 // # Why this is one function and not three lines at each site
 //
@@ -16,8 +16,11 @@
 // One function is the seam: a provider substitutes this chunk, keeps the signature, and both callers
 // follow.
 //
-// This is deliberately the analytic sky and nothing more. It is what the renderer already did, moved,
-// so no committed reference shifts.
+// **That seam has now been used once, and it held.** A captured environment is exactly the second
+// answer it was written for, and wiring it took editing this function and nothing above it — the water
+// pass reflects an HDRI without knowing one exists. What the change did add is a `cone` parameter,
+// because the analytic sky had no detail for a spread lobe to average and a captured one has nothing
+// but.
 //
 // # The two call sites, one of which is not here yet
 //
@@ -32,12 +35,13 @@
 fn reflection_colour(
     world_position: vec3<f32>,
     normal: vec3<f32>,
-    view_direction: vec3<f32>
+    view_direction: vec3<f32>,
+    cone: f32
 ) -> vec3<f32> {
-    // `world_position` is unused by the analytic sky, which depends only on direction. It is in the
+    // `world_position` is unused by either sky, both of which depend only on direction. It is in the
     // signature because every provider that is not the sky needs it -- a trace needs an origin, and a
     // probe needs to know which one it is nearest -- and adding a parameter later means editing the
     // callers this function exists to keep from being edited.
     _ = world_position;
-    return sky_colour(reflect(-view_direction, normal));
+    return sky_reflection(reflect(-view_direction, normal), cone);
 }

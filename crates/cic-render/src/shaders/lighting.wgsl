@@ -1,6 +1,6 @@
 // The deferred lighting resolve: one fullscreen pass over the G-buffer.
 //
-// A composition chunk. Requires `scene.wgsl`, `shadow.wgsl` and `atmosphere.wgsl`.
+// A composition chunk. Requires `scene.wgsl`, `shadow.wgsl`, `sky.wgsl` and `atmosphere.wgsl`.
 //
 // Lighting is deferred because the shadow and occlusion terms are screen-space: each needs the whole
 // depth buffer resolved before any pixel can be lit, which a forward pass cannot provide.
@@ -32,10 +32,9 @@ fn lighting_fragment(input: FullscreenOutput) -> @location(0) vec4<f32> {
     let pixel = vec2<i32>(input.position.xy);
     let coverage = textureLoad(g_coverage, pixel, 0).r;
     if (coverage < 0.5) {
-        // Pixel y grows downward, so this runs from the zenith at the top of the frame to the horizon
-        // at the bottom.
-        let horizon = clamp(input.position.y / camera.viewport.y, 0.0, 1.0);
-        return vec4<f32>(mix(SKY_ZENITH, SKY_HORIZON, horizon), 1.0);
+        // Nothing was drawn here, so this pixel is the sky. What that means — a screen gradient or a
+        // captured environment sampled along the view ray — is `sky.wgsl`'s question, not this pass's.
+        return vec4<f32>(sky_background(input.position.xy), 1.0);
     }
     let world = world_at(pixel);
     let normal_roughness = textureLoad(g_normal, pixel, 0);
