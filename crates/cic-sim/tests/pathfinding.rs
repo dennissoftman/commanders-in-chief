@@ -15,78 +15,16 @@
 // not move much", which is a different and weaker claim.
 #![allow(clippy::float_cmp)]
 
+mod common;
+
 use cic_assets::templates::{Template, TemplateKind, TemplateSet};
 use cic_assets::terrain::Terrain;
 use cic_sim::command::{Command, PlayerId};
-use cic_sim::ground::{Ground, GroundRules};
+use cic_sim::ground::Ground;
 use cic_sim::kernel::{Kernel, KernelConfig, first_divergence};
 use cic_sim::units::{
     AvoidanceRules, UNITS, Units, move_command, move_group_command, spawn_command,
 };
-
-/// Samples per axis. Sixty-five samples at eight metres is a 512-metre map — a quarter of the
-/// generated demo's, big enough to have separate regions and small enough to run in a unit test.
-const SAMPLES: u32 = 65;
-
-/// Metres between samples, matching the demo terrain's spacing.
-const SPACING: f32 = 8.0;
-
-/// A rough heightfield: two interpolated octaves of value noise, in integers throughout, so every
-/// machine builds the identical terrain to compare against.
-///
-/// **Interpolated matters.** A lattice sampled without it puts a cliff on every lattice boundary,
-/// which makes a map of sealed pockets rather than a landscape — the first version of this fixture
-/// did exactly that and seven of twelve units had nowhere at all to walk. Hills that *rise* mean
-/// most ground is connected and the steep parts are features on it.
-fn rough_terrain() -> Terrain {
-    let mut elevations = Vec::with_capacity((SAMPLES * SAMPLES) as usize);
-    for y in 0..SAMPLES {
-        for x in 0..SAMPLES {
-            // Amplitudes are chosen against the grade the rules below allow: eight metres of rise
-            // per eight-metre cell. The coarse octave climbs about ten per sample at its steepest
-            // and the fine one about six, so slopes straddle the threshold instead of sitting
-            // entirely on one side of it.
-            let height = octave(x, y, 16, 160) + octave(x, y, 4, 24);
-            elevations.push(u16::try_from(height).unwrap_or(u16::MAX));
-        }
-    }
-    Terrain::new(SAMPLES, SAMPLES, SPACING, 1.0, elevations, Vec::new()).expect("a valid terrain")
-}
-
-/// One octave: a lattice of hashed values every `period` samples, bilinearly interpolated.
-///
-/// The interpolation is a weighted sum divided once, so it stays exact in integers and no rounding
-/// choice has to be pinned.
-fn octave(x: u32, y: u32, period: u32, amplitude: u32) -> u32 {
-    let (cell_x, cell_y) = (x / period, y / period);
-    let (fx, fy) = (x % period, y % period);
-    let corner = |dx: u32, dy: u32| mix(cell_x + dx, cell_y + dy) % amplitude;
-    let (top_left, top_right) = (corner(0, 0), corner(1, 0));
-    let (bottom_left, bottom_right) = (corner(0, 1), corner(1, 1));
-    let (gx, gy) = (period - fx, period - fy);
-    (top_left * gx * gy + top_right * fx * gy + bottom_left * gx * fy + bottom_right * fx * fy)
-        / (period * period)
-}
-
-/// A small integer avalanche. Not a random stream — nothing here reaches simulation state, and a
-/// fixture that changed between runs would make a failure impossible to reproduce.
-fn mix(x: u32, y: u32) -> u32 {
-    let mut value = x.wrapping_mul(0x9E37_79B9) ^ y.wrapping_mul(0x85EB_CA6B);
-    value ^= value >> 15;
-    value = value.wrapping_mul(0xC2B2_AE35);
-    value ^ (value >> 13)
-}
-
-fn rules() -> GroundRules {
-    GroundRules {
-        maximum_grade: 1.0,
-        water_level: Some(40.0),
-        // Eight metres a cell here, so the default corner radius is the shape a real map gets. The
-        // invariant these tests assert -- never standing on impassable ground -- is exactly the one
-        // a rounding pass could break, so it is deliberately left switched on.
-        ..GroundRules::default()
-    }
-}
 
 fn templates() -> TemplateSet {
     TemplateSet {
@@ -117,7 +55,7 @@ fn kernel_avoiding(terrain: &Terrain, avoidance: AvoidanceRules) -> Kernel {
         seed: 4,
         ticks_per_second: 30,
     });
-    kernel.add_subsystem(Box::new(Ground::derive(terrain, rules())));
+    kernel.add_subsystem(Box::new(Ground::derive(terrain, common::rules())));
     kernel.add_subsystem(Box::new(Units::new(&templates()).with_rules(avoidance)));
     kernel
 }
@@ -153,7 +91,7 @@ fn the_fixture_is_ground_worth_pathing_over() {
     // and a map with everything blocked would satisfy them by having nobody move. Both failure
     // modes are the same one — a fixture that cannot fail — so the fixture asserts its own shape
     // before anything is asserted against it.
-    let ground = Ground::derive(&rough_terrain(), rules());
+    let ground = Ground::derive(&common::rough_terrain(), common::rules());
     let cells = (ground.width() * ground.height()) as usize;
     let blocked = (0..ground.height())
         .flat_map(|y| (0..ground.width()).map(move |x| (x, y)))
@@ -167,8 +105,8 @@ fn the_fixture_is_ground_worth_pathing_over() {
 
 #[test]
 fn no_unit_ever_stands_on_impassable_ground() {
-    let terrain = rough_terrain();
-    let ground = Ground::derive(&terrain, rules());
+    let terrain = common::rough_terrain();
+    let ground = Ground::derive(&terrain, common::rules());
     let starts = scattered_starts(&ground, 12);
     assert_eq!(starts.len(), 12, "the fixture should offer twelve starts");
 
@@ -225,8 +163,8 @@ fn no_unit_ever_stands_on_impassable_ground() {
 
 #[test]
 fn a_crowded_map_replays_identically() {
-    let terrain = rough_terrain();
-    let ground = Ground::derive(&terrain, rules());
+    let terrain = common::rough_terrain();
+    let ground = Ground::derive(&terrain, common::rules());
     let starts = scattered_starts(&ground, 16);
 
     let script: Vec<Command> = starts
@@ -330,8 +268,8 @@ fn a_crowd_ordered_to_one_point_stops_standing_in_itself() {
     // muster point is close enough to be pushed into, and deleting the grid check was measured
     // leaving this test green. `a_crowd_pressed_against_the_terrain_is_never_pushed_over_it` is the
     // one that can fail on it.
-    let terrain = rough_terrain();
-    let ground = Ground::derive(&terrain, rules());
+    let terrain = common::rough_terrain();
+    let ground = Ground::derive(&terrain, common::rules());
     let starts = scattered_starts(&ground, 16);
     let (open, clear) = musters(&ground, 3)
         .into_iter()
@@ -400,8 +338,8 @@ fn a_crowd_pressed_against_the_terrain_is_never_pushed_over_it() {
     // The open-ground crowd above cannot make this statement and was measured proving that it
     // cannot: with the grid check deleted it still passed, because nothing there ever pushed
     // anybody near anything.
-    let terrain = rough_terrain();
-    let ground = Ground::derive(&terrain, rules());
+    let terrain = common::rough_terrain();
+    let ground = Ground::derive(&terrain, common::rules());
     let starts = scattered_starts(&ground, 16);
     let (tight, blocked) = musters(&ground, 3)
         .into_iter()
@@ -473,8 +411,8 @@ fn one_group_order_beats_sixteen_orders_to_the_same_point() {
     // The comparison is the same crowd, the same map and the same tick budget, differing only in
     // whether the destination was one point or a formation — so the number below is about the
     // mechanism rather than about a tolerance somebody chose.
-    let terrain = rough_terrain();
-    let ground = Ground::derive(&terrain, rules());
+    let terrain = common::rough_terrain();
+    let ground = Ground::derive(&terrain, common::rules());
     let starts = scattered_starts(&ground, 16);
     let (open, clear) = musters(&ground, 3)
         .into_iter()

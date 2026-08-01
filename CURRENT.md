@@ -443,7 +443,9 @@ numbers is the only part of this a still image cannot show. **And the scouts pat
 rather than as six units**: each side's three are sent to the next corner by one `move_group` order,
 so they arrive in the shape they set out in instead of in a pile, and a **plate is drawn on the
 ground at every unit's slot** — which is the formation made visible, before anybody reaches it and
-gone once they have. The kernel advances at
+gone once they have. The demo also **drags a facing** on every order, standing in for the mouse the
+viewer does not have: each side turns its line to face the leg it is about to march, which is the
+part of this that no still image reports. The kernel advances at
 its fixed 30 Hz from the accumulator whatever the frame rate does, and the orders are host-side
 inputs of exactly the shape a network session would feed.
 
@@ -630,6 +632,27 @@ efficiently", and it is a one-line sort rather than a packing algorithm.
 The measurement is the point: sixteen units sent to one cell **as a group** end with **zero** of a
 hundred and twenty pairs overlapping, against **twelve** for the same crowd sent by sixteen separate
 orders.
+
+**Two amendments to that record landed with it.** A group order now carries a **facing the player
+drags** — the gesture *Command & Conquer 3* and *Red Alert 3* use to choose how a squad forms up —
+so a line can be arranged for a heading rather than only carried to a point. A plain click still
+translates the shape exactly; nothing rearranges a formation nobody asked to have rearranged. The
+facing is a **direction rather than an angle**, which is what keeps trigonometry out of the kernel:
+the rotation from one unit vector to another is their complex quotient, four multiplies, and the
+promise that `cic_sim::units` "needs no trigonometry until something wants a facing angle" survived
+something wanting a facing. And a group now **marches at the pace of its slowest member**, so a
+column ordered together does not string out — held on the *base* speed, so a road still speeds the
+whole column rather than pulling it apart again.
+
+**And the method is measured rather than argued about**, which is the answer to "how do we know this
+is the right one". `cic-sim/tests/formation.rs` sends an eight-unit squad to every eleventh passable
+cell of the rough map and counts what happens to the shape: **2612 of 2728 slots — 95.7% — come
+through as a pure translation**, and the slots that move are *exactly* the ones the terrain refused,
+none others. A compact box laid over the same suite needs **72 repairs against the carried shape's
+116**, so keeping the player's arrangement costs about **1.6 times** the repair of the tightest
+packing there is. That is the trade in two numbers, and the suite is the harness a different method
+would be scored on. What it cannot settle is whether it *looks* like an army moving; the viewer
+draws the slots so there is something to watch.
 
 **The economy is decided, and so is the cost ladder.** Denys accepted
 [ADR 3002](docs/adr/3002-corridor-economy.md) on 2026-08-01, together with the three amendments it

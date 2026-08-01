@@ -24,9 +24,25 @@ consumers exactly as the deferral intended.
   re-placed **widest member first**, so the object that has the hardest time fitting gets first
   refusal on the roomy ground. Sixteen units sent to one cell as a group end with **zero**
   overlapping pairs against twelve for sixteen separate orders, which closes the limitation
-  [ADR 3001](../adr/3001-pathfinding.md) decision 10 recorded against itself. What is left on this
-  line is *attack*, *attack-move*, *hold* and *patrol* — order kinds that arrive with combat — and
-  selection itself, which is input rather than simulation. The first slice, below, was spawn, move
+  [ADR 3001](../adr/3001-pathfinding.md) decision 10 recorded against itself.
+
+  Two amendments to that record landed with it. **A group order carries a facing the player drags**,
+  so the squad can be arranged for a heading rather than only carried to a point — and a plain click
+  still translates the shape exactly, because rearranging a formation nobody asked to have
+  rearranged is the thing the record exists to avoid. The facing is a *direction*, not an angle, so
+  no trigonometry enters the kernel to do it. And **a group marches at the pace of its slowest
+  member**, so a column ordered together does not string out; the ground class still multiplies that
+  pace, so a road speeds the whole column rather than pulling it apart again.
+
+  How good the method *is* is measured rather than argued: over every eleventh passable cell of the
+  rough test map, **95.7% of slots come through as a pure translation** and the only ones that move
+  are the ones the terrain refused. The comparison is a compact box laid over the same suite, which
+  needs about two-thirds of the repair — so carrying a shape costs roughly **1.6 times** the repair
+  of the tightest packing there is and keeps the player's arrangement 96% of the time. That suite is
+  the harness any alternative method would be scored against.
+
+  What is left on this line is *attack*, *attack-move*, *hold* and *patrol* — order kinds that arrive
+  with combat — and selection itself, which is input rather than simulation. The first slice, below, was spawn, move
   and stop, as `cic_sim::units`: command payloads decoded by the
   gameplay layer (the kernel keeps them opaque), ownership checked with rejections *counted and
   hashed* so an ignored order is visible rather than silent drift, and straight-line movement in the

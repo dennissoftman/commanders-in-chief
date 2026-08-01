@@ -1,7 +1,10 @@
 # ADR 3003: Formation movement — the shape a group is already in, carried to where it is sent
 
 - Status: accepted, implemented — direction set by Denys on 2026-08-02, built the same day as
-  `cic_sim::formation` and the `move_group` verb.
+  `cic_sim::formation` and the `move_group` verb. **Two amendments, both accepted and both built**,
+  from the same direction the day it landed: **A** gives a group order a facing the player drags,
+  which supersedes decision 6; **B** holds a column to the pace of its slowest member, which closes
+  the consequence this record left open.
 
 ## Context
 
@@ -67,6 +70,9 @@ no heading, so no part of this may need one.
    *drag-to-face* order is a later verb if one is ever wanted, and it would be an addition rather
    than a change.
 
+   **Superseded by amendment A**, which is the addition this clause predicted — and it was an
+   addition rather than a change: a *click* still does exactly what this says.
+
 7. **A selection is a set, not a list.** The named identifiers are sorted and deduplicated before
    anything is computed, so the answer depends on *who* was selected and not on the order a client's
    selection happened to iterate in. Two clients that agree about the selection then agree about
@@ -127,8 +133,92 @@ spacing slightly; it is a constant because the alternative is a knob whose only 
   the order lands — not per tick. At the group sizes an RTS selects this is not measurable.
 - The demo viewer issues group orders and draws a plate at each slot, so the formation is legible
   before it arrives. That is presentation reading simulation state and adding nothing to it.
-- **Still not here**: a facing for the formation (decision 6), and *attack-move* and *patrol*, which
-  are order kinds rather than movement and belong with combat. A group order also does not keep the
-  group together *en route* — each member walks its own route at its own speed, so a mixed-speed
-  group arrives strung out. Matching pace to the slowest member is a real want and a separate
-  decision, because it is about what an order *means* rather than about where it ends.
+- **Still not here**: *attack-move* and *patrol*, which are order kinds rather than movement and
+  belong with combat, and **selection**, which is input rather than simulation. The two things this
+  list named as missing when it was written — a facing, and keeping the group together — are the two
+  amendments below.
+
+## Amendments A and B — accepted, and both built
+
+Both came out of the same conversation as the record itself, on 2026-08-02, and neither reverses a
+decision: A is the addition decision 6 predicted, and B is the consequence this record listed as
+outstanding.
+
+### A. A group order carries a facing, and the player drags it
+
+**What the record got right and what it left short.** Decision 6 declined rotation because "a facing
+would need an input the command does not carry" — which was true of the verb as written, and is a
+statement about the verb rather than about the mechanic. Denys asked for the thing *Command &
+Conquer 3* and *Red Alert 3* have, where holding the mouse and dragging chooses how the squad forms
+up. That is the input decision 6 was missing.
+
+**The order gains a facing**, as a **direction vector** rather than an angle. The shape is then
+arranged for that heading instead of for the one the group happens to be marching on: it is rotated
+by the turn that carries the direction of travel onto the dragged direction. A line abreast of an
+eastward march, dragged north, arrives abreast of north.
+
+- **A click is untouched.** No drag is no facing, and no facing is the pure translation decision 2
+  describes. Nothing in this amendment can rearrange a formation the player did not ask it to, which
+  is the whole reason it is an addition rather than a change.
+- **A vector, not an angle, and this is the interesting part.** Turning the drag into an angle would
+  need `atan2` on the host and a sine and cosine in the kernel — all three refused by
+  [ADR 0007](0007-simulation-arithmetic.md) decision 3 — to arrive at exactly the number that was
+  already in hand. The rotation from one unit vector to another *is* their complex quotient:
+  `to × conj(from)` is the `(cos, sin)` of the difference, and applying it is four multiplies. Two
+  square roots, two divisions, and **no trigonometry enters the crate**. The promise in
+  `cic_sim::units` that it "needs no trigonometry until something wants a facing angle" survives
+  something wanting a facing.
+- **A drag of no length is a click**, and so is one that is not a number. Both fall out of the
+  normalisation rather than being special-cased — the first version guarded them twice, and the
+  second guard was measured changing nothing, which is the definition of a rule in two places.
+
+**What this deliberately is not.** *Red Alert 3*'s drag also sets the *width* of a line the squad
+forms into, which is a **generated** formation and is what decision 2 declines. The fork is worth
+naming because it is a cheap one to take later: the same verb, the same payload, and a different
+reading of the drag — its length as a spread rather than as nothing. It is not taken now because
+generating a shape throws away the one the player made, and this record's whole position is that the
+player's own arrangement is the thing worth keeping.
+
+### B. A group marches at the pace of its slowest member
+
+**The consequence this record listed and did not fix.** Each member walked its own route at its own
+speed, so a group of mixed speeds arrived strung out — a formation that existed at the moment of the
+order and nowhere after it.
+
+**A unit now carries two speeds**: `speed`, what the template says, and `march`, what it is walking
+at under its current order. A group order sets every member's `march` to the slowest `speed` in the
+group; a single order and a stop set it back. Hashed, like everything else that decides where a unit
+ends up.
+
+- **The ground class still multiplies it**, so [ADR 3001](3001-pathfinding.md) amendment B survives:
+  a metalled road speeds the whole column rather than stretching it out again. It is a *base* speed
+  that is held, not the final rate.
+- **The slowest of the members actually going**, so somebody else's unit in a selection cannot slow
+  you down — it was rejected before the pace was taken.
+- **It does not make the group arrive together**, only stop members running away from each other:
+  two units with different route lengths still arrive at different times. Matching *arrival* would
+  mean scaling each member's speed by its own route length, which makes a unit crawl because
+  somebody else went the long way round. Not done, and named here so it is a decision rather than an
+  oversight.
+
+## How this method is checked, and how another one would be
+
+Worth its own section, because "is this the right method" is not a question tests answer by passing.
+Three different things settle three different parts of it, and only the first is automatic.
+
+1. **Properties**, by assertion: the shape survives, nobody crosses anybody, no slot lands on ground
+   nothing can stand on, the same group always lands the same way. Those are settled, and they are
+   what the unit tests beside `cic_sim::formation` are for.
+2. **Behaviour over a whole map**, by measurement. `cic-sim/tests/formation.rs` sends an eight-unit
+   squad to every eleventh passable cell of the rough test map and counts two things — how many
+   slots come through as a **pure translation**, and how many the ground **refuses** before any
+   repair. Measured at **2612 of 2728 slots untouched (95.7%)**, with the moved slots being
+   *exactly* the ones the terrain refused and no others, and **116 refusals against a compact box's
+   72**. So carrying the shape costs about **1.6 times** the repair of the tightest packing there
+   is, and buys a formation that survives untouched 96% of the time. **That is the trade, in
+   numbers.** A different method — a generated box, a wedge, a matched assignment — is scored by
+   running it over the same suite, which is why the box is already in there as a yardstick.
+3. **Whether it looks like an army moving**, by watching it. Nothing here settles that, and this
+   project has been caught by the gap before: the "clunky movement" complaint that produced
+   [ADR 3001](3001-pathfinding.md)'s amendment D passed every assertion it had. The viewer patrols
+   two groups and draws a plate at each slot so that there is something to watch.

@@ -97,7 +97,7 @@ use cic_sim::activation::FORCES;
 use cic_sim::units::UNITS;
 use cic_sim::{
     Command, Forces, Ground, GroundRules, Kernel, KernelConfig, ObjectId, PlayerId,
-    TickAccumulator, Units, activate, move_group_command, spawn_command,
+    TickAccumulator, Units, activate, move_group_facing_command, spawn_command,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -1057,12 +1057,18 @@ fn demo_orders(kernel: &Kernel, extent: [f32; 2]) -> Vec<Command> {
     sides
         .into_iter()
         .map(|(seat, group)| {
-            let corner =
-                corners[usize::try_from((phase + u64::from(seat) * 2) % 4).expect("below four")];
+            let leg = usize::try_from((phase + u64::from(seat) * 2) % 4).expect("below four");
+            let corner = corners[leg];
+            // The facing a player would have dragged: along the leg after this one, so each side
+            // arrives at the corner already turned for the way it is about to march. Standing in
+            // for a mouse the viewer does not have, and it is what makes the turn visible —
+            // without it the patrol would translate round the square without ever wheeling.
+            let next = corners[(leg + 1) % corners.len()];
+            let facing = [next[0] - corner[0], next[1] - corner[1]];
             Command {
                 tick,
                 player: PlayerId(seat),
-                payload: move_group_command(&group, corner[0], corner[1]),
+                payload: move_group_facing_command(&group, corner[0], corner[1], facing),
             }
         })
         .collect()
