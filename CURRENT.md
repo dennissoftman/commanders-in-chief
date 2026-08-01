@@ -354,10 +354,11 @@ What works:
     between adjacent samples against a grade, and a cell wholly under the water line — on the
     heightfield's own grid, so there is no second resolution to keep registered and no authored layer
     to go stale when the ground is edited. The search is **A\* with no floating point in it at all**:
-    `10` an orthogonal step and `14` a diagonal, ties broken on the lower cell index, no diagonal
-    cutting a corner past an impassable cell, a binary heap over flat arrays and not one hashed
-    container. ADR 0007 would have *permitted* `f64` costs; integers make the accumulation question
-    unaskable instead of manageable, which is the same shape as choosing integer turns for angles.
+    `10` an orthogonal step and `14` a diagonal by default, ties broken on the lower cell index, no
+    diagonal cutting a corner past an impassable cell, a binary heap over flat arrays and not one
+    hashed container. ADR 0007 would have *permitted* `f64` costs; integers make the accumulation
+    question unaskable instead of manageable, which is the same shape as choosing integer turns for
+    angles.
     - **An unreachable target does not fail.** The route ends at the nearest cell the search closed,
       which is what a player asking for the far side of a wall means and costs nothing, because the
       search already did the work.
@@ -366,6 +367,22 @@ What works:
       strand a fraction of a step and the pathfinder would have made units worse at going places —
       the test for it is pinned to an exact arrival tick, and it was rewritten once after the first
       version turned out to pass with the carry-over deliberately removed.
+    - **And a corner is rounded rather than turned on the spot.** A string-pulled route still bends
+      at cell centres, which on an eight-metre grid is a 45° pivot every few strides and reads as
+      clockwork. Each interior corner is cut back and interpolated across a short quadratic Bézier —
+      and **every segment of the arc is checked against the grid, with the corner left sharp if any
+      of it would clip**, because a smoothing pass that ignored the grid would reintroduce exactly
+      the cut corners the search took care to avoid, at exactly the turns that exist to get around
+      something.
+    - **Every coefficient is a setting, and every setting is in the hash.** The grade that makes a
+      cliff, the water line, the cost class the derivation assigns, what a step costs, and how far
+      back a corner starts turning all live on `GroundRules` rather than in constants. They are
+      folded into the subsystem hash because they decide what the grid *means*: two machines playing
+      one match under different grades are playing two different games, and that should surface as a
+      divergence on tick zero rather than as somebody diffing configuration files. The heuristic
+      prices itself against the **cheapest class the grid actually holds** rather than assuming that
+      class is `1`, which is what keeps a renumbered ladder from quietly making A\* inadmissible —
+      ADR 3001's amendment A is now a test rather than a hazard.
   - **A subsystem can now read its peers** ([`subsystem`](crates/cic-sim/src/subsystem.rs)), which is
     what movement asking the ground where a unit may walk actually requires. Immutably, and only
     peers: the kernel splits its own list around the subsystem it is running, so the running one holds
@@ -383,9 +400,19 @@ Pass a `.cicmap` path to view a real map; with no argument it generates terrain,
 from the heightfield's own low point, their surfaces — and **a scenario, activated through the kernel
 and running live**: two players' depots tinted by seat, neutral pines between them, and six scouts
 that spawn by command on tick zero and patrol a square around the map's middle on standing orders,
-crossing each other's paths. The kernel advances at its fixed 30 Hz from the accumulator whatever the
-frame rate does, the orders are host-side inputs of exactly the shape a network session would feed,
-and presentation derives each scout's facing from its motion — the simulation stores no heading. A
+crossing each other's paths and going round the lake rather than through it. The kernel advances at
+its fixed 30 Hz from the accumulator whatever the frame rate does, and the orders are host-side
+inputs of exactly the shape a network session would feed.
+
+**Presentation interpolates between the last two ticks**, which it did not, and that omission was
+the whole of a complaint that movement looked clunky: a unit whose position is read straight from
+the snapshot moves thirty times a second in front of somebody watching a hundred and forty frames of
+it. `TickAccumulator::alpha` had existed since M5, documented as "what a renderer interpolates by",
+with nothing calling it. Between two computed ticks rather than extrapolated past the latest one —
+presentation shows a moment the simulation has already been through, one tick behind, and never a
+position it did not compute. Facing is derived from that motion and **turn-rate limited**, which is
+[ADR 3001](docs/adr/3001-pathfinding.md) decision 9's own answer and the other half of the
+clockwork: without it a unit reaching a waypoint pivots between one frame and the next. A
 loaded package still shows the building scatter, because packages do not carry a template set yet —
 the demo path is exactly what they will reuse when they do. `T` toggles antialiasing and the bracket keys step the resolution scale, because what an
 edge does *as the camera moves* is the whole subject and no still capture reports it; `P` prints the

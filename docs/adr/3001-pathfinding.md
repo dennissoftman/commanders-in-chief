@@ -1,7 +1,9 @@
 # ADR 3001: Pathfinding — derived passability, occluders and passage, integer-cost grid A*
 
 - Status: accepted, and **implemented in part** — `cic_sim::ground` derives the grid and searches
-  it, and `cic_sim::units` walks what it returns. Decisions 1, 2, 3, 5, 6, 8 and 9 are in the tree;
+  it, and `cic_sim::units` walks what it returns. Decision 6's string-pulling gained a corner-rounding
+  pass this record did not describe, recorded as **amendment D** below rather than left as
+  undocumented behaviour. Decisions 1, 2, 3, 5, 6, 8 and 9 are in the tree;
   decisions 4 (footprint and passage stamps), 7 (repathing on grid edits) and 10 (local avoidance)
   are not, each waiting on the mechanic that produces the thing it reacts to. Three amendments are
   **proposed** below, raised by [ADR 3002](3002-corridor-economy.md) and carrying its review;
@@ -248,3 +250,40 @@ The consequence is that a road closes by *accumulation* rather than by a single 
 behaviour worth having: a sustained battle chokes the corridor with its own casualties, and the
 choking outlives the shooting. Ordinary decay clears it, and Meridian recovering the wrecks clears it
 faster — so the faction that lives on throughput is paid to restore it.
+
+## Amendment — implemented, raised by watching it
+
+### D. A route's corners are rounded, and the rounding is checked against the grid
+
+**What the record missed.** Decision 6 says a path is "a waypoint list, string-pulled, walked by the
+stepper that already exists", and that is what was built. It is also not enough. String-pulling
+removes the staircase along a straight run but leaves every surviving corner at a cell centre, so a
+unit crosses open ground beautifully and then turns 45° on the spot at an eight-metre interval. The
+first person to watch it called the movement clunky, which is the correct word: the route was
+optimal and the walking was clockwork. No test could have reported this — every assertion about
+routes was about where they go, and this is about how they are taken.
+
+**The fix.** Each interior corner is cut back by a radius and interpolated across a short quadratic
+Bézier, the original corner serving as the control point. Both the radius and the number of segments
+are coefficients on `GroundRules`, so a map or a mover class can want a different one, and `0.0`
+restores the sharp behaviour exactly.
+
+**The constraint that makes it safe, and it is the whole of the amendment.** Decision 5 forbids a
+diagonal step cutting a corner past an impassable cell, and a smoothing pass that ignored the grid
+would put that cut straight back — worse, it would put it back *precisely at the turns a unit makes
+to walk around something*, which is where it matters. So every segment of a rounded corner is
+checked against the grid, and a corner whose arc would clip anything stays sharp. Rounding may
+therefore be refused, silently and per corner; a route is never smoothed into an obstacle.
+
+**Why this sits in the simulation rather than in presentation.** It changes where the unit actually
+is, so it is state, so it is hashed. Only the *facing* is presentation's, which decision 9 already
+says and which the viewer now implements with the turn-rate limit that decision specifies. The two
+together are what stop a unit reading as a piece on a board: the position curves, and the model
+turns into the curve instead of snapping at each waypoint.
+
+**The other half of the same complaint was not pathfinding at all.** Presentation was drawing raw
+thirty-hertz snapshot positions at whatever rate the window ran, so units stepped. That is fixed by
+interpolating between the last two ticks — `TickAccumulator::alpha`, which had existed since M5
+documented as "what a renderer interpolates by" with nothing calling it. Worth recording here
+because the symptom was indistinguishable from a pathfinding fault and the cause was in a different
+crate.

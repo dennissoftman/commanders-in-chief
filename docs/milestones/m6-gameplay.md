@@ -28,7 +28,12 @@ consumers exactly as the deferral intended.
   cell index, no diagonal cutting a corner, and an unreachable target degrading to the nearest cell
   the search closed. Routes are string-pulled and `cic_sim::units` walks them, spending one tick's
   travel across as many legs as it reaches — so a corner costs a unit no time, and the move verb's
-  encoding did not change. The grid's fingerprint is in the tick hash.
+  encoding did not change. Corners are then **rounded** into a short interpolated arc, with every
+  segment checked against the grid so smoothing cannot reintroduce the cut corners the search
+  avoided. Every coefficient — grade, water line, cost class, step costs, corner radius — is a
+  `GroundRules` setting rather than a constant, and all of them are in the tick hash, because a
+  coefficient that changes which way a unit goes changes the game. The grid's fingerprint is in the
+  tick hash too.
 
   **Dynamic obstruction and local avoidance are the parts still outstanding**, and both are waiting
   on a producer rather than on a decision: a `footprint` and a `passage` stamp the grid when
