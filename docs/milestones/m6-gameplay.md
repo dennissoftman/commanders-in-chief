@@ -25,8 +25,20 @@ consumers exactly as the deferral intended.
   local avoidance between units. **Decided, not yet built** — [ADR 3001](../adr/3001-pathfinding.md):
   passability derived from the heightfield, occluder and passage footprints on templates, and A* on an
   integer-cost grid.
-- Combat: weapons, ranges, damage types, armour classes, health, death.
-- Economy: a resource, gatherers, and a rate that makes expansion a real decision.
+- Combat: weapons, ranges, damage types, armour classes, health, death. **Specified, not yet built** —
+  [mechanics.md §3](../design/mechanics.md#3-combat): integers throughout, four damage types against
+  five armour classes as integer percentages, and no multiplier anywhere in the table equal to zero,
+  because the bible forbids a faction being helpless against anything.
+- Economy: a resource, gatherers, and a rate that makes expansion a real decision. **Specified, not
+  yet built, and the specification is a proposal** — [ADR
+  3002](../adr/3002-corridor-economy.md) is the corridor economy: goods enter at map-edge gates,
+  accumulate at yards, and are carried by killable carriers to a delivery point, with one currency
+  earned three different ways. It answers this charter line's "makes expansion a real decision"
+  concretely — income is `load value ÷ round-trip time` against a fixed map flow, so expansion buys a
+  shorter trip on flow somebody else would otherwise take. A route link where somebody's assets are
+  being destroyed carries no freight until the fighting stops, which is what puts the economy and the
+  fighting on the same map rather than beside each other. Awaiting review, and it carries two proposed
+  amendments to [ADR 3001](../adr/3001-pathfinding.md).
 - Construction: build sites, placement validity, progress, cancellation.
 - Production: queues, prerequisites, cost.
 - Fog of war and shroud, per player, with the visibility state living in the simulation.
@@ -81,4 +93,8 @@ invert it.
   a settled simulation to script against.
 - No audio. It touches nothing in the simulation and can land at any time; keeping it out of the
   critical path is the point.
-- No balance. Numbers exist to make mechanics testable, not to be fair.
+- No balance. Numbers exist to make mechanics testable, not to be fair. The *framework* for setting
+  them has been written ahead of the numbers — [balance.md](../design/balance.md), whose anchors,
+  budget line and verification split are what the pass after this milestone uses — so the first real
+  number is set by a method rather than establishing one. Nothing in the tree has been through it, and
+  nothing in this milestone should be.

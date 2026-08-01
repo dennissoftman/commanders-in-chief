@@ -1,6 +1,7 @@
 # ADR 3001: Pathfinding — derived passability, occluders and passage, integer-cost grid A*
 
-**Status:** accepted
+**Status:** accepted. Two amendments are **proposed** below, raised by
+[ADR 3002](3002-corridor-economy.md) and carrying its review.
 
 ## Context
 
@@ -192,3 +193,41 @@ on screen is constrained by this; only the *stamp* is quantized.
   data-driven (behaviour trees authored per faction rather than hard-coded), which is out of scope
   here and noted so the grid's query surface is designed as *the* consumer-facing API rather than
   `units`-private plumbing.
+
+## Amendments — proposed, raised by ADR 3002
+
+Both were found by writing [the corridor economy](3002-corridor-economy.md) against this record rather
+than by implementing anything, and neither changes a decision so much as finish one.
+
+### A. Plain ground is not cost class `1`
+
+**The defect.** Decision 3 says a graded road is "a cell class cheaper than ground" and sets `0` to
+impassable and `1` to plain ground; decision 5 sets an orthogonal step at `10 ×` the class. With
+integer classes and `0` reserved, **there is no value cheaper than plain ground.** As written, grading
+can restore mud and never improve past it — which turns Concord's rising income curve, the arithmetic
+its entire doctrine rests on, into pothole repair.
+
+**The fix, which changes no format and no arithmetic:** plain ground stops being `1`. Metalled road
+`1`, graded road `2`, plain ground `3`, mud `4`, rubble `5` and up. `0` stays impassable, `10`/`14`
+stays the octile pair, and the only thing that moves is which class number means which ground.
+
+A metalled road at 3× open ground is aggressive on purpose. A road that is 20% better than a field is
+not a thing three factions go to war over, and this one is the premise.
+
+**The rejected alternative** is a lookup table from class to cost, which buys finer gradations —
+road 7, ground 10, mud 16 — at the price of a table to author, version and keep deterministic. Not
+worth it until the coarse ladder above proves too coarse, and recorded so it is not reinvented from
+scratch when it does.
+
+### B. A cell's cost class must reach the movement rate, not only path ranking
+
+This record is about *search*: the class scales the cost of a step and therefore which route wins.
+Nothing in it makes a unit physically travel faster on a good road — `units` moves in a straight line
+at the template's `speed` and consults no grid.
+
+For Concord's paving to be an income increase rather than a routing preference, the same class has to
+multiply movement rate. Stated here because the gap sits exactly on the seam between two subsystems,
+which is where it would otherwise be found by wondering why grading the whole map changed nothing.
+
+The arithmetic stays inside [ADR 0007](0007-simulation-arithmetic.md): an integer class against an
+integer per-tick displacement, no new floating point.

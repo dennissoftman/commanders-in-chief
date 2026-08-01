@@ -1,0 +1,558 @@
+# Commanders in Chief — Game Mechanics
+
+**Status:** working draft. The economy is proposed as
+[ADR 3002](../adr/3002-corridor-economy.md) and awaits review; everything downstream of it here is
+draft with it.
+**Scope:** the rules every faction plays under. What a resource is, how force is produced, how combat
+resolves, what a player can see, and how a match ends.
+
+**Companion documents.** [faction-bible.md](faction-bible.md) is the character specification and is
+*upstream* of this file — where it states a doctrine, this document is obliged to implement it, not
+free to reinterpret it. [faction-mechanics.md](faction-mechanics.md) is how each faction expresses
+the rules below. [balance.md](balance.md) is how the numbers get set and checked.
+
+---
+
+## 0. The one paragraph that matters
+
+Three belligerents contest a trade corridor, and none of them is fighting for territory — they are
+fighting over the terms of passage. So **the economy is passage.** Goods enter the map at its edges,
+accumulate at yards along the road, and have to be physically carried somewhere before they are worth
+anything. All three factions get paid out of that flow and each one takes its cut in a different
+place: AEC flies loads out, Concord hauls them overland on roads it built, and Meridian charges a duty
+on other people's carriage. One currency, three ways to earn it, every one of them a thing standing on
+the map that an enemy can shoot.
+
+Everything in this document is a consequence of that sentence or a constraint on it.
+
+---
+
+## 1. The charter: what this game refuses to be
+
+The failure this section exists to prevent is specific, and naming it is cheaper than rediscovering
+it. *Command & Conquer 4* removed base building, removed harvesting, replaced an economy with an
+abstract point pool, gated units behind persistent between-match progression, and made unit losses
+free. Each of those is individually defensible and together they removed the reason to look at the
+map. A player who cannot lose anything by being out of position is not playing a strategy game.
+
+These are non-negotiable, and each one is testable rather than aspirational:
+
+1. **There is a base and the player builds it.** Structure placement is an economic decision, because
+   income is a function of carriage distance. A base in the wrong place earns less.
+2. **Resources are on the map, not in a menu.** Income follows from position and from what a player
+   holds, never from elapsed time alone.
+3. **Carriers are units, and they can be killed.** Interception is a strategy. A load lost in transit
+   **drops where the carrier died** and can be recovered by anyone, so raiding pays the raider rather
+   than merely costing the victim.
+4. **No between-match progression affects match power.** No unlocks, no account levels, no earned
+   access. A first-time player and a veteran field the same options at minute zero. Cosmetics and
+   records are fine; capability is not.
+5. **No class-locked partial armies.** Every faction covers every tactical role — that is a bible
+   constraint, not a balance preference — and no mode hands a player a third of the game and calls it
+   a specialisation.
+6. **Technology is bought inside the match and stands on the map.** Every tier a player advances is a
+   structure an enemy can destroy, so an advantage is always takeable.
+7. **The unit ceiling is a structure count, never an abstract pool.** Whatever bounds a player's army
+   is something they built, can see, and can lose. See [§4.4](#44-the-ceiling-is-built-not-granted).
+8. **Losses cost.** No free reinforcement, no unit that returns at no price. Attrition has to be felt,
+   or none of the seven rules above matter.
+9. **One currency.** Costs are quoted in the same units for everyone, so a designer can compare an AEC
+   unit to a Concord one. Asymmetry lives in *how a faction earns and produces*, never in a private
+   currency that makes its prices incommensurable.
+
+Rule 4 is the load-bearing one and the easiest to lose to a good argument. Retention, progression and
+a sense of investment are real goals with real advocates. They are met with cosmetics, records,
+campaign content and ranked history — never with capability, because capability earned outside the
+match is capability the opponent cannot contest inside it.
+
+---
+
+## 2. The economy
+
+### 2.1 Freight and credit
+
+| Layer | What it is | Who sees it | Where it lives |
+|---|---|---|---|
+| **Freight** | Physical goods, as discrete **loads** with a position and an integer value | Everyone, subject to fog | Simulation objects |
+| **Credit** | The single spendable number | Its owner | An integer per player |
+
+Freight is contested; credit is not. A load is taken by holding ground and carrying it; credit, once
+banked, cannot be stolen, raided or drained. That split is deliberate: a raid should cost an opponent
+*future* income and a load in transit, never their bank, because retroactively deleting a player's
+saved-up plan is not a decision they can play against.
+
+**Credit has three names and one value.** AEC calls it **Allocation**, Concord **Appropriation**,
+Meridian **Receipts**. The engine calls it `credit`, the string table holds the three display keys,
+and no faction ever uses another's word for it — the same lexicon rule the bible applies to
+everything else. The underlying quantity is identical, because [balance.md](balance.md) cannot work
+otherwise.
+
+### 2.2 The three layers of a supply chain
+
+"Supply chain" does three jobs at once here, and confusing them is the fastest way to design the wrong
+thing:
+
+| Layer | What it is | Owned by | What a player does with it |
+|---|---|---|---|
+| **The corridor** | A road on the terrain, drawn by the map author: cheap cell classes, visibly different ground | Nobody | Drives on it, improves it, damages it |
+| **The route graph** | The authored topology over it — gates, yards, nodes, and the **links** between them | Nobody | Freight flows along it, duty is assessed on it, links can be interdicted |
+| **Carriage** | Carriers moving loads from a yard to a delivery point | The player | The part that is built, escorted, and lost |
+
+**The corridor is a fixed authored road; carriage is not bound to it.** That split is the decision, and
+it is worth being explicit about the alternative: a trade route whose carriers run on rails — *Age of
+Empires III*'s is the clearest reference — is interceptable only *on* the rail, which deletes the
+spatial game, and it cannot express a faction that regrades the map, because the route is fixed by
+authoring. Here a hauler paths over terrain like anything else and merely *prefers* the road, because
+the road is cheap ground.
+
+**Freight flows abstractly, and the traffic on the road is presentation.** A load's journey from gate to
+yard is a rate along the graph rather than a convoy of objects. What the player sees moving on the
+corridor is drawn by the renderer, holds no simulation state, and is therefore free — the road looks
+alive at no cost to the tick and none to determinism.
+
+That is a deliberate deferral and not a simplification. Promoting the traffic to simulation objects
+makes it killable, and destroying commercial traffic to starve Meridian's duty is a real strategy with
+real weight in this setting. It should be reached by a decision, not by somebody adding a health field
+to a truck.
+
+#### The corridor is improvable, and damageable
+
+- **Concord grades**, as spatial work: an engineering unit builds along a drawn path, at a cost, over
+  time, changing the terrain permanently and publicly.
+- **Everyone craters.** Rubble is already a dearer cell class, so damaging a road is available to all
+  three — cheaply to AEC, for whom it is one air-delivered munition. This is the direct counter to the
+  only rising income curve in the game.
+- **Re-grading is cheaper than grading**, because the roadbed survives. So the crater-and-repave
+  exchange costs Concord *time* rather than credit, which is the currency it actually cannot spare.
+- **There is no route-wide upgrade tier.** No purchased "all roads are faster". Charter rule 6 puts
+  technology on the map, and a global percentage appears nowhere; grading has to be a thing that is
+  watched growing across the terrain, because that is what "its map presence is literally paved" means.
+
+This needs an amendment to [ADR 3001](../adr/3001-pathfinding.md), which is recorded there: as written,
+its cost classes cannot express a road *cheaper* than plain ground, so grading could only repair mud
+and never improve past it — which would flatten Concord's entire economic identity.
+
+### 2.3 The map's economic furniture
+
+Three authored site kinds, all neutral and none destructible:
+
+- **Gates.** Points at the map edge where the corridor leaves the map. A gate emits one load every
+  *N* ticks, for the whole match. This is the map's total economic output and it is authored, fixed,
+  and published — see [§7](#7-what-a-map-author-controls).
+- **Yards.** Points along the route where loads accumulate: a weighbridge, a siding, a container
+  stack. A yard with nobody working it simply fills up, and a full yard stops accepting, which means an
+  unworked corner of the map is *stored* value rather than wasted flow. A player who arrives late at a
+  contested yard finds it worth taking.
+- **Nodes.** The vertices of the route graph. Crossing one is what Meridian assesses duty on
+  ([§2.5](#25-the-three-acquisitions)). Otherwise inert.
+
+Gates being indestructible and neutral is the valve that prevents the resource-death stalemate. The
+flow never stops **permanently** — a link stops while it is being fought over
+([§2.6](#26-interdiction-a-contested-link-stops)) and resumes when the fighting does — so a match is
+never decided by both players running dry. But the flow is *fixed*, so taking more of it means taking
+it from somebody. That is where the pressure comes from, and the fiction supplies it for free: the road
+connects two places that are not on the map.
+
+### 2.4 Carriage
+
+A **carrier** is a load capacity with standing orders and no combat value worth mentioning. Given a
+yard and a delivery point it runs the round trip by itself, indefinitely, and the player never routes
+an individual trip.
+
+"A carrier is a unit" is *nearly* true and the exception matters: AEC does not own carriers at all, it
+holds recurring off-map sorties ([§2.5](#25-the-three-acquisitions)). Everything below about distance,
+escort and interception applies to a sortie exactly as it does to a truck — what differs is that the
+airframe cannot be built, queued, or kept.
+
+That is the whole interaction, and it is deliberately the harvester relationship every working RTS
+economy has used, because the decisions it produces are the good ones: *which* yard, *where* the
+delivery point goes, *how many* carriers, and *what protects the line between them*. Per-trip
+micromanagement produces none of those and costs attention the battle needs.
+
+Income per carrier is therefore
+`load value ÷ (travel time out + travel time back + load time + unload time)`,
+which makes three things true at once and is the reason the model is shaped this way:
+
+- **Distance is money**, so base placement and expansion are economic decisions rather than tempo ones.
+- **Roads are money**, so Concord grading the map is an income increase and not a cosmetic.
+- **The line between yard and base is a target**, so map control has a price a player can feel.
+
+### 2.5 The three acquisitions
+
+Every path ends in credit. Every path involves moving something losable. They differ in ceiling, ramp
+and risk, and that difference *is* the factions' economic identity.
+
+| | **AEC — the air bridge** | **Concord — ground haulage** | **Meridian — duty on throughput** |
+|---|---|---|---|
+| Carriage | **Sorties from off-map.** No owned carriers | Owned heavy haulers | Porters, and mostly none at all |
+| Route | Map edge → yard → pad. Straight, ignores terrain | Road network, terrain costs apply | — |
+| Delivery point | Pad (relocatable, cheap) | Plant (large, permanent) | Permit desk at a node |
+| Hard constraint | **Corridor capacity** — simultaneous sortie slots, raised only by holding beacons | Travel time; no count cap | Node coverage, and how busy the map is |
+| Fallback | **Contracted ground haulage** | — | Salvage |
+| Ramp | Fast | Slowest | Immediate |
+| Ceiling | Lowest | Highest | Middling |
+| Risk | Highest — carriage and reinforcement share a point of failure | Medium — slow, armoured, long exposure | Lowest — it is not carrying anything |
+| Interdiction exposure | Upstream only; its carriage leg uses no links | Upstream **and** on the road it drives | Total — duty *is* throughput |
+| Breaks against | Air defence, jamming | Distance, and raids on the road | Being found |
+
+**AEC has no gatherers.** It holds *slots*, not vehicles. A slot is a recurring sortie: it spawns at the
+map edge, flies to a yard, lifts a slung load, delivers it to a pad, and exits off-map. Nothing is
+queued and nothing is kept. The faction whose force arrives from off-map gets its freight the same way,
+through the same doctrine — the alternative, a fleet of owned lift aircraft shuttling back and forth,
+is Concord's hauler with different pathing and would make AEC's economy a reskin rather than a
+doctrine.
+
+Three consequences:
+
+- **The flight path is the pad's placement.** A sortie enters from the map edge nearest the pad it
+  serves, so a forward pad beside a contested yard earns well and transits hostile airspace both ways.
+  The interception surface is created by the AEC player's own choices and needs no extra authoring.
+- **A downed sortie costs three ways**: the load, which drops where it fell for anyone to recover; the
+  slot's downtime while a replacement comes from off-map; and credit for the airframe. That is the
+  bible's "every loss is expensive", and it keeps AEC's attrition a *money* problem rather than a queue
+  problem.
+- **Its economy and its reinforcement are one mechanism.** Pads receive loads and units both, so
+  pressure on a pad costs income and army at once. That is how "air denial is near-existential" becomes
+  a single mechanic instead of two flavour notes, and it is why AEC's ceiling is deliberately the
+  lowest of the three: it is buying speed and reach.
+
+**And a fallback, because no faction may be helpless.** *Contracted ground haulage* is AEC's second
+option. The coalition does not carry by road — it **hires**. Trucks, cheap, entirely outside corridor
+capacity, paying a **fee per delivered load** rather than a purchase price, so they are an operating
+expense with somebody else's margin inside it. That is what a contractor is, and it is why they net
+well under the air bridge.
+
+Two properties make them a choice rather than a strictly worse option:
+
+- **They do not consume slots**, so they run *alongside* the air bridge rather than instead of it. A
+  player with spare capacity and a safe road runs both.
+- **They refuse contested ground.** Not "slower under fire" — a refusal. A route crossing an interdicted
+  link is a route they will not accept.
+
+The refusal is what keeps the air dependency's teeth while removing the helplessness: under air denial
+AEC degrades into a slower, poorer Concord that also cannot reach anywhere dangerous. It is also where
+the bible's contractor fault line — *their incentives are not the coalition's* — stops being backstory
+and starts being a thing that happens to the player mid-match.
+
+**Concord's income rises with the map.** A graded road is a cheaper cell class ([ADR
+3001](../adr/3001-pathfinding.md) decision 3), so every stretch it paves shortens every future round
+trip. Its curve is the only one that bends upward on its own, which is "slow to spin up, then a rolling
+wave that does not stop" expressed as arithmetic. The cost is stated in the bible and kept here: **the
+road is public.** Everyone moves faster on it, including the people coming for the plant.
+
+**Meridian is paid out of other people's work.** A **permit desk** built at a node assesses a duty on
+every load that crosses it — including AEC's and Concord's — and the duty is **additive**. The payer
+loses nothing. Nobody's harvester slows down, nobody's yard is locked, and no opponent has homework
+imposed on them; Meridian simply gets paid alongside. This is the bible's "greed, not homework", and
+the reason it is a hard rule rather than a preference is that the alternative — a faction that taxes
+value *out* of an opponent's economy — is a mechanic whose counterplay is chores.
+
+Three consequences, all of them wanted:
+
+- **Meridian profits from its enemies prospering**, and has a standing reason not to strangle a
+  logistics line it could kill. That is the Chain's fault line — a war economy that cannot survive
+  peace — available as a live decision in a skirmish rather than only as backstory.
+- **Meridian can be paid while losing.** It carries nothing, so a lost battle costs it units and no
+  income. This is its "attrition of patience", and it is the only faction with that property.
+- **Its economy is the one thing it cannot conceal.** A desk becomes visible to the payer once it
+  assesses its first load — it serves a notice, which is exactly what the faction would do — so
+  Meridian's income reveals its position. Concealment is its defence and its earnings are the leak.
+  The faction's two halves are mechanically at odds, which is what the Council and the Chain are.
+
+**Counterplay to a desk is a choice, never a chore.** An opponent may fight for the node, or route
+carriage around it and pay in travel time instead. Both are decisions with a price. Neither is
+"remember to do a thing every ninety seconds".
+
+### 2.6 Interdiction: a contested link stops
+
+**A link of the route graph where something is being harmed does not carry freight.**
+
+| | |
+|---|---|
+| **Trigger** | Damage dealt to a unit or structure **that has an owner**, within the link's radius |
+| **Not a trigger** | Fire that harms nothing, and damage to neutral scenery, props, wrecks or unclaimed buildings |
+| **Duration** | Held for *T* after the last qualifying damage, then the link reopens |
+| **Effect** | Freight does not traverse the link. Flow accumulates upstream against a cap, and the backlog moves as a surge when the link reopens |
+| **Permanent version** | A destroyed bridge or a cratered road — which costs ordnance rather than a fight |
+
+**Harm rather than fire, and the distinction is load-bearing.** Taking a weapon discharge as the trigger
+lets a player close a road by shooting a hillside, which is both an exploit and nonsense: a road does
+not close because somebody shot a rock. Requiring damage to something *owned* means a link closes only
+inside an engagement where somebody's asset is actually being destroyed, so the closure always costs
+what it should. Presence alone was rejected for the same family of reasons — one scout parked on a road
+forever is a chore, not a decision.
+
+**A defender cannot reopen the road by winning quickly.** Damage to *either* side's assets counts, so a
+defender shooting back is also holding the link shut. The road reopens when the fighting stops, not
+when it is won. That is the property this mechanic exists for: sustained fighting on a supply line
+makes everyone poorer, and both parties know it while they are doing it.
+
+**It makes the middle of the map expensive to fight over.** Central links feed both players, so a
+positional grind on the midline is mutual economic destruction. The efficient economic attack is a
+**deep raid** at a link that feeds only the enemy — near their gate, behind their line. One rule, and
+the game is pushed away from a static front and toward raiding.
+
+**It differentiates the factions with no special-casing**, which is the sign the rule is the right
+shape. AEC's sorties traverse no links, so its carriage leg is immune — but a yard that was never fed
+is still empty, so it is exposed upstream like everybody else. Concord is hit twice: the flow into its
+yards stops *and* the fight is happening on the road its haulers are driving. Meridian is hit hardest
+of the three, and in a way that turns out to be the best thing in this design: duty falls as fighting
+rises while salvage rises with it, so its two wings end up on
+[opposite sides of the war's intensity](faction-mechanics.md#the-council-and-the-chain-sit-on-opposite-sides-of-the-war).
+
+**A link with nothing on it cannot be closed**, and that corollary is fine. An empty road held by
+raiders with nobody to shoot keeps flowing. In practice it is not the case that arises: what a deep
+raid finds on a supply line is *carriers*, and a carrier is an owned object whose destruction both
+takes the load and shuts the link. The raid's target and the interdiction trigger are the same object.
+
+**This is not a breach of the rule against gating an opponent's economy.** That rider constrains
+Meridian's *duty*, which must never be extractive. Interdiction is combat — available to all three
+equally, and paid for in the only currency this design accepts for an economic attack, which is a
+fight.
+
+The radius, the hold duration and the upstream cap are
+[measured, not chosen](balance.md#54-numbers-that-are-measured-not-chosen).
+
+### 2.7 Why expansion is a real decision
+
+The M6 charter asks for "a rate that makes expansion a real decision", so it is worth stating exactly
+what makes it one here. Income is `load value ÷ round-trip time`, gate output is fixed, and yards
+store what nobody collects. An expansion therefore buys a shorter round trip on flow somebody else
+would otherwise take, at the cost of a structure to defend and a line to hold. The break-even is
+computable, it moves with the map, and the answer is different in the first four minutes than in the
+fourteenth. That is the decision. See [balance.md §5](balance.md#5-economic-benchmarks) for the
+numbers that set where the break-even lands.
+
+### 2.8 Deliberately not a second currency
+
+Power, fuel, ammunition and manpower were all considered as a second harvested resource and all
+rejected in favour of **faction-specific structural constraints** — corridor capacity, queue capacity,
+standing convertible buildings. The reasoning is that a second global currency makes all three
+factions more similar (everybody gathers two things) while a structural constraint makes them less so,
+and the bible has already specified three different constraints. A second currency also doubles the
+balance surface for one axis of decision.
+
+The one candidate still open is **the grid**: the bible gives Concord substations and Meridian
+"illegal grid taps and generators", which is a map-level utility with three obvious asymmetric uses
+rather than a currency. It is designed and not scheduled — see
+[§8](#8-designed-and-not-scheduled).
+
+---
+
+## 3. Combat
+
+### 3.1 The model
+
+Health, damage, range and cooldown are **integers**, and every rate is integer arithmetic per tick.
+This is not a stylistic preference: the kernel is almost entirely integer by construction ([ADR
+0007](../adr/0007-simulation-arithmetic.md)), and an economy or a damage model that accumulates
+fractions is a determinism liability that buys precision nothing needs. Where a rate does not divide
+evenly, it accumulates as an integer numerator over a fixed denominator with the remainder retained —
+exact, driftless, and hashable.
+
+Resolution per shot: range check, cooldown check, seeded accuracy roll from a named stream, damage
+lookup, integer subtract. Nothing else. No physics decides anything ([ADR
+0008](../adr/0008-physics-engine.md) — the engine is *told* the answer).
+
+### 3.2 Damage types and armour classes
+
+Four damage types against five armour classes, as integer percentages:
+
+| | infantry | light | heavy | structure | air |
+|---|---|---|---|---|---|
+| **kinetic** — autocannon, small arms | 100 | **150** | 50 | 50 | 100 |
+| **heat** — shaped charge, guided missile | 50 | 125 | **150** | 75 | 50 |
+| **blast** — high explosive, artillery | 150 | 100 | 75 | **150** | 50 |
+| **frag** — airburst, anti-personnel | **200** | 75 | 50 | 75 | 125 |
+
+Every armour class has exactly one clear nemesis and one clear resistance, and every damage type has a
+best and a worst target, so a player can hold the whole table in their head after two matches.
+
+**No multiplier is zero, and a test asserts it.** Nothing in this game is immune to anything. That is
+the bible's constraint — "no faction is allowed to be characterised as helpless against something" —
+arriving as a number, and it is what keeps a counter from becoming a hard gate: an infantry squad
+against a heavy tank is a bad trade, not a null one, and a player who guessed the composition wrong
+loses ground rather than losing the ability to act.
+
+Electronic warfare is **not** in this table. Jamming, spoofing and GPS denial do no health damage;
+they suppress capability — a lift returning empty, a sweep returning nothing, a guided weapon reverting
+to unguided. Modelling them as damage would make them a fifth column here and would let them kill,
+which is not what they do.
+
+### 3.3 Wrecks
+
+A destroyed vehicle or structure leaves a **wreck object** in the simulation with a decay timer.
+Wrecks matter mechanically for three reasons and are therefore simulation state rather than
+presentation:
+
+- **Meridian recovers them** into degraded units
+  ([faction-mechanics.md](faction-mechanics.md#army-captured-not-built)).
+- **Rubble is a cost class.** A collapsed building grades the ground it fell on, which ADR 3001
+  already anticipates.
+- **A battlefield reads as one.** The tumble is presentation and may differ between clients; the wreck
+  that is there to be recovered may not.
+
+---
+
+## 4. Production and construction
+
+### 4.1 The shared frame
+
+Every faction produces through the same five quantities — **cost, lead time, prerequisite, delivery
+point, queue** — and diverges in what those quantities are worth to it. That the frame is shared is
+what makes the divergence legible and what makes balance possible; a faction with a bespoke production
+*grammar* cannot be compared to one without.
+
+### 4.2 Construction
+
+A structure is placed, validated, and built on site. Placement validity is footprint clearance,
+terrain passability, and proximity to whatever the structure requires. A build site is a real object
+from the moment it is placed: it can be attacked, and cancelling refunds the unspent remainder and
+nothing more.
+
+### 4.3 Technology
+
+Charter rule 6 in force: every tier a player advances is a structure standing on the map. The three
+expressions are in [faction-mechanics.md](faction-mechanics.md); the shared rule is that **no
+capability is ever purely a number in a player's account.** If a player has it, an opponent can find
+the thing that grants it.
+
+### 4.4 The ceiling is built, not granted
+
+Whatever bounds an army is a structure count:
+
+- **AEC** — pads and beacons. Delivery throughput and corridor capacity, together.
+- **Concord** — factories and their queue slots.
+- **Meridian** — converted buildings still standing.
+
+The immediate consequence, and the reason this is a charter rule: **an opponent can lower your
+ceiling.** A global pool cannot be attacked, so it turns every fight into a question about the front
+line only. A built ceiling means a raid twenty minutes deep into the map can shrink what its victim is
+allowed to field, which is the kind of decision an RTS map exists to host.
+
+---
+
+## 5. Vision, fog and detection
+
+Vision lives in the simulation, not the renderer, and M6 already states why: what a player can see
+determines what their units may target. Three states per object per player:
+
+| State | Meaning |
+|---|---|
+| **Shrouded** | Never seen. Terrain unknown. |
+| **Fogged** | Seen before, not now. Last known state remembered; a remembered object may be gone. |
+| **Observed** | In vision of something of the player's, now. |
+
+**Detection is a fourth axis, not a fourth state.** A concealed object inside a player's vision is
+*not* observed until something detects it or it reveals itself by firing. This is what makes AEC's
+purchased vision and Meridian's purchased ambiguity oppose each other directly rather than merely
+differ — one faction spends credits to move objects from fogged to observed and the other spends them
+to keep objects undetected inside enemy vision. Two mechanics on one axis, pointed in opposite
+directions, is worth more than two unrelated gimmicks.
+
+Remembered state is per player and is allowed to be wrong. A fogged structure that has been destroyed
+still appears until somebody looks. That is a feature — it is where a feint pays.
+
+---
+
+## 6. Victory
+
+Two conditions, either sufficient:
+
+- **Corridor control.** Hold *N* of the map's route nodes continuously for *T*. Authored per map.
+- **Annihilation.** No production capability and no army remaining.
+
+Control is the primary condition because the setting demands it: nobody here is fighting for
+territory, so a game whose only ending is extermination contradicts its own premise. It also removes
+the turtle stalemate — a player who declines to leave their base loses on a clock rather than
+outlasting the match.
+
+Annihilation stays because control victories need a floor. **Open question:** whether a control
+timer that has started should be visible to the losing player. Hiding it is more honest to the
+setting; showing it is the only version a player can respond to. Leaning toward showing it, on the
+grounds that an unannounced loss condition is indistinguishable from a bug.
+
+---
+
+## 7. What a map author controls
+
+The economy is authored, which means a map is a balance surface and has to be treated as one. Four
+knobs, and all four are **published in the map's own metadata** so a player can read them before
+choosing to play it:
+
+| Knob | Effect | Failure if wrong |
+|---|---|---|
+| Gate count and rate | Total economic output of the map | Too high and position stops mattering; too low and the match is a knife fight |
+| Yard count and placement | Where income has to be defended | Clustered yards make one fight decide everything |
+| Route node count | Meridian's income ceiling | Node-dense maps are a Meridian map, silently |
+| Convertible buildings | Meridian's production ceiling | A map with no town is a map Meridian cannot play |
+
+The third and fourth rows are why per-map balance cannot be an afterthought: two of the three factions
+have their ceiling set by map authoring rather than by their own build order. A tournament map set has
+to state these figures, and a stock map that departs from the reference values has to say so.
+
+---
+
+## 8. Designed and not scheduled
+
+Recorded so none of it reads as forgotten:
+
+- **The grid.** Substations as capturable map utilities, with three asymmetric uses — Concord's plants
+  scale throughput with grid access, Meridian taps it illegally for free at the cost of a detectable
+  signature, AEC ships generators and pays for them in corridor capacity. This is the most promising
+  open item because it hangs three faction-characteristic behaviours off one authored map feature.
+- **Weather and the air bridge.** The renderer has blendable weather; an air economy that degrades in
+  low cloud is nearly free and would make an existing presentation system a strategic input.
+- **Contributing-nation contingents** as an AEC mechanic — national caveats as a real restriction on
+  what a given contingent will do. Excellent character, unclear whether it is fun. Contracted haulage
+  refusing contested ground ([§2.5](#25-the-three-acquisitions)) is the same idea at a smaller scale
+  and is the cheap test of whether it plays well.
+- **Civilian traffic as simulation objects.** The corridor's traffic is presentation today
+  ([§2.2](#22-the-three-layers-of-a-supply-chain)) and could be promoted to real objects, at which
+  point destroying commerce to starve Meridian's duty becomes a strategy. That is a legitimate move in
+  this setting rather than a gimmick, but it is a decision about civilian death and gets made
+  deliberately or not at all.
+
+## 9. Explicitly not in this document
+
+- **Numbers.** Costs, healths, rates and multipliers other than the damage table live in
+  [balance.md](balance.md), which also owns the method for setting them. The one exception is the
+  damage table, which is here because its *shape* — four by five, no zeros — is a rule rather than a
+  tuning value.
+- **Per-faction detail.** [faction-mechanics.md](faction-mechanics.md).
+- **Campaign and mission structure.** Scripted missions are a different subject and the bible's game
+  split governs them.
+- **Multiplayer format.** Team sizes, seat counts and modes wait on a playable one-versus-one.
+
+---
+
+## 10. What this document obliges the engine to gain
+
+The design README claims the faction bible is a source of engine requirements and has already been
+one. This document is the same claim continued, and the list is short enough to state:
+
+| Requirement | Where it lands | Already promised? |
+|---|---|---|
+| Scenario `routes`, `gates`, `yards` | [scenario.md](../formats/scenario.md) | No — additive fields, needs a format decision |
+| Template `health`, `cost`, `build_time`, `weapons`, `armour_class`, `vision`, `capacity` | [templates.md](../formats/templates.md) | Yes — "each arrives with the M6 mechanic that reads it" |
+| Template `footprint`, `passage` | same | Yes — [ADR 3001](../adr/3001-pathfinding.md) consequences |
+| Carrier round trips as standing orders | `cic_sim` | Partly — standing orders exist |
+| Off-map sortie slots with recovery timers | `cic_sim` | No |
+| Integer credit accumulation with retained remainder | `cic_sim` | No |
+| Per-link interdiction state, driven by damage events | `cic_sim` | No |
+| Upstream backlog with a cap, and the reopening surge | `cic_sim` | No |
+| Wreck objects with decay | `cic_sim` | No |
+| Convertible neutral structures | `cic_sim`, templates | No |
+| Detection as an axis beside vision | `cic_sim` fog | No |
+| Runtime cell-cost edits for grading and cratering | `cic_sim` pathfinding | Yes — ADR 3001 decision 7's spike |
+| A cell's cost class reaching **movement rate**, not only path ranking | `cic_sim` units | No — and see the ADR 3001 amendment |
+| Cost classes that can express better-than-ground | ADR 3001 | No — amendment recorded there |
+| Cosmetic corridor traffic | `cic-render` | No — presentation only, no simulation state |
+| Per-faction display strings for one currency | string table | Yes — exists |
+| Per-instance tint for recovered hulls | `cic-render` | Yes — exists |
+
+Six of seventeen are already promised or built, which is the argument for writing this now rather than
+after M6's economy line is implemented: the cheap half of the list is cheap *because* the bible was
+written before the renderer. Two of the seventeen are amendments to an accepted record rather than new
+work, and both were found by writing this document rather than by building anything — which is the
+other argument for the order.

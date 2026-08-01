@@ -35,9 +35,12 @@ are shapes rather than features.
 A milestone describes an engine capability — a heightfield that renders, a kernel that ticks
 deterministically, a lockstep session that replays, a cue that plays where the unit is — because that is
 what can be finished and tested. The
-game those capabilities add up to is described in [the README](README.md#the-game) and specified in the
-[faction bible](docs/design/faction-bible.md), which is upstream of several entries here rather than
-downstream of them: M3's writable terrain textures exist because a faction paves the map.
+game those capabilities add up to is described in [the README](README.md#the-game) and specified in
+[docs/design](docs/design/README.md) — the [faction bible](docs/design/faction-bible.md) for character,
+[mechanics.md](docs/design/mechanics.md) for the rules, and [balance.md](docs/design/balance.md) for how
+their numbers get set. That directory is upstream of several entries here rather than downstream of
+them: M3's writable terrain textures exist because a faction paves the map, and M6's economy line is
+answered by [ADR 3002](docs/adr/3002-corridor-economy.md) rather than by the milestone.
 
 Everything is implemented from scratch in the project's own formats. This is not a reimplementation of or
 a compatibility layer for any existing game, and nothing here reads another game's data or derives from
