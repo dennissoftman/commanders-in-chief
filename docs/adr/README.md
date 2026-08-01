@@ -28,6 +28,7 @@ only the leading token has to agree.
 | [2001](2001-block-compressed-textures.md) | Block-compressed textures in DDS, and a converter to make them | accepted, implemented |
 | [3001](3001-pathfinding.md) | Pathfinding: derived passability, occluders and passage, integer-cost grid A* | accepted and implemented in full; five amendments, four of them built |
 | [3002](3002-corridor-economy.md) | The corridor economy: one currency, three acquisitions, carriage on the map | accepted |
+| [3003](3003-formation-movement.md) | Formation movement: the shape a group is already in, carried to where it is sent | accepted, implemented |
 | [4001](4001-hdri-sky.md) | Captured skies: Radiance `.hdr`, an equirectangular lookup, and the light derived from it | accepted, implemented |
 | [4002](4002-water-kinds.md) | Three kinds of water: a spread wave train, kind presets, and normal level-of-detail | accepted, implemented |
 | [6001](6001-audio-backend-boundary.md) | Where the audio backend boundary goes | accepted, implemented |

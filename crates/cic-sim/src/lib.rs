@@ -9,6 +9,7 @@
 //!   authored order.
 //! - [`units`] — the first verbs: spawn, move, stop, walking routes at the template's speed.
 //! - [`ground`] — the passability grid derived from the heightfield, and integer A\* across it.
+//! - [`formation`] — where a group of units stands when it gets where it was sent.
 //! - [`scripts`] — the event dispatcher: a scenario's scripts, in authored order, and the mission
 //!   state they keep on this side of the host boundary.
 //! - [`subsystem`] — the [`Subsystem`] trait and the [`TickContext`] a tick hands one.
@@ -46,6 +47,7 @@
 
 pub mod activation;
 pub mod command;
+pub mod formation;
 pub mod ground;
 pub mod hash;
 pub mod id;
@@ -58,6 +60,7 @@ pub mod units;
 
 pub use activation::{ActivationError, Forces, Placed, Player, activate};
 pub use command::{Command, CommandError, CommandLog, PlayerId};
+pub use formation::Member;
 pub use ground::{CellRect, GROUND, Ground, GroundRules};
 pub use hash::StateHasher;
 pub use id::{IdAllocator, ObjectId};
@@ -68,4 +71,6 @@ pub use random::{Stream, Streams};
 pub use scripts::{Mission, ScriptFault, ScriptLoadError, Scripts};
 pub use subsystem::{Subsystem, TickContext};
 pub use tick::TickAccumulator;
-pub use units::{AvoidanceRules, Unit, Units, move_command, spawn_command, stop_command};
+pub use units::{
+    AvoidanceRules, Unit, Units, move_command, move_group_command, spawn_command, stop_command,
+};

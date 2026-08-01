@@ -97,7 +97,7 @@ use cic_sim::activation::FORCES;
 use cic_sim::units::UNITS;
 use cic_sim::{
     Command, Forces, Ground, GroundRules, Kernel, KernelConfig, ObjectId, PlayerId,
-    TickAccumulator, Units, activate, move_command, spawn_command,
+    TickAccumulator, Units, activate, move_group_command, spawn_command,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -950,6 +950,54 @@ fn scout_model() -> Model {
     }
 }
 
+/// A slot marker: a flat plate on the ground, drawn where a unit has been told to stand.
+///
+/// This is [ADR 3003](../../../docs/adr/3003-formation-movement.md) made visible. A formation is a
+/// set of *destinations*, so it is legible before anybody arrives and invisible afterwards — which
+/// is exactly when a player wants to see it. Tinted by owner like the scouts, and lifted a hair off
+/// the terrain so it does not fight the ground for depth.
+fn marker_model() -> Model {
+    let half = 2.2f32;
+    let lift = 0.35f32;
+    let corners = [
+        [-half, -half, lift],
+        [half, -half, lift],
+        [half, half, lift],
+        [-half, half, lift],
+    ];
+    Model {
+        name: "marker".to_owned(),
+        primitives: vec![
+            ModelPrimitive {
+                vertices: corners
+                    .into_iter()
+                    .enumerate()
+                    .map(|(corner, position)| ModelVertex {
+                        position,
+                        normal: [0.0, 0.0, 1.0],
+                        uv: quad_uv(corner),
+                        ..ModelVertex::default()
+                    })
+                    .collect(),
+                indices: vec![0, 1, 2, 0, 2, 3],
+                material: Some(0),
+            }
+            .with_generated_tangents(),
+        ],
+        materials: vec![ModelMaterial {
+            name: "paint".to_owned(),
+            base_color: [1.0, 1.0, 1.0, 1.0],
+            metallic: 0.0,
+            roughness: 0.9,
+            emissive: [0.25, 0.25, 0.25],
+            ..ModelMaterial::default()
+        }],
+        images: Vec::new(),
+        has_skin: false,
+        has_animation: false,
+    }
+}
+
 /// The demo's opening inputs: each player spawns three scouts beside their start.
 fn demo_spawns(scenario: &Scenario) -> Vec<Command> {
     let mut commands = Vec::new();
@@ -970,8 +1018,13 @@ fn demo_spawns(scenario: &Scenario) -> Vec<Command> {
     commands
 }
 
-/// The demo's standing orders: every five seconds, every scout is sent to the next corner of a
-/// square around the map's middle, staggered by identifier so the two sides' patrols interleave.
+/// The demo's standing orders: every five seconds, each side's scouts are sent **as one group** to
+/// the next corner of a square around the map's middle, the two sides half a lap apart.
+///
+/// One order per side rather than one per scout, because that is what makes this a demonstration of
+/// [ADR 3003](../../../docs/adr/3003-formation-movement.md) rather than of three coincidental
+/// destinations: three scouts sent to one point would arrive in a pile that avoidance then has to
+/// untangle, and three scouts sent as a group arrive in the shape they set out in.
 ///
 /// This is host-side input generation, not simulation: the commands it produces are ordinary
 /// tick-stamped inputs, exactly what a lobby's network session or a player's clicks would feed in.
@@ -993,15 +1046,23 @@ fn demo_orders(kernel: &Kernel, extent: [f32; 2]) -> Vec<Command> {
         [f64::from(extent[0]) * 0.35, f64::from(extent[1]) * 0.65],
     ];
     let phase = tick / 150;
-    units
-        .units()
-        .iter()
-        .map(|(id, unit)| {
-            let corner = corners[usize::try_from((phase + id.0) % 4).expect("index below four")];
+
+    // Grouped by seat, in a `BTreeMap` for the reason everything in this loop is ordered: the
+    // commands it produces are recorded input, and input that came out in a different order on
+    // another machine is a replay that does not reproduce.
+    let mut sides: BTreeMap<u8, Vec<ObjectId>> = BTreeMap::new();
+    for (id, unit) in units.units() {
+        sides.entry(unit.owner.0).or_default().push(*id);
+    }
+    sides
+        .into_iter()
+        .map(|(seat, group)| {
+            let corner =
+                corners[usize::try_from((phase + u64::from(seat) * 2) % 4).expect("below four")];
             Command {
                 tick,
-                player: unit.owner,
-                payload: move_command(*id, corner[0], corner[1]),
+                player: PlayerId(seat),
+                payload: move_group_command(&group, corner[0], corner[1]),
             }
         })
         .collect()
@@ -1012,6 +1073,11 @@ fn demo_orders(kernel: &Kernel, extent: [f32; 2]) -> Vec<Command> {
 struct UnitPose {
     position: [f64; 2],
     owner: u8,
+    /// Where it has been told to stand, when it has been told anything.
+    ///
+    /// The last waypoint of its route, which after a group order *is* its slot in the formation —
+    /// so drawing these is drawing the formation, with no simulation state added to do it.
+    slot: Option<[f64; 2]>,
 }
 
 /// Every unit's pose at the end of the tick just computed.
@@ -1025,6 +1091,7 @@ fn unit_poses(units: &Units) -> BTreeMap<ObjectId, UnitPose> {
                 UnitPose {
                     position: unit.position,
                     owner: unit.owner.0,
+                    slot: unit.destination(),
                 },
             )
         })
@@ -1097,6 +1164,29 @@ fn unit_instances(
         .collect()
 }
 
+/// One flat plate per unit that has somewhere to be, on the ground at its slot.
+///
+/// Not interpolated and not turned: a slot does not move between ticks, and a plate has no front.
+fn slot_instances(current: &BTreeMap<ObjectId, UnitPose>, terrain: &Terrain) -> Vec<ModelInstance> {
+    const TEAM_TINTS: [[f32; 4]; 2] = [[0.55, 0.70, 1.0, 1.0], [1.0, 0.62, 0.42, 1.0]];
+    current
+        .values()
+        .filter_map(|pose| {
+            let slot = pose.slot?;
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "presentation narrows simulation state freely; nothing feeds back"
+            )]
+            let (x, y) = (slot[0] as f32, slot[1] as f32);
+            let ground = terrain.elevation_at_world(x, y)?;
+            Some(
+                ModelInstance::placed([x, y, ground], 0.0, 1.0)
+                    .with_tint(TEAM_TINTS[usize::from(pose.owner) % TEAM_TINTS.len()]),
+            )
+        })
+        .collect()
+}
+
 /// The three kinds `J` cycles through, in the order it cycles them.
 ///
 /// A lake first, because that is what a whole-map water table over a generated heightfield actually
@@ -1126,6 +1216,8 @@ struct Simulation {
     kernel: Kernel,
     accumulator: TickAccumulator,
     scout: Model,
+    /// The plate drawn at each unit's slot, so a formation is legible before it arrives.
+    marker: Model,
     /// Unit poses at the end of the tick before last, and at the end of the last one. Presentation
     /// draws between them; see [`unit_instances`].
     previous: BTreeMap<ObjectId, UnitPose>,
@@ -1626,6 +1718,7 @@ impl ApplicationHandler for Viewer {
                 kernel,
                 accumulator,
                 scout: scout_model(),
+                marker: marker_model(),
                 previous: opening.clone(),
                 current: opening,
                 headings: BTreeMap::new(),
@@ -1886,6 +1979,20 @@ impl Viewer {
                     &active.context,
                     &simulation.scout,
                     &instances,
+                    active.surface.material_layout(),
+                )
+                .map_err(|error| error.to_string())?;
+                active.models.push(batch);
+            }
+            // The formation, drawn where it is going rather than where it is. Built from the
+            // current tick alone -- a slot does not move between two ticks, so there is nothing to
+            // interpolate and interpolating it would only make the plate shiver.
+            let slots = slot_instances(&simulation.current, &self.terrain);
+            if !slots.is_empty() {
+                let batch = ModelBatch::new(
+                    &active.context,
+                    &simulation.marker,
+                    &slots,
                     active.surface.material_layout(),
                 )
                 .map_err(|error| error.to_string())?;

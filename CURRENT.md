@@ -439,10 +439,11 @@ that spawn by command on tick zero and patrol a square around the map's middle o
 crossing each other's paths and going round the lake rather than through it. **The depots now deny
 the ground they stand on** — five cells square against the eight-metre grid — and the viewer prints
 the grid twice, before and after the placements stamp it, because the difference between the two
-numbers is the only part of this a still image cannot show. **And the scouts have a radius**, which
-the demo's own standing orders exercise without being asked to: the patrol sends two pairs of them
-to the *same* corner every phase, so where they used to arrive standing inside each other they now
-arrive beside each other. The kernel advances at
+numbers is the only part of this a still image cannot show. **And the scouts patrol as two groups
+rather than as six units**: each side's three are sent to the next corner by one `move_group` order,
+so they arrive in the shape they set out in instead of in a pile, and a **plate is drawn on the
+ground at every unit's slot** — which is the formation made visible, before anybody reaches it and
+gone once they have. The kernel advances at
 its fixed 30 Hz from the accumulator whatever the frame rate does, and the orders are host-side
 inputs of exactly the shape a network session would feed.
 
@@ -601,13 +602,34 @@ everything else, because a standing object's occupancy is its footprint and a mo
 every push is measured before any is applied, so being spawned first buys nothing; and the one
 coefficient there is, is in the hash.
 
-Two limitations are recorded rather than smoothed over. A head-on pair stalls, because a push
+One limitation is recorded rather than smoothed over: a head-on pair stalls, because a push
 straight backwards has no sideways component to slide on, and choosing a side is the negotiation
-the record declined. And a crowd converging on one point keeps jostling — those 17 pairs are that,
-not a failure to settle — which is what **formation movement** is for: sixteen units sent to one
-place should be given sixteen places. The quadratic pair loop was measured rather than assumed at
-**0.013 ms per tick at 100 units, 0.14 ms at 500 and 0.49 ms at 1000**, against a 33 ms tick, so
-the spatial bin that would remove it is recorded and not built.
+the record declined. The quadratic pair loop was measured rather than assumed at **0.013 ms per
+tick at 100 units, 0.14 ms at 500 and 0.49 ms at 1000**, against a 33 ms tick, so the spatial bin
+that would remove it is recorded and not built.
+
+**The other limitation it recorded is now closed.** A crowd converging on one point kept jostling —
+every unit still walking at a point every other unit was standing on — and the record named the fix
+without building it: sixteen units sent to one place should be given sixteen places. That is
+**formation movement**, [ADR 3003](docs/adr/3003-formation-movement.md), and a `move_group` order
+now does exactly that. The formation is **the one the group is already in**: each member's slot is
+its own offset from the group's centre, carried to the destination, so a line arrives as a line and
+a wedge as a wedge. There is no box, no template and no shape table anywhere in it — which is the
+*free* half — and the assignment is the identity, member `i` to slot `i`, which is the *not random*
+half and also means that on open ground every displacement is the same vector and nobody crosses
+anybody.
+
+Two things the translation cannot do alone. A group that set out in a heap has no shape to carry, so
+the slots are **opened out** by the same radius-aware push avoidance uses — taking the *average* of
+what each slot's neighbours ask for rather than the sum, because summing overshoots and the group
+oscillates outward instead of settling. And a slot the ground refuses is **re-placed widest member
+first**: the object that has the hardest time fitting anywhere gets first refusal on the roomy
+ground, and the narrow ones fill in around it. That ordering is the whole of "wide units placed
+efficiently", and it is a one-line sort rather than a packing algorithm.
+
+The measurement is the point: sixteen units sent to one cell **as a group** end with **zero** of a
+hundred and twenty pairs overlapping, against **twelve** for the same crowd sent by sixteen separate
+orders.
 
 **The economy is decided, and so is the cost ladder.** Denys accepted
 [ADR 3002](docs/adr/3002-corridor-economy.md) on 2026-08-01, together with the three amendments it
