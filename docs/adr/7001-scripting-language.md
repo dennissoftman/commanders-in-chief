@@ -1,6 +1,6 @@
 # ADR 7001: A scripting language of this project's own
 
-- Status: accepted and **implemented**. The language, compiler, and machine are in.
+- Status: accepted, implemented. The language, compiler, and machine are in.
 - **An earlier draft of this record argued the opposite of decision 2** and was wrong. See
   [What the first draft got wrong](#what-the-first-draft-got-wrong).
 
@@ -44,7 +44,8 @@ machine in the match at once.
    [`cic-script`](../../crates/cic-script/).
 2. **The arithmetic is ADR 0007's, unchanged.** `f64` values, only the correctly-rounded operations,
    `sqrt` used directly because the standard requires it to be exact, and sine and cosine written in
-   the permitted set in [`real`](../../crates/cic-script/src/real.rs).
+   the permitted set — originally in this crate's own `real` module, and since extracted to
+   [`cic-math`](../../crates/cic-math/src/lib.rs); see the note at the end of this record.
 3. **Angles are turns**, per ADR 0007 decision 5. A script writes `sys.sin(0.25)` for a quarter turn.
 4. **No heap.** Every value is a fixed-size scalar; a string is an index into the program's constant
    table. No allocator in the interpreter, no garbage collector, no collection pause, no allocation
@@ -134,6 +135,14 @@ changed at the same time — see [the index](README.md).
   at: a Wasm module implementing the same host contract needs no change above it.
 
 ## What implementing it established
+
+**The transcendentals did not stay in this crate, and decision 2 is stronger for it.** They were written
+here because this is where they were first needed, and extracted to **`cic-math`** once a simulation
+kernel was going to want the same functions — one crate below both, depending on nothing, carrying
+ADR 0007 decision 8's textual scan with them. The point decision 2 was making is sharpened rather than
+contradicted: the arithmetic is not the scripting language's, it is the project's, and a script and a
+kernel able to hold two implementations that could disagree is precisely the state the extraction
+removes. The exact-bit pins and the platform-oracle comparison moved with the code.
 
 **The textual guard earned its place immediately.** ADR 0007 decision 8 reads like bookkeeping until it
 fails. Its first run on this crate found `2f64.powi(63)` in the `floor` bounds check — `powi` is

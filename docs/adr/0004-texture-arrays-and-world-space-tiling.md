@@ -1,6 +1,6 @@
 # ADR 0004: Texture arrays, world-space tiling, and CPU mip generation
 
-- Status: accepted
+- Status: accepted, implemented. Decision 4 is since taken up by [ADR 2001](2001-block-compressed-textures.md) for anything shipping DDS; see Consequences.
 
 ## Context
 
@@ -82,3 +82,10 @@ because `naga` runs the same uniformity analysis the backend does.
 - Anisotropic filtering is deliberately not used. It is an optional device capability, and a sampler that
   fails to create on a software adapter would take the headless tests with it. Trilinear until there is a
   measured reason and a capability check.
+- **Decision 4 has since been taken up by [ADR 2001](2001-block-compressed-textures.md).** This record
+  accepted CPU mip generation as a cost and named its own successor — *precomputed mips in the asset,
+  not a pass at upload* — and that successor now exists: a `.dds` arrives with its chain already in the
+  file and its blocks reach the texture unit untouched. The CPU pass is not gone and is not meant to be;
+  it remains the path for any image that does not ship compressed, and the two agree to within a bit.
+  Recorded here because a reader arriving at decision 4 should not have to find 2001 to learn it was
+  answered.

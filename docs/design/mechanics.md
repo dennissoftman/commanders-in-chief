@@ -415,11 +415,36 @@ euphemisms, and this is what the phrase would mean if it meant anything: you do 
 logistics, you rearrange the ground until the logistics come to you. The faction that talks like a
 staff college gets the mechanic its vocabulary was already describing.
 
-Three answers exist, so it is a decision and not a trap: rebuild the crossing, which costs an engineer
-standing under whatever is now overlooking it; clear the outpost; or accept the longer route and pay in
-income. **This is also the best argument for having kept the three mechanisms separate** — severance,
-occupation and interdiction chain into one operation precisely because they are three different things.
-One merged "the road is damaged" quantity could not have produced it.
+Three answers exist, so it is a decision and not a trap: rebuild the crossing, clear the outpost, or
+accept the longer route and pay in income. **This is also the best argument for having kept the three
+mechanisms separate** — severance, occupation and interdiction chain into one operation precisely
+because they are three different things. One merged "the road is damaged" quantity could not have
+produced it.
+
+##### Rebuilding a crossing, and interrupting one
+
+**A crossing can always be rebuilt, and it is deliberately expensive and slow.** Any faction with an
+engineering capability can do it; Concord does it fastest and cheapest, because it is the roadbuilder.
+The cost has to be real, or demolition is a nuisance rather than a decision, and the time has to be
+real, or an outpost overlooking the site is watching nothing happen.
+
+**A rebuild is a build site, so it obeys [§4.2](#42-construction) and needs no new rule.** From the
+moment work starts there is an object standing at the crossing, and everything follows from that:
+
+- **Anyone can interrupt it.** Kill the engineer and work stops where it stopped. Progress already
+  invested stays on the site, so an interruption costs the *tempo*, not the investment, and the owner
+  can come back and resume.
+- **Destroying the site is the harsher answer**, and it costs what it should: cancelling a build refunds
+  the unspent remainder, and having it destroyed refunds nothing. An opponent who wants the crossing
+  gone permanently has to keep coming back and levelling the works, which is a commitment of its own.
+- **So a crossing becomes a place, not an event.** It is contested repeatedly over a match, and whoever
+  holds the ground around it decides whether the bridge exists at all.
+
+That last line is what makes the outpost from the previous section worth more than one ambush. It
+covers the detour *and* denies the repair, so a player who takes the high ground beside a crossing has
+bought both halves of the argument. And the counter is equally clear: the crossing's owner has to
+contest that ground before an engineer is worth sending, which is a fight over terrain that neither
+side chose for its own sake — which is the kind of fight a corridor should generate.
 
 ### 2.7 Why expansion is a real decision
 
@@ -672,8 +697,14 @@ one. This document is the same claim continued, and the list is short enough to 
 | Per-faction display strings for one currency | string table | Yes — exists |
 | Per-instance tint for recovered hulls | `cic-render` | Yes — exists |
 
-Seven of twenty are already promised or built, which is the argument for writing this now rather than
-after M6's economy line is implemented: the cheap half of the list is cheap *because* the bible was
-written before the renderer. Three of the twenty are amendments to an accepted record rather than new
-work, and all three were found by writing this document rather than by building anything — which is the
-other argument for the order.
+<!--count:promised-->Seven<!--/count--> of <!--count:total-->twenty<!--/count--> are already promised
+or built, which is the argument for writing this now rather than after M6's economy line is
+implemented: the cheap half of the list is cheap *because* the bible was written before the renderer.
+<!--count:amendments-->Three<!--/count--> of the <!--count:total-->twenty<!--/count--> are amendments to
+an accepted record rather than new work, and all of those were found by writing this document rather
+than by building anything — which is the other argument for the order.
+
+*The three counts in that paragraph are generated from the table above by
+`tools/generate-doc-counts.py`, and CI fails on a stale one. They were each wrong at least once while
+this document was being written, because adding a row here does not remind anybody to edit a sentence
+in two other files.*

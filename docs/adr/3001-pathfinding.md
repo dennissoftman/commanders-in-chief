@@ -1,7 +1,7 @@
 # ADR 3001: Pathfinding — derived passability, occluders and passage, integer-cost grid A*
 
-**Status:** accepted. Three amendments are **proposed** below, raised by
-[ADR 3002](3002-corridor-economy.md) and carrying its review.
+- Status: accepted. Three amendments are **proposed** below, raised by
+  [ADR 3002](3002-corridor-economy.md) and carrying its review.
 
 ## Context
 

@@ -1,6 +1,6 @@
 # ADR 0006: Atmosphere — one environment, marched fog, procedural cloud shadows
 
-- Status: accepted
+- Status: accepted, implemented. **Decision 6 was reversed by the implementation** — see What implementing it established.
 
 ## Context
 
@@ -27,7 +27,9 @@ asking for "storm" is asking for one thing.
 5. **Weather's surface response is applied to the G-buffer in the lighting pass**, not in the terrain
    and model shaders that wrote it. Wetness darkens albedo and drops roughness; snow blends toward a
    snow surface by *slope*.
-6. **The environment's sun is opt-in.** `DeferredFrame::light` stays authoritative.
+6. **The environment's sun is opt-in.** `DeferredFrame::light` stays authoritative. — **Reversed by the
+   implementation; see [below](#what-implementing-it-established).** The sun is now derived by default
+   and `light` is the override.
 7. **Airborne precipitation is out of scope.** It is a particle system, which M3 defers.
 
 ## Rationale
@@ -107,8 +109,11 @@ beam and into the sky rather than removing it. Dimming both is what makes an ove
 - `Weather::wetness` and `Weather::snow` are read by the lighting pass and verified by capture: snow is
   visibly held off the spire's flanks and the ridge's steep face while covering the plain, and wet ground
   darkens across the frame.
-- Time of day derives a sun that nothing uses by default. That is deliberate, but it does mean a caller
-  wanting a day cycle must assign `Environment::sun_light()` to the frame themselves.
+- ~~Time of day derives a sun that nothing uses by default. That is deliberate, but it does mean a caller
+  wanting a day cycle must assign `Environment::sun_light()` to the frame themselves.~~ **No longer true**,
+  and it is the consequence the reversal of decision 6 was aimed at: the frame derives its own sun and a
+  caller wanting a day cycle does nothing at all. Struck rather than deleted, because the burden this
+  bullet describes is exactly the argument for the reversal.
 - No latitude, date, or north reference: the sun is a half-sine over a fixed civil day, because no map
   format carries the inputs a real solar position model would need.
 - Cloud shadows cost seven gradient-noise evaluations per lit pixel — five octaves plus two for the warp —
@@ -130,3 +135,25 @@ beam and into the sky rather than removing it. Dimming both is what makes an ove
   layer, `exp(-(614-30)/52)` is about 1e-5, so the rays passed through almost no fog at all. The layer has
   to be thick and dense *relative to the camera height*, not to the terrain. Patchiness contributes
   visible variation but not crisp banks; crisp banks want a lower camera or a denser march.
+
+## What implementing it established
+
+**Decision 6 was reversed, and it was the right reversal.** The record said the environment's sun is
+opt-in and `DeferredFrame::light` stays authoritative. The implementation does the opposite:
+`DeferredFrame::new` derives its light from the environment's hour, `in_environment` re-derives it, and
+an explicit `light` assigned *afterwards* is what now reads as the deliberate override.
+
+The argument that turned it round is one the original decision did not consider. Leaving the two
+independent does not produce flexibility, it produces a default that is quietly wrong — an environment
+carrying a 6 a.m. hour beside a light still pointing where it did at noon is not a configuration anyone
+wants, and every caller changing the time of day has to remember to update both or ship a frame whose
+sky and shadows disagree. Opt-in defaults are correct when the derived value is *a* reasonable answer;
+here it is the *only* consistent one, so the burden belongs on the caller who wants them to disagree.
+
+The derivation is calibrated against `daylight_with_occlusion`, the hand-tuned preset it replaced as the
+default, and a test pins it there — so the reversal did not quietly change what a frame looks like.
+
+**And the calibration caught a derived sun that looked right and was not.** It matched its preset's
+colour exactly while sitting 27 degrees away in azimuth, which no assertion over the two colours would
+have found. That is the standing rule about looking at the capture, arriving in this record's subject
+area rather than in a shader.

@@ -1,6 +1,6 @@
 # ADR 6001: Where the audio backend boundary goes, and why the default is our own mixer
 
-- Status: accepted and **implemented**. All five decisions are in.
+- Status: accepted, implemented. All five decisions are in; the device layer beneath the boundary is M9's open item, not this record's.
 
 ## Context
 

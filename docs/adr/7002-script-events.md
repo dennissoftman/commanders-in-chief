@@ -1,6 +1,6 @@
 # ADR 7002: Script events — subscription is a handler, and scripts arrive with the scenario
 
-**Status:** accepted
+- Status: accepted, implemented. `cic_sim::scripts` dispatches, and a scenario's scripts run.
 
 ## Context
 
