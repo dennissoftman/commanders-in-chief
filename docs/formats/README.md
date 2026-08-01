@@ -14,6 +14,7 @@ game's format, because nothing here reads one.
 | `*.cicbank.json` | Sound bank: what a sound *event* is | [sound-bank.md](sound-bank.md) |
 | `*.cics` | Script: behaviour in data — scenario logic and objectives | [script.md](script.md) |
 | `.dds` | Textures: BC1, BC5 or BC7 blocks with their mip chains | [texture.md](texture.md) |
+| `.hdr` | Skies: an equirectangular environment in high dynamic range | [sky.md](sky.md) |
 | `.glb` | Models, props, units | [glTF 2.0](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html) |
 | `.wav` | Audio clips | [RIFF/WAVE](https://learn.microsoft.com/en-us/windows/win32/xaudio2/resource-interchange-file-format--riff-) |
 | `.zip`, `.tar` | Content containers | Their own published specifications |
@@ -43,6 +44,11 @@ paying a large cost to solve an already-solved problem.
 in video memory and is decompressed by the texture unit on read, so the format is chosen by what the GPU
 samples rather than by what compresses best. DDS is the container every texture tool already writes, and its
 header is fixed-offset fields that need no dependency to parse. See [texture.md](texture.md).
+
+**A sky is the exception that proves that rule.** It is the one image here that is *not* a reflectance, so
+none of the reasoning above applies to it: eight bits per channel cannot hold radiance, and the hardware
+format that could — BC6H — would need an encoder written before a single file existed. Radiance `.hdr` is
+what the content is distributed as and is a header plus RLE scanlines to read. See [sky.md](sky.md).
 
 ## What every decoder guarantees
 
