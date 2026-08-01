@@ -117,7 +117,7 @@ pub use texture::{ColourSpace, TextureArray, TextureImage, array_format, block_a
 pub use timing::{FrameTimings, PassTimer, TimedPass};
 pub use ui::{DrawList, UiMetrics, UiRenderer, atlas_sizes};
 pub use view::{Projection, view_projection};
-pub use water::{WaterBody, WaterMaterial, WaterSurface};
+pub use water::{WaterBody, WaterKind, WaterMaterial, WaterSurface};
 
 /// A failure in a renderer operation.
 #[derive(Debug)]

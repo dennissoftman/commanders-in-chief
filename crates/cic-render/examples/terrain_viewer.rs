@@ -26,6 +26,7 @@
 //! | `,` `.` | Step the time of day, held to scrub the sun |
 //! | `P` | Toggle the per-pass GPU timing printout |
 //! | `V` | Toggle the virtual-texture page cache |
+//! | `J` | Cycle the water: lake, river, ocean |
 //! | `K` | Toggle the captured sky, when one was given |
 //! | `Esc` | Quit |
 //!
@@ -90,7 +91,7 @@ use cic_render::view::Projection;
 use cic_render::{
     Action, Antialiasing, DeferredFrame, DisplaySettings, Environment, GpuContext, InputState,
     LayerMaterial, ModelBatch, ModelInstance, SurfaceRenderer, TerrainGround, TerrainPageCache,
-    TerrainRenderer, TextureImage, WaterBody, WaterSurface, Weather,
+    TerrainRenderer, TextureImage, WaterBody, WaterKind, WaterSurface, Weather,
 };
 use cic_sim::activation::FORCES;
 use cic_sim::units::UNITS;
@@ -1076,15 +1077,26 @@ fn unit_instances(
         .collect()
 }
 
+/// The three kinds `J` cycles through, in the order it cycles them.
+///
+/// A lake first, because that is what a whole-map water table over a generated heightfield actually
+/// is and what the committed references were captured through. The flow and wind vectors are the same
+/// direction, so stepping river to ocean changes the kind and nothing else about the heading.
+const WATER_CYCLE: [(&str, WaterKind); 3] = [
+    ("lake", WaterKind::Lake),
+    ("river", WaterKind::River { flow: [7.0, 2.5] }),
+    ("ocean", WaterKind::Ocean { wind: [7.0, 2.5] }),
+];
+
 /// A water table just above the terrain's low point, spanning the whole map.
 ///
 /// The elevation comes from [`Terrain::water_level`] rather than from a derivation of the viewer's
 /// own, because the simulation refuses to walk under the same line and two derivations of one water
 /// level is a unit wading through a lake. The shoreline needs no outline: the water pass clips the
 /// surface wherever the bed rises through it, so one rectangle fills every basin the terrain has.
-fn water_table(terrain: &Terrain) -> WaterSurface {
+fn water_table(terrain: &Terrain, kind: WaterKind) -> WaterSurface {
     let [extent_x, extent_y] = terrain.world_extent();
-    WaterSurface::new([0.0, 0.0, extent_x, extent_y], terrain.water_level())
+    WaterSurface::of_kind([0.0, 0.0, extent_x, extent_y], terrain.water_level(), kind)
 }
 
 /// Everything created once a window exists.
@@ -1137,6 +1149,9 @@ struct Viewer {
     last_frame: Option<Instant>,
     /// Seconds since the first frame, which is what animates the water.
     elapsed: f32,
+    /// Which entry of [`WATER_CYCLE`] the table is built from. Held here rather than inside [`Active`]
+    /// so the choice survives the window being rebuilt, the same as the display settings.
+    water_kind: usize,
     /// How many frames have been presented, which drives the temporal jitter sequence.
     frame_ordinal: u32,
     /// Held here rather than only inside the surface, so the setting survives the window being rebuilt.
@@ -1188,6 +1203,8 @@ impl Viewer {
             active: None,
             last_frame: None,
             elapsed: 0.0,
+            // A lake, for the same reason the display and the environment start where they do.
+            water_kind: 0,
             frame_ordinal: 0,
             // Starts where the headless captures are, so the first frame in the window is the frame the
             // references were rendered from and pressing a key is the only difference from them.
@@ -1337,6 +1354,36 @@ impl Viewer {
                 active.window.request_redraw();
             }
             Err(error) => eprintln!("pages: could not allocate the cache: {error}"),
+        }
+    }
+
+    /// Rebuilds the water table as the next kind in [`WATER_CYCLE`].
+    ///
+    /// Here for the same reason the weather and antialiasing keys are, and with a stronger case than
+    /// either. Two of the three things that separate a river from a lake are *motion* — the current
+    /// carrying the whole surface downstream, and the chop running along the channel rather than
+    /// across it — and a still capture cannot report either. The third, a surf line advancing and
+    /// retreating along a shore with the swell, is motion as well. Everything a headless reference can
+    /// show about these three kinds is their colour.
+    ///
+    /// A body's material is fixed at construction, so this replaces the body rather than assigning
+    /// through it. That is cheap: the uniform is 112 bytes and the grid is procedural, so there is no
+    /// vertex buffer to rebuild — only a buffer, a bind group, and the cell count the new wavelength
+    /// implies.
+    fn cycle_water(&mut self) {
+        self.water_kind = (self.water_kind + 1) % WATER_CYCLE.len();
+        let (name, kind) = WATER_CYCLE[self.water_kind];
+        let Some(active) = &mut self.active else {
+            return;
+        };
+        let table = water_table(&self.terrain, kind);
+        match WaterBody::new(&active.context, table, active.surface.water_layout()) {
+            Ok(body) => {
+                eprintln!("water: {name}, {} vertices", body.vertex_count());
+                active.water = vec![body];
+                active.window.request_redraw();
+            }
+            Err(error) => eprintln!("water: could not build a {name}: {error}"),
         }
     }
 
@@ -1577,11 +1624,12 @@ impl ApplicationHandler for Viewer {
         // One water table across the whole map. The shader clips it wherever the bed rises through
         // it, so a single rectangle fills every depression the heightfield happens to have — which is
         // what makes this work for a loaded map as well as for the generated one.
-        let table = water_table(&self.terrain);
+        let (name, kind) = WATER_CYCLE[self.water_kind];
+        let table = water_table(&self.terrain, kind);
         let water = match WaterBody::new(&context, table, surface.water_layout()) {
             Ok(body) => {
                 eprintln!(
-                    "water: surface at {:.1}, {} vertices",
+                    "water: {name} surface at {:.1}, {} vertices",
                     table.elevation,
                     body.vertex_count()
                 );
@@ -1659,6 +1707,10 @@ impl ApplicationHandler for Viewer {
                     }
                     if pressed && code == KeyCode::KeyV {
                         self.toggle_pages();
+                        return;
+                    }
+                    if pressed && !event.repeat && code == KeyCode::KeyJ {
+                        self.cycle_water();
                         return;
                     }
                     if pressed && let Some(display) = display_change(code, self.display) {
