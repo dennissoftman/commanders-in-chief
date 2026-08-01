@@ -57,6 +57,11 @@ toward whatever is behind it, and behind it is the sky. A fog colour that disagr
 horizon exactly where the terrain silhouette meets it. A test pins the shared constant across the
 Rust/WGSL boundary, because nothing else would catch them drifting.
 
+This is the decision [ADR 4001](4001-hdri-sky.md) had to satisfy rather than sidestep. A captured sky
+makes both of the constants this model derives from — the horizon colour here and `SKY_NEUTRAL` for the
+ambient — stop describing what is on screen, so it re-derives them from the image instead of binding a
+photograph behind a scene lit by something else.
+
 **Cloud shadows attenuate the direct term only.** A cloud occludes the sun's disc, not the sky. Taking
 ambient down with it makes cloud shade read as a hole in the world rather than as an overcast patch.
 

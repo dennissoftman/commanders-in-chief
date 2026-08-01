@@ -309,6 +309,7 @@ fn render(
         &harness.renderer,
         models,
         &[],
+        None,
         &harness.targets,
         harness.output.colour_view(),
     );

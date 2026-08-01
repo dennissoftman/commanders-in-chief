@@ -18,10 +18,12 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use cic_assets::sky::{SkyAsset, SkyLimits, decode_radiance};
 use cic_assets::{Terrain, TerrainLayer};
 use cic_camera::CameraPose;
 use cic_render::detail::TerrainDetailRequest;
 use cic_render::display::JITTER_PHASES;
+use cic_render::sky::{Sky, SkySettings};
 use cic_render::terrain::LayerColour;
 use cic_render::terrain_virtual::VirtualPageView;
 use cic_render::{
@@ -130,6 +132,30 @@ fn pose(terrain: &Terrain) -> CameraPose {
     }
 }
 
+/// A camera with the horizon in frame, for the tests about what is behind the scene.
+///
+/// [`pose`] is pitched about twenty-six degrees down and the projection's half angle is a little under
+/// that, so its topmost row sits within a degree of horizontal — every background pixel it captures is
+/// *below* the horizon. That is a perfectly good camera for shadows and a useless one for a sky, and
+/// the distinction took a capture to see: the first run of these tests rendered the environment's lower
+/// hemisphere across the whole background and read as a flat grey lid, which looks exactly like a
+/// texture that failed to bind.
+fn sky_pose(terrain: &Terrain) -> CameraPose {
+    let [extent_x, extent_y] = terrain.world_extent();
+    let focus = [extent_x * 0.45, extent_y * 0.55, 240.0];
+    let eye = [
+        focus[0] + extent_x * 0.30,
+        focus[1] - extent_y * 0.95,
+        extent_x * 0.22,
+    ];
+    CameraPose {
+        eye,
+        focus,
+        // A shallow pitch, so the upper third of the frame is genuinely above the horizon.
+        forward: [-0.30, 0.95, -0.14],
+    }
+}
+
 /// A camera close enough to the ground to run *out* of scene before it runs out of shadow distance.
 ///
 /// The other half of the cascade fit from [`pose`], which is bounded at its near end. This one stands a
@@ -231,6 +257,7 @@ fn render(context: &GpuContext, harness: &Harness, frame: DeferredFrame) -> Capt
         &harness.renderer,
         &[],
         &[],
+        None,
         &harness.targets,
         harness.output.colour_view(),
     );
@@ -403,6 +430,7 @@ fn ambient_occlusion_is_computed_and_varies() {
         &harness.renderer,
         &[],
         &[],
+        None,
         &harness.targets,
         harness.output.colour_view(),
     );
@@ -445,6 +473,7 @@ fn ambient_occlusion_is_computed_and_varies() {
         &flat_renderer,
         &[],
         &[],
+        None,
         &flat_targets,
         flat_output.colour_view(),
     );
@@ -529,7 +558,7 @@ fn the_chain_renders_into_a_bgra_target() {
     deferred
         .set_frame(context, &renderer, &[], &[], frame)
         .expect("upload frame uniforms");
-    deferred.render(context, &renderer, &[], &[], &targets, &view);
+    deferred.render(context, &renderer, &[], &[], None, &targets, &view);
 
     // Validation errors surface asynchronously, so drain the queue before declaring success.
     context
@@ -674,6 +703,7 @@ fn render_water(
         &harness.renderer,
         &[],
         water,
+        None,
         &harness.targets,
         harness.output.colour_view(),
     );
@@ -1148,6 +1178,7 @@ fn a_water_body_survives_the_chain_being_rebuilt() {
         &renderer,
         &[],
         &water,
+        None,
         &second_targets,
         output.colour_view(),
     );
@@ -2407,4 +2438,445 @@ fn a_page_sampled_at_a_grazing_angle_does_not_alias_worse_than_the_direct_blend(
         "the page path aliases across the whole plain ({paged_plain:.2} against {direct_plain:.2}), which is \
          more than the horizon band alone can account for"
     );
+}
+
+// -------------------------------------------------------------------------------------------------
+// A captured sky
+//
+// The fixture is *generated*, not a photograph. Two reasons, and the second is the one that matters:
+// an HDRI is a copyrighted work and this tree carries none, and a generated sky can be made to state
+// its own orientation -- a sun at a known azimuth, a distinctly coloured ground below the horizon, and
+// a zenith that is not the horizon's colour -- so an image that is upside down, rotated, or mirrored is
+// a failing assertion rather than something to be caught by eye.
+// -------------------------------------------------------------------------------------------------
+
+/// Where the fixture sky puts its sun, as an azimuth in radians and an elevation above the horizon.
+const FIXTURE_SUN: (f32, f32) = (1.1, 0.61);
+
+/// Angular radius of that sun's disc.
+const FIXTURE_SUN_RADIUS: f32 = 0.06;
+
+/// A synthetic equirectangular sky, encoded as a real Radiance file.
+///
+/// Encoded rather than handed to `SkyAsset::new` directly, so this exercises the container the way a
+/// downloaded HDRI would: header, resolution line, RGBE scanlines and all. A decoder fault and a
+/// renderer fault then both land here rather than one of them hiding behind a bypass.
+///
+/// Four features, each of which a specific mistake would destroy:
+///
+/// - a **blue zenith** and a **warm horizon**, so a flipped `v` swaps them;
+/// - a **dark ground** below the horizon, so a sky sampled with the wrong sign appears as a black lid;
+/// - a **sun disc** at [`FIXTURE_SUN`], so a rotation is measurable and a wrong one visible;
+/// - radiance **far above one** in that disc, so an eight-bit path could not carry it.
+fn fixture_sky() -> Vec<u8> {
+    const SKY_WIDTH: u32 = 256;
+    const SKY_HEIGHT: u32 = 128;
+    let (sun_azimuth, sun_elevation) = FIXTURE_SUN;
+    let sun = [
+        sun_elevation.cos() * sun_azimuth.cos(),
+        sun_elevation.cos() * sun_azimuth.sin(),
+        sun_elevation.sin(),
+    ];
+
+    let mut bytes = b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n".to_vec();
+    bytes.extend_from_slice(format!("-Y {SKY_HEIGHT} +X {SKY_WIDTH}\n").as_bytes());
+    for y in 0..SKY_HEIGHT {
+        let theta = (y as f32 + 0.5) / SKY_HEIGHT as f32 * std::f32::consts::PI;
+        for x in 0..SKY_WIDTH {
+            let phi = ((x as f32 + 0.5) / SKY_WIDTH as f32 - 0.5) * std::f32::consts::TAU;
+            let direction = [
+                theta.sin() * phi.cos(),
+                theta.sin() * phi.sin(),
+                theta.cos(),
+            ];
+            let mut colour = if direction[2] > 0.0 {
+                let height = direction[2].powf(0.6);
+                // Brighter and warmer on the sun's side of the sky, which every real environment is
+                // and which this fixture needs for a second reason: a sky varying with elevation alone
+                // would be almost rotationally symmetric, and the tests that turn it would then pass on
+                // a renderer that ignored the rotation entirely.
+                let facing = 0.78 + 0.34 * (phi - sun_azimuth).cos();
+                [
+                    (0.72 + (0.10 - 0.72) * height) * facing,
+                    (0.46 + (0.22 - 0.46) * height) * facing,
+                    0.30 + (0.58 - 0.30) * height,
+                ]
+            } else {
+                // Ground. Dark and slightly warm, which is what a real environment's lower hemisphere
+                // is and, more usefully here, unmistakably not the sky.
+                //
+                // Varied with longitude rather than flat, and that is load-bearing rather than
+                // decorative: an RTS camera looks *down*, so a large share of the background a test
+                // captures is below the horizon. A uniform lower hemisphere would make the rotation
+                // test vacuous over exactly the pixels it has most of.
+                let facing = 0.7 + 0.3 * phi.cos();
+                [0.09 * facing, 0.075 * facing, 0.06 * facing]
+            };
+            let along = direction[0] * sun[0] + direction[1] * sun[1] + direction[2] * sun[2];
+            if along.clamp(-1.0, 1.0).acos() < FIXTURE_SUN_RADIUS {
+                colour = [3_000.0, 2_700.0, 2_200.0];
+            }
+            bytes.extend_from_slice(&to_rgbe(colour));
+        }
+    }
+    bytes
+}
+
+/// Encodes linear radiance as one RGBE quadruple.
+fn to_rgbe(colour: [f32; 3]) -> [u8; 4] {
+    let peak = colour[0].max(colour[1]).max(colour[2]);
+    if peak < 1.0e-32 {
+        return [0, 0, 0, 0];
+    }
+    let exponent = peak.log2().floor() as i32 + 1;
+    let scale = 256.0 / (exponent as f32).exp2();
+    [
+        (colour[0] * scale).clamp(0.0, 255.0) as u8,
+        (colour[1] * scale).clamp(0.0, 255.0) as u8,
+        (colour[2] * scale).clamp(0.0, 255.0) as u8,
+        (exponent + 128) as u8,
+    ]
+}
+
+fn fixture_sky_asset() -> SkyAsset {
+    decode_radiance(&fixture_sky(), SkyLimits::default())
+        .expect("the fixture is a valid Radiance file")
+}
+
+fn fixture_sky_bound(context: &GpuContext, harness: &Harness) -> Sky {
+    Sky::new(
+        context,
+        harness.deferred.sky_layout(),
+        &fixture_sky_asset(),
+        SkySettings::default(),
+    )
+    .expect("upload the fixture sky")
+}
+
+/// Renders the chain with a captured sky bound and the environment taken from it.
+fn render_under_sky(
+    context: &GpuContext,
+    harness: &Harness,
+    sky: &Sky,
+    frame: DeferredFrame,
+) -> Capture {
+    let frame = frame.in_environment(frame.environment.under_sky(sky.lighting()));
+    harness
+        .deferred
+        .set_frame(context, &harness.renderer, &[], &[], frame)
+        .expect("upload frame uniforms");
+    harness.deferred.render(
+        context,
+        &harness.renderer,
+        &[],
+        &[],
+        Some(sky),
+        &harness.targets,
+        harness.output.colour_view(),
+    );
+    harness
+        .output
+        .resolve(context, encoder(context))
+        .expect("resolve composite")
+}
+
+/// Mean colour of the pixels a mask selects, as `[r, g, b]` in `0..=1`.
+fn mean_colour(capture: &Capture, mut selected: impl FnMut(u32, u32) -> bool) -> [f32; 3] {
+    let mut total = [0.0f32; 3];
+    let mut counted = 0.0f32;
+    for (index, pixel) in capture.rgba().chunks_exact(4).enumerate() {
+        let x = index as u32 % capture.width();
+        let y = index as u32 / capture.width();
+        if !selected(x, y) {
+            continue;
+        }
+        for channel in 0..3 {
+            total[channel] += f32::from(pixel[channel]) / 255.0;
+        }
+        counted += 1.0;
+    }
+    if counted == 0.0 {
+        return [0.0; 3];
+    }
+    [total[0] / counted, total[1] / counted, total[2] / counted]
+}
+
+#[test]
+fn a_captured_sky_replaces_the_gradient_and_the_light_it_implied() {
+    let Some(context) = context() else { return };
+    let harness = harness(context);
+    let sky = fixture_sky_bound(context, &harness);
+
+    let pose = sky_pose(&harness.terrain);
+    let plain = render(context, &harness, DeferredFrame::new(pose, WIDTH, HEIGHT));
+    let captured = render_under_sky(
+        context,
+        &harness,
+        &sky,
+        DeferredFrame::new(pose, WIDTH, HEIGHT),
+    );
+    write_capture("deferred-sky-captured.png", &captured);
+    // The image is the verification. Every assertion below passes on frames that are wrong in ways an
+    // assertion cannot name -- a sky rotated a quarter turn, a horizon in the wrong place, a seam down
+    // the meridian.
+    support::check_reference(context, "deferred-sky-captured.png", &captured);
+
+    // Most of the frame moved, which is the coarse statement that the environment reached both the
+    // background and -- through the ambient it derives -- the ground under it.
+    let moved = fraction_differing(&plain, &captured);
+    assert!(
+        moved > 0.9,
+        "only {:.1}% of the frame changed; the environment is not reaching the passes",
+        moved * 100.0
+    );
+}
+
+#[test]
+fn the_sky_is_sampled_by_direction_rather_than_by_screen_position() {
+    // The property that separates a real environment from a gradient, and the one the analytic sky
+    // *cannot* have: turning the sky must change what is behind the scene. Done by rotating the image
+    // rather than the camera, which isolates it completely -- a yaw moves nothing else in the frame,
+    // not the terrain, not the shadows, and not the ambient, because `lighting` is rotation-invariant.
+    let Some(context) = context() else { return };
+    let harness = harness(context);
+    let mut sky = fixture_sky_bound(context, &harness);
+
+    let frame = DeferredFrame::new(sky_pose(&harness.terrain), WIDTH, HEIGHT);
+    let unturned = render_under_sky(context, &harness, &sky, frame);
+    sky.set_settings(
+        context,
+        SkySettings {
+            yaw: std::f32::consts::FRAC_PI_2,
+            ..SkySettings::default()
+        },
+    );
+    let turned = render_under_sky(context, &harness, &sky, frame);
+    write_capture("deferred-sky-turned.png", &turned);
+
+    // Only the sky can have moved, so the fraction differing is a lower bound on how much of the frame
+    // is sky. A screen-space gradient would give exactly zero.
+    let moved = fraction_differing(&unturned, &turned);
+    assert!(
+        moved > 0.05,
+        "turning the sky a quarter turn changed {:.2}% of the frame, so it is not being sampled by \
+         direction",
+        moved * 100.0
+    );
+}
+
+#[test]
+fn the_zenith_is_at_the_top_of_the_frame_and_the_horizon_below_it() {
+    // What catches a flipped `v`, which is the single most likely coordinate mistake in an
+    // equirectangular lookup and the one that survives every statistical check: a sky that is upside
+    // down has exactly the same histogram as one that is not.
+    //
+    // The fixture's zenith is blue and its horizon warm, so the test is which way round the frame is
+    // rather than how bright it is.
+    let Some(context) = context() else { return };
+    let harness = harness(context);
+    let sky = fixture_sky_bound(context, &harness);
+    let capture = render_under_sky(
+        context,
+        &harness,
+        &sky,
+        DeferredFrame::new(sky_pose(&harness.terrain), WIDTH, HEIGHT),
+    );
+
+    // The top eighth of the frame is sky at this pose whatever the terrain does, and the band beneath
+    // it is the sky nearer the horizon. Fixed bands rather than a located silhouette, so the
+    // measurement does not depend on the fixture terrain's shape.
+    let high = mean_colour(&capture, |_, y| y < HEIGHT / 8);
+    let low = mean_colour(&capture, |_, y| (HEIGHT / 4..HEIGHT / 3).contains(&y));
+    assert!(
+        high[2] > high[0],
+        "the top of the frame is not the blue zenith: {high:?}"
+    );
+    assert!(
+        low[0] > high[0] && low[2] < high[2],
+        "the sky does not warm toward the horizon: {low:?} beneath {high:?}"
+    );
+}
+
+#[test]
+fn aiming_the_sky_puts_its_sun_where_the_scene_says_the_sun_is() {
+    // A captured sky has a sun in it and a scene has a directional light; nothing makes them agree by
+    // default, and when they disagree the symptom is that every shadow falls away from a bright patch
+    // of sky somewhere else. That reads as a shadow fault, which is why it is worth an assertion
+    // rather than an eye.
+    let Some(context) = context() else { return };
+    let harness = harness(context);
+    let mut sky = fixture_sky_bound(context, &harness);
+
+    // Found from the image alone, and it must be where the fixture put it.
+    assert!(
+        (sky.sun_azimuth() - FIXTURE_SUN.0).abs() < FIXTURE_SUN_RADIUS * 2.0,
+        "the image's sun was located at {} rather than {}",
+        sky.sun_azimuth(),
+        FIXTURE_SUN.0
+    );
+
+    let environment = Environment::default();
+    sky.aim_at(context, environment.sun_direction());
+    let [sun_x, sun_y, _] = environment.sun_direction();
+    let wanted = sun_y.atan2(sun_x);
+    let landed = sky.sun_azimuth() - sky.settings().yaw;
+    assert!(
+        (landed - wanted).abs() < 0.05,
+        "aiming left the sky's sun at {landed} against the light's {wanted}; a sign error here \
+         puts it twice as far out as doing nothing"
+    );
+
+    // And the rotation is real rather than only recorded.
+    let frame = DeferredFrame::new(sky_pose(&harness.terrain), WIDTH, HEIGHT);
+    let aimed = render_under_sky(context, &harness, &sky, frame);
+    write_capture("deferred-sky-aimed.png", &aimed);
+    sky.set_settings(context, SkySettings::default());
+    let unaimed = render_under_sky(context, &harness, &sky, frame);
+    assert!(
+        fraction_differing(&aimed, &unaimed) > 0.01,
+        "aiming the sky changed nothing in the frame"
+    );
+}
+
+/// Renders a lake under a captured sky, with the environment taken from it.
+fn render_water_under_sky(
+    context: &GpuContext,
+    harness: &Harness,
+    water: &[WaterBody],
+    sky: &Sky,
+    frame: DeferredFrame,
+) -> Capture {
+    let frame = frame.in_environment(frame.environment.under_sky(sky.lighting()));
+    harness
+        .deferred
+        .set_frame(context, &harness.renderer, &[], water, frame)
+        .expect("upload frame uniforms");
+    harness.deferred.render(
+        context,
+        &harness.renderer,
+        &[],
+        water,
+        Some(sky),
+        &harness.targets,
+        harness.output.colour_view(),
+    );
+    harness
+        .output
+        .resolve(context, encoder(context))
+        .expect("resolve composite")
+}
+
+#[test]
+fn a_lake_reflects_the_captured_sky_rather_than_the_analytic_one() {
+    // The second half of what an environment is for, and the half a background capture cannot show.
+    // `reflection.wgsl` was written as the seam a non-analytic sky would be substituted at, and this is
+    // the test that the substitution actually reached the water pass -- which binds its own groups, in
+    // its own pipeline, and could perfectly well have been left behind.
+    //
+    // Measured over the lake alone. A reflection is a Fresnel-weighted share of the surface, so a
+    // whole-frame statistic would be dominated by the terrain around it and would pass on a lake that
+    // reflected nothing at all.
+    let Some(context) = context() else { return };
+    let scene = water_scene_under_sky(context);
+    let sky = fixture_sky_bound(context, &scene.harness);
+    let water = water_body(context, &scene, scene.level);
+
+    let analytic = render_water(context, &scene.harness, &water, scene.frame);
+    let captured = render_water_under_sky(context, &scene.harness, &water, &sky, scene.frame);
+    write_capture("water-sky-analytic.png", &analytic);
+    write_capture("water-sky-captured.png", &captured);
+    // The image is the verification: a reflection that is present, upside down, or the wrong colour all
+    // satisfy every number below.
+    support::check_reference(context, "water-sky-captured.png", &captured);
+
+    // Where the lake is: the pixels a flood changes against the same scene dry, under the same sky. Taken
+    // against the *captured* frame so the mask is the lake rather than the lake plus everything the
+    // ambient moved.
+    let dry = render_under_sky(context, &scene.harness, &sky, scene.frame);
+    let lake: Vec<bool> = dry
+        .rgba()
+        .chunks_exact(4)
+        .zip(captured.rgba().chunks_exact(4))
+        .map(|(a, b)| a != b)
+        .collect();
+    let covered = lake.iter().filter(|wet| **wet).count();
+    assert!(
+        covered > (WIDTH * HEIGHT) as usize / 40,
+        "the lake covers {covered} pixels, which is too few to measure a reflection in"
+    );
+
+    let on_lake = |x: u32, y: u32| lake[(y * WIDTH + x) as usize];
+    let analytic_lake = mean_colour(&analytic, on_lake);
+    let captured_lake = mean_colour(&captured, on_lake);
+
+    // The fixture sky is warm at the horizon and the analytic one is cold everywhere, and a lake seen at
+    // this angle reflects the sky *near the horizon* -- so the reflected share has to carry the warmth
+    // across. Stated as a ratio rather than as absolute channels, because the ambient moved too and
+    // brightness alone would be satisfied by a lake that merely got lighter.
+    let warmth = |colour: [f32; 3]| colour[0] / colour[2].max(1.0e-4);
+    assert!(
+        warmth(captured_lake) > warmth(analytic_lake) * 1.15,
+        "the lake did not take the captured sky's colour: {captured_lake:?} against \
+         {analytic_lake:?}"
+    );
+
+    // A limit this capture shows and no assertion here bounds: the surface **sparkles**, with dark
+    // pixels scattered through the reflection. That is not the sky lookup — it survives forcing the
+    // reflection to any mip level, including one where the environment is a flat wash. It is the
+    // Fresnel term aliasing on the wave normals, and it is pre-existing: at a ten-degree grazing view a
+    // six-degree change in a wave's slope moves the reflected share from 0.19 to 0.72, so neighbouring
+    // pixels alternate between the bright sky and the dark water body. The analytic sky hid it by
+    // being nearly as dark as the body, so there was nothing to alternate *with*. Fixing it means
+    // damping the wave normal by the pixel's footprint in the water pass, which is a change to how
+    // water shades rather than to what it reflects.
+    // And turning the sky moves what the lake reflects. This is what separates a reflection from a
+    // tint: a Fresnel share of a constant would not care which way the environment is facing.
+    let mut turned_sky = fixture_sky_bound(context, &scene.harness);
+    turned_sky.set_settings(
+        context,
+        SkySettings {
+            yaw: std::f32::consts::PI,
+            ..SkySettings::default()
+        },
+    );
+    let turned = render_water_under_sky(context, &scene.harness, &water, &turned_sky, scene.frame);
+    let moved = lake
+        .iter()
+        .enumerate()
+        .filter(|(index, wet)| {
+            **wet
+                && captured.rgba()[index * 4..index * 4 + 3]
+                    != turned.rgba()[index * 4..index * 4 + 3]
+        })
+        .count();
+    // A fifth of the lake, not all of it. A surface this flat, seen at this angle, reflects a narrow
+    // band around the horizon, and half a turn changes what is in that band only by as much as the sky
+    // varies with longitude. The bound separates "reflects the environment" from "is tinted by it"; it
+    // is not a measure of how much of the sky a lake can see.
+    assert!(
+        moved * 5 > covered,
+        "turning the sky half a turn moved only {moved} of the lake's {covered} pixels, so the \
+         surface is tinted by the environment rather than reflecting it"
+    );
+}
+
+/// The basin scene, seen from the shallow camera the sky tests use.
+///
+/// [`water_scene`] uses [`pose`], which has no horizon in frame — so its lake reflects only the
+/// environment's lower hemisphere and the reflection is a flat colour whichever sky is bound. The
+/// grazing angle this camera gives is also what makes the reflected share large enough to measure:
+/// water's reflectance at normal incidence is two percent, and it is the Fresnel rise toward the
+/// horizon that turns a lake into a mirror.
+fn water_scene_under_sky(context: &GpuContext) -> WaterScene {
+    let harness = harness_for(context, basin_terrain());
+    let frame = DeferredFrame::new(sky_pose(&harness.terrain), WIDTH, HEIGHT);
+    let dry = render_water(context, &harness, &[], frame);
+    let (floor, rim) = world_elevation_range(&harness.terrain);
+    let level = floor + (rim - floor) * 0.45;
+    WaterScene {
+        harness,
+        dry,
+        level,
+        frame,
+    }
 }

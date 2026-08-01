@@ -477,6 +477,51 @@ sand, grass and rock, authored as PNGs, converted by `cic-texconv`, resolved by 
 package, and reported by the viewer as `3 slices at (256, 256), 9 mip levels, BC7_UNORM_SRGB`. That was the
 one check this work could not make when it landed.
 
+**The sky can now be a photograph.** Until this the sky was two `vec3` constants and a vertical gradient
+across the frame — a sky that does not respond to camera pitch, has nothing in it for water to mirror, and
+cannot be authored at all. `cic-assets::sky` reads Radiance `.hdr` (both scanline encodings, the header
+exposure divided back out, bounded and total like every other decoder here), and `cic_render::Sky` uploads
+it as `Rgba16Float` with a mip chain that **wraps in longitude**, which no hardware generator does and
+without which a seam runs down the meridian. It is group 3 and its own WGSL chunk, bound by the two passes
+that ask a direction what colour it is — so the analytic gradient and a captured environment are two
+branches of one file, and every committed reference stayed byte-identical. See
+[ADR 4001](docs/adr/4001-hdri-sky.md) and [the format](docs/formats/sky.md).
+
+**An 8K file is reduced rather than refused**, which breaks this crate's uniform "refuse what crosses a
+bound" rule deliberately. HDRIs ship at 8K by convention and 8K is more resolution than a sky can use —
+one texel covers half a pixel at the horizon, for 358 MiB of video memory. The reader already walks one
+scanline at a time, so box filtering by a power of two as it goes costs almost nothing and never
+allocates the oversized buffer: the 128 MiB 8192x4096 file this was tested against reads in 280 ms and
+peaks around 34 MiB. `maximum_dimension` still refuses, at 16384, because a declaration of 200000 texels
+is a different thing from a large picture.
+
+The part that was not a texture lookup is the light. [ADR 0006](docs/adr/0006-atmosphere.md) derives the
+fog colour and the ambient from the *sky*, so binding a photograph behind a scene lit by two hand-tuned
+constants would have reintroduced exactly the disagreement that record exists to make inexpressible — an
+orange sunset overhead and blue-grey shade beneath it. Both are now measured off the image at load, **with
+the sun clamped out of the integral**: an HDRI's sun disc carries most of the irradiance, and this renderer
+already has a directional light for it, so counting it twice does not brighten the scene — it removes
+shadow contrast entirely, because the ambient becomes as strong as the beam. The sun itself is *not* taken
+from the image, because fitting a light to an overcast environment picks a direction out of noise;
+`Sky::aim_at` turns the image until its own sun sits at the light's azimuth instead, and the viewer
+re-aims it every frame so scrubbing the hour moves the sky and the shadows together.
+
+Two things the implementation settled, both by looking at captures rather than by an assertion. **A
+reflection's blur is selected by an angle, not by a roughness**, and the first version got a lake as
+coloured speckle before that was clear: water's material roughness is small — that is why it mirrors —
+while its wave *slope* is not, and it is the slope that decides how much sky one pixel reflects. And **the
+deferred fixture's camera has no horizon in it**: it is pitched twenty-six degrees down against a
+projection half-angle a little under that, so its every background pixel is below the horizon, and the
+first sky capture rendered the environment's lower hemisphere as a flat grey lid that looked exactly like
+a texture that had failed to bind.
+
+One unwelcome consequence, recorded rather than smoothed over: a captured sky makes the **water pass's
+existing normal aliasing visible**. At a grazing view a six-degree change in a wave's slope moves the
+Fresnel share from 0.19 to 0.72, so neighbouring pixels alternate between the bright reflected sky and the
+dark water body and the surface sparkles. The analytic sky hid it by being nearly as dark as the body.
+Fixing it means damping the wave normal by the pixel's footprint, which changes how water shades and moves
+every committed water reference, so it is its own change. `water-sky-captured.png` shows it.
+
 ## Next verified step
 
 **[M5, the simulation](docs/milestones/m5-simulation.md), is complete: the kernel mechanics and now

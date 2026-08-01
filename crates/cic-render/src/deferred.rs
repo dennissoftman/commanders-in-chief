@@ -65,6 +65,7 @@ use crate::environment::Environment;
 use crate::gpu::{DEPTH_FORMAT, GpuContext};
 use crate::model::{ModelBatch, buffer_layouts};
 use crate::shadow::{CASCADE_COUNT, CASCADE_RESOLUTION, Cascade, ShadowedBounds, fit_cascades};
+use crate::sky::{AnalyticSky, Sky};
 use crate::terrain::{Animation, DirectionalLight, Motion, TerrainRenderer};
 use crate::timing::{FrameTimings, PassTimer, TimedPass};
 use crate::view::{Projection, invert, look_at, multiply, perspective};
@@ -511,6 +512,13 @@ pub struct DeferredRenderer {
     material_layout: wgpu::BindGroupLayout,
     water_pipeline: wgpu::RenderPipeline,
     water_layout: wgpu::BindGroupLayout,
+    /// Group 3, and the group bound there when a frame carries no [`Sky`].
+    ///
+    /// The layout is held because a caller builds its [`Sky`] against it, exactly as it builds a
+    /// [`WaterBody`] against the water layout. The placeholder is held because a pipeline layout is
+    /// fixed at creation, so the slot exists whether a scene has an environment or not.
+    sky_layout: wgpu::BindGroupLayout,
+    analytic_sky: AnalyticSky,
     ao: AoStage,
     lighting: LightingStage,
     /// The post-pass antialias resolve, present only when the settings asked for that one.
@@ -627,6 +635,8 @@ impl DeferredRenderer {
         let (cascade_layout, cascade_uniforms, cascade_groups) = build_cascade_bindings(device);
         let material_layout = ModelBatch::material_layout(device);
         let water_layout = WaterBody::layout(device);
+        let sky_layout = Sky::layout(device);
+        let analytic_sky = AnalyticSky::new(device, &sky_layout);
         // The scene and shadow layouts come back out rather than staying inside the stage, because the
         // water pass binds both of those groups: it needs the camera and the scene depth from the one,
         // and the fitted cascades from the other. Building second identical layouts for it would be two
@@ -636,6 +646,7 @@ impl DeferredRenderer {
             targets,
             &scene_uniform,
             &shadow_uniform,
+            &sky_layout,
             &lighting_shader,
             &composite_shader,
             output_format,
@@ -698,9 +709,12 @@ impl DeferredRenderer {
                 &scene_layout,
                 &water_layout,
                 &shadow_layout,
+                &sky_layout,
                 &water_shader,
             ),
             water_layout,
+            sky_layout,
+            analytic_sky,
             ao: build_ao(device, targets, &scene_uniform, &ao_shader),
             lighting,
             antialias,
@@ -788,6 +802,14 @@ impl DeferredRenderer {
     #[must_use]
     pub const fn water_layout(&self) -> &wgpu::BindGroupLayout {
         &self.water_layout
+    }
+
+    /// Returns the layout a [`Sky`] binds its environment through.
+    ///
+    /// Shared for the same reason the material and water layouts are.
+    #[must_use]
+    pub const fn sky_layout(&self) -> &wgpu::BindGroupLayout {
+        &self.sky_layout
     }
 
     /// Uploads every per-frame uniform: the scene camera, the fitted cascades, and each cascade view.
@@ -1024,15 +1046,31 @@ impl DeferredRenderer {
     /// Models draw into the *same* G-buffer pass as terrain and into every shadow cascade, so both
     /// share one depth buffer and occlude each other correctly. Whatever wrote into the G-buffer is
     /// lit identically afterwards, which is the point of deferring.
+    ///
+    /// `sky` is the captured environment behind the scene and reflected in its water, or `None` for the
+    /// analytic gradient. Passed per frame rather than held, for the same reason a [`WaterBody`] is: a
+    /// resize rebuilds this renderer along with every bind group holding a view of a resized target,
+    /// and an environment is neither — so owning it here would silently drop it when the window changed
+    /// size.
+    ///
+    /// Setting this does **not** by itself change the lighting. A caller wanting the ambient and the fog
+    /// to follow the image assigns [`Sky::lighting`] into the frame's environment through
+    /// [`crate::environment::Environment::under_sky`], which is the same explicitness
+    /// [`DeferredFrame::in_environment`] applies to the sun.
+    // Seven of the eight arguments are a distinct kind of thing to draw or draw into, and the eighth is
+    // the device. Bundling any of them into a struct would be a parameter list with a name on it.
+    #[allow(clippy::too_many_arguments)]
     pub fn render(
         &self,
         context: &GpuContext,
         terrain: &TerrainRenderer,
         models: &[ModelBatch],
         water: &[WaterBody],
+        sky: Option<&Sky>,
         targets: &DeferredTargets,
         output: &wgpu::TextureView,
     ) {
+        let sky_group = sky.map_or_else(|| self.analytic_sky.group(), Sky::group);
         let mut encoder =
             context
                 .device()
@@ -1112,7 +1150,11 @@ impl DeferredRenderer {
             "cic-render lighting",
             &targets.hdr,
             &self.lighting.pipeline,
-            &[(0, &self.lighting.group), (2, &self.lighting.shadow_group)],
+            &[
+                (0, &self.lighting.group),
+                (2, &self.lighting.shadow_group),
+                (3, sky_group),
+            ],
             self.time(&mut recorded, TimedPass::Lighting),
         );
 
@@ -1134,6 +1176,7 @@ impl DeferredRenderer {
             pass.set_pipeline(&self.water_pipeline);
             pass.set_bind_group(0, &self.lighting.group, &[]);
             pass.set_bind_group(2, &self.lighting.shadow_group, &[]);
+            pass.set_bind_group(3, sky_group, &[]);
             for body in water {
                 body.draw(&mut pass);
             }
@@ -1403,7 +1446,10 @@ fn scene_bytes(
     // toward whatever is behind it, and behind it is the sky — a fog colour that disagrees puts a band
     // along the horizon precisely where the terrain silhouette meets it. Overcast desaturates both
     // together, which is why this is computed rather than configured.
-    let [fog_r, fog_g, fog_b] = mix_colour(SKY_HORIZON, OVERCAST_HORIZON, weather.overcast);
+    //
+    // Derived by the environment rather than here, because with an image bound the horizon is measured
+    // off it and the two answers must come from one place.
+    let [fog_r, fog_g, fog_b] = environment.fog_colour();
     push_vec4(
         &mut scene,
         [fog_r, fog_g, fog_b, environment.fog.density.max(0.0)],
@@ -1457,27 +1503,6 @@ fn scene_bytes(
 fn size_and_reciprocal(size: [u32; 2]) -> [f32; 4] {
     let (width, height) = (size[0] as f32, size[1] as f32);
     [width, height, 1.0 / width.max(1.0), 1.0 / height.max(1.0)]
-}
-
-/// The clear sky's horizon colour, matching `SKY_HORIZON` in `atmosphere.wgsl`.
-///
-/// Duplicated across the language boundary because the shader needs it as a constant and the fog colour
-/// is derived from it on the CPU. A test pins the pair rather than trusting the comment.
-const SKY_HORIZON: [f32; 3] = [0.12, 0.20, 0.30];
-
-/// The horizon under a full cloud deck: brighter, and desaturated toward grey.
-///
-/// Brighter *and* flatter, which is the part that is easy to get backwards. An overcast sky scatters the
-/// sun across the whole dome, so the horizon gains light even as the ground loses it.
-const OVERCAST_HORIZON: [f32; 3] = [0.34, 0.36, 0.39];
-
-fn mix_colour(from: [f32; 3], to: [f32; 3], amount: f32) -> [f32; 3] {
-    let amount = amount.clamp(0.0, 1.0);
-    [
-        from[0] + (to[0] - from[0]) * amount,
-        from[1] + (to[1] - from[1]) * amount,
-        from[2] + (to[2] - from[2]) * amount,
-    ]
 }
 
 /// Builds one uniform buffer and bind group per shadow cascade.
@@ -1905,11 +1930,15 @@ struct LightingStage {
 /// the two passes that do sample it and buys the property that matters later: how the shadow term is
 /// *produced* is now one layout and one WGSL chunk, replaceable without touching a binding the rest of
 /// the chain depends on. See `shaders/shadow.wgsl`.
+// One argument per resource this stage is built from, all of them borrowed from the caller that owns
+// them. See the note on `render` above.
+#[allow(clippy::too_many_arguments)]
 fn build_lighting(
     device: &wgpu::Device,
     targets: &DeferredTargets,
     scene_uniform: &wgpu::Buffer,
     shadow_uniform: &wgpu::Buffer,
+    sky_layout: &wgpu::BindGroupLayout,
     lighting_shader: &wgpu::ShaderModule,
     composite_shader: &wgpu::ShaderModule,
     output_format: wgpu::TextureFormat,
@@ -1981,9 +2010,9 @@ fn build_lighting(
             lighting_shader,
             "lighting_fragment",
             // The hole at group 1 is the per-pass slot this pass has no resources for. Group 2 is the
-            // shadow provider, and it keeps that index here so the one WGSL declaration in
-            // `shadow.wgsl` serves this pass and the water pass alike.
-            &[Some(&layout), None, Some(&shadow_layout)],
+            // shadow provider and group 3 the sky provider, and both keep those indices here so the one
+            // WGSL declaration in each serves this pass and the water pass alike.
+            &[Some(&layout), None, Some(&shadow_layout), Some(sky_layout)],
             HDR_FORMAT,
         ),
         composite_pipeline: fullscreen_pipeline(
@@ -2218,16 +2247,22 @@ fn build_water_pipeline(
     scene_layout: &wgpu::BindGroupLayout,
     water_layout: &wgpu::BindGroupLayout,
     shadow_layout: &wgpu::BindGroupLayout,
+    sky_layout: &wgpu::BindGroupLayout,
     water_shader: &wgpu::ShaderModule,
 ) -> wgpu::RenderPipeline {
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("cic-render water pipeline layout"),
         // Contiguous, with no empty slot. Water reuses the scene group because it needs the camera and
-        // the scene depth already declared there; its own uniform follows in group 1, and the shadow
-        // provider it samples the light's visibility from is group 2, the same index the lighting pass
-        // binds it at. It declares only the group-0 bindings it reads, and a layout carrying more than
-        // a shader uses is allowed.
-        bind_group_layouts: &[Some(scene_layout), Some(water_layout), Some(shadow_layout)],
+        // the scene depth already declared there; its own uniform follows in group 1, the shadow
+        // provider it samples the light's visibility from is group 2, and the sky it reflects is group
+        // 3 — the last two at the same indices the lighting pass binds them at. It declares only the
+        // group-0 bindings it reads, and a layout carrying more than a shader uses is allowed.
+        bind_group_layouts: &[
+            Some(scene_layout),
+            Some(water_layout),
+            Some(shadow_layout),
+            Some(sky_layout),
+        ],
         immediate_size: 0,
     });
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -2522,9 +2557,7 @@ fn normalize(vector: [f32; 3]) -> [f32; 3] {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        CASCADE_COUNT, SCENE_UNIFORM_BYTES, SHADOW_UNIFORM_BYTES, SKY_HORIZON, occlusion_size,
-    };
+    use super::{CASCADE_COUNT, SCENE_UNIFORM_BYTES, SHADOW_UNIFORM_BYTES, occlusion_size};
 
     #[test]
     fn the_occlusion_estimate_is_half_resolution_rounded_up() {
@@ -2594,14 +2627,19 @@ mod tests {
         // WGSL constant, and the fog colour is derived from it here. Nothing but this test stops the two
         // drifting, and the symptom would be a fog bank a different colour from the sky it fades into --
         // a band along the horizon, exactly where it is most visible.
-        let declared = crate::shader::chunk("atmosphere").expect("atmosphere chunk");
+        //
+        // The constant moved from `atmosphere.wgsl` to `sky.wgsl` when a captured environment became the
+        // alternative to it, and the Rust side moved from this module to `environment`, which is now
+        // where the choice between the two horizons is made.
+        let declared = crate::shader::chunk("sky").expect("sky chunk");
+        let horizon = crate::environment::CLEAR_HORIZON;
         let expected = format!(
             "vec3<f32>({:.2}, {:.2}, {:.2})",
-            SKY_HORIZON[0], SKY_HORIZON[1], SKY_HORIZON[2]
+            horizon[0], horizon[1], horizon[2]
         );
         assert!(
             declared.contains(&expected),
-            "atmosphere.wgsl does not declare SKY_HORIZON as {expected}"
+            "sky.wgsl does not declare SKY_HORIZON as {expected}"
         );
     }
 }

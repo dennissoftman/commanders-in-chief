@@ -19,6 +19,8 @@
 //! flatter, foggier scene under a thicker cloud deck — plus the surface state (`wetness`, `snow`) that
 //! shaders read. A storm reads as a storm from those alone; the falling motes are additive.
 
+use cic_assets::SkyLighting;
+
 use crate::terrain::DirectionalLight;
 
 /// Weather, as a set of independently blendable states rather than an enum of presets.
@@ -208,6 +210,22 @@ pub struct Environment {
     pub fog: Fog,
     /// Cloud shadows, whose coverage weather raises.
     pub clouds: Clouds,
+    /// What a captured sky contributes, when one is bound.
+    ///
+    /// `None` means the analytic sky, and everything below then derives its colours as it always did.
+    /// `Some` replaces two of them — the ambient and the horizon the fog fades toward — with figures
+    /// measured off the image, which is the *only* way an HDRI can be introduced without breaking this
+    /// module's central claim.
+    ///
+    /// That claim is worth restating, because it is what makes the field necessary rather than
+    /// convenient: the sun, the sky, the fog and the ambient are one thing seen four ways, and the
+    /// reason they are derived here instead of authored is that five numbers holding one idea drift.
+    /// Binding an image behind the scene while leaving [`SKY_NEUTRAL`] driving the ambient would
+    /// reintroduce exactly that drift, in its most visible form: an orange sunset overhead and blue-grey
+    /// shade on the ground beneath it.
+    ///
+    /// The sun is deliberately *not* taken from the image. See [`Self::sun_light`].
+    pub sky: Option<SkyLighting>,
 }
 
 impl Default for Environment {
@@ -223,6 +241,7 @@ impl Default for Environment {
             weather: Weather::default(),
             fog: Fog::default(),
             clouds: Clouds::default(),
+            sky: None,
         }
     }
 }
@@ -297,6 +316,21 @@ const SKY_OVERCAST: [f32; 3] = [0.42, 0.44, 0.48];
 
 /// What a lightning flash adds to the ambient. Cold, because a discharge is.
 const FLASH_AMBIENT: [f32; 3] = [0.55, 0.62, 0.85];
+
+/// The analytic sky's horizon colour, matching `SKY_HORIZON` in `sky.wgsl`.
+///
+/// Duplicated across the language boundary because the shader needs it as a constant and the fog colour
+/// is derived from it here. A test pins the pair rather than trusting the comment.
+pub const CLEAR_HORIZON: [f32; 3] = [0.12, 0.20, 0.30];
+
+/// The horizon under a full cloud deck: brighter, and desaturated toward grey.
+///
+/// Brighter *and* flatter, which is the part that is easy to get backwards. An overcast sky scatters the
+/// sun across the whole dome, so the horizon gains light even as the ground loses it.
+///
+/// Not duplicated in any shader: nothing draws an overcast horizon, because the sky gradient does not
+/// respond to weather. That is a real gap and this constant is where it would be closed.
+pub const OVERCAST_HORIZON: [f32; 3] = [0.34, 0.36, 0.39];
 
 /// Sun elevation in radians at the horizon, below which it contributes no direct light.
 const HORIZON: f32 = 0.0;
@@ -386,6 +420,32 @@ impl Environment {
         clear * (1.0 - 0.75 * self.weather.sanitised().overcast)
     }
 
+    /// The environment with a captured sky's contribution attached.
+    ///
+    /// Take the argument from [`crate::sky::Sky::lighting`], which scales the image's measured figures
+    /// by the intensity it is being displayed at — so the light under the sky tracks the sky as a
+    /// designer turns it up.
+    #[must_use]
+    pub const fn under_sky(mut self, sky: SkyLighting) -> Self {
+        self.sky = Some(sky);
+        self
+    }
+
+    /// The colour distance fades toward, which is the sky behind whatever is being faded.
+    ///
+    /// Derived rather than authored, and that is the whole point: fog a different colour from the sky it
+    /// fades into puts a visible band along the horizon exactly where the terrain silhouette meets it.
+    /// With an image bound the horizon is measured off it; without one it is the analytic sky's own
+    /// horizon constant, which is what the shader draws.
+    ///
+    /// Overcast moves it toward a brighter, flatter grey in either case. A cloud deck is in front of
+    /// whatever the sky was, so it desaturates a captured horizon exactly as it does a derived one.
+    #[must_use]
+    pub fn fog_colour(&self) -> [f32; 3] {
+        let clear = self.sky.map_or(CLEAR_HORIZON, |sky| sky.horizon);
+        mix3(clear, OVERCAST_HORIZON, self.weather.sanitised().overcast)
+    }
+
     /// The directional light this environment implies.
     ///
     /// **Opt-in, not automatic.** [`crate::deferred::DeferredFrame::light`] stays authoritative, and a
@@ -393,6 +453,23 @@ impl Environment {
     /// have silently rewritten the light in every existing scene — including the ones the committed
     /// reference captures were taken from, which would have destroyed the only evidence that the rest of
     /// this plumbing changed nothing.
+    ///
+    /// # What a captured sky does and does not replace
+    ///
+    /// It replaces the **ambient** and nothing else. That term is an integral of the whole sky over a
+    /// hemisphere, and an image is a measurement of exactly that integral where [`SKY_NEUTRAL`] is an
+    /// interpolation between two hand-tuned colours — so where they disagree, the image is right.
+    ///
+    /// It does **not** replace the direction, the colour, or the strength of the beam, and that is a
+    /// decision rather than an omission. Fitting a directional light to an environment means locating
+    /// the brightest solid angle and integrating over it, which is a real estimator that fails on the
+    /// ordinary case: an overcast HDRI has no sun, so it yields a direction picked out of noise and a
+    /// scene whose shadows point somewhere arbitrary. The half-sine over the hour is wrong in a way a
+    /// designer can predict and correct; a fitted sun is wrong in a way nobody can. [`crate::sky::Sky::yaw_toward`]
+    /// closes the gap from the other end, turning the image until its sun agrees with the hour.
+    ///
+    /// The overcast and flash terms still apply on top of the measured ambient, because both describe
+    /// something in front of the sky rather than a property of it.
     #[must_use]
     pub fn sun_light(&self) -> DirectionalLight {
         let weather = self.weather.sanitised();
@@ -408,7 +485,14 @@ impl Environment {
         // at dusk by air the ground cannot see the sun through.
         let lit = self.sun_elevation().sin().clamp(0.0, 1.0);
         let sky = SKYLIGHT_FLOOR + (1.0 - SKYLIGHT_FLOOR) * lit.sqrt();
-        let clear_ambient = scale3(mix3(SKY_NEUTRAL, SKY_LOW, warmth), sky);
+        // A measured sky is used as it stands, with no elevation falloff applied over it. The falloff
+        // exists to model a sky that dims as its sun drops, and an image *already is* the sky at
+        // whatever hour it was captured — scaling it by the hour as well would darken a photographed
+        // dusk twice, once for being a dusk and once for being at 18:00.
+        let clear_ambient = self.sky.map_or_else(
+            || scale3(mix3(SKY_NEUTRAL, SKY_LOW, warmth), sky),
+            |captured| captured.ambient,
+        );
 
         // Overcast raises ambient while lowering the direct term: a cloud deck is a diffuser, so it moves
         // light out of the beam and into the sky rather than removing it. Getting this backwards -- dimming
@@ -450,7 +534,19 @@ mod tests {
     // comparisons in this module are all inequalities.
     #![allow(clippy::float_cmp)]
 
-    use super::{Environment, Fog, Weather};
+    use cic_assets::SkyLighting;
+
+    use super::{CLEAR_HORIZON, Environment, Fog, Weather};
+
+    /// A measured sky quite unlike the analytic one, so a figure taken from the wrong source is
+    /// unmistakable rather than merely slightly off.
+    fn sunset() -> SkyLighting {
+        SkyLighting {
+            horizon: [0.90, 0.42, 0.18],
+            zenith: [0.10, 0.16, 0.34],
+            ambient: [0.44, 0.30, 0.26],
+        }
+    }
 
     fn at(hour: f32) -> Environment {
         Environment {
@@ -604,6 +700,61 @@ mod tests {
         assert_eq!(environment.fog.density, 0.0);
         assert_eq!(environment.clouds.coverage, 0.0);
         assert_eq!(environment.weather, Weather::default());
+        // And no captured sky, which is the same requirement one field later: with `sky` set, both the
+        // ambient and the fog colour come from somewhere else, and every reference would move.
+        assert_eq!(environment.sky, None);
+        assert_eq!(environment.fog_colour(), CLEAR_HORIZON);
+    }
+
+    #[test]
+    fn a_captured_sky_replaces_the_ambient_and_the_fog_colour_and_nothing_else() {
+        // The coherence the `sky` field exists for. Binding an image behind the scene while the ambient
+        // still came from `SKY_NEUTRAL` would put blue-grey shade under an orange sunset — the exact
+        // failure this module was written to make inexpressible, reintroduced by the feature.
+        let plain = Environment::default();
+        let lit = plain.under_sky(sunset());
+
+        assert_eq!(lit.sun_light().ambient, sunset().ambient);
+        assert_ne!(plain.sun_light().ambient, lit.sun_light().ambient);
+        assert_eq!(lit.fog_colour(), sunset().horizon);
+
+        // The beam is untouched: an image measures the sky, not the sun, and fitting a directional
+        // light to it fails on the overcast case that has no sun to find. See `sun_light`.
+        assert_eq!(plain.sun_light().diffuse, lit.sun_light().diffuse);
+        assert_eq!(plain.sun_light().direction, lit.sun_light().direction);
+    }
+
+    #[test]
+    fn weather_still_acts_on_top_of_a_captured_sky() {
+        // Overcast and lightning describe something *in front of* the sky rather than a property of it,
+        // so an image must not switch them off. A deck over a photographed sunset is still a deck.
+        let stormy = Environment::default()
+            .under_sky(sunset())
+            .with_weather(Weather {
+                flash: 1.0,
+                ..Weather::thunderstorm()
+            });
+        assert!(
+            stormy.sun_light().ambient[2] > sunset().ambient[2],
+            "the deck and the flash must both still lift the ambient"
+        );
+        // And the fog colour moves off the measured horizon toward the overcast grey, so a stormy
+        // sunset does not fade its distance to bright orange.
+        assert!(stormy.fog_colour()[0] < sunset().horizon[0]);
+        assert!(stormy.fog_colour()[2] > sunset().horizon[2]);
+    }
+
+    #[test]
+    fn a_captured_sky_is_not_dimmed_again_by_the_hour() {
+        // The double-count that is easy to write. The elevation falloff models a sky that dims as its
+        // sun drops; an image already *is* the sky at whatever hour it was taken, so applying the
+        // falloff over it darkens a photographed dusk twice.
+        let dusk = Environment {
+            time_of_day: 18.5,
+            ..Environment::default()
+        }
+        .under_sky(sunset());
+        assert_eq!(dusk.sun_light().ambient, sunset().ambient);
     }
 
     #[test]

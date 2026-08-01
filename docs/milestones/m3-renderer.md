@@ -119,6 +119,15 @@ regression fails the build. See [Exit condition](#exit-condition).
   *and* foggier, all being one cloud deck seen from different angles. Weather is blendable scalars rather
   than an enum, because weather transitions. See [ADR 0006](../adr/0006-atmosphere.md).
 
+- **A captured sky**, optionally, as an equirectangular Radiance `.hdr` behind the scene and reflected in
+  its water. Its own bind group and its own WGSL chunk, so the analytic two-colour gradient and a
+  photographed environment are two branches of one file rather than two skies. What made this more than a
+  texture lookup is the atmosphere above: the fog colour and the ambient are *derived* from the sky, so an
+  image that replaces the sky has to replace them too or the ground stops agreeing with what is behind it.
+  Both are measured off the picture at load, with the sun clamped out of the integral — the renderer
+  already has a directional light for the sun, and counting it twice removes shadow contrast entirely. See
+  [ADR 4001](../adr/4001-hdri-sky.md).
+
 - **Cloud shadows**, as procedural gradient noise sampled in *world* space, domain-warped so its contours are
   wisps rather than blobs, attenuating the sun's direct term only — a cloud occludes the sun's disc, not the
   sky — with a depth that rises with cloud thickness rather than saturating into one uniform shade.
@@ -242,6 +251,10 @@ regression fails the build. See [Exit condition](#exit-condition).
     this work: there is no environment probe, so a metal reflects the three light slots and the sky
     gradient and nothing else. It reads as darker with a coloured highlight, which is correct and
     incomplete. The light slots' own comment already anticipates the probe.
+  - **Half of that changed** when captured skies landed: water now reflects a real environment through
+    `reflection.wgsl`, which was written as exactly this substitution point, and a metal's ambient is now
+    measured off the same image. A metal still takes `albedo * ambient` rather than a directional lookup,
+    so the two agree in colour and disagree in detail. See [ADR 4001](../adr/4001-hdri-sky.md).
 - **Alpha-tested materials** ([`model`](../../crates/cic-render/src/model.rs)), which is how foliage is
   authored. A material that cuts its own silhouette gets its own index range and its own pair of
   pipelines, so opaque geometry keeps its early depth rejection and its fragment-free shadow pass — a
