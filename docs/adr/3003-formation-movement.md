@@ -1,10 +1,13 @@
 # ADR 3003: Formation movement — the shape a group is already in, carried to where it is sent
 
 - Status: accepted, implemented — direction set by Denys on 2026-08-02, built the same day as
-  `cic_sim::formation` and the `move_group` verb. **Two amendments, both accepted and both built**,
-  from the same direction the day it landed: **A** gives a group order a facing the player drags,
-  which supersedes decision 6; **B** holds a column to the pace of its slowest member, which closes
-  the consequence this record left open.
+  `cic_sim::formation` and the `move_group` verb. **Three amendments, all accepted and all built**,
+  from the same direction over the same day: **A** gave a group order a facing the player drags,
+  which superseded decision 6; **B** holds a column to the pace of its slowest member, which closed
+  the consequence this record left open; and **C** replaces A's reading of the drag with the one
+  *Red Alert 3* has — the line you draw is the line the squad stands on, and **its length is the
+  width**. C supersedes A. The click, which is the order that matters most here, is untouched by all
+  three.
 
 ## Context
 
@@ -70,8 +73,9 @@ no heading, so no part of this may need one.
    *drag-to-face* order is a later verb if one is ever wanted, and it would be an addition rather
    than a change.
 
-   **Superseded by amendment A**, which is the addition this clause predicted — and it was an
-   addition rather than a change: a *click* still does exactly what this says.
+   **Superseded by amendment A and then by amendment C**, which are the addition this clause
+   predicted — and it was an addition rather than a change: a *click* still does exactly what this
+   says, which is the whole of why the supersession was cheap.
 
 7. **A selection is a set, not a list.** The named identifiers are sorted and deduplicated before
    anything is computed, so the answer depends on *who* was selected and not on the order a client's
@@ -145,6 +149,11 @@ decision: A is the addition decision 6 predicted, and B is the consequence this 
 outstanding.
 
 ### A. A group order carries a facing, and the player drags it
+
+**Superseded by amendment C**, which keeps everything in this entry except what the drag *means*.
+Left here rather than rewritten, because the payload, the arithmetic argument and the "a click is
+untouched" guarantee all survived it, and because the record naming its own alternative and then
+being asked for that alternative is the process working.
 
 **What the record got right and what it left short.** Decision 6 declined rotation because "a facing
 would need an input the command does not carry" — which was true of the verb as written, and is a
@@ -222,3 +231,44 @@ Three different things settle three different parts of it, and only the first is
    project has been caught by the gap before: the "clunky movement" complaint that produced
    [ADR 3001](3001-pathfinding.md)'s amendment D passed every assertion it had. The viewer patrols
    two groups and draws a plate at each slot so that there is something to watch.
+
+### C. The line the player draws is the line the squad stands on
+
+**Chosen by Denys**, from the fork amendment A named and declined. A said the drag was a *facing*
+and its length meant nothing; C says the drag is the **front rank**, and its length is how wide the
+formation is. That is the *Red Alert 3* gesture rather than the *Command & Conquer 3* one, and it is
+what was asked for.
+
+The press point is where the rank begins and the release point is where it ends. Everything else
+falls out of that:
+
+- **Direction is which way the rank runs.** Drag east and the squad lines up east.
+- **Length is the width.** A long drag strings the group out along it; a short one **folds** it into
+  ranks stacked behind the first; a drag shorter than one member is wide gives a single-file column.
+  That folding is what makes the length worth being an input at all — without it, only drags
+  *longer* than the group needs would mean anything.
+- **Ranks stack behind the front one**, on the side the group is coming from, so nobody walks
+  through the rank in front to reach their place.
+- **Members keep the order they are standing in**, by where each projects onto the drag, so a group
+  forming up does not cross itself. Decision 3's "not random" applies to the drawn rank as much as
+  to the carried shape; it is just a different way of saying which slot is whose.
+- **Room along the rank is each member's own**, so a wide unit takes more of the line than a narrow
+  one, and any surplus the drag leaves over what the group needs is shared out evenly so the rank
+  spans exactly what was drawn. Decision 5's "big units placed efficiently" reappears here as
+  spacing rather than as a re-placement order.
+- **A drag of no length, or one that is not a number, is a click.** Unchanged from A.
+
+**A click still carries the shape, and that is the point of the whole arrangement.** This record's
+position is that a formation the player made is worth keeping, and nothing above weakens it: the
+*only* thing that ever discards a shape is the player drawing a new one. Decision 2 stands for every
+order except the one that explicitly replaces it.
+
+**What this costs, stated plainly.** The measurement in the section below is about *clicks*, and it
+still holds — 95.7% of slots untouched. A drag scores nothing on that axis by construction, because
+generating a rank is exactly what a drag is for. The two orders are measured against different
+things on purpose, and conflating them would make the number meaningless.
+
+**What is still not here.** Multiple ranks are laid out by filling, so a group of nine dragged
+narrow gives ranks of, say, four, four and one rather than three even ranks. Evening them out is a
+refinement nobody has asked for and would be one function; it is written down so that whoever wants
+it does not have to work out that it was never considered.

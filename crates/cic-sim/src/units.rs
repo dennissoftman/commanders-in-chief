@@ -379,17 +379,16 @@ impl Units {
         issuer: PlayerId,
         units: &[u8],
         destination: [f64; 2],
-        facing: Option<[f64; 2]>,
+        drag: Option<[f64; 2]>,
         ground: Option<&Ground>,
     ) {
         if !(destination[0].is_finite() && destination[1].is_finite()) {
             self.rejected += 1;
             return;
         }
-        // A facing of no length, or one that is not a number, needs no guard here: it *is* a click
-        // with no drag behind it, and `formation` answers the identity for both. Filtering it a
-        // second time was measured changing nothing, which is the definition of a rule in two
-        // places.
+        // A drag of no length, or one that is not a number, needs no guard here: it *is* a click,
+        // and `formation` answers the carried shape for both. Filtering it a second time was
+        // measured changing nothing, which is the definition of a rule in two places.
         // Sorted and deduplicated, so the answer depends on the *set* of units and not on whatever
         // order a host's selection happened to iterate in. Two clients that agree about who is
         // selected then agree about where everybody goes, even if their lists came out in different
@@ -423,7 +422,7 @@ impl Units {
         }
 
         let members: Vec<Member> = group.iter().map(|(_, member)| *member).collect();
-        let slots = formation::slots(&members, destination, facing, ground);
+        let slots = formation::slots(&members, destination, drag, ground);
         // The column's pace, per amendment B: a group ordered together should arrive together, and
         // a unit that runs ahead of the group it was ordered with has left the formation the order
         // was about. Taken over the members that are actually going, so somebody else's unit in the
@@ -497,12 +496,9 @@ impl Units {
                     _ => self.rejected += 1,
                 }
             }
-            Some(Verb::MoveGroup {
-                units,
-                x,
-                y,
-                facing,
-            }) => self.order_group(issuer, units, [x, y], facing, ground),
+            Some(Verb::MoveGroup { units, x, y, drag }) => {
+                self.order_group(issuer, units, [x, y], drag, ground);
+            }
             Some(Verb::Stop { unit }) => match self.roster.get_mut(&unit) {
                 Some(subject) if subject.owner == issuer => {
                     subject.route.clear();
@@ -671,7 +667,7 @@ enum Verb<'payload> {
         x: f64,
         y: f64,
         /// The heading the group is to arrange for, or `None` for a click with no drag behind it.
-        facing: Option<[f64; 2]>,
+        drag: Option<[f64; 2]>,
     },
 }
 
@@ -740,7 +736,7 @@ pub fn move_group_command(units: &[ObjectId], x: f64, y: f64) -> Vec<u8> {
 ///
 /// Panics if more than 65535 units are named, for the same reason [`move_group_command`] does.
 #[must_use]
-pub fn move_group_facing_command(units: &[ObjectId], x: f64, y: f64, facing: [f64; 2]) -> Vec<u8> {
+pub fn move_group_dragged_command(units: &[ObjectId], x: f64, y: f64, facing: [f64; 2]) -> Vec<u8> {
     group_payload(units, x, y, facing)
 }
 
@@ -812,7 +808,7 @@ fn decode(payload: &[u8]) -> Option<Verb<'_>> {
                 units,
                 x,
                 y,
-                facing: Some([fx, fy]),
+                drag: Some([fx, fy]),
             })
         }
         _ => None,
@@ -838,7 +834,7 @@ mod tests {
     use cic_assets::terrain::Terrain;
 
     use super::{
-        UNITS, Units, move_command, move_group_command, move_group_facing_command, spawn_command,
+        UNITS, Units, move_command, move_group_command, move_group_dragged_command, spawn_command,
         stop_command,
     };
     use crate::activation::activate;
@@ -1911,11 +1907,11 @@ mod tests {
     }
 
     #[test]
-    fn a_dragged_facing_turns_the_formation_and_a_click_leaves_it_alone() {
-        // Amendment A through the kernel, so this is a statement about the verb and not only about
-        // the solver. Three units abreast of an eastward march; dragged north, they arrive abreast
-        // of north instead.
-        let run_to = |target: [f64; 2], facing: Option<[f64; 2]>| {
+    fn a_drag_draws_the_rank_and_a_click_leaves_the_formation_alone() {
+        // Amendment C through the kernel, so this is a statement about the verb and not only about
+        // the solver. Three units in a column: clicked, they arrive as the same column; dragged
+        // thirty metres east, they arrive as a rank spanning exactly that.
+        let run_to = |target: [f64; 2], drag: Option<[f64; 2]>| {
             let mut kernel = kernel();
             kernel
                 .advance(&[
@@ -1925,8 +1921,8 @@ mod tests {
                 ])
                 .expect("advances");
             let group = [ObjectId(1), ObjectId(2), ObjectId(3)];
-            let payload = match facing {
-                Some(facing) => move_group_facing_command(&group, target[0], target[1], facing),
+            let payload = match drag {
+                Some(drag) => move_group_dragged_command(&group, target[0], target[1], drag),
                 None => move_group_command(&group, target[0], target[1]),
             };
             kernel.advance(&[command(1, 0, payload)]).expect("advances");
@@ -1941,18 +1937,24 @@ mod tests {
         };
 
         // The click's destination is off both axes on purpose: a group travelling due east would
-        // come through an accidental turn-to-travel unchanged, and the assertion would say nothing.
+        // come through an accidental rotation unchanged, and the assertion would say nothing.
         assert_eq!(
             run_to([70.0, 40.0], None),
             vec![[70.0, 34.0], [70.0, 40.0], [70.0, 46.0]],
-            "a click turned a formation nobody asked it to turn"
+            "a click rearranged a formation nobody asked it to"
         );
-        let turned = run_to([90.0, 0.0], Some([0.0, 1.0]));
-        for (slot, expected) in turned.iter().zip([[96.0, 0.0], [90.0, 0.0], [84.0, 0.0]]) {
+
+        // Dragged east from the same point: a rank from the click to the end of the drag, in the
+        // order the three were standing in from south to north.
+        let drawn = run_to([70.0, 40.0], Some([30.0, 0.0]));
+        for (slot, expected) in drawn
+            .iter()
+            .zip([[70.0, 40.0], [85.0, 40.0], [100.0, 40.0]])
+        {
             let (dx, dy) = (slot[0] - expected[0], slot[1] - expected[1]);
             assert!(
                 (dx * dx + dy * dy).sqrt() < 1e-9,
-                "dragged north, the line did not come round: {turned:?}"
+                "the drag did not draw the rank: {drawn:?}"
             );
         }
     }
