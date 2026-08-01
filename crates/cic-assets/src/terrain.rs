@@ -273,6 +273,36 @@ impl Terrain {
         ]
     }
 
+    /// Returns the elevation the water table stands at, derived from the heightfield.
+    ///
+    /// An eighth of the way up the terrain's own range: high enough to be a lake rather than a
+    /// puddle, low enough to stay in the basins instead of drowning the map. No shoreline is
+    /// authored anywhere — one level over the whole map fills every basin the ground has, and the
+    /// render side clips the surface wherever the bed rises through it.
+    ///
+    /// **It lives here because two subsystems must agree on it.** Presentation floods the map to
+    /// this line and the simulation refuses to walk under it
+    /// ([ADR 3001](../../../docs/adr/3001-pathfinding.md) decision 1), and water that blocks
+    /// movement at one elevation while being drawn at another is a unit wading through what the
+    /// player sees as a lake. One function, two callers, no second implementation to drift — the
+    /// same argument that moved the transcendentals into `cic-math`.
+    ///
+    /// Derived rather than authored, for now. A map that wants a specific level gets an authored
+    /// one in package data, and this becomes the fallback when none is declared; nothing about the
+    /// callers changes when it does.
+    #[must_use]
+    pub fn water_level(&self) -> f32 {
+        let (low, high) = self
+            .elevations
+            .iter()
+            .fold((u16::MAX, u16::MIN), |(low, high), sample| {
+                (low.min(*sample), high.max(*sample))
+            });
+        let floor = f32::from(low) * self.vertical_scale;
+        let ceiling = f32::from(high) * self.vertical_scale;
+        floor + (ceiling - floor) * 0.12
+    }
+
     /// Encodes the terrain into its container form.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {

@@ -81,8 +81,8 @@ use cic_render::{
 use cic_sim::activation::FORCES;
 use cic_sim::units::UNITS;
 use cic_sim::{
-    Command, Forces, Kernel, KernelConfig, PlayerId, TickAccumulator, Units, activate,
-    move_command, spawn_command,
+    Command, Forces, Ground, GroundRules, Kernel, KernelConfig, PlayerId, TickAccumulator, Units,
+    activate, move_command, spawn_command,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -939,9 +939,11 @@ fn unit_instances(units: &Units, terrain: &Terrain) -> Vec<ModelInstance> {
         .filter_map(|unit| {
             let [x, y] = [unit.position[0] as f32, unit.position[1] as f32];
             let ground = terrain.elevation_at_world(x, y)?;
-            let facing = unit.target.map_or(0.0, |target| {
-                let dy = (target[1] - unit.position[1]) as f32;
-                let dx = (target[0] - unit.position[0]) as f32;
+            // The next waypoint, not the destination: a unit rounding an obstacle should face the
+            // corner it is walking to rather than the far side of the thing it is walking around.
+            let facing = unit.heading_for().map_or(0.0, |waypoint| {
+                let dy = (waypoint[1] - unit.position[1]) as f32;
+                let dx = (waypoint[0] - unit.position[0]) as f32;
                 dy.atan2(dx)
             });
             Some(
@@ -954,24 +956,13 @@ fn unit_instances(units: &Units, terrain: &Terrain) -> Vec<ModelInstance> {
 
 /// A water table just above the terrain's low point, spanning the whole map.
 ///
-/// Derived from the heightfield rather than authored, so the viewer floods a loaded `.cicmap` and the
-/// generated terrain alike. The shoreline needs no outline: the water pass clips the surface wherever
-/// the bed rises through it, so one rectangle at one elevation fills every basin the terrain has.
+/// The elevation comes from [`Terrain::water_level`] rather than from a derivation of the viewer's
+/// own, because the simulation refuses to walk under the same line and two derivations of one water
+/// level is a unit wading through a lake. The shoreline needs no outline: the water pass clips the
+/// surface wherever the bed rises through it, so one rectangle fills every basin the terrain has.
 fn water_table(terrain: &Terrain) -> WaterSurface {
     let [extent_x, extent_y] = terrain.world_extent();
-    let (low, high) = terrain
-        .elevations()
-        .iter()
-        .fold((u16::MAX, u16::MIN), |(low, high), sample| {
-            (low.min(*sample), high.max(*sample))
-        });
-    let scale = terrain.vertical_scale();
-    let floor = f32::from(low) * scale;
-    let ceiling = f32::from(high) * scale;
-    // An eighth of the way up the terrain's range: high enough to be a lake rather than a puddle, low
-    // enough to stay in the basins instead of drowning the map.
-    let elevation = floor + (ceiling - floor) * 0.12;
-    WaterSurface::new([0.0, 0.0, extent_x, extent_y], elevation)
+    WaterSurface::new([0.0, 0.0, extent_x, extent_y], terrain.water_level())
 }
 
 /// Everything created once a window exists.
@@ -1332,6 +1323,22 @@ impl ApplicationHandler for Viewer {
             if let Err(error) = activate(&mut kernel, scenario, templates) {
                 return self.fail(event_loop, error.to_string());
             }
+            // The grid goes in *before* the units that consult it, because a subsystem reads peers
+            // registered earlier as they stand this tick. Registered the other way round, a unit
+            // would path against the previous tick's ground — correct today, when nothing edits it,
+            // and wrong the moment something does.
+            let ground = Ground::derive(&self.terrain, GroundRules::derived(&self.terrain));
+            eprintln!(
+                "ground: {}x{} cells at {:.1} m, {} impassable",
+                ground.width(),
+                ground.height(),
+                ground.cell_size(),
+                (0..ground.height())
+                    .flat_map(|y| (0..ground.width()).map(move |x| (x, y)))
+                    .filter(|(x, y)| !ground.passable(*x, *y))
+                    .count()
+            );
+            kernel.add_subsystem(Box::new(ground));
             kernel.add_subsystem(Box::new(Units::new(templates)));
             // Tick zero carries the opening inputs: each seat spawns its scouts. From here on the
             // draw loop advances the kernel at its fixed rate, whatever the frame rate does.
