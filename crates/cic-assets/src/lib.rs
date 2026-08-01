@@ -6,6 +6,7 @@
 //! |---|---|---|
 //! | Models, props, units | **glTF 2.0** (`.glb`) | A published standard every DCC tool exports. Writing a mesh format would mean writing a Blender exporter first. |
 //! | Textures | **DDS** with BC1/BC5/BC7 blocks | Stays compressed in video memory and carries its own mip chain, so the upload is a copy. Every texture tool writes it. |
+//! | Sky environments | **Radiance** (`.hdr`) | A sky is radiance, not reflectance, and eight bits per channel cannot hold it. What every HDRI is distributed as, and a header plus RLE scanlines to read. |
 //! | Terrain heightfield and layers | **custom chunked binary** (`.cict`) | A regular numeric grid. No standard describes one well, and `u16` elevations upload directly as a baseline `R16Uint` GPU texture. |
 //! | Scenario: placements, players, waypoints | **JSON** (`map.json`) | Diffable, reviewable, hand-fixable. The bulk numerics are elsewhere, so the size argument for a binary encoding does not apply. |
 //! | A whole map | **zip** (`.cicmap`) | Already has a directory, per-member compression, and universal tooling. |
@@ -20,6 +21,7 @@ pub mod image;
 pub mod model;
 pub mod package;
 pub mod scenario;
+pub mod sky;
 pub mod templates;
 pub mod terrain;
 #[cfg(test)]
@@ -36,6 +38,9 @@ pub use model::{
 pub use package::{MapPackage, PackageError, PackageLimits};
 pub use scenario::{
     ObjectPlacement, PlayerSlot, Position, Scenario, ScenarioError, TerrainReference, Waypoint,
+};
+pub use sky::{
+    SKY_CHANNELS, ScanlineFault, SkyAsset, SkyError, SkyLighting, SkyLimits, decode_radiance,
 };
 pub use templates::{Template, TemplateError, TemplateKind, TemplateSet};
 pub use terrain::{
