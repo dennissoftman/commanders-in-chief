@@ -498,13 +498,26 @@ crossing (ADR 3001 decision 4) both stamp the grid, and nothing constructs or de
 repathing on a grid edit (decision 7) arrives with the first edit for the same reason. Local
 avoidance (decision 10) the record already defers.
 
-**One question is open and it is one constant wide.** ADR 3001's proposed amendment A renumbers the
-cost ladder so a metalled road can be cheaper than a field — as the accepted record stands, plain
-ground is class `1` and nothing can be cheaper than it, which would make Concord's paving pothole
-repair. The implementation follows the accepted text and puts the number in exactly one place,
-`ground::PLAIN`, so accepting the amendment is a one-line change. It is not implemented, because the
-amendment carries [ADR 3002](docs/adr/3002-corridor-economy.md)'s review and that record is still
-`proposed`.
+**The economy is decided, and so is the cost ladder.** Denys accepted
+[ADR 3002](docs/adr/3002-corridor-economy.md) on 2026-08-01, together with the three amendments it
+raised against [ADR 3001](docs/adr/3001-pathfinding.md). Two of those are now built:
+
+- **A**, the ladder — metalled `1`, graded `2`, plain `3`, mud `4`, rubble `5`. It cost one default
+  value, because the heuristic had already been made to price itself against the cheapest class the
+  grid holds rather than a hardcoded `1`. A test walks one route under three ladders and requires the
+  same answer, which is what makes the renumbering provably free rather than merely apparently so.
+- **B**, class reaching the movement rate — a unit crosses a metalled cell three times as fast as a
+  field, so grading is an income increase and not just a routing preference. The amendment did not
+  say what "three times" is measured *against*, and something has to: `reference_class` declares
+  which rung a template's authored `speed` is the speed for, kept separate from `plain_class` because
+  what the terrain derives to and what a speed means are different questions.
+- **C**, wrecks stamping a cost class rather than a footprint, has nothing to implement — there is no
+  combat, so there are no wrecks. It is accepted so the first one is not made a wall by whoever
+  writes it.
+
+Accepting 3002 fixes the design and does not schedule it. Nothing of the economy is built, the record
+names decision 1 — gates, yards, carriage — as the minimum viable version, and its own build order is
+shared carriage first and faction divergence second.
 
 Next M6 lines to choose from: combat's first pass; packages gaining a `templates.json` member so a
 real `.cicmap` runs the same way the generated demo does; and

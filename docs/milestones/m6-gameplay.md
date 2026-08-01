@@ -50,16 +50,24 @@ consumers exactly as the deferral intended.
   [mechanics.md §3](../design/mechanics.md#3-combat): integers throughout, four damage types against
   five armour classes as integer percentages, and no multiplier anywhere in the table equal to zero,
   because the bible forbids a faction being helpless against anything.
-- Economy: a resource, gatherers, and a rate that makes expansion a real decision. **Specified, not
-  yet built, and the specification is a proposal** — [ADR
-  3002](../adr/3002-corridor-economy.md) is the corridor economy: goods enter at map-edge gates,
-  accumulate at yards, and are carried by killable carriers to a delivery point, with one currency
-  earned three different ways. It answers this charter line's "makes expansion a real decision"
-  concretely — income is `load value ÷ round-trip time` against a fixed map flow, so expansion buys a
-  shorter trip on flow somebody else would otherwise take. A route link where somebody's assets are
-  being destroyed carries no freight until the fighting stops, which is what puts the economy and the
-  fighting on the same map rather than beside each other. Awaiting review, and it carries two proposed
-  amendments to [ADR 3001](../adr/3001-pathfinding.md).
+- Economy: a resource, gatherers, and a rate that makes expansion a real decision. **Decided, not yet
+  built** — [ADR 3002](../adr/3002-corridor-economy.md) is the corridor economy, accepted on
+  2026-08-01: goods enter at map-edge gates, accumulate at yards, and are carried by killable carriers
+  to a delivery point, with one currency earned three different ways. It answers this charter line's
+  "makes expansion a real decision" concretely — income is `load value ÷ round-trip time` against a
+  fixed map flow, so expansion buys a shorter trip on flow somebody else would otherwise take. A route
+  link where somebody's assets are being destroyed carries no freight until the fighting stops, which
+  is what puts the economy and the fighting on the same map rather than beside each other.
+
+  The three amendments it raised against [ADR 3001](../adr/3001-pathfinding.md) were accepted with it,
+  and **two are built**: the cost ladder now runs metalled, graded, plain, mud, rubble, and a cell's
+  class sets the pace on it as well as ranking the route across it — so grading is an income increase
+  rather than a routing preference. The third, wrecks stamping a class rather than a footprint, waits
+  on combat producing a wreck.
+
+  Accepting the record fixed the design and did not schedule it. Its own build order is shared
+  carriage first, faction divergence second, and decision 1 — gates, yards, carriage — is the minimum
+  viable version.
 - Construction: build sites, placement validity, progress, cancellation.
 - Production: queues, prerequisites, cost.
 - Fog of war and shroud, per player, with the visibility state living in the simulation.

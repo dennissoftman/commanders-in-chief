@@ -1,6 +1,8 @@
 # Faction Mechanical Identity
 
-**Status:** working draft, downstream of [ADR 3002](../adr/3002-corridor-economy.md)'s review.
+**Status:** working draft, downstream of [ADR 3002](../adr/3002-corridor-economy.md), which is
+accepted — so the economy these expressions rest on is settled and this document is drafty on its own
+account.
 **Scope:** how each faction expresses the shared rules in [mechanics.md](mechanics.md). One section
 per faction, in the same order the bible uses.
 
