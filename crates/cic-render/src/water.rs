@@ -216,7 +216,7 @@ impl WaterMaterial {
             deep: [0.03, 0.09, 0.15],
             // Longer than it was, so the ramp is still doing something out in the middle rather than
             // reaching its far end a few units from the bank and leaving the rest flat.
-            depth_scale: 20.0,
+            depth_scale: 6.0,
             // Shorter than `depth_scale`: opacity should arrive well before the tint finishes
             // ramping, or the shallows read as fog over the bed instead of as clear water above it.
             edge_feather: 3.0,
@@ -262,7 +262,7 @@ impl WaterMaterial {
             // bed a metre under it, and both are the ground's colour rather than the sky's.
             shallow: [0.24, 0.29, 0.17],
             deep: [0.06, 0.10, 0.07],
-            depth_scale: 4.0,
+            depth_scale: 2.5,
             edge_feather: 1.2,
             // Chop rather than swell, but not so fine that it falls under the normal
             // level-of-detail at playing distance: a six-unit wave is under a pixel across a channel
@@ -315,7 +315,7 @@ impl WaterMaterial {
             // a deep tint that is still recognisably blue leaves an ocean looking like a swimming
             // pool — the blue of the sea in a photograph is very largely the sky in it.
             deep: [0.004, 0.02, 0.05],
-            depth_scale: 30.0,
+            depth_scale: 8.0,
             edge_feather: 2.5,
             wave_height: 1.6,
             wave_length: 110.0,

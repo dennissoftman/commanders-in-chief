@@ -21,7 +21,11 @@ struct Water {
     surface: vec4<f32>,
     // rgb the shallow tint, w the depth over which it reaches the deep tint.
     shallow: vec4<f32>,
-    // rgb the deep tint, w the depth over which the shoreline reaches full opacity.
+    // rgb the deep tint, w unused.
+    //
+    // `w` carried a shoreline feather until absorption took over deciding opacity. It is left in place
+    // rather than repacked because every field after it would move, and a silent misalignment of this
+    // block is the failure the size assertions exist for.
     deep: vec4<f32>,
     // x wave amplitude, y dominant wavelength, z travel speed, w surface roughness.
     waves: vec4<f32>,
@@ -474,12 +478,23 @@ fn water_fragment(input: WaterVertexOutput) -> @location(0) vec4<f32> {
     let bed_uv = select(own_uv, displaced.uv, displaced.on_screen);
     let bed_colour = scene_colour_at(bed_uv);
 
+    // How much of what is under the surface the water has absorbed, and the only depth ramp there is.
+    //
+    // One figure drives both the tint and the opacity, because they are the same physics: light
+    // crossing water is absorbed along its path, which both shifts its colour and hides what it came
+    // from. Two ramps is what this had, and the shorter of the two -- a shoreline feather of one to
+    // three units -- was the one deciding opacity. That made every body fully opaque a metre or two
+    // out, which is why refraction was invisible: there was no bed left to displace. It is also simply
+    // wrong about water. You can see the bottom of a clear lake from a long way up.
+    //
+    // Exponential rather than linear, which is Beer-Lambert and is what absorption actually does: a
+    // constant fraction removed per unit travelled. The practical difference from a clamped ramp is at
+    // the two ends -- the shallows stay genuinely clear instead of starting to cloud immediately, and
+    // deep water approaches opaque without ever snapping to it.
+    let absorbed = 1.0 - exp(-depth / max(water.shallow.w, 0.001));
+
     // The transmitted term, tinted by how much water the view looks through.
-    let tint = mix(
-        water.shallow.rgb,
-        water.deep.rgb,
-        clamp(depth / max(water.shallow.w, 0.001), 0.0, 1.0)
-    );
+    let tint = mix(water.shallow.rgb, water.deep.rgb, absorbed);
     let light = camera.lights[0];
     // Accumulated separately from `body` because the foam below is a white diffuse surface lit by the
     // same two terms, and lighting it a second way is how a foam band ends up brighter than the sunlit
@@ -571,12 +586,11 @@ fn water_fragment(input: WaterVertexOutput) -> @location(0) vec4<f32> {
     // deliberately not fogged again here, having been fogged by the pass that drew it.
     surface = apply_fog(surface, input.world_position);
 
-    // Opacity is the greatest of what depth, reflectance and foam imply. A shallow edge seen from
+    // Opacity is the greatest of what absorption, reflectance and foam imply. A shallow edge seen from
     // overhead is nearly clear, but the same edge seen at a grazing angle is a mirror, and a figure
     // taken from depth alone would fade out the far shore of every lake. Foam is froth rather than
     // water and hides the bed under it outright, so it forces its own share opaque.
-    let depth_alpha = clamp(depth / max(water.deep.w, 0.001), 0.0, 1.0);
-    let opacity = max(max(depth_alpha, fresnel), foam);
+    let opacity = max(max(absorbed, fresnel), foam);
 
     // Composited here rather than by the blender, and **that is what makes refraction possible at
     // all**. Fixed-function blending can only ever take the destination at *this* pixel, and a

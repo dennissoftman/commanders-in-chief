@@ -27,43 +27,57 @@
 //
 // # The march
 //
-// Fixed-step in world space, refined by bisection on the first step that ends up behind the depth
-// buffer. Fixed steps are the cheap half and are wrong on their own -- a step that lands past the
-// surface reports a hit at the far end of it, which draws a reflection smeared along the ray by the
-// step length. The refinement costs a few more samples and puts the hit where the crossing is.
+// Geometrically growing steps in world space, refined by bisection on the first step that ends up
+// behind the depth buffer. The refinement is the standard fix for a coarse march: a step that lands
+// past a surface reports a hit at the far end of it, which draws a reflection smeared along the ray by
+// the step length.
 //
-// Marching in *world* space rather than in screen space is the simpler of the two standard forms and
-// the right one here. A screen-space DDA distributes its samples evenly over pixels, which is what you
-// want when the reflector fills the frame; water is a roughly horizontal plane seen from above, so its
-// reflected rays travel mostly *into* the screen, and even pixel steps put almost all the samples in
-// the first few world units. Even world steps put them where the ray actually goes.
+// **The growth is not a refinement, it is the difference between working and not**, and the first
+// version got it wrong. Fixed seven-unit steps over sixty units is a defensible march for a rough
+// reflector filling the frame, and it is useless for water: a lake reflects its *far shore*, which at
+// a grazing angle is hundreds of world units away, so every ray ran out of march long before reaching
+// anything and the provider fell back to sky on every pixel. Measured against the sky provider it
+// differed by 0.20 of 255 -- indistinguishable from doing nothing.
 //
-// This is the standard technique rather than anything novel here; the usual references are McGuire and
+// Growing steps put fine samples where the ray leaves the surface, which is where a near hit needs
+// precision, and coarse ones far away, where a whole ridge spans many steps anyway. Twelve steps at a
+// ratio of 1.6 reach about nine hundred units from a two-unit first step.
+//
+// Marching in world space rather than screen space stays right, for the reason growth fixes: a
+// screen-space DDA spends its samples evenly over pixels, and at a grazing view the pixels near the
+// horizon each cover enormous distances, so the far end of the ray -- the part that matters here -- is
+// sampled worst.
+//
+// This is the standard technique rather than anything novel; the usual references are McGuire and
 // Mara's screen-space ray tracing note (2014) for the refinement, and Sousa's Crysis 3 presentation
 // (2013) for the fade rules below.
 
-// How far a reflected ray is followed, in world units, and in how many steps.
+// The first step in world units, how each one grows on the last, and how many there are.
 //
-// Sixty units at eight steps is seven and a half units a step, which for water on a map this scale
-// covers the shore a body is likely to be reflecting and stops well short of the horizon. The bound is
-// as much about what is *useful* as about cost: past a few tens of units the reflected image of a
-// grazing ray is compressed into so few pixels that the sky fallback is indistinguishable from a hit.
-const REFLECTION_MARCH_DISTANCE: f32 = 60.0;
-const REFLECTION_MARCH_STEPS: i32 = 8;
+// Two units, times 1.6, twelve times, reaches about nine hundred -- which on a map a couple of thousand
+// units across is the far shore of anything a body is likely to be reflecting.
+const REFLECTION_STEP_FIRST: f32 = 2.0;
+const REFLECTION_STEP_GROWTH: f32 = 1.6;
+const REFLECTION_MARCH_STEPS: i32 = 12;
 
 // How many times the crossing step is halved. Four brings a seven-and-a-half-unit step down to under
 // half a unit, which is finer than the depth reconstruction is trustworthy at these distances.
 const REFLECTION_REFINE_STEPS: i32 = 4;
 
-// How far behind the depth buffer a sample may be and still count as a hit, in world units.
+// How far behind the depth buffer a sample may be and still count as a hit, as a multiple of the step
+// that got there.
 //
 // Without a thickness test the depth buffer reads as an infinitely deep occluder: every ray that ever
 // passes behind anything registers a hit on it, and a reflection of the sky beyond a ridge comes back
 // as a smear of the ridge. With one, a ray that passes *well* behind a surface is treated as having
-// gone past it rather than into it. The figure is a guess about the scene rather than a measurement --
-// which is exactly the information a depth buffer does not carry, and one of the reasons this
+// gone past it rather than into it.
+//
+// Relative to the step rather than absolute, because the steps grow: a fixed four units is generous
+// against a two-unit step near the surface and impossibly tight against a hundred-unit one far away,
+// so a fixed figure would make the march progressively blinder the further it went. What thickness a
+// surface actually has is information a depth buffer does not carry, which is one of the reasons this
 // technique is an approximation.
-const REFLECTION_THICKNESS: f32 = 4.0;
+const REFLECTION_THICKNESS_STEPS: f32 = 1.5;
 
 // Where the reflection fades out, as a fraction of the way to the screen edge.
 //
@@ -87,13 +101,21 @@ fn reflection_colour(
         return sky;
     }
 
-    let step_length = REFLECTION_MARCH_DISTANCE / f32(REFLECTION_MARCH_STEPS);
     var hit_uv = vec2<f32>(0.0);
     var found = false;
     var travelled = 0.0;
+    var reach = 0.0;
+    var step_length = REFLECTION_STEP_FIRST;
+    var total = 0.0;
+    for (var count = 0; count < REFLECTION_MARCH_STEPS; count += 1) {
+        total += REFLECTION_STEP_FIRST * pow(REFLECTION_STEP_GROWTH, f32(count));
+    }
 
-    for (var step = 1; step <= REFLECTION_MARCH_STEPS; step += 1) {
-        let distance = f32(step) * step_length;
+    for (var step = 0; step < REFLECTION_MARCH_STEPS; step += 1) {
+        let previous = reach;
+        reach += step_length;
+        let distance = reach;
+        step_length *= REFLECTION_STEP_GROWTH;
         let sample_position = world_position + direction * distance;
         let point = project_to_screen(sample_position);
         if (!point.on_screen) {
@@ -109,13 +131,14 @@ fn reflection_colour(
         }
         // Behind something. How far behind decides whether the ray hit it or passed it.
         let surface = world_from_depth(pixel, scene_depth_value);
-        if (distance - length(surface - world_position) > REFLECTION_THICKNESS) {
+        if (distance - length(surface - world_position)
+            > (distance - previous) * REFLECTION_THICKNESS_STEPS) {
             break;
         }
 
         // Bisect the step that crossed. Halving from the near end each time, so `near` is always in
         // front of the surface and `far` always behind it.
-        var near = distance - step_length;
+        var near = previous;
         var far = distance;
         for (var refine = 0; refine < REFLECTION_REFINE_STEPS; refine += 1) {
             let middle = (near + far) * 0.5;
@@ -151,6 +174,6 @@ fn reflection_colour(
     // than making them right.
     let edge = min(min(hit_uv.x, 1.0 - hit_uv.x), min(hit_uv.y, 1.0 - hit_uv.y));
     let edge_fade = smoothstep(0.0, REFLECTION_EDGE_FADE, edge);
-    let distance_fade = 1.0 - smoothstep(0.7, 1.0, travelled / REFLECTION_MARCH_DISTANCE);
+    let distance_fade = 1.0 - smoothstep(0.7, 1.0, travelled / max(total, 0.001));
     return mix(sky, scene_colour_at(hit_uv), edge_fade * distance_fade);
 }
