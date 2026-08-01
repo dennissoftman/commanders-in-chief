@@ -1045,9 +1045,17 @@ fn the_three_kinds_of_water_are_told_apart_by_their_own_captures() {
         let capture = render_water(context, &scene.harness, &body, scene.frame);
         let file = format!("water-kind-{name}.png");
         write_capture(&file, &capture);
-        support::check_reference(context, &file, &capture);
-        captures.push((name, capture));
+        captures.push((name, file, capture));
     }
+    // All three at once rather than one call each, so a run against an adapter with no reference set
+    // writes all three and a change that moved all three reports all three. See `check_references`.
+    support::check_references(
+        context,
+        &captures
+            .iter()
+            .map(|(_, file, capture)| (file.as_str(), capture))
+            .collect::<Vec<_>>(),
+    );
 
     // Compared pixel by pixel rather than as three mean colours, which is what a first attempt did and
     // why it measured almost nothing: an ocean runs from turquoise over the bank to near-black in the
@@ -1056,11 +1064,11 @@ fn the_three_kinds_of_water_are_told_apart_by_their_own_captures() {
     // a per-pixel difference is the statistic that says so.
     let masks: Vec<Vec<bool>> = captures
         .iter()
-        .map(|(_, capture)| wet_mask(&dry, capture))
+        .map(|(_, _, capture)| wet_mask(&dry, capture))
         .collect();
-    for (index, (name, capture)) in captures.iter().enumerate() {
+    for (index, (name, _, capture)) in captures.iter().enumerate() {
         let other = (index + 1) % captures.len();
-        let difference = mean_difference_where(capture, &captures[other].1, |pixel| {
+        let difference = mean_difference_where(capture, &captures[other].2, |pixel| {
             masks[index][pixel] && masks[other][pixel]
         });
         assert!(
@@ -1089,8 +1097,8 @@ fn the_three_kinds_of_water_are_told_apart_by_their_own_captures() {
         }
         highest - lowest
     };
-    let ocean_range = range(&captures[2].1, &masks[2]);
-    let lake_range = range(&captures[0].1, &masks[0]);
+    let ocean_range = range(&captures[2].2, &masks[2]);
+    let lake_range = range(&captures[0].2, &masks[0]);
     assert!(
         ocean_range > lake_range * 1.5,
         "the ocean spans {ocean_range:.1} in luminance against the lake's {lake_range:.1}, \
@@ -1113,8 +1121,8 @@ fn the_three_kinds_of_water_are_told_apart_by_their_own_captures() {
             .count()
     };
     let (lake_foam, ocean_foam) = (
-        frothy(&captures[0].1, &masks[0]),
-        frothy(&captures[2].1, &masks[2]),
+        frothy(&captures[0].2, &masks[0]),
+        frothy(&captures[2].2, &masks[2]),
     );
     assert!(
         ocean_foam > 400 && ocean_foam > lake_foam * 4,
