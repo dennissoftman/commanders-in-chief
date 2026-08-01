@@ -443,9 +443,10 @@ numbers is the only part of this a still image cannot show. **And the scouts pat
 rather than as six units**: each side's three are sent to the next corner by one `move_group` order,
 so they arrive in the shape they set out in instead of in a pile, and a **plate is drawn on the
 ground at every unit's slot** — which is the formation made visible, before anybody reaches it and
-gone once they have. The demo also **drags a facing** on every order, standing in for the mouse the
-viewer does not have: each side turns its line to face the leg it is about to march, which is the
-part of this that no still image reports. The kernel advances at
+gone once they have. The demo also **drags a sixty-metre line across the way each side is
+marching**, standing in for the mouse the viewer does not have, so both patrols arrive as a line
+abreast rather than as whatever huddle they were in — which is the part of this that no still image
+reports. The kernel advances at
 its fixed 30 Hz from the accumulator whatever the frame rate does, and the orders are host-side
 inputs of exactly the shape a network session would feed.
 
@@ -633,16 +634,19 @@ The measurement is the point: sixteen units sent to one cell **as a group** end 
 hundred and twenty pairs overlapping, against **twelve** for the same crowd sent by sixteen separate
 orders.
 
-**Two amendments to that record landed with it.** A group order now carries a **facing the player
-drags** — the gesture *Command & Conquer 3* and *Red Alert 3* use to choose how a squad forms up —
-so a line can be arranged for a heading rather than only carried to a point. A plain click still
-translates the shape exactly; nothing rearranges a formation nobody asked to have rearranged. The
-facing is a **direction rather than an angle**, which is what keeps trigonometry out of the kernel:
-the rotation from one unit vector to another is their complex quotient, four multiplies, and the
-promise that `cic_sim::units` "needs no trigonometry until something wants a facing angle" survived
-something wanting a facing. And a group now **marches at the pace of its slowest member**, so a
-column ordered together does not string out — held on the *base* speed, so a road still speeds the
-whole column rather than pulling it apart again.
+**Three amendments to that record landed with it.** **The line the player drags is the line the
+squad stands on** — the *Red Alert 3* gesture, where the press point is where the rank begins and
+the release point is where it ends. Its direction is which way the rank runs and **its length is the
+width**: drag long and the group strings out along it, drag short and it folds into ranks stacked
+behind the first, drag almost nothing and it goes single file. Members keep the order they were
+standing in, so a squad forming up does not cross itself, and a wide unit takes more of the line
+than a narrow one.
+
+**A plain click still carries the shape exactly.** The only thing that ever replaces a formation is
+the player drawing a new one — which is what makes the drag an addition rather than the game
+deciding to rearrange things. And a group now **marches at the pace of its slowest member**, so a
+column ordered together does not string out; the pace is held on the *base* speed, so a road still
+speeds the whole column rather than pulling it apart again.
 
 **And the method is measured rather than argued about**, which is the answer to "how do we know this
 is the right one". `cic-sim/tests/formation.rs` sends an eight-unit squad to every eleventh passable

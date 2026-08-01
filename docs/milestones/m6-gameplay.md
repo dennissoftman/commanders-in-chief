@@ -26,13 +26,14 @@ consumers exactly as the deferral intended.
   overlapping pairs against twelve for sixteen separate orders, which closes the limitation
   [ADR 3001](../adr/3001-pathfinding.md) decision 10 recorded against itself.
 
-  Two amendments to that record landed with it. **A group order carries a facing the player drags**,
-  so the squad can be arranged for a heading rather than only carried to a point — and a plain click
-  still translates the shape exactly, because rearranging a formation nobody asked to have
-  rearranged is the thing the record exists to avoid. The facing is a *direction*, not an angle, so
-  no trigonometry enters the kernel to do it. And **a group marches at the pace of its slowest
-  member**, so a column ordered together does not string out; the ground class still multiplies that
-  pace, so a road speeds the whole column rather than pulling it apart again.
+  Three amendments to that record landed with it. **The line the player drags is the line the squad
+  stands on** — the *Red Alert 3* gesture: its direction is which way the rank runs and its length is
+  how wide the formation is, so a long drag strings the group out and a short one folds it into
+  ranks behind the first. A plain click still carries the shape exactly, because rearranging a
+  formation nobody asked to have rearranged is the thing the record exists to avoid; the only thing
+  that ever replaces a shape is the player drawing a new one. And **a group marches at the pace of
+  its slowest member**, so a column ordered together does not string out; the ground class still
+  multiplies that pace, so a road speeds the whole column rather than pulling it apart again.
 
   How good the method *is* is measured rather than argued: over every eleventh passable cell of the
   rough test map, **95.7% of slots come through as a pure translation** and the only ones that move
