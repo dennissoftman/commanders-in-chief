@@ -20,11 +20,13 @@ on:
     paths:
       - '**/*.md'
       - 'tools/generate-doc-counts.py'
+      - 'tools/check-doc-links.py'
       - '.github/workflows/docs.yml'
   pull_request:
     paths:
       - '**/*.md'
       - 'tools/generate-doc-counts.py'
+      - 'tools/check-doc-links.py'
       - '.github/workflows/docs.yml'
 
 jobs:
@@ -48,3 +50,14 @@ jobs:
           python3 tools/generate-doc-counts.py --check
           python3 tools/generate-doc-counts.py
           git diff --exit-code -- docs/
+      # The documents cross-reference heavily and deliberately, which is what keeps each
+      # fact in one home — and it means a renamed heading or a moved file breaks a
+      # reference that nothing in a build reads. The dead link this replaces had outlived
+      # the code it pointed at by two milestones. External links are not fetched: that
+      # would make a documentation check depend on other people's uptime.
+      #
+      # Note the scope difference from the step above. Counts live in three documents under
+      # `docs/`; links are checked across every markdown file in the tree, including the
+      # root README, CONTRIBUTING, and the workflow skill.
+      - name: every relative link and anchor resolves
+        run: python3 tools/check-doc-links.py
