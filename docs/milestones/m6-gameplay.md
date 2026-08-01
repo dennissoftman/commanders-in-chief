@@ -22,23 +22,52 @@ consumers exactly as the deferral intended.
   is what proves the command-to-motion pipe end to end. The template set gained `speed`, the first
   field to arrive with the mechanic that reads it.
 - Pathfinding over the heightfield, with terrain passability, dynamic obstruction from structures, and
-  local avoidance between units. **Decided, not yet built** — [ADR 3001](../adr/3001-pathfinding.md):
-  passability derived from the heightfield, occluder and passage footprints on templates, and A* on an
-  integer-cost grid.
+  local avoidance between units. **First slice landed** — [ADR 3001](../adr/3001-pathfinding.md)'s
+  grid and search, as `cic_sim::ground`: passability derived from the heightfield by slope and water
+  line, one cell per sample interval, and A\* on an 8-connected integer-cost grid with ties broken on
+  cell index, no diagonal cutting a corner, and an unreachable target degrading to the nearest cell
+  the search closed. Routes are string-pulled and `cic_sim::units` walks them, spending one tick's
+  travel across as many legs as it reaches — so a corner costs a unit no time, and the move verb's
+  encoding did not change. Corners are then **rounded** into a short interpolated arc, with every
+  segment checked against the grid so smoothing cannot reintroduce the cut corners the search
+  avoided. Every coefficient — grade, water line, cost class, step costs, corner radius — is a
+  `GroundRules` setting rather than a constant, and all of them are in the tick hash, because a
+  coefficient that changes which way a unit goes changes the game. The grid's fingerprint is in the
+  tick hash too.
+
+  **Dynamic obstruction and local avoidance are the parts still outstanding**, and both are waiting
+  on a producer rather than on a decision: a `footprint` and a `passage` stamp the grid when
+  something is built or destroyed, and nothing constructs anything yet. Repathing on a grid edit
+  (decision 7) arrives with the first edit for the same reason.
+
+  Two things this slice needed that were not pathfinding. A subsystem can now **read its peers**
+  during a tick — immutably, with a peer registered earlier already advanced — because movement
+  asking the ground where a unit may walk is the first cross-subsystem read the kernel has, and it
+  is the same seam [M10](m10-scripting.md)'s host verbs need. And the **water table moved into
+  `cic-assets`**: presentation floods a map to that line and the simulation refuses to walk under
+  it, so two derivations of it would be a unit wading through what the player sees as a lake.
 - Combat: weapons, ranges, damage types, armour classes, health, death. **Specified, not yet built** —
   [mechanics.md §3](../design/mechanics.md#3-combat): integers throughout, four damage types against
   five armour classes as integer percentages, and no multiplier anywhere in the table equal to zero,
   because the bible forbids a faction being helpless against anything.
-- Economy: a resource, gatherers, and a rate that makes expansion a real decision. **Specified, not
-  yet built, and the specification is a proposal** — [ADR
-  3002](../adr/3002-corridor-economy.md) is the corridor economy: goods enter at map-edge gates,
-  accumulate at yards, and are carried by killable carriers to a delivery point, with one currency
-  earned three different ways. It answers this charter line's "makes expansion a real decision"
-  concretely — income is `load value ÷ round-trip time` against a fixed map flow, so expansion buys a
-  shorter trip on flow somebody else would otherwise take. A route link where somebody's assets are
-  being destroyed carries no freight until the fighting stops, which is what puts the economy and the
-  fighting on the same map rather than beside each other. Awaiting review, and it carries two proposed
-  amendments to [ADR 3001](../adr/3001-pathfinding.md).
+- Economy: a resource, gatherers, and a rate that makes expansion a real decision. **Decided, not yet
+  built** — [ADR 3002](../adr/3002-corridor-economy.md) is the corridor economy, accepted on
+  2026-08-01: goods enter at map-edge gates, accumulate at yards, and are carried by killable carriers
+  to a delivery point, with one currency earned three different ways. It answers this charter line's
+  "makes expansion a real decision" concretely — income is `load value ÷ round-trip time` against a
+  fixed map flow, so expansion buys a shorter trip on flow somebody else would otherwise take. A route
+  link where somebody's assets are being destroyed carries no freight until the fighting stops, which
+  is what puts the economy and the fighting on the same map rather than beside each other.
+
+  The three amendments it raised against [ADR 3001](../adr/3001-pathfinding.md) were accepted with it,
+  and **two are built**: the cost ladder now runs metalled, graded, plain, mud, rubble, and a cell's
+  class sets the pace on it as well as ranking the route across it — so grading is an income increase
+  rather than a routing preference. The third, wrecks stamping a class rather than a footprint, waits
+  on combat producing a wreck.
+
+  Accepting the record fixed the design and did not schedule it. Its own build order is shared
+  carriage first, faction divergence second, and decision 1 — gates, yards, carriage — is the minimum
+  viable version.
 - Construction: build sites, placement validity, progress, cancellation.
 - Production: queues, prerequisites, cost.
 - Fog of war and shroud, per player, with the visibility state living in the simulation.

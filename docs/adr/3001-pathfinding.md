@@ -1,7 +1,14 @@
 # ADR 3001: Pathfinding — derived passability, occluders and passage, integer-cost grid A*
 
-- Status: accepted. Three amendments are **proposed** below, raised by
-  [ADR 3002](3002-corridor-economy.md) and carrying its review.
+- Status: accepted, and **implemented in part** — `cic_sim::ground` derives the grid and searches
+  it, and `cic_sim::units` walks what it returns. Decision 6's string-pulling gained a corner-rounding
+  pass this record did not describe, recorded as **amendment D** below rather than left as
+  undocumented behaviour. Decisions 1, 2, 3, 5, 6, 8 and 9 are in the tree;
+  decisions 4 (footprint and passage stamps), 7 (repathing on grid edits) and 10 (local avoidance)
+  are not, each waiting on the mechanic that produces the thing it reacts to. **All four amendments
+  below are accepted** — A, B and C by Denys on 2026-08-01 together with
+  [ADR 3002](3002-corridor-economy.md), which raised them, and D with the pass that introduced it.
+  A and B are implemented; C has nothing to implement until combat produces a wreck.
 
 ## Context
 
@@ -194,11 +201,16 @@ on screen is constrained by this; only the *stamp* is quantized.
   here and noted so the grid's query surface is designed as *the* consumer-facing API rather than
   `units`-private plumbing.
 
-## Amendments — proposed, raised by ADR 3002
+## Amendments A, B and C — accepted, raised by ADR 3002
 
 All three came out of writing [the corridor economy](3002-corridor-economy.md) against this record
 rather than out of implementing anything. The first two are defects; the third settles a choice
 decision 4 deliberately left open. None of them reverses a decision — they finish one.
+
+**Accepted by Denys on 2026-08-01, together with the record that raised them.** A and B are also
+arrived at independently by the [faction bible](../design/faction-bible.md), which gives Concord
+"graded roads that speed movement" — so they were obligations of accepted content whatever became of
+ADR 3002, and that is the reason they were not left to wait on it.
 
 ### A. Plain ground is not cost class `1`
 
@@ -220,6 +232,12 @@ road 7, ground 10, mud 16 — at the price of a table to author, version and kee
 worth it until the coarse ladder above proves too coarse, and recorded so it is not reinvented from
 scratch when it does.
 
+**Implemented.** The ladder is named in `cic_sim::ground` — `METALLED`, `GRADED`, `PLAIN`, `MUD`,
+`RUBBLE` — and `GroundRules::plain_class` starts at `PLAIN`. It cost one default value, because the
+heuristic had already been made to price itself against the cheapest class the grid holds rather than
+against a hardcoded `1`; `a_renumbered_cost_ladder_finds_the_same_route` walks one route under three
+ladders and requires the same answer, which is what makes the renumbering provably free.
+
 ### B. A cell's cost class must reach the movement rate, not only path ranking
 
 This record is about *search*: the class scales the cost of a step and therefore which route wins.
@@ -230,8 +248,19 @@ For Concord's paving to be an income increase rather than a routing preference, 
 multiply movement rate. Stated here because the gap sits exactly on the seam between two subsystems,
 which is where it would otherwise be found by wondering why grading the whole map changed nothing.
 
-The arithmetic stays inside [ADR 0007](0007-simulation-arithmetic.md): an integer class against an
-integer per-tick displacement, no new floating point.
+The arithmetic stays inside [ADR 0007](0007-simulation-arithmetic.md): a ratio of two small
+integers against a per-tick displacement, correctly rounded, no transcendental and no new
+representation.
+
+**Implemented**, with one thing this amendment did not say. A ratio needs a denominator: something
+has to declare which rung a template's authored `speed` is the speed *for*, or "three times faster"
+has no referent. That is `GroundRules::reference_class`, defaulting to `PLAIN` and kept separate from
+`plain_class` because they answer different questions — what the terrain derives to, against what a
+speed means. A map that paved its open ground would move the first and leave the second alone.
+
+The pace is sampled once per tick from the cell the unit stands in, not per leg. At thirty ticks a
+second a unit spends tens of ticks inside one eight-metre cell, so the difference is unobservable and
+the simpler rule is the one that can be reasoned about later.
 
 ### C. Wrecks stamp a cost class, not a footprint
 
@@ -243,3 +272,45 @@ The consequence is that a road closes by *accumulation* rather than by a single 
 behaviour worth having: a sustained battle chokes the corridor with its own casualties, and the
 choking outlives the shooting. Ordinary decay clears it, and Meridian recovering the wrecks clears it
 faster — so the faction that lives on throughput is paid to restore it.
+
+**Nothing to implement.** There is no combat, so there are no wrecks, and a wreck stamps through the
+same mechanism decision 4 describes — which is itself unbuilt. Accepted now so that whoever writes
+the first wreck does not have to decide it again, and does not reach for a footprint because a
+footprint is the easier thing to reach for.
+
+## Amendment — implemented, raised by watching it
+
+### D. A route's corners are rounded, and the rounding is checked against the grid
+
+**What the record missed.** Decision 6 says a path is "a waypoint list, string-pulled, walked by the
+stepper that already exists", and that is what was built. It is also not enough. String-pulling
+removes the staircase along a straight run but leaves every surviving corner at a cell centre, so a
+unit crosses open ground beautifully and then turns 45° on the spot at an eight-metre interval. The
+first person to watch it called the movement clunky, which is the correct word: the route was
+optimal and the walking was clockwork. No test could have reported this — every assertion about
+routes was about where they go, and this is about how they are taken.
+
+**The fix.** Each interior corner is cut back by a radius and interpolated across a short quadratic
+Bézier, the original corner serving as the control point. Both the radius and the number of segments
+are coefficients on `GroundRules`, so a map or a mover class can want a different one, and `0.0`
+restores the sharp behaviour exactly.
+
+**The constraint that makes it safe, and it is the whole of the amendment.** Decision 5 forbids a
+diagonal step cutting a corner past an impassable cell, and a smoothing pass that ignored the grid
+would put that cut straight back — worse, it would put it back *precisely at the turns a unit makes
+to walk around something*, which is where it matters. So every segment of a rounded corner is
+checked against the grid, and a corner whose arc would clip anything stays sharp. Rounding may
+therefore be refused, silently and per corner; a route is never smoothed into an obstacle.
+
+**Why this sits in the simulation rather than in presentation.** It changes where the unit actually
+is, so it is state, so it is hashed. Only the *facing* is presentation's, which decision 9 already
+says and which the viewer now implements with the turn-rate limit that decision specifies. The two
+together are what stop a unit reading as a piece on a board: the position curves, and the model
+turns into the curve instead of snapping at each waypoint.
+
+**The other half of the same complaint was not pathfinding at all.** Presentation was drawing raw
+thirty-hertz snapshot positions at whatever rate the window ran, so units stepped. That is fixed by
+interpolating between the last two ticks — `TickAccumulator::alpha`, which had existed since M5
+documented as "what a renderer interpolates by" with nothing calling it. Worth recording here
+because the symptom was indistinguishable from a pathfinding fault and the cause was in a different
+crate.

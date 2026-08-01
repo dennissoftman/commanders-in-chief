@@ -44,7 +44,7 @@ under many markings.
 
 [mechanics.md](mechanics.md) continues that claim rather than restating it, and closes it with
 [its own list](mechanics.md#10-what-this-document-obliges-the-engine-to-gain) of
-<!--count:total-->twenty<!--/count--> requirements — <!--count:promised-->seven<!--/count--> already
+<!--count:total-->twenty<!--/count--> requirements — <!--count:promised-->nine<!--/count--> already
 promised or built, and <!--count:amendments-->three<!--/count--> of them
 **amendments to an accepted record**, since writing
 the economy against [ADR 3001](../adr/3001-pathfinding.md) found that its cost classes cannot express a
@@ -55,10 +55,10 @@ found by writing prose, which is the argument for doing this before the mileston
 
 Working draft, all four documents.
 
-The economy is **proposed and awaiting review** as [ADR 3002](../adr/3002-corridor-economy.md).
-`mechanics.md` is draft with it, and `faction-mechanics.md` and `balance.md` are downstream of both —
-so a change to the economy's shape changes all three, which is why the record exists to be argued with
-first.
+The economy is **accepted** as [ADR 3002](../adr/3002-corridor-economy.md), decided on 2026-08-01.
+`mechanics.md`, `faction-mechanics.md` and `balance.md` are all downstream of it — so a change to the
+economy's shape still changes all three, which is why the record exists to be argued with first and
+why reopening it is a deliberate act rather than an edit here.
 
 No number in the tree has been through [balance.md](balance.md)'s framework, and that is the right
 order rather than a gap: [M6](../milestones/m6-gameplay.md) states that its numbers exist to make

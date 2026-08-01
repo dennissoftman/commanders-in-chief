@@ -1,8 +1,8 @@
 # Commanders in Chief — Game Mechanics
 
-**Status:** working draft. The economy is proposed as
-[ADR 3002](../adr/3002-corridor-economy.md) and awaits review; everything downstream of it here is
-draft with it.
+**Status:** working draft. The economy it describes is **accepted** as
+[ADR 3002](../adr/3002-corridor-economy.md), so what is drafty here is the writing and the measured
+numbers rather than the shape.
 **Scope:** the rules every faction plays under. What a resource is, how force is produced, how combat
 resolves, what a player can see, and how a match ends.
 
@@ -159,9 +159,11 @@ watched growing across the terrain, because that is what "its map presence is li
 gate feeds into it does nothing. Concord's curve bends upward until it meets the flow and then flattens,
 which is the natural ceiling on paving and means it never needs an artificial one.
 
-This needs an amendment to [ADR 3001](../adr/3001-pathfinding.md), which is recorded there: as written,
-its cost classes cannot express a road *cheaper* than plain ground, so grading could only repair mud
-and never improve past it — which would flatten Concord's entire economic identity.
+This needed an amendment to [ADR 3001](../adr/3001-pathfinding.md) and got one: as first written, its
+cost classes could not express a road *cheaper* than plain ground, so grading could only repair mud and
+never improve past it — which would have flattened Concord's entire economic identity. Amendments A and
+B are accepted and built, so the ladder now runs metalled, graded, plain, mud, rubble, and a class sets
+the pace on a cell as well as ranking the route across it.
 
 ### 2.3 The map's economic furniture
 
@@ -686,18 +688,18 @@ one. This document is the same claim continued, and the list is short enough to 
 | Upstream backlog with a cap, and the reopening surge | `cic_sim` | No |
 | Flow rerouting over the graph when a link is severed | `cic_sim` | No |
 | Destructible neutral crossings, and rebuilding them | `cic_sim`, templates | Partly — `passage` from ADR 3001 is what a bridge grants |
-| Wreck objects with decay, stamping a cost class | `cic_sim` | No — and see the ADR 3001 amendment |
+| Wreck objects with decay, stamping a cost class | `cic_sim` | No — ADR 3001 amendment C is accepted, but nothing stamps until combat makes a wreck |
 | Link capacity derived from road condition and obstruction | `cic_sim` | No |
 | Convertible neutral structures | `cic_sim`, templates | No |
 | Detection as an axis beside vision | `cic_sim` fog | No |
 | Runtime cell-cost edits for grading, cratering and repair | `cic_sim` pathfinding | Yes — ADR 3001 decision 7's spike |
-| A cell's cost class reaching **movement rate**, not only path ranking | `cic_sim` units | No — and see the ADR 3001 amendment |
-| Cost classes that can express better-than-ground | ADR 3001 | No — amendment recorded there |
+| A cell's cost class reaching **movement rate**, not only path ranking | `cic_sim` units | Yes — built, ADR 3001 amendment B |
+| Cost classes that can express better-than-ground | ADR 3001 | Yes — built, ADR 3001 amendment A |
 | Cosmetic corridor traffic | `cic-render` | No — presentation only, no simulation state |
 | Per-faction display strings for one currency | string table | Yes — exists |
 | Per-instance tint for recovered hulls | `cic-render` | Yes — exists |
 
-<!--count:promised-->Seven<!--/count--> of <!--count:total-->twenty<!--/count--> are already promised
+<!--count:promised-->Nine<!--/count--> of <!--count:total-->twenty<!--/count--> are already promised
 or built, which is the argument for writing this now rather than after M6's economy line is
 implemented: the cheap half of the list is cheap *because* the bible was written before the renderer.
 <!--count:amendments-->Three<!--/count--> of the <!--count:total-->twenty<!--/count--> are amendments to
