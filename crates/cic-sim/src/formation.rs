@@ -18,6 +18,14 @@
 //! the group translates rigidly and no two units ever cross paths — which is the property that
 //! makes a group move read as one order rather than as `n` of them.
 //!
+//! # Unless the player draws one, and then they have chosen it
+//!
+//! A **drag** is the one thing that discards the shape, because it is the player replacing it:
+//! amendment C's gesture is the one *Red Alert 3* has, where the line you draw is the line the
+//! squad stands on. Its direction is which way the rank runs and **its length is how wide the
+//! formation is** — drag long and the group strings out along it, drag short and it stacks into
+//! ranks behind the first, drag nothing at all and it is a click. See [`ranked`].
+//!
 //! # Two things the translation cannot do on its own, and what is done about them
 //!
 //! A group that sets out standing on top of itself would arrive standing on top of itself, and a
@@ -108,28 +116,27 @@ const FAN: [[f64; 2]; 8] = [
 /// Returned in the order the members were given, because the assignment is the identity: member
 /// `i` gets slot `i`. See the module documentation for why that is the whole of "not random".
 ///
-/// `facing` is the direction the player dragged, if they dragged one — see [`turn_from`] for what
-/// it does and, in [ADR 3003](../../../docs/adr/3003-formation-movement.md)'s **amendment A**, why
-/// it is the only thing in here that ever rotates anything. `None` is a plain click, and a plain
-/// click never rearranges a formation.
+/// `drag` is the line the player drew, if they drew one — see [`ranked`] and, in
+/// [ADR 3003](../../../docs/adr/3003-formation-movement.md)'s **amendment C**, why its *length* is
+/// as much of the order as its direction. `None` is a plain click, and a plain click never
+/// rearranges a formation.
 ///
 /// `ground` is optional for the same reason it is everywhere else in this crate: a kernel that was
-/// never told about terrain has no ground to refuse a slot, and the answer is the translation
+/// never told about terrain has no ground to refuse a slot, and the answer is the arrangement
 /// alone.
 #[must_use]
 pub fn slots(
     members: &[Member],
     destination: [f64; 2],
-    facing: Option<[f64; 2]>,
+    drag: Option<[f64; 2]>,
     ground: Option<&Ground>,
 ) -> Vec<[f64; 2]> {
     if members.is_empty() {
         return Vec::new();
     }
 
-    // The shape the group is already in, carried to where it was sent. Counted by adding rather
-    // than by casting a length, which keeps the whole of this exact for any group a `u16` count
-    // can name.
+    // Counted by adding rather than by casting a length, which keeps the whole of this exact for
+    // any group a `u16` count can name.
     let (mut sum, mut count) = ([0.0_f64; 2], 0.0_f64);
     for member in members {
         sum[0] += member.position[0];
@@ -137,31 +144,28 @@ pub fn slots(
         count += 1.0;
     }
     let centre = [sum[0] / count, sum[1] / count];
-    // The identity unless the player asked for something else, which is the whole of "a click does
-    // not rearrange your formation".
-    let turn = facing.map_or([1.0, 0.0], |facing| {
-        turn_from(
-            [destination[0] - centre[0], destination[1] - centre[1]],
-            facing,
-        )
-    });
-    let mut slots: Vec<[f64; 2]> = members
-        .iter()
-        .map(|member| {
-            let offset = [
-                member.position[0] - centre[0],
-                member.position[1] - centre[1],
-            ];
-            [
-                destination[0] + offset[0] * turn[0] - offset[1] * turn[1],
-                destination[1] + offset[0] * turn[1] + offset[1] * turn[0],
-            ]
-        })
-        .collect();
 
-    if spread(&mut slots, members) {
-        // Only when something actually moved: opening a group out does not have to keep its centre
-        // exactly, and a group that needed no opening must come through the translation untouched.
+    // Two orders, and which one the player gave is the whole of the branch. A **drag** draws the
+    // ranks and is the only thing that ever discards the group's own shape; a **click** carries it.
+    let drawn = drag.and_then(|drag| ranked(members, destination, drag, centre));
+    let dragged = drawn.is_some();
+    let mut slots = drawn.unwrap_or_else(|| {
+        members
+            .iter()
+            .map(|member| {
+                [
+                    destination[0] + member.position[0] - centre[0],
+                    destination[1] + member.position[1] - centre[1],
+                ]
+            })
+            .collect()
+    });
+
+    if spread(&mut slots, members) && !dragged {
+        // Only for a carried shape, and only when something actually moved. Opening a group out
+        // does not have to keep its centre exactly, so a huddle is slid back onto the point it was
+        // sent to — but a drawn rank has its *end* on that point by construction, and recentring it
+        // would slide the line the player drew off the line they drew it on.
         recentre(&mut slots, destination);
     }
     if let Some(ground) = ground {
@@ -170,29 +174,124 @@ pub fn slots(
     slots
 }
 
-/// The rotation that carries `from` onto `to`, as a `(cos, sin)` pair.
+/// The slots a drag draws: one or more ranks along the dragged line.
 ///
-/// # Why there is no trigonometry in here
+/// [ADR 3003](../../../docs/adr/3003-formation-movement.md)'s **amendment C**, and the gesture is
+/// the whole specification. The player presses at the destination and releases somewhere else; the
+/// line between the two *is* the front rank. Its direction is which way the rank runs and **its
+/// length is how wide the formation is** — drag a long line and the group arrives strung out along
+/// it, drag a short one and it stacks into ranks behind the first.
 ///
-/// A facing is a *direction*, and the player gave it as one — the vector between the two points
-/// they dragged. Turning that into an angle and back again would need `atan2` on one side and a
-/// sine and cosine on the other, all three of them things [ADR
-/// 0007](../../../docs/adr/0007-simulation-arithmetic.md) decision 3 refuses, to arrive at exactly
-/// the number that was already in hand. The rotation from one unit vector to another *is* their
-/// complex quotient: with both normalised, `to × conj(from)` is the `(cos, sin)` of the difference,
-/// and applying it is four multiplies. Two square roots and two divisions, and nothing that a
-/// platform library gets to have an opinion about.
+/// # What decides what
 ///
-/// A direction of no length has no rotation, and the answer is the identity — which is what makes a
-/// group already standing on its destination, or one dragged nowhere, come through untouched.
-fn turn_from(from: [f64; 2], to: [f64; 2]) -> [f64; 2] {
-    let (Some(from), Some(to)) = (unit(from), unit(to)) else {
-        return [1.0, 0.0];
+/// - **Along the rank, members keep the order they are standing in**, by where each one projects
+///   onto the drag. The unit on the left ends up on the left, so a group forming up does not cross
+///   itself — the same reason the carried shape uses the identity assignment.
+/// - **Room along the rank is a member's own**, so a wide unit takes more of the line than a narrow
+///   one and the spacing is theirs rather than an average. When the drag is longer than the group
+///   needs, the surplus is shared out evenly and the rank stretches to span it exactly.
+/// - **Ranks stack behind the front one**, on the side the group is coming from, so nobody has to
+///   walk through the rank in front to reach their place.
+///
+/// `None` when the drag has no length or is not a number — which is a click, and is handled by the
+/// caller as one.
+fn ranked(
+    members: &[Member],
+    destination: [f64; 2],
+    drag: [f64; 2],
+    centre: [f64; 2],
+) -> Option<Vec<[f64; 2]>> {
+    let along = unit(drag)?;
+    let width = (drag[0] * drag[0] + drag[1] * drag[1]).sqrt();
+
+    // Behind is the perpendicular pointing back the way the group came, so the ranks queue up
+    // *behind* the front one. A group already standing on its destination has no direction to come
+    // from, and the sign then falls out of the comparison rather than being another case.
+    let across = [-along[1], along[0]];
+    let travel = [destination[0] - centre[0], destination[1] - centre[1]];
+    let back = if across[0] * travel[0] + across[1] * travel[1] > 0.0 {
+        [-across[0], -across[1]]
+    } else {
+        across
     };
-    [
-        to[0] * from[0] + to[1] * from[1],
-        to[1] * from[0] - to[0] * from[1],
-    ]
+
+    // Left to right along the drag, as the group is standing now. Ties on the order the caller
+    // supplied, which is identifier order, so two members abreast of each other never depend on
+    // which way a sort happened to fall.
+    let mut order: Vec<usize> = (0..members.len()).collect();
+    let reach = |index: usize| {
+        members[index].position[0] * along[0] + members[index].position[1] * along[1]
+    };
+    order.sort_by(|left, right| reach(*left).total_cmp(&reach(*right)).then(left.cmp(right)));
+
+    // Fill the front rank until the next member would not fit inside the width the player asked
+    // for, then start another behind it. A drag shorter than one member is wide gives every member
+    // its own rank — a single-file column, which is what dragging almost nothing should mean.
+    let mut ranks: Vec<Vec<usize>> = Vec::new();
+    let mut used = 0.0_f64;
+    let mut previous: Option<f64> = None;
+    for index in order {
+        let radius = members[index].radius;
+        match previous.map(|previous| (previous + radius) * SPREAD_SLACK) {
+            Some(step) if used + step <= width => {
+                used += step;
+                if let Some(rank) = ranks.last_mut() {
+                    rank.push(index);
+                }
+            }
+            Some(_) => {
+                ranks.push(vec![index]);
+                used = 0.0;
+            }
+            None => ranks.push(vec![index]),
+        }
+        previous = Some(radius);
+    }
+
+    let mut placed = vec![[0.0_f64; 2]; members.len()];
+    let mut depth = 0.0_f64;
+    let mut behind: Option<f64> = None;
+    for rank in &ranks {
+        let widest = rank
+            .iter()
+            .map(|index| members[*index].radius)
+            .fold(0.0_f64, f64::max);
+        if let Some(behind) = behind {
+            depth += (behind + widest) * SPREAD_SLACK;
+        }
+
+        // What the rank needs, and the surplus the drag leaves over it. Shared out between the gaps
+        // so the rank spans exactly what was drawn; a rank that already fills the width, or one
+        // with a single member in it, gets nothing and stays as tight as its members allow.
+        let (mut needed, mut gaps, mut last) = (0.0_f64, 0.0_f64, None);
+        for index in rank {
+            if let Some(last) = last {
+                needed += (last + members[*index].radius) * SPREAD_SLACK;
+                gaps += 1.0;
+            }
+            last = Some(members[*index].radius);
+        }
+        let surplus = if gaps > 0.0 && width > needed {
+            (width - needed) / gaps
+        } else {
+            0.0
+        };
+
+        let (mut offset, mut last) = (0.0_f64, None);
+        for index in rank {
+            let radius = members[*index].radius;
+            if let Some(last) = last {
+                offset += (last + radius) * SPREAD_SLACK + surplus;
+            }
+            placed[*index] = [
+                destination[0] + along[0] * offset + back[0] * depth,
+                destination[1] + along[1] * offset + back[1] * depth,
+            ];
+            last = Some(radius);
+        }
+        behind = Some(widest);
+    }
+    Some(placed)
 }
 
 /// A direction of length one, or `None` when there is no direction to be had.
@@ -675,13 +774,13 @@ mod tests {
     }
 
     #[test]
-    fn a_click_never_turns_a_formation() {
-        // The half of amendment A that matters most. Rearranging a shape nobody asked to have
-        // rearranged is the thing this whole record exists to avoid, so it is asserted as bit
-        // equality — and the destination is deliberately **off both axes**, because a group
-        // travelling due east comes through an accidental turn-to-travel unchanged and the
-        // assertion would then say nothing. That is exactly what the first version of it did, and
-        // the sabotage pass is what found it.
+    fn a_click_never_rearranges_a_formation() {
+        // The half of amendments A and C that matters most, and the one thing neither of them may
+        // touch. Rearranging a shape nobody asked to have rearranged is what this whole record
+        // exists to avoid, so it is asserted as bit equality — and the destination is deliberately
+        // **off both axes**, because a group travelling due east comes through an accidental
+        // rotation unchanged and the assertion would then say nothing. That is exactly what the
+        // first version of it did, and the sabotage pass is what found it.
         let line = [
             member(0.0, -4.0, 0.5),
             member(0.0, 0.0, 0.5),
@@ -694,44 +793,169 @@ mod tests {
         );
     }
 
+    /// How far apart two points are along an axis, and across it.
+    fn along_and_across(from: [f64; 2], to: [f64; 2], axis: [f64; 2]) -> (f64, f64) {
+        let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
+        (dx * axis[0] + dy * axis[1], dx * -axis[1] + dy * axis[0])
+    }
+
+    /// The extent of a set of slots along an axis and across it.
+    fn extents(slots: &[[f64; 2]], axis: [f64; 2]) -> (f64, f64) {
+        let project = |slot: &[f64; 2]| {
+            (
+                slot[0] * axis[0] + slot[1] * axis[1],
+                slot[0] * -axis[1] + slot[1] * axis[0],
+            )
+        };
+        let (mut low, mut high) = (project(&slots[0]), project(&slots[0]));
+        for slot in slots {
+            let here = project(slot);
+            low = (low.0.min(here.0), low.1.min(here.1));
+            high = (high.0.max(here.0), high.1.max(here.1));
+        }
+        (high.0 - low.0, high.1 - low.1)
+    }
+
     #[test]
-    fn a_drag_turns_the_formation_to_the_heading_it_asks_for() {
-        // The other half. The group is travelling east and the line is abreast of that; dragged
-        // north, the line has to come round with it and be abreast of *north* — a quarter turn,
-        // exactly, and asserted as one.
-        let line = [
-            member(0.0, -4.0, 0.5),
-            member(0.0, 0.0, 0.5),
-            member(0.0, 4.0, 0.5),
+    fn a_drag_lines_the_group_up_along_it() {
+        // Amendment C, and the gesture in one assertion: the line the player draws is the line the
+        // squad stands on. Three equal members and a drag long enough to hold them span it exactly
+        // — the first at the point that was clicked, the last at the end of the drag, and the third
+        // between them.
+        let three = [
+            member(0.0, 0.0, 1.0),
+            member(4.0, 0.0, 1.0),
+            member(8.0, 0.0, 1.0),
         ];
-        let dragged = slots(&line, [100.0, 0.0], Some([0.0, 7.0]), None);
-        for (slot, expected) in dragged
-            .iter()
-            .zip([[104.0, 0.0], [100.0, 0.0], [96.0, 0.0]])
-        {
+        let placed = slots(&three, [50.0, 50.0], Some([30.0, 0.0]), None);
+        assert!(between(placed[0], [50.0, 50.0]) < 1e-9, "{placed:?}");
+        assert!(
+            between(placed[2], [80.0, 50.0]) < 1e-9,
+            "the rank did not span the drag: {placed:?}"
+        );
+        assert!(
+            between(placed[1], [65.0, 50.0]) < 1e-9,
+            "the surplus was not shared evenly: {placed:?}"
+        );
+    }
+
+    #[test]
+    fn a_longer_drag_makes_a_wider_line() {
+        // The length is the order, not just the direction. Same group, same direction, twice the
+        // drag: twice the rank.
+        let four: Vec<Member> = (0..4)
+            .map(|index| member(f64::from(index) * 4.0, 0.0, 1.0))
+            .collect();
+        let narrow = slots(&four, [0.0, 0.0], Some([20.0, 0.0]), None);
+        let wide = slots(&four, [0.0, 0.0], Some([40.0, 0.0]), None);
+        let (narrow_along, _) = extents(&narrow, [1.0, 0.0]);
+        let (wide_along, _) = extents(&wide, [1.0, 0.0]);
+        assert!((narrow_along - 20.0).abs() < 1e-9, "{narrow_along}");
+        assert!((wide_along - 40.0).abs() < 1e-9, "{wide_along}");
+    }
+
+    #[test]
+    fn a_short_drag_stacks_the_group_into_ranks_behind_the_front_one() {
+        // The other half of "length sets the width", and the half that makes it worth having: a
+        // drag too short for the group does not squash it, it *folds* it. Four members dragged five
+        // metres come out two ranks deep, and the second rank is on the side the group came from so
+        // that nobody has to walk through the front rank to reach their place.
+        let four: Vec<Member> = (0..4)
+            .map(|index| member(f64::from(index) * 4.0, 0.0, 1.0))
+            .collect();
+        let drag = [5.0, 0.0];
+        let destination = [0.0, 40.0];
+        let placed = slots(&four, destination, Some(drag), None);
+
+        let (along, across) = extents(&placed, [1.0, 0.0]);
+        assert!(
+            along <= 5.0 + 1e-9,
+            "the rank spilled past the width drawn: {along}"
+        );
+        assert!(
+            across > 1.0,
+            "the group did not fold into ranks at all: {placed:?}"
+        );
+
+        // The group is coming from y = 0 and going to y = 40, so anything behind the front rank is
+        // at a *smaller* y. A rank in front would make the back of the formation walk through it.
+        for slot in &placed {
+            let (_, back) = along_and_across(destination, *slot, [1.0, 0.0]);
             assert!(
-                between(*slot, expected) < 1e-9,
-                "dragged north the line should have turned: {dragged:?}"
+                back <= 1e-9,
+                "a rank was placed in front of the line the player drew: {placed:?}"
             );
         }
     }
 
     #[test]
-    fn dragging_the_way_the_group_is_already_going_changes_nothing() {
-        // The identity case, and the one that says what a facing *means*: the shape is arranged for
-        // a heading, so asking for the heading it is already arranged for is not an order to move
-        // anybody. The drag is deliberately a different length from the trip, because only its
-        // direction may count.
-        let group = [member(3.0, 1.0, 0.5), member(-3.0, -1.0, 0.5)];
-        let target = [50.0, 0.0];
-        let clicked = slots(&group, target, None, None);
-        let dragged = slots(&group, target, Some([9.0, 0.0]), None);
-        for (click, drag) in clicked.iter().zip(&dragged) {
-            assert!(
-                between(*click, *drag) < 1e-9,
-                "{clicked:?} against {dragged:?}"
-            );
-        }
+    fn a_wider_member_takes_more_of_the_line_than_a_narrow_one() {
+        // Room along the rank is each member's own, so the gap beside a transporter is wider than
+        // the gap between two riflemen. The wide member goes at the **end** rather than the middle,
+        // which is what makes the two gaps differ at all: with it in the middle they are equal
+        // whether the rule is followed or not, and the first version of this test was measured
+        // passing against a deliberately equal-room implementation.
+        let mixed = [
+            member(0.0, 0.0, 0.5),
+            member(4.0, 0.0, 0.5),
+            member(8.0, 0.0, 3.0),
+        ];
+        // Exactly the room they need, so there is no surplus to share out and the spacing is theirs
+        // alone. Any longer and the surplus — which is shared *equally* — would drag the two gaps
+        // toward each other and blunt the assertion.
+        let narrow_gap = (0.5 + 0.5) * super::SPREAD_SLACK;
+        let wide_gap = (0.5 + 3.0) * super::SPREAD_SLACK;
+        let placed = slots(&mixed, [0.0, 0.0], Some([narrow_gap + wide_gap, 0.0]), None);
+
+        let first = between(placed[0], placed[1]);
+        let second = between(placed[1], placed[2]);
+        assert!(
+            (first - narrow_gap).abs() < 1e-9,
+            "{first} between two narrow members"
+        );
+        assert!(
+            (second - wide_gap).abs() < 1e-9,
+            "{second} beside the wide one"
+        );
+        assert!(
+            second > first * 2.0,
+            "the wide member took no more of the line than a narrow one: {first} against {second}"
+        );
+    }
+
+    #[test]
+    fn the_line_keeps_the_order_the_group_was_standing_in() {
+        // Nobody crosses anybody, which is the same requirement the carried shape meets with the
+        // identity assignment. Here the members are listed in the *wrong* order on purpose, so an
+        // implementation that laid them out by index rather than by where they stand fails.
+        let scattered = [
+            member(30.0, 0.0, 1.0),
+            member(10.0, 0.0, 1.0),
+            member(20.0, 0.0, 1.0),
+        ];
+        let placed = slots(&scattered, [0.0, 0.0], Some([30.0, 0.0]), None);
+        assert!(
+            placed[1][0] < placed[2][0] && placed[2][0] < placed[0][0],
+            "the rank shuffled the group: {placed:?}"
+        );
+    }
+
+    #[test]
+    fn the_drag_decides_which_way_the_rank_runs() {
+        // Direction as well as length. The same group dragged north makes a rank up the Y axis
+        // rather than across the X one.
+        let three = [
+            member(0.0, 0.0, 1.0),
+            member(4.0, 0.0, 1.0),
+            member(8.0, 0.0, 1.0),
+        ];
+        let placed = slots(&three, [50.0, 50.0], Some([0.0, 30.0]), None);
+        let (along, across) = extents(&placed, [0.0, 1.0]);
+        assert!(
+            (along - 30.0).abs() < 1e-9,
+            "the rank did not run north: {placed:?}"
+        );
+        assert!(across < 1e-9, "the rank is not a line: {placed:?}");
     }
 
     #[test]
@@ -741,40 +965,6 @@ mod tests {
         let clicked = slots(&group, target, None, None);
         assert_eq!(slots(&group, target, Some([0.0, 0.0]), None), clicked);
         assert_eq!(slots(&group, target, Some([f64::NAN, 1.0]), None), clicked);
-        // And a group already standing on its destination has no direction of travel to turn from,
-        // so there is nothing a drag can mean and nothing it may do.
-        let standing = [member(0.0, -2.0, 0.5), member(0.0, 2.0, 0.5)];
-        assert_eq!(
-            slots(&standing, [0.0, 0.0], Some([1.0, 1.0]), None),
-            slots(&standing, [0.0, 0.0], None, None)
-        );
-    }
-
-    #[test]
-    fn turning_a_shape_does_not_change_it() {
-        // A rotation is a rigid motion, so every distance inside the formation has to survive it.
-        // This is what separates "the player chose an orientation" from "the game rearranged the
-        // squad", and it is the property an implementation that reached for a shape table would
-        // quietly lose.
-        let group = [
-            member(0.0, 0.0, 0.5),
-            member(5.0, 2.0, 0.5),
-            member(-3.0, 6.0, 0.5),
-            member(1.0, -4.0, 0.5),
-        ];
-        let target = [200.0, 90.0];
-        let clicked = slots(&group, target, None, None);
-        let dragged = slots(&group, target, Some([-2.0, 5.0]), None);
-        for first in 0..group.len() {
-            for second in first + 1..group.len() {
-                let before = between(clicked[first], clicked[second]);
-                let after = between(dragged[first], dragged[second]);
-                assert!(
-                    (before - after).abs() < 1e-9,
-                    "turning the shape stretched it: {before} became {after}"
-                );
-            }
-        }
     }
 
     #[test]
