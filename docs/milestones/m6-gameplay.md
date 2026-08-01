@@ -2,8 +2,9 @@
 
 One playable skirmish: build a base, produce units, fight, win or lose.
 
-**Status:** In progress — the template set is the first slice landed, written against its first real
-consumers exactly as the deferral intended.
+**Status:** In progress — movement and pathfinding are complete, including formations and local
+avoidance. The next vertical closure is loading the template set from a real map package; combat follows
+on that package path.
 
 ## Charter
 
@@ -96,7 +97,9 @@ consumers exactly as the deferral intended.
   Two things this slice needed that were not pathfinding. A subsystem can now **read its peers**
   during a tick — immutably, with a peer registered earlier already advanced — because movement
   asking the ground where a unit may walk is the first cross-subsystem read the kernel has, and it
-  is the same seam [M10](m10-scripting.md)'s host verbs need. And the **water table moved into
+  is the query half of the seam [M10](m10-scripting.md)'s host verbs need. Their write half remains
+  the typed effect route proposed in [ADR 3008](../adr/3008-deterministic-task-execution.md). And the
+  **water table moved into
   `cic-assets`**: presentation floods a map to that line and the simulation refuses to walk under
   it, so two derivations of it would be a unit wading through what the player sees as a lake.
 - Combat: weapons, ranges, damage types, armour classes, health, death. **Specified, not yet built** —
@@ -127,6 +130,34 @@ consumers exactly as the deferral intended.
 - Fog of war and shroud, per player, with the visibility state living in the simulation.
 - Victory and defeat conditions.
 - An AI opponent good enough to be a test harness — it exercises every mechanic without a human.
+
+## Next implementation sequence
+
+1. **Make the existing slice run from a real `.cicmap`.** The package reads `templates.json` within a
+   caller-supplied bound, owns the decoded `TemplateSet`, and cross-checks the scenario references while
+   it holds both documents. The viewer activates that scenario and resolves the models the templates name
+   through the package mount, replacing the generated demo's special-case model table. Missing, malformed
+   and oversized template members fail with the member named. This closes a vertical gap; it adds no new
+   mechanic.
+2. **Settle the simulation effect path before combat creates ad-hoc peer mutation.** [ADR
+   3008](../adr/3008-deterministic-task-execution.md) proposes explicit dependency phases,
+   phase-scoped double buffers, typed cross-subsystem effects and stable commits. Its serial executor is
+   the first implementation; a parallel backend follows measurement rather than blocking gameplay.
+3. **Build combat's first complete pass.** Add health, armour and one weapon with the template fields that
+   consume them; add attack, integer range/cooldown/damage, death and the accepted rubble-class wreck
+   stamp. One headless engagement must replay to identical per-tick hashes, and the live viewer must make
+   the same fight visible. Attack-move, hold and patrol extend that proven path rather than arriving as
+   unrelated command encodings.
+4. **Connect scripting to the mechanics that now exist.** Spawn, order and count use typed system effects
+   and queries rather than forged player commands. Combat contributes its first real event only when it
+   can raise one.
+5. **Parallelise a measured workload without changing the hashes.** The serial phase plan stays the
+   oracle. Worker count, range size and scheduling order vary in the equivalence suite; a custom executor
+   is considered only after a general scoped pool supplies the baseline.
+
+Faction colour is independent presentation work and may land alongside this sequence. The accepted
+corridor economy stays after combat: its wreck, interdiction and killable-carrier rules all need combat
+to exist, and acceptance fixed its design rather than scheduling it.
 
 ## Exit condition
 

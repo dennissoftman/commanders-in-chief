@@ -64,9 +64,12 @@ to prevent. And a `str` handler argument **cannot be synthesized** — a string 
 program's constant table and there is no heap — so a timer's name resolves against each receiving
 script's own constants, and a script hears about a timer only if it names it.
 
-What is left is the verbs that reach *another* subsystem — spawn, order, count. Those are no longer
-blocked on the kernel, which exists; they are blocked on how one subsystem reaches another's state
-during a tick, and the answer must not be "a script forges a player's command".
+What is left is the verbs that reach *another* subsystem — spawn, order, count. The immutable half of
+that boundary now exists: a subsystem can read its peers during a tick. The mutable half still needs an
+attributable route, because the answer must not be "a script forges a player's command" or "a subsystem
+takes a mutable reference to its peer". Proposed [ADR 3008](docs/adr/3008-deterministic-task-execution.md)
+puts typed effects through a stable phase commit, which is also the semantic contract a later parallel
+task executor must preserve.
 
 Landing M3's last five renderer items turned up a defect every committed reference had been rendered
 through, so **ten of the twenty-two references changed** — see the antialiasing entry below.
@@ -425,7 +428,8 @@ What works:
     `&mut` to itself and `&` to everything else and the mutation the rule forbids cannot be spelled.
     What a read *sees* is pinned by the order that already existed — a peer registered earlier has
     advanced this tick, one registered later has not — so it is asserted both ways round rather than
-    left to whichever order a host happened to pick. M10's cross-subsystem verbs need the same seam.
+    left to whichever order a host happened to pick. This is the query half of M10's cross-subsystem
+    verbs; writes still need the typed effect route proposed in ADR 3008.
 - Windowed presentation, driven by the reusable camera:
 
 ```bash
@@ -680,12 +684,22 @@ Accepting 3002 fixes the design and does not schedule it. Nothing of the economy
 names decision 1 — gates, yards, carriage — as the minimum viable version, and its own build order is
 shared carriage first and faction divergence second.
 
-Next M6 lines to choose from: combat's first pass; packages gaining a `templates.json` member so a
-real `.cicmap` runs the same way the generated demo does; and
-[faction colour](https://github.com/dennissoftman/commanders-in-chief/issues/61), which is the one
-open issue. The verbs are also what [ADR 7002](docs/adr/7002-script-events.md)'s host surface and
-first real events hang off — and the peer-read seam that movement needed to consult the ground is the
-same one those verbs need, so it is now in place rather than ahead of them.
+**The next sequence is explicit now.** First, packages gain a bounded `templates.json` member so a real
+`.cicmap` activates and draws through the same path as the generated demo. Second, proposed
+[ADR 3008](docs/adr/3008-deterministic-task-execution.md)'s phase and typed-effect contract is settled and
+lands with a serial executor, preserving every existing replay hash. Third, combat's first pass adds
+health, one weapon, attack, death and the rubble-class wreck the accepted economy record already names.
+The first scripting verbs and combat events then have mechanics and an attributable effect path to reach.
+
+Parallel execution follows a measured workload rather than blocking those mechanics. The schedule owns
+dependencies, visibility and stable commit order; an executor owns only which ready job runs on which
+worker. Buffering occurs at dependency barriers rather than once for the whole tick, so a structure that
+changes the ground and a unit that routes over it do not acquire an accidental tick of latency. A serial
+backend remains the oracle, and a custom work-stealing backend is considered only if a general scoped pool
+cannot meet a measured latency or isolation requirement.
+
+[Faction colour](https://github.com/dennissoftman/commanders-in-chief/issues/61) is independent
+presentation work and can land alongside the sequence above.
 
 The prerequisite decision earned its keep: [ADR 0007](docs/adr/0007-simulation-arithmetic.md) was
 settled before the kernel was written, so the kernel was written *inside* it — almost entirely integer,
@@ -694,8 +708,8 @@ transcendentals sit in `cic-math` below everything, per the extraction recorded 
 
 **Priorities were set by Denys on 2026-07-29: playable first.** The audio device layer (M9's one open
 item) and the view-driven detail request (M3's recorded leftover, described below) are both deliberately
-deferred — recorded here so neither reads as forgotten. The script-event binding model is proposed as
-ADR 7002 and awaits his review before any of it is implemented.
+deferred — recorded here so neither reads as forgotten. The script-event binding model is accepted and
+implemented as ADR 7002; its cross-subsystem verbs wait on mechanics and the typed effect path above.
 
 One item is still outstanding from M3 and is described below: **a view-driven detail request**, which is
 what decides *which* ground gets a page. It is not a charter line, and the page mip chain is what showed it
@@ -788,14 +802,15 @@ at all, and *which ground has a page* is the residency decision nothing derives 
 residency map already ranks by projected size, so this is a small function over the frustum rather than a
 design.
 
-**Scripting needs host verbs, and what was blocking them has since been built.** Spawn, order, count,
-query a zone, set an objective: every one is a call into a simulation kernel, and M5 is complete. Two
-of the three things they wanted are now standing rather than pending — a kernel declares them on an
-`Interface` and implements one trait, and **a subsystem can read its peers during a tick**, which is
-the seam a verb reaching across subsystems needs and which pathfinding is the first thing to use. The
-transcendentals trap ahead of it was closed earlier: the implementation moved to **`cic-math`**, one
-crate below both the VM and the kernel, so decision 4's `sin` has exactly one home and two
-implementations that could disagree can no longer exist. What is left is writing the verbs.
+**Scripting needs host verbs, and the read half of their boundary has since been built.** Spawn, order,
+count, query a zone, set an objective: every one reaches simulation state, and M5 is complete. A kernel
+declares them on an `Interface`, and **a subsystem can read its peers during a tick**, which is how a
+query such as count can observe its owner. Spawn and order are writes, though, and an immutable peer read
+cannot honestly implement them. Proposed ADR 3008 gives those writes typed effects committed by the state
+owner, distinct from player commands and stable under parallel scheduling. The transcendentals trap ahead
+of all of it was closed earlier: the implementation moved to **`cic-math`**, one crate below both the VM
+and the kernel, so decision 4's `sin` has exactly one home and two implementations that could disagree can
+no longer exist.
 
 **Audio needs a device, and that is the one thing about it a green suite cannot establish.** The mixer
 produces correct frames and nothing hands them to hardware. This is the same lesson the standing constraint
