@@ -30,6 +30,7 @@ only the leading token has to agree.
 | [3002](3002-corridor-economy.md) | The corridor economy: one currency, three acquisitions, carriage on the map | accepted |
 | [3003](3003-formation-movement.md) | Formation movement: the shape a group is already in, carried to where it is sent | accepted, implemented |
 | [3004](3004-ai-command-seam.md) | The AI command seam: the opponent is a player, not a subsystem | proposed |
+| [3005](3005-route-graph.md) | The route graph: sites are vertices, links are drawn, flow is routed like paths | proposed |
 | [4001](4001-hdri-sky.md) | Captured skies: Radiance `.hdr`, an equirectangular lookup, and the light derived from it | accepted, implemented |
 | [4002](4002-water-kinds.md) | Three kinds of water: a spread wave train, kind presets, and normal level-of-detail | accepted, implemented |
 | [6001](6001-audio-backend-boundary.md) | Where the audio backend boundary goes | accepted, implemented |
