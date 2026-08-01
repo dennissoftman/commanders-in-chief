@@ -34,6 +34,7 @@ displaced, tinted or lit. That made refraction unimplementable rather than merel
 7. **Refraction displaces the transmitted view** by the wave normal, built in world space and projected.
 8. **Opacity follows absorption, not the shoreline feather**, exponentially, from the same figure that
    drives the tint. `depth_scale` is an absorption length; `edge_feather` no longer decides anything.
+9. **Reflectance is tunable per material**, lifting `F0` from the physical 0.02 toward a stylised 0.35.
 
 ## Rationale
 
@@ -85,6 +86,39 @@ without snapping to it.
 
 `edge_feather` is left in the material and in the uniform rather than removed. Repacking would move every
 field after it, and a silently misaligned uniform block is the failure both size assertions exist for.
+
+**Decision 9 lifts `F0` rather than scaling the reflected share.** The Fresnel curve is already near one
+at a grazing angle, so raising its base adds reflection where there is almost none and leaves the case
+that already worked alone; multiplying the result instead would saturate a grazing view into a flat
+mirror while barely touching an overhead one. It is the standard artistic F0 knob, and it is per
+material because how far to depart from physics is a decision about a scene. It costs transparency in
+the right direction too: what a surface reflects it does not transmit, and one figure decides both.
+
+## What a top-down camera can and cannot reflect
+
+This deserves its own heading because it was measured three times before it was understood, and it
+bounds what decisions 1, 6 and 9 are worth.
+
+**A camera looking down at water sees the sky reflected in it, whatever is standing beside it.** The
+mirror direction of a forty-degree downward view is a forty-degree *upward* ray, which leaves the scene.
+Reflecting a ridge requires a near-horizontal reflected ray, which requires a near-horizontal view. So a
+screen-space provider — whose entire subject is reflecting the *scene* — cannot contribute at a playing
+camera, and no amount of reflectance boosting changes that: `F0` decides how much of the reflection is
+seen, not what is in it.
+
+Measured, at forty degrees over terrain with a two-hundred-unit ridge beside the water and reflectance
+lifted to 0.45: the two providers differ over **four pixels of 345,600**. At eight degrees over the same
+ground they differ plainly and the ridge is visible in the water.
+
+Two consequences follow, and both are worth stating rather than discovering again:
+
+- **Screen-space reflection is a grazing-camera and cinematic feature here**, not a playing-camera one.
+  It is kept, opt-in and defaulted off, because the seam is built and a lower camera would want it.
+- **The reflectance knob pays off against a *captured* sky rather than against the analytic one.** The
+  analytic gradient is nearly the same colour as the water body — the observation [ADR 4002](4002-water-kinds.md)
+  opens with — so mixing seven times more of it changes almost nothing: a lake at 0.45 moved 29% of its
+  pixels by a peak of 6/255. An HDRI has content and warmth that the body does not, and that is where
+  lifting `F0` shows.
 
 ## Consequences
 
