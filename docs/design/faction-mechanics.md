@@ -232,10 +232,15 @@ the plant. Concord's own investment shortens its enemies' approach — an argume
 the faction is nevertheless correct to ignore, and a mechanic that carries "everybody wants the road
 open" without a line of dialogue.
 
-**And the road can be broken.** Cratering is available to all three, cheaply to AEC, and it is the
-direct counter to the only rising income curve in the game. Re-grading is cheaper than grading because
-the roadbed survives, so the exchange costs Concord *time* rather than credit — which is the currency
-it actually cannot spare, and therefore the right one to charge it in.
+**And the road can be broken — but only on purpose.** Ordinary fighting on a road leaves the road
+alone; what degrades it is ordnance aimed at it, which every faction has and AEC has cheapest.
+Cratering pushes a stretch down the condition scale, so the link carries less; only demolishing a
+*structure* on the route — a bridge, a culvert — severs it outright. Re-grading is cheaper than grading
+because the roadbed survives, so the exchange costs Concord *time* rather than credit, which is the
+currency it actually cannot spare and therefore the right one to charge it in.
+
+The distinction is what keeps this from being a chore: a shelled road is a slower road that Concord
+repairs on its own schedule, not an emergency it has to answer within thirty seconds.
 
 **Interdiction hits Concord twice.** A fight on its haul route stops the flow into its yards *and*
 threatens the haulers driving it. It is the most road-dependent faction in a design where the road can
@@ -326,7 +331,7 @@ The three properties this produces are all deliberate:
 #### The Council and the Chain sit on opposite sides of the war
 
 This is the best property in the design and it was not designed — it fell out of
-[interdiction](mechanics.md#26-interdiction-a-contested-link-stops) meeting an economy that was already
+[interdiction](mechanics.md#26-what-stops-a-link) meeting an economy that was already
 written.
 
 Duty is charged on throughput, and an interdicted link carries none. So **every fight anywhere in the
@@ -389,6 +394,15 @@ Four rules keep it from being a snowball, and they are all necessary:
 who won them*. It can lose a fight, hold the field afterwards, and come out with material. That is a
 comeback mechanism which pays for aggression by both opponents rather than punishing the loser further,
 and it is precisely the bible's "attrition of patience".
+
+**And its recovery crews are the map's road-clearing crews.** Wreckage obstructs a roadway
+([mechanics.md §2.6](mechanics.md#26-what-stops-a-link)), and recovering a wreck removes it. So the
+faction that lives on throughput is paid to restore the throughput a battle destroyed, and its two
+economic activities turn out to be the same activity. Nothing was added to make that true — it fell out
+of salvage and obstruction being written against each other.
+
+It also gives the Council-versus-Chain tension a physical form: clearing the road is the Council's
+interest and stripping the field is the Chain's, and they are one vehicle doing one job.
 
 **The misidentification engine is a real mechanic, not a paint job.** A recovered hull reads at a
 glance as the faction it was built by. In a three-way match that is genuine target confusion, and in a

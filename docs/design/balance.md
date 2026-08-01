@@ -223,6 +223,9 @@ These are set by sweeping until the stated target is met, and nobody may hand-pi
 | Salvage recovery cost and wreck decay | Salvage supplying ≤ 30% of Meridian's fielded value at 15:00 |
 | **Interdiction radius and hold duration** | A skirmish that both sides walk away from closing a link for under 30 s; a running battle keeping it shut |
 | **Upstream backlog cap** | A link shut for 60 s returning ≤ 50% of what it would have carried, as a surge |
+| **Link capacity per road condition** | A metalled link carrying ≥ 2× a cratered one, and a plain link never below the gate rate feeding it |
+| **Cratering: damage per munition, and repair cost and time** | An artillery mission costing the attacker less credit than the repair costs the defender, and less time |
+| **Wreck cost class and decay** | A link needing the wreckage of ~a company before it closes, and clearing itself within ~90 s of the last loss |
 | **Duty against salvage, swept together** | Meridian's total income varying by ≤ 25% between a quiet map and a bloody one |
 
 The eighth row is the anti-snowball guard from
@@ -258,6 +261,8 @@ deliberately into **invariants that fail a build** and **statistics that are tra
 | **Credit conservation** | Credits created equal gate output collected plus duty assessed, less contractor fees. Nothing else creates credit, and the total is part of the tick hash |
 | **Interdiction is symmetric** | Damage from either side holds a link shut. A test plants a one-sided engagement and asserts the link stays closed while the *defender* is the only one still shooting |
 | **Interdiction needs an owner** | Damage to neutral scenery, props, wrecks and unclaimed buildings closes nothing. This is the rule most likely to be broken by a later refactor that makes everything damageable uniformly |
+| **Combat does not degrade the road** | A battle fought to completion on a stretch of road leaves that stretch's cost class unchanged. Only ordnance aimed at the road moves it |
+| **A cratered road still carries** | A link at the worst reachable road condition, with no fighting and no wreckage, has capacity above zero. Only a demolished structure or an obstructed roadway reaches zero |
 | **Reachability** | Every template is buildable from a stock start on the reference map — no orphan tech |
 | **Economic benchmark** | Income at one, two and three worked yards is within tolerance of §5.2 |
 | **Role coverage** | Every faction has at least one template in every tactical role |

@@ -1,6 +1,6 @@
 # ADR 3001: Pathfinding — derived passability, occluders and passage, integer-cost grid A*
 
-**Status:** accepted. Two amendments are **proposed** below, raised by
+**Status:** accepted. Three amendments are **proposed** below, raised by
 [ADR 3002](3002-corridor-economy.md) and carrying its review.
 
 ## Context
@@ -196,8 +196,9 @@ on screen is constrained by this; only the *stamp* is quantized.
 
 ## Amendments — proposed, raised by ADR 3002
 
-Both were found by writing [the corridor economy](3002-corridor-economy.md) against this record rather
-than by implementing anything, and neither changes a decision so much as finish one.
+All three came out of writing [the corridor economy](3002-corridor-economy.md) against this record
+rather than out of implementing anything. The first two are defects; the third settles a choice
+decision 4 deliberately left open. None of them reverses a decision — they finish one.
 
 ### A. Plain ground is not cost class `1`
 
@@ -231,3 +232,14 @@ which is where it would otherwise be found by wondering why grading the whole ma
 
 The arithmetic stays inside [ADR 0007](0007-simulation-arithmetic.md): an integer class against an
 integer per-tick displacement, no new floating point.
+
+### C. Wrecks stamp a cost class, not a footprint
+
+Not a defect — a choice this record's decision 4 leaves open, settled here because the economy depends
+on it. A wreck is an object and could stamp either. It stamps a **cost class**, because a footprint is
+impassable and one dead truck is something a column pushes past rather than a wall.
+
+The consequence is that a road closes by *accumulation* rather than by a single loss, which is the
+behaviour worth having: a sustained battle chokes the corridor with its own casualties, and the
+choking outlives the shooting. Ordinary decay clears it, and Meridian recovering the wrecks clears it
+faster — so the faction that lives on throughput is paid to restore it.

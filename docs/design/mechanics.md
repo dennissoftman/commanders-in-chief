@@ -115,18 +115,49 @@ makes it killable, and destroying commercial traffic to starve Meridian's duty i
 real weight in this setting. It should be reached by a decision, not by somebody adding a health field
 to a truck.
 
-#### The corridor is improvable, and damageable
+#### The corridor's condition is a scale, and only deliberate acts move it
 
-- **Concord grades**, as spatial work: an engineering unit builds along a drawn path, at a cost, over
-  time, changing the terrain permanently and publicly.
-- **Everyone craters.** Rubble is already a dearer cell class, so damaging a road is available to all
-  three — cheaply to AEC, for whom it is one air-delivered munition. This is the direct counter to the
-  only rising income curve in the game.
-- **Re-grading is cheaper than grading**, because the roadbed survives. So the crater-and-repave
-  exchange costs Concord *time* rather than credit, which is the currency it actually cannot spare.
-- **There is no route-wide upgrade tier.** No purchased "all roads are faster". Charter rule 6 puts
-  technology on the map, and a global percentage appears nowhere; grading has to be a thing that is
-  watched growing across the terrain, because that is what "its map presence is literally paved" means.
+Road quality is one continuous quantity — the cell cost class — running from metalled through graded,
+plain, cratered and up to rubble. Grading moves a stretch up the scale; ordnance moves it down. The
+link's carrying capacity follows the scale, so this single number is where Concord's rising income and
+everyone else's answer to it both live.
+
+**Only deliberate acts move it.** Ordinary combat does not damage the road, and this is a rule rather
+than an omission: a firefight over a stretch of tarmac leaves the tarmac. What degrades a road is
+ordnance aimed at the road — artillery, rockets, an engineer's demolition charge — each of which is
+paid for and aimed on purpose.
+
+The tiers matter, because damaged and destroyed are not the same thing:
+
+| Act | Effect on the road | Effect on the link |
+|---|---|---|
+| **Grading** | Up the scale, permanently and publicly | Capacity rises |
+| **Cratering** — artillery, rockets, charges | Down the scale. Still passable, slower | Capacity falls, proportionally |
+| **Demolition of a structure** — a bridge, a culvert, a cut | Impassable at that point | Capacity zero until rebuilt |
+| **Repair** | Back up the scale | Capacity recovers |
+
+**A cratered road is not a closed road.** It carries less and it carries slower, and a player who wants
+a link *shut* has to either destroy a structure on it or go and fight there. That is the distinction
+this design turns on: degradation is cheap, gradual and persistent; closure is expensive and always
+costs something specific.
+
+**Which is why bridges are the map author's chokepoints.** A road can only be degraded, so the places
+where a link can genuinely be severed are the structures on it, and where those sit is authored. That
+is a deliberate lever rather than a side effect — see [§7](#7-what-a-map-author-controls).
+
+**Everyone can repair, and Concord repairs best.** Re-grading is cheaper than grading because the
+roadbed survives, so a crater-and-repave exchange costs the attacker credit and Concord *time* — which
+is the currency Concord actually cannot spare, and therefore the right one to charge it in. Other
+factions repair more slowly and more expensively, because they are not the roadbuilder, but none of
+them is locked out: a map that degrades monotonically into unplayability is a map nobody finishes.
+
+**There is no route-wide upgrade tier.** No purchased "all roads are faster". Charter rule 6 puts
+technology on the map, and a global percentage appears nowhere; grading has to be a thing that is
+watched growing across the terrain, because that is what "its map presence is literally paved" means.
+
+**Grading cannot create freight.** Gate output is fixed, so raising a link's capacity above what the
+gate feeds into it does nothing. Concord's curve bends upward until it meets the flow and then flattens,
+which is the natural ceiling on paving and means it never needs an artificial one.
 
 This needs an amendment to [ADR 3001](../adr/3001-pathfinding.md), which is recorded there: as written,
 its cost classes cannot express a road *cheaper* than plain ground, so grading could only repair mud
@@ -148,7 +179,7 @@ Three authored site kinds, all neutral and none destructible:
 
 Gates being indestructible and neutral is the valve that prevents the resource-death stalemate. The
 flow never stops **permanently** — a link stops while it is being fought over
-([§2.6](#26-interdiction-a-contested-link-stops)) and resumes when the fighting does — so a match is
+([§2.6](#26-what-stops-a-link)) and resumes when the fighting does — so a match is
 never decided by both players running dry. But the flow is *fixed*, so taking more of it means taking
 it from somebody. That is where the pressure comes from, and the fiction supplies it for free: the road
 connects two places that are not on the map.
@@ -263,17 +294,35 @@ Three consequences, all of them wanted:
 carriage around it and pay in travel time instead. Both are decisions with a price. Neither is
 "remember to do a thing every ninety seconds".
 
-### 2.6 Interdiction: a contested link stops
+### 2.6 What stops a link
 
-**A link of the route graph where something is being harmed does not carry freight.**
+Three independent things reduce or stop a link's carrying capacity, and keeping them separate is what
+stops the model collapsing into "shoot near the road, road closes":
+
+| | Cause | Shape | Clears when |
+|---|---|---|---|
+| **Interdiction** | Fighting — harm to an owned asset near the link | Binary: shut or open | The fighting stops |
+| **Condition** | Deliberate ordnance or grading ([§2.2](#22-the-three-layers-of-a-supply-chain)) | Continuous: capacity scales with the road | Somebody repairs it |
+| **Obstruction** | Wreckage accumulating on the roadway | Continuous, and can reach zero | Wrecks decay, or are cleared |
+
+A battle on a road produces the first immediately and the third afterwards. It never produces the
+second.
+
+#### Interdiction
+
+**A link where something is being harmed does not carry freight.**
 
 | | |
 |---|---|
 | **Trigger** | Damage dealt to a unit or structure **that has an owner**, within the link's radius |
-| **Not a trigger** | Fire that harms nothing, and damage to neutral scenery, props, wrecks or unclaimed buildings |
+| **Not a trigger** | Fire that harms nothing; damage to neutral scenery, props, wrecks or unclaimed buildings; and damage to the road itself, which is terrain and belongs to nobody |
 | **Duration** | Held for *T* after the last qualifying damage, then the link reopens |
 | **Effect** | Freight does not traverse the link. Flow accumulates upstream against a cap, and the backlog moves as a surge when the link reopens |
-| **Permanent version** | A destroyed bridge or a cratered road — which costs ordnance rather than a fight |
+
+The third exclusion is worth its own line: **shelling a road does not interdict it.** Nothing owned was
+harmed, so the link stays open — it simply carries less, because the road is worse. An attack on the
+roadway and an attack on the traffic are different attacks with different costs, and a player should be
+able to choose between them.
 
 **Harm rather than fire, and the distinction is load-bearing.** Taking a weapon discharge as the trigger
 lets a player close a road by shooting a hillside, which is both an exploit and nonsense: a road does
@@ -312,6 +361,27 @@ fight.
 
 The radius, the hold duration and the upstream cap are
 [measured, not chosen](balance.md#54-numbers-that-are-measured-not-chosen).
+
+#### Obstruction
+
+**Enough wreckage on a roadway blocks it**, and this needs no mechanism of its own. A wreck
+([§3.3](#33-wrecks)) stamps a dearer cost class on the cells it covers, so one wreck is an
+inconvenience and a road full of them is impassable in aggregate. The link's capacity derives from the
+cheapest route along it, so it falls as the wreckage builds and reaches zero when nothing can get
+through.
+
+A wreck stamps a **cost class rather than a footprint**, deliberately. A footprint is a hard wall, and
+a single dead truck should not be one — you push past it slowly. What closes a road is the
+accumulation, which is the thing that should be true: a sustained battle on the corridor eventually
+chokes it with its own casualties, long after the shooting has moved on.
+
+This is the delayed, physical half of the property interdiction gives immediately. Fighting on a supply
+line costs everyone twice — once while it happens, and again for as long as the debris sits there.
+
+**And it hands Meridian something nobody designed.** Recovering wrecks is how Meridian builds its army,
+and recovering wrecks is also how a blocked road gets cleared. Its salvage crews are its road-clearing
+crews, so the faction that lives on throughput is paid to restore the throughput a battle destroyed.
+Nothing was added to make that true.
 
 ### 2.7 Why expansion is a real decision
 
@@ -382,12 +452,15 @@ which is not what they do.
 ### 3.3 Wrecks
 
 A destroyed vehicle or structure leaves a **wreck object** in the simulation with a decay timer.
-Wrecks matter mechanically for three reasons and are therefore simulation state rather than
+Wrecks matter mechanically for four reasons and are therefore simulation state rather than
 presentation:
 
 - **Meridian recovers them** into degraded units
   ([faction-mechanics.md](faction-mechanics.md#army-captured-not-built)).
-- **Rubble is a cost class.** A collapsed building grades the ground it fell on, which ADR 3001
+- **They obstruct.** A wreck stamps a dearer **cost class** on the cells it covers — not a footprint,
+  because a single dead truck is something you push past rather than a wall. The accumulation is what
+  closes a road ([§2.6](#26-what-stops-a-link)).
+- **Rubble is a cost class too.** A collapsed building grades the ground it fell on, which ADR 3001
   already anticipates.
 - **A battlefield reads as one.** The tumble is presentation and may differ between clients; the wreck
   that is there to be recovered may not.
@@ -541,18 +614,19 @@ one. This document is the same claim continued, and the list is short enough to 
 | Integer credit accumulation with retained remainder | `cic_sim` | No |
 | Per-link interdiction state, driven by damage events | `cic_sim` | No |
 | Upstream backlog with a cap, and the reopening surge | `cic_sim` | No |
-| Wreck objects with decay | `cic_sim` | No |
+| Wreck objects with decay, stamping a cost class | `cic_sim` | No — and see the ADR 3001 amendment |
+| Link capacity derived from road condition and obstruction | `cic_sim` | No |
 | Convertible neutral structures | `cic_sim`, templates | No |
 | Detection as an axis beside vision | `cic_sim` fog | No |
-| Runtime cell-cost edits for grading and cratering | `cic_sim` pathfinding | Yes — ADR 3001 decision 7's spike |
+| Runtime cell-cost edits for grading, cratering and repair | `cic_sim` pathfinding | Yes — ADR 3001 decision 7's spike |
 | A cell's cost class reaching **movement rate**, not only path ranking | `cic_sim` units | No — and see the ADR 3001 amendment |
 | Cost classes that can express better-than-ground | ADR 3001 | No — amendment recorded there |
 | Cosmetic corridor traffic | `cic-render` | No — presentation only, no simulation state |
 | Per-faction display strings for one currency | string table | Yes — exists |
 | Per-instance tint for recovered hulls | `cic-render` | Yes — exists |
 
-Six of seventeen are already promised or built, which is the argument for writing this now rather than
+Six of eighteen are already promised or built, which is the argument for writing this now rather than
 after M6's economy line is implemented: the cheap half of the list is cheap *because* the bible was
-written before the renderer. Two of the seventeen are amendments to an accepted record rather than new
-work, and both were found by writing this document rather than by building anything — which is the
+written before the renderer. Three of the eighteen are amendments to an accepted record rather than new
+work, and all three were found by writing this document rather than by building anything — which is the
 other argument for the order.

@@ -94,9 +94,16 @@ reasonable simplifications.
 15. **A link where something is being harmed carries no freight.** The trigger is **damage dealt to a
     unit or structure that has an owner**, within the link's radius, held for a duration after the
     last such damage. Fire that harms nothing does not count, and neither does damage to neutral
-    scenery, props, wrecks or unclaimed buildings. Flow accumulates upstream against a cap and the
-    backlog moves as a surge when the link reopens. The permanent version of the same thing is a
-    destroyed bridge or a cratered road, which costs ordnance rather than a fight.
+    scenery, props, wrecks or unclaimed buildings — nor damage to the road itself, which is terrain
+    and belongs to nobody. Flow accumulates upstream against a cap and the backlog moves as a surge
+    when the link reopens.
+
+    **Three separate things reduce a link's capacity, and they do not collapse into one.**
+    *Interdiction*, above, is binary and clears when the fighting stops. *Condition* is continuous,
+    moved only by the deliberate acts in decision 18, and clears when somebody repairs it.
+    *Obstruction* is continuous, caused by accumulated wreckage, and clears as wrecks decay or are
+    recovered. A battle on a road produces the first immediately and the third afterwards, and never
+    the second.
 
 16. **A supply chain is three layers and they are not interchangeable.** The **corridor** is authored
     road on the terrain; the **route graph** is authored topology over it; **carriage** is the
@@ -107,9 +114,13 @@ reasonable simplifications.
     to yard is a rate along the graph, not a convoy of objects. The vehicles a player sees hold no
     simulation state.
 
-18. **The corridor is improvable and damageable, spatially and never by a purchased tier.** Concord
-    grades along a drawn path with an engineering unit; anyone can crater; re-grading is cheaper than
-    grading because the roadbed survives. There is no route-wide upgrade.
+18. **The corridor's condition is one continuous scale, and only deliberate acts move it.** Cell cost
+    class from metalled down to rubble, with the link's capacity following it. Concord grades along a
+    drawn path with an engineering unit; ordnance aimed at the road — artillery, rockets, an engineer's
+    charge — craters it; **ordinary combat does not degrade it at all**. A cratered road still carries,
+    slower; only demolishing a *structure* on the route severs it. Everyone can repair and Concord
+    repairs best, because a map that degrades monotonically into unplayability is a map nobody
+    finishes. There is no route-wide upgrade tier.
 
 19. **AEC holds sortie slots, not carriers.** A slot is a recurring off-map sortie that flies to a
     yard, lifts a slung load, delivers to a pad and leaves. A downed sortie costs the load, the slot's
@@ -180,6 +191,31 @@ and the interdiction trigger are the same object.
 **This does not breach decision 5.** That rider constrains Meridian's duty, which must never be
 extractive. Interdiction is combat, available to all three equally, and paid for in a fight — which is
 the only currency this design accepts for an economic attack.
+
+**Why fighting, road damage and wreckage are three mechanisms rather than one.** The tempting
+simplification is to let combat degrade the road and have one quantity carry everything. It is wrong
+three times. A firefight over a stretch of tarmac leaves the tarmac, so it is *false*, and a design
+whose model of the world is visibly false spends the player's trust for nothing. It makes every
+skirmish a permanent economic act, so a map decays monotonically toward unplayable with nobody having
+chosen it. And it collapses two attacks that should be distinct choices — attacking the traffic and
+attacking the roadway — into whichever one is cheaper.
+
+Separating them costs nothing and buys the shape: interdiction is immediate, binary and free of
+ordnance; cratering is deliberate, gradual, persistent and paid for; wreckage is the delayed physical
+consequence of the fighting, and it clears itself. **Fighting on a supply line therefore costs everyone
+twice** — once while it happens, and again for as long as the debris sits there — which is the property
+worth having, arrived at honestly.
+
+Damaged and destroyed are also not the same state, and conflating them was the other half of the error.
+A cratered road that stops carrying makes artillery a delete button aimed at the map; a cratered road
+that carries *less* makes it an exchange, and leaves severing a link to the two things that should cost
+real commitment — demolishing a structure, or going there and fighting. It also promotes bridges into
+the map author's chokepoints, which is a lever worth having deliberately.
+
+**Wrecks stamp a cost class rather than a footprint**, for the same reason. A footprint is a hard wall,
+and one dead truck should not be one. What closes a road is accumulation, which is the thing that ought
+to be true, and it makes Meridian's recovery crews into the map's road-clearing crews without anybody
+adding a road-clearing mechanic.
 
 **Why carriage is not bound to the route graph.** A trade route whose carriers run on rails — *Age of
 Empires III*'s is the clearest reference — is interceptable only on the rail, which deletes the spatial
@@ -261,15 +297,24 @@ representation drift. An integer numerator over a fixed denominator is exact for
 - **A deliberate low-cost "block the road" ability** — rejected. Interdiction should always cost a
   fight; a cheap roadblock turns a strategic decision into upkeep. The deliberate version is cratering,
   which costs ordnance.
+- **Combat degrading the road** — rejected, and it was in the first draft of this record. It is false
+  to the world, it decays every map monotonically toward unplayable, and it collapses two attacks that
+  should be separate choices.
+- **A cratered road being a closed road** — rejected. It makes artillery a delete button aimed at the
+  map. Degradation is an exchange; severance costs a demolished structure or a fight.
+- **Wrecks as impassable footprints** — rejected. One dead truck is not a wall; accumulation is what
+  closes a road.
 
 ## Consequences
 
-**It amends ADR 3001, twice.** [ADR 3001](3001-pathfinding.md) says a graded road is "a cell class
-cheaper than ground" while setting plain ground at class `1` and step cost at `10 × class`, so
+**It amends ADR 3001, three times.** [ADR 3001](3001-pathfinding.md) says a graded road is "a cell
+class cheaper than ground" while setting plain ground at class `1` and step cost at `10 × class`, so
 cheaper-than-ground is unrepresentable — grading could restore mud and never improve past it, which
-flattens Concord's entire economic identity. And a cell's class currently ranks paths only; for
-Concord's income to rise as it paves, the same class has to reach the movement rate. Both are recorded
-as an amendment on that record and carry this one's `proposed` status.
+flattens Concord's entire economic identity. A cell's class also ranks paths only; for Concord's income
+to rise as it paves, the same class has to reach the movement rate. And decision 4 leaves open whether
+an object stamps a footprint or a cost class, which the obstruction rule settles: a wreck stamps a
+**cost class**, because one dead truck is not a wall. All three are recorded as amendments on that
+record and carry this one's `proposed` status.
 
 **The best property here was not designed.** Decision 15 meeting Meridian's already-written economy
 produces a faction whose two income sources move in *opposite* directions along one axis: duty falls as
@@ -278,7 +323,7 @@ economy that cannot survive peace — as arithmetic a player feels in their inco
 in a briefing. It also carries a balance obligation, since two anti-correlated curves cannot be swept
 one at a time.
 
-**What this obliges.** Seventeen engine requirements, listed with their homes in
+**What this obliges.** Eighteen engine requirements, listed with their homes in
 [mechanics.md §10](../design/mechanics.md#10-what-this-document-obliges-the-engine-to-gain). Six are
 already promised or built — templates growing fields with the mechanics that read them, footprint and
 passage from ADR 3001, runtime cell-cost edits, the string table, per-instance tint, and standing orders
