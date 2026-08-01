@@ -44,6 +44,21 @@ It is a specification for generated text, not flavour — briefing copy, unit ba
 written by several people and tools over the project's life, and the failure mode is not bad writing but
 *inconsistent* writing.
 
+How those factions are *played* is [docs/design/mechanics.md](docs/design/mechanics.md), and the economy
+under it is [ADR 3002](docs/adr/3002-corridor-economy.md): goods enter at the map's edges, accumulate at
+yards, and have to be carried somewhere by units that can be killed. One currency, earned three
+different ways — AEC's freight arrives on off-map sorties it does not own, Concord hauls overland on
+roads it built, Meridian charges a duty on other people's carriage. The setting's premise is the
+mechanic: the economy is passage.
+
+And a link of the corridor where somebody's assets are being destroyed **stops carrying freight** until
+the fighting does. So a grinding battle on the middle of the map makes both sides poorer, the efficient
+economic attack is a deep raid behind the enemy's line, and Meridian — which is paid out of throughput
+and paid again out of wreckage — ends up with its two halves on opposite sides of the war's intensity.
+
+Per-faction detail is [faction-mechanics.md](docs/design/faction-mechanics.md) and the method for
+setting any number is [balance.md](docs/design/balance.md).
+
 It is also a source of engine requirements, and has already been one. A faction whose map presence is
 literally paved has to grade roads across terrain at runtime, and a faction that converts existing
 buildings into production needs those buildings to be destructible map objects — which is why terrain
