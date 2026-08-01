@@ -23,6 +23,7 @@ model a placed object wears.
       "id": "structure/bridge", "kind": "structure", "model": "models/bridge.glb",
       "passage": { "cells": [2, 9], "class": 2 }
     },
+    { "id": "unit/scout", "kind": "unit", "model": "models/scout.glb", "speed": 26.0, "radius": 3.4 },
     { "id": "faction/vanguard", "kind": "faction", "name": "faction.vanguard" }
   ]
 }
@@ -38,6 +39,7 @@ model a placed object wears.
 | `templates[].model` | for placeable kinds | absent | Package-relative `.glb` path. Required for `unit`, `structure`, `prop`; refused for `faction`, which has no pose to draw at. |
 | `templates[].name` | no | absent | String-table key for the display name. |
 | `templates[].speed` | for `unit` | absent | World units per second, finite and positive. Required for a `unit` — one that cannot move is a structure wearing the wrong kind — and refused for every other kind, which has no movement for it to mean anything to. |
+| `templates[].radius` | for `unit` | absent | World units, finite and positive. How much room the unit keeps around itself, which is what stops units standing in each other. Required for a `unit` and refused for every other kind, on the same rule as `speed`. |
 | `templates[].footprint` | no | absent | `{ "cells": [x, y] }` — the ground this object *denies*, in whole pathfinding cells. Both extents non-zero. Allowed on `structure` and `prop` only. |
 | `templates[].passage` | no | absent | `{ "cells": [x, y], "class": n }` — the ground this object *grants*, and what crossing it costs. Both extents non-zero, class non-zero. Allowed on `structure` and `prop` only. |
 
@@ -63,18 +65,32 @@ template's own axes, and both are optional — a template may declare either, bo
   turn and does nothing for a half. What is *drawn* rotates freely: rasterizing a rectangle at 37°
   deterministically is solvable and buys nothing for a genre whose buildings have snapped to grids
   since it existed.
-- **A `unit` may not declare either.** A mover's own occupancy is ADR 3001 decision 10's `radius`
-  and the steering that reads it, not a grid stamp — a footprint that moved would have to be lifted
-  and re-laid every tick. A `faction` may not either, having no ground to stand on.
+- **A `unit` may not declare either.** A mover's own occupancy is its `radius` below, not a grid
+  stamp — a footprint that moved would have to be lifted and re-laid every tick. A `faction` may not
+  either, having no ground to stand on.
+
+## Radius
+
+[ADR 3001](../adr/3001-pathfinding.md) decision 10, and the other half of the same idea: a standing
+object occupies whole **cells** and a moving one occupies a **circle**. A unit's radius is what keeps
+units out of each other — after everybody has stepped, overlapping circles push apart, and a push the
+ground refuses slides along whichever axis is free.
+
+Required for a `unit` and refused for everything else, on the identical rule as `speed`, and for the
+same reason: a template that declares the wrong kind of occupancy has said something it cannot mean,
+and that is worth a loud error at load rather than a unit that never gets out of anybody's way. A
+radius of zero is refused too — it parses, and what it would actually describe is a unit nothing can
+ever push.
 
 ## Deliberately minimal, and how it grows
 
 Health, cost, weapons: none are here yet, and that is the point rather than an oversight. A
 field nothing consumes is a field nothing tests, which is the same argument that deferred the whole
 format from M2. Each arrives with the M6 mechanic that reads it — `speed` was the first to do so,
-arriving with movement, and `footprint` and `passage` the next, arriving with the grid stamps of
-[ADR 3001](../adr/3001-pathfinding.md) decision 4. Adding an optional field later does not
-break existing files; changing what an existing field means takes a version bump.
+arriving with movement, then `footprint` and `passage` with the grid stamps of
+[ADR 3001](../adr/3001-pathfinding.md) decision 4, then `radius` with decision 10's local
+avoidance. Adding an optional field later does not break existing files; changing what an existing
+field means takes a version bump.
 
 ## One document, overridden wholesale
 

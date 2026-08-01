@@ -23,8 +23,9 @@ consumers exactly as the deferral intended.
   is what proves the command-to-motion pipe end to end. The template set gained `speed`, the first
   field to arrive with the mechanic that reads it.
 - Pathfinding over the heightfield, with terrain passability, dynamic obstruction from structures, and
-  local avoidance between units. **First slice landed** — [ADR 3001](../adr/3001-pathfinding.md)'s
-  grid and search, as `cic_sim::ground`: passability derived from the heightfield by slope and water
+  local avoidance between units. **Done** — all three parts, and
+  [ADR 3001](../adr/3001-pathfinding.md) is implemented in full. The grid and search came first, as
+  `cic_sim::ground`: passability derived from the heightfield by slope and water
   line, one cell per sample interval, and A\* on an 8-connected integer-cost grid with ties broken on
   cell index, no diagonal cutting a corner, and an unreachable target degrading to the nearest cell
   the search closed. Routes are string-pulled and `cic_sim::units` walks them, spending one tick's
@@ -36,15 +37,24 @@ consumers exactly as the deferral intended.
   coefficient that changes which way a unit goes changes the game. The grid's fingerprint is in the
   tick hash too.
 
-  **Dynamic obstruction has landed too**, and it needed no new producer after all: scenario
+  **Dynamic obstruction and local avoidance have landed too**, and the first needed no new producer
+  after all: scenario
   activation already places structures, so the grid reads `Forces` as an earlier peer and stamps
   what stands on it. Templates gained `footprint` — the ground an object denies — and `passage` —
   the ground it grants, with a cost class — and the grid keeps the terrain's own derivation whole
   underneath them, so a demolition restores what a building stood on rather than guessing. Routes
   **replan on the tick the grid changes**, in identifier order, and a repath is counted and hashed
-  the same way an ignored order is. **Local avoidance is what is still outstanding**, and the record
-  defers it deliberately: units have no radius, and the intent is steering rather than crowd
-  simulation.
+  the same way an ignored order is.
+
+  **Local avoidance closes the charter line**, and it is the modest thing the record asked for: a
+  unit is a circle, overlapping circles push apart, and a push the ground refuses slides along
+  whichever axis is free. Every push is measured before any is applied, so which unit was spawned
+  first decides nothing; every push is checked against the grid, so a shove is not a licence to walk
+  into a building. Sixteen units ordered to one cell end with 17 of 120 pairs overlapping against
+  **120 of 120** with the coefficient at zero. Two limitations are recorded rather than hidden — a
+  head-on pair stalls, and a crowd converging on one point keeps jostling, which is what
+  **formation movement**, the charter line above, exists to fix by giving sixteen units sixteen
+  places to stand.
 
   Stamping found a defect in the slice before it, which is the argument for building the two in this
   order. String-pulling asked only whether a shortcut was *walkable*, which is the right question

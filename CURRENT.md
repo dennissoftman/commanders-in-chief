@@ -403,7 +403,15 @@ What works:
         over-approximation — a leg is checked by the bounding box of the cells its ends fall in — so
         it can cost a repath that returns the same route and it cannot miss one, which is why the
         record's "a unit whose next step is blocked" fallback turned out to have nothing to catch.
-      - **Stamping found a defect in the slice before it.** String-pulling asked only whether a
+      - **And they keep out of each other** (decision 10). A unit is a circle of `radius` metres —
+      the field arriving with its consumer exactly as `speed` and the stamps did — and after
+      everybody has stepped, each overlapping pair gives up half the overlap along the line between
+      their centres. Every push is measured before any is applied, so identifier order decides
+      nothing but which way two units standing in the *very same spot* step; and every push is
+      checked against the grid, because a shove is not a licence to enter a building. A push the
+      ground refuses is retried one axis at a time, which is the record's "slide along" and is why a
+      unit shoved into a wall travels down it rather than stopping against it.
+    - **Stamping found a defect in the slice before it.** String-pulling asked only whether a
         shortcut was walkable — the right question until two adjacent cells cost different amounts,
         and `passage` is the first thing in the engine that makes them. A route that went four rows
         out of its way to reach a road was pulled straight back off it, so A\* made the decision the
@@ -431,7 +439,10 @@ that spawn by command on tick zero and patrol a square around the map's middle o
 crossing each other's paths and going round the lake rather than through it. **The depots now deny
 the ground they stand on** — five cells square against the eight-metre grid — and the viewer prints
 the grid twice, before and after the placements stamp it, because the difference between the two
-numbers is the only part of this a still image cannot show. The kernel advances at
+numbers is the only part of this a still image cannot show. **And the scouts have a radius**, which
+the demo's own standing orders exercise without being asked to: the patrol sends two pairs of them
+to the *same* corner every phase, so where they used to arrive standing inside each other they now
+arrive beside each other. The kernel advances at
 its fixed 30 Hz from the accumulator whatever the frame rate does, and the orders are host-side
 inputs of exactly the shape a network session would feed.
 
@@ -577,8 +588,26 @@ because it kept the derivation whole underneath rather than writing over it.
 So decision 4 is built — `footprint` denies, `passage` grants at a cost class, precedence runs
 derivation, then passage, then occlusion — and so is decision 7, routes replanning on the tick the
 grid changes. Neither needed a construction mechanic in the end: scenario activation already places
-structures, and `Ground` reads them from `Forces` as an earlier peer. **Local avoidance (decision
-10) is what remains**, and the record already defers it.
+structures, and `Ground` reads them from `Forces` as an earlier peer.
+
+**And decision 10 with them, so [ADR 3001](docs/adr/3001-pathfinding.md) is now implemented in
+full.** Local avoidance is the modest thing the record reserved ground for: a unit is a circle,
+overlapping circles push apart, and a push the ground refuses slides along whichever axis is free.
+Sixteen units ordered to one cell on the rough test map end with **17 of 120 pairs** standing in
+each other, against **120 of 120** with the coefficient at zero — and on the tightest muster point
+that map has, nobody is ever pushed onto ground the grid refuses. What the record left open is
+written into the record rather than into the code: `radius` is required for a unit and refused for
+everything else, because a standing object's occupancy is its footprint and a mover's is a circle;
+every push is measured before any is applied, so being spawned first buys nothing; and the one
+coefficient there is, is in the hash.
+
+Two limitations are recorded rather than smoothed over. A head-on pair stalls, because a push
+straight backwards has no sideways component to slide on, and choosing a side is the negotiation
+the record declined. And a crowd converging on one point keeps jostling — those 17 pairs are that,
+not a failure to settle — which is what **formation movement** is for: sixteen units sent to one
+place should be given sixteen places. The quadratic pair loop was measured rather than assumed at
+**0.013 ms per tick at 100 units, 0.14 ms at 500 and 0.49 ms at 1000**, against a 33 ms tick, so
+the spatial bin that would remove it is recorded and not built.
 
 **The economy is decided, and so is the cost ladder.** Denys accepted
 [ADR 3002](docs/adr/3002-corridor-economy.md) on 2026-08-01, together with the three amendments it
