@@ -28,8 +28,9 @@ use cic_render::terrain::LayerColour;
 use cic_render::terrain_virtual::VirtualPageView;
 use cic_render::{
     Antialiasing, Capture, CaptureTarget, Clouds, DeferredFrame, DeferredRenderer, DeferredTargets,
-    DisplaySettings, Environment, Fog, FrameTimings, GpuContext, LayerMaterial, TerrainRenderer,
-    TextureImage, TimedPass, WaterBody, WaterKind, WaterMaterial, WaterSurface, Weather,
+    DisplaySettings, Environment, Fog, FrameTimings, GpuContext, LayerMaterial, ReflectionProvider,
+    TerrainRenderer, TextureImage, TimedPass, WaterBody, WaterKind, WaterMaterial, WaterSurface,
+    Weather,
 };
 
 const WIDTH: u32 = 720;
@@ -1131,6 +1132,129 @@ fn the_three_kinds_of_water_are_told_apart_by_their_own_captures() {
     );
 }
 
+/// A lake with a steep ridge on its far shore and a banded bed under it.
+///
+/// Built for the two things `basin_terrain` structurally cannot show, and both absences were found by
+/// measuring rather than by looking.
+///
+/// **Something above the waterline to reflect.** A screen-space reflection can only return what is on
+/// screen, and a bowl has nothing standing above its own water: every reflected ray leaves the frame
+/// and the provider correctly falls back to the sky, so the whole feature renders as a no-op. The
+/// ridge here rises two hundred units out of the far shore and is what a low camera across the water
+/// sees reflected in it.
+///
+/// **A bed with contrast in it.** Refraction displaces what is seen *through* the surface, and the
+/// basin's bed is a smooth pale wash — so displacing it by twenty world units changed 0.18% of pixels
+/// by at most 4/255, which is indistinguishable from the term being disconnected. It took forcing the
+/// sample to a constant colour to establish that the plumbing worked at all. The bed here is banded
+/// between the two terrain layers, so there are edges under the water for a wave to bend.
+fn reflecting_terrain() -> Terrain {
+    let count = (SAMPLES * SAMPLES) as usize;
+    let mut elevations = Vec::with_capacity(count);
+    let last = (SAMPLES - 1) as f32;
+    for y in 0..SAMPLES {
+        for x in 0..SAMPLES {
+            let fx = x as f32 / last;
+            let fy = y as f32 / last;
+            // A trough across the near half, and a ridge across the far side. Both run along x, so the
+            // shoreline is broadly straight and a camera looking down y sees water the whole way.
+            let trough = 150.0 * (-((fy - 0.34) / 0.20).powi(2)).exp();
+            let ridge = 260.0 * (-((fy - 0.82) / 0.09).powi(2)).exp();
+            // Relief along the shore, so the waterline is a contour rather than a ruled line and the
+            // reflection has something with shape in it to be a reflection *of*.
+            let relief = 22.0 * (fx * 7.1).sin() * (fy * 3.3).cos();
+            // Bed ripples, at the shortest wavelength this grid can carry. Sample spacing is eight
+            // world units, so anything under sixteen aliases; these run about forty. They are here as
+            // *shading* contrast rather than colour contrast — the lighting pass turns a slope into a
+            // light or dark band whatever the palette is, where two layer colours this close together
+            // wash out to the same pale under a strong sun. Without something like this under the
+            // water there is nothing for a refracting wave to visibly displace.
+            let ripples = 5.0 * (fx * 240.0).sin() * (fy * 90.0).cos();
+            let elevation = 330.0 - trough + ridge + relief + ripples;
+            elevations.push(elevation.round().clamp(0.0, 65_535.0) as u16);
+        }
+    }
+
+    let mut ground = Vec::with_capacity(count);
+    let mut rock = Vec::with_capacity(count);
+    for (index, elevation) in elevations.iter().enumerate() {
+        let fx = (index % SAMPLES as usize) as f32 / last;
+        let fy = (index / SAMPLES as usize) as f32 / last;
+        // Bands rather than an elevation ramp. An elevation split puts the layer boundary along a
+        // contour, which under water runs parallel to the shore and gives a refracting wave one edge
+        // to move; bands crossing the lake give it a dozen. High ground is rock regardless, so the
+        // ridge still reads as rock.
+        let banded = ramp(((fx * 9.0 + fy * 3.0).sin()).mul_add(0.5, 0.5), 0.35, 0.65);
+        let high = ramp(f32::from(*elevation), 420.0, 520.0);
+        let into_rock = banded.mul_add(1.0 - high, high);
+        ground.push(((1.0 - into_rock) * 255.0).round() as u8);
+        rock.push((into_rock * 255.0).round() as u8);
+    }
+
+    Terrain::new(
+        SAMPLES,
+        SAMPLES,
+        SPACING,
+        VERTICAL,
+        elevations,
+        vec![
+            TerrainLayer {
+                name: "ground".to_owned(),
+                weights: ground,
+            },
+            TerrainLayer {
+                name: "rock".to_owned(),
+                weights: rock,
+            },
+        ],
+    )
+    .expect("valid reflecting terrain")
+}
+
+/// Low over the near shore, looking across the water at the ridge.
+///
+/// Deliberately the most grazing camera in this file, at about eight degrees above the surface, and
+/// that is the whole point of it: the reflected share goes as the fifth power of the incidence, so at
+/// this angle it is over two thirds and the reflection is most of what the water shows. The
+/// forty-five-degree shore camera is the opposite case and is where the *body* is everything — between
+/// them they cover both regimes water has.
+fn reflecting_pose(terrain: &Terrain, level: f32) -> CameraPose {
+    let [extent_x, extent_y] = terrain.world_extent();
+    // The eye sits over the near bank, not over the water: the trough only holds water between about
+    // 0.21 and 0.47 of the map, and the first version of this pose put the camera at 0.06 where the
+    // ground stands twenty units *above* the surface -- so it rendered the inside of a hill.
+    let focus = [extent_x * 0.5, extent_y * 0.80, level + 80.0];
+    let eye = [extent_x * 0.5, extent_y * 0.15, level + 45.0];
+    CameraPose {
+        eye,
+        focus,
+        forward: [focus[0] - eye[0], focus[1] - eye[1], focus[2] - eye[2]],
+    }
+}
+
+/// Down at the shallows of the reflecting fixture, steeply enough to see the bed through them.
+///
+/// The opposite camera to [`reflecting_pose`] over the same ground, and both are needed because water
+/// shows two different things at the two angles. At eight degrees the reflected share is over two
+/// thirds and the body contributes almost nothing, which is where a reflection is measurable and where
+/// refraction is not: the surface is nearly opaque there and there is no bed in the frame to bend.
+/// At forty degrees the reflected share is a few percent and everything seen is what the water
+/// transmits — so this is where refraction lives, and it is why the first attempt at measuring it
+/// through the grazing pose reported a hundredth of a level out of 255.
+fn refracting_pose(terrain: &Terrain, level: f32) -> CameraPose {
+    let [extent_x, extent_y] = terrain.world_extent();
+    // Aimed at the *shoreline*, not the middle. The trough is thirty-six units deep at its centre and
+    // absorption closes over the bed within about ten, so a camera pointed at the centre of the lake
+    // sees opaque water and nothing to refract -- which is what the first version of this pose did.
+    let focus = [extent_x * 0.5, extent_y * 0.225, level];
+    let eye = [extent_x * 0.5, extent_y * 0.09, level + 170.0];
+    CameraPose {
+        eye,
+        focus,
+        forward: [focus[0] - eye[0], focus[1] - eye[1], focus[2] - eye[2]],
+    }
+}
+
 /// A flood plain with one channel cut across it, meandering as it goes.
 ///
 /// A river needs its own fixture and cannot borrow the basin. A body laid over a bowl clips to a disc
@@ -1227,6 +1351,175 @@ fn channel_pose(terrain: &Terrain, level: f32) -> CameraPose {
         focus,
         forward: [focus[0] - eye[0], focus[1] - eye[1], focus[2] - eye[2]],
     }
+}
+
+/// The reflecting fixture, its water level, and a frame looking across it at the ridge.
+struct ReflectingScene {
+    harness: Harness,
+    level: f32,
+    frame: DeferredFrame,
+    water: Vec<WaterBody>,
+}
+
+fn reflecting_scene(context: &GpuContext) -> ReflectingScene {
+    let harness = harness_for(context, reflecting_terrain());
+    let (floor, rim) = world_elevation_range(&harness.terrain);
+    // Low in the trough, so the lake is a broad shallow sheet rather than a deep pool: the shallows
+    // are where a bed shows through and where refraction is visible at all.
+    let level = floor + (rim - floor) * 0.16;
+    let frame = DeferredFrame::new(reflecting_pose(&harness.terrain, level), WIDTH, HEIGHT);
+    let [extent_x, extent_y] = harness.terrain.world_extent();
+    let water = vec![
+        WaterBody::new(
+            context,
+            WaterSurface::of_kind([0.0, 0.0, extent_x, extent_y], level, WaterKind::Lake),
+            harness.deferred.water_layout(),
+        )
+        .expect("build lake"),
+    ];
+    ReflectingScene {
+        harness,
+        level,
+        frame,
+        water,
+    }
+}
+
+#[test]
+fn the_screen_space_provider_reflects_the_scene_where_the_sky_provider_cannot() {
+    // The assertion the whole provider mechanism exists to make, and it is differential in the one way
+    // that matters: the *same* scene, the same camera and the same water, rendered through both
+    // providers. Anything that differs is the reflection, because nothing else changed.
+    //
+    // It needs saying why this fixture and not one of the others. Measured through the shore camera the
+    // two providers differ over 0.2% of pixels by at most 15/255, and through the basin fixture at a
+    // grazing angle they do not differ at all -- the first because a surface seen from above reflects
+    // two percent of anything, the second because a bowl has nothing standing above its own water for a
+    // screen-space march to find. Neither is a fair test of a reflection.
+    let Some(context) = context() else { return };
+    let mut scene = reflecting_scene(context);
+
+    let sky = render_water(context, &scene.harness, &scene.water, scene.frame);
+    scene.harness.deferred.set_reflection(
+        context,
+        ReflectionProvider::ScreenSpace,
+        &scene.harness.targets,
+    );
+    let screen = render_water(context, &scene.harness, &scene.water, scene.frame);
+    write_capture("water-reflect-sky.png", &sky);
+    write_capture("water-reflect-screen.png", &screen);
+    support::check_references(
+        context,
+        &[
+            ("water-reflect-sky.png", &sky),
+            ("water-reflect-screen.png", &screen),
+        ],
+    );
+
+    // Where the water is: the pixels a flood changes, taken against the sky provider so the mask is the
+    // lake rather than the lake plus whatever the reflection moved.
+    let dry = {
+        scene.harness.deferred.set_reflection(
+            context,
+            ReflectionProvider::Sky,
+            &scene.harness.targets,
+        );
+        render_water(context, &scene.harness, &[], scene.frame)
+    };
+    let wet = wet_mask(&dry, &sky);
+    let covered = wet.iter().filter(|w| **w).count();
+    assert!(
+        covered > (WIDTH * HEIGHT) as usize / 20,
+        "the lake covers {covered} pixels, too few to measure a reflection in"
+    );
+
+    // Substantial and confined to the water. A provider that reflected the scene *everywhere* would be
+    // a bug in the pipeline rather than a reflection, and the second bound is what says so.
+    let on_water = mean_difference_where(&sky, &screen, |pixel| wet[pixel]);
+    let off_water = mean_difference_where(&sky, &screen, |pixel| !wet[pixel]);
+    assert!(
+        on_water > 4.0,
+        "the two providers differ by only {on_water:.2} of 255 over the water, so the screen-space \
+         march is finding nothing the sky did not already answer"
+    );
+    assert!(
+        off_water < 0.5,
+        "the providers differ by {off_water:.2} of 255 away from the water, so something other than \
+         the water pass changed"
+    );
+}
+
+#[test]
+fn a_wave_bends_what_is_seen_through_it() {
+    // Refraction, stated against the same material with the term zeroed -- which is the only way to
+    // measure it, since everything else about the two frames is identical.
+    //
+    // This fixture rather than an earlier one because refraction displaces the *bed*, and a bed with no
+    // contrast in it displaces to the same colour. The basin's is a smooth pale wash: moving it twenty
+    // world units changed 0.18% of pixels by at most 4/255, which is what a disconnected term looks
+    // like, and it took forcing the sample to a constant to prove otherwise. This bed is banded.
+    let Some(context) = context() else { return };
+    let scene = reflecting_scene(context);
+    let [extent_x, extent_y] = scene.harness.terrain.world_extent();
+    // Its own camera, looking down into the shallows rather than across the surface.
+    let frame = DeferredFrame::new(
+        refracting_pose(&scene.harness.terrain, scene.level),
+        WIDTH,
+        HEIGHT,
+    );
+
+    // Exaggerated well past the preset, and that is the point of the test rather than a cheat.
+    //
+    // Refraction at this engine's scale is a *sub-unit* effect: the physical lateral shift is about a
+    // quarter of the surface slope times the depth, and a lake's slope is under four degrees, so at
+    // five units down the preset displaces the bed by about half a world unit. The bed it is
+    // displacing is a heightfield sampled every eight units, which cannot carry detail finer than
+    // sixteen — so half a unit of shift lands inside one bed feature and changes almost nothing.
+    //
+    // That is a fact about the fixture, not about the term. A real map's bed carries tiled albedo with
+    // detail far below the heightfield's, which is where the preset shows. What this test can
+    // establish is that the mechanism is connected and displaces in proportion to the figure it is
+    // given — which is exactly what could not be established by staring at captures, and what took
+    // forcing the sample to a constant colour to find out last time.
+    let bending = WaterMaterial {
+        refraction: 30.0,
+        ..WaterKind::Lake.material()
+    };
+    let flat = WaterMaterial {
+        refraction: 0.0,
+        ..bending
+    };
+    let body = |material: WaterMaterial| {
+        vec![
+            WaterBody::new(
+                context,
+                WaterSurface::new([0.0, 0.0, extent_x, extent_y], scene.level)
+                    .with_material(material),
+                scene.harness.deferred.water_layout(),
+            )
+            .expect("build lake"),
+        ]
+    };
+
+    let bent = render_water(context, &scene.harness, &body(bending), frame);
+    let straight = render_water(context, &scene.harness, &body(flat), frame);
+    write_capture("water-refraction.png", &bent);
+    support::check_reference(context, "water-refraction.png", &bent);
+
+    let dry = render_water(context, &scene.harness, &[], frame);
+    let wet = wet_mask(&dry, &straight);
+    let moved = mean_difference_where(&bent, &straight, |pixel| wet[pixel]);
+    // A quarter of a level, against a measured 0.52. That looks like a low bar and is not: the same
+    // measurement with the term disconnected reads 0.02, so the gap between working and not is
+    // twenty-five fold and this sits in the middle of it. It is a mean over *all* the water, most of
+    // which is deep enough to be opaque and can therefore show no bed at any displacement — so the
+    // figure is diluted by construction rather than small at the pixels that carry it.
+    assert!(
+        moved > 0.25,
+        "bending the transmitted view moved {moved:.2} of 255 over the water, against 0.52 when \
+         it was last measured working and 0.02 when it was disconnected — so the bed is being \
+         read at the same place whatever the wave face is doing"
+    );
 }
 
 #[test]

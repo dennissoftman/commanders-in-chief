@@ -11,7 +11,9 @@
 //! heightfield to understand a surface it has no use for.
 //!
 //! See [ADR 4002](../../../docs/adr/4002-water-kinds.md) for why the wave train has the shape it has
-//! and why the shading normal is damped by the pixel footprint.
+//! and why the shading normal is damped by the pixel footprint, and
+//! [ADR 4003](../../../docs/adr/4003-reflection-providers.md) for why absorption decides opacity and
+//! what a reflection provider is.
 //!
 //! # Provenance
 //!
@@ -190,6 +192,25 @@ pub struct WaterMaterial {
     /// Separate from [`Self::foam_strength`] rather than a fraction of it: a lake laps at its edge
     /// and never breaks in the middle, and an ocean does both.
     pub whitecap: f32,
+    /// How far the reflectance is lifted above the physical, in `0..=1`.
+    ///
+    /// Zero is what water actually does, and what water actually does is nearly invisible from a
+    /// playing camera: the reflected share goes as the fifth power of the incidence, so an RTS view
+    /// looking down at forty degrees sees about three percent of whatever is being reflected. One
+    /// raises the normal-incidence reflectance to a strongly stylised figure. It lifts the curve where
+    /// it is near zero and leaves a grazing view — which already reflects most of what it sees —
+    /// almost unchanged.
+    ///
+    /// This is a deliberate departure from physics and is per material because how far to depart is a
+    /// decision about a scene. It also costs transparency: what a surface reflects, it does not
+    /// transmit, and the same figure decides both.
+    pub reflectivity: f32,
+    /// How far a wave face displaces the bed seen through it, in world units at full depth.
+    ///
+    /// This is refraction, and it is what makes a stone under a ripple wobble. Scaled down as the
+    /// water shallows, so a bed a hand's breadth under the surface is not slid out from under its own
+    /// shoreline. Zero renders the bed undisplaced, which is what every frame before this did.
+    pub refraction: f32,
 }
 
 impl WaterMaterial {
@@ -210,7 +231,7 @@ impl WaterMaterial {
             deep: [0.03, 0.09, 0.15],
             // Longer than it was, so the ramp is still doing something out in the middle rather than
             // reaching its far end a few units from the bank and leaving the rest flat.
-            depth_scale: 20.0,
+            depth_scale: 6.0,
             // Shorter than `depth_scale`: opacity should arrive well before the tint finishes
             // ramping, or the shallows read as fog over the bed instead of as clear water above it.
             edge_feather: 3.0,
@@ -238,6 +259,12 @@ impl WaterMaterial {
             // None. Inland water with no fetch does not break, and a lake with whitecaps on it reads
             // as a photograph of a sea.
             whitecap: 0.0,
+            // A pond is clear and still enough to see a bed wobble through, which is most of
+            // what says the surface is moving when the waves are as small as a lake's.
+            // The most mirror-like of the three, because a calm lake *is* the mirror everyone has
+            // seen. Still water holds a reflection that chop destroys.
+            reflectivity: 0.45,
+            refraction: 1.5,
         }
     }
 
@@ -253,7 +280,7 @@ impl WaterMaterial {
             // bed a metre under it, and both are the ground's colour rather than the sky's.
             shallow: [0.24, 0.29, 0.17],
             deep: [0.06, 0.10, 0.07],
-            depth_scale: 4.0,
+            depth_scale: 2.5,
             edge_feather: 1.2,
             // Chop rather than swell, but not so fine that it falls under the normal
             // level-of-detail at playing distance: a six-unit wave is under a pixel across a channel
@@ -286,6 +313,12 @@ impl WaterMaterial {
             // A little, for the standing water that breaks over a shallow. Well under an ocean's:
             // this is riffle rather than surf.
             whitecap: 0.25,
+            // The strongest of the three, because a river is the one kind whose bed is reliably
+            // close enough to the surface to be seen at all.
+            // Least of the three. A current shears its own surface continuously, and a river that
+            // mirrors its banks reads as frozen.
+            reflectivity: 0.15,
+            refraction: 2.2,
         }
     }
 
@@ -303,7 +336,7 @@ impl WaterMaterial {
             // a deep tint that is still recognisably blue leaves an ocean looking like a swimming
             // pool — the blue of the sea in a photograph is very largely the sky in it.
             deep: [0.004, 0.02, 0.05],
-            depth_scale: 30.0,
+            depth_scale: 8.0,
             edge_feather: 2.5,
             wave_height: 1.6,
             wave_length: 110.0,
@@ -330,6 +363,13 @@ impl WaterMaterial {
             // navy. Whitecaps are the only high-frequency detail deep sea has at this distance —
             // everything else out there is the depth ramp, which is smooth by construction.
             whitecap: 0.95,
+            // Large in absolute terms and rarely visible: the swell is what displaces it, and
+            // the ramp has gone to near-black long before this could show in deep water. It reads on
+            // a sandbar, which is exactly where it should.
+            // Between them. Open water reflects, but a swell with whitecaps on it scatters far more
+            // than a pond does — and the sea has its own colour to show, which a mirror would hide.
+            reflectivity: 0.30,
+            refraction: 2.5,
         }
     }
 }
@@ -437,7 +477,13 @@ impl WaterSurface {
             || !(0.0..=1.0).contains(&material.peaking)
             || !(0.0..=1.0).contains(&material.foam_strength)
             || !(0.0..=1.0).contains(&material.whitecap)
+            || !(0.0..=1.0).contains(&material.reflectivity)
         {
+            return Err(RenderError::InvalidWater);
+        }
+        // Not a share, so bounded differently: a displacement in world units, which must be finite and
+        // may not pull the bed toward the camera.
+        if !material.refraction.is_finite() || material.refraction < 0.0 {
             return Err(RenderError::InvalidWater);
         }
         Ok(())
@@ -598,7 +644,15 @@ impl WaterBody {
                 material.foam_strength,
             ],
         );
-        push_vec4(&mut bytes, [material.whitecap, 0.0, 0.0, 0.0]);
+        push_vec4(
+            &mut bytes,
+            [
+                material.whitecap,
+                material.refraction,
+                material.reflectivity,
+                0.0,
+            ],
+        );
         debug_assert_eq!(bytes.len(), WATER_UNIFORM_BYTES, "water uniform drifted");
         context.queue().write_buffer(&self.uniform, 0, &bytes);
     }

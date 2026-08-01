@@ -95,7 +95,9 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
 pub use culling::{CHUNK_CELLS, ChunkGrid, Frustum};
-pub use deferred::{DeferredFrame, DeferredRenderer, DeferredTargets, occlusion_size};
+pub use deferred::{
+    DeferredFrame, DeferredRenderer, DeferredTargets, ReflectionProvider, occlusion_size,
+};
 pub use display::{Antialiasing, DisplaySettings};
 pub use environment::{Clouds, Environment, Fog, Weather};
 pub use gpu::{Capture, CaptureTarget, GpuContext};
@@ -147,6 +149,12 @@ pub enum RenderError {
     RequestAdapter(wgpu::RequestAdapterError),
     /// An adapter was found but no device could be created from it.
     RequestDevice(wgpu::RequestDeviceError),
+    /// The adapter offers fewer bind groups than the deepest pipeline binds at once.
+    ///
+    /// Carries what was offered; what is needed is [`gpu::REQUIRED_BIND_GROUPS`]. Reported here rather
+    /// than left to surface as a pipeline validation error, because that one names a bind group layout
+    /// and says nothing about the adapter being the reason.
+    BindGroupLimit(u32),
     /// Waiting for submitted work to complete failed.
     Poll(wgpu::PollError),
     /// Mapping the readback buffer failed.
@@ -231,6 +239,11 @@ impl Display for RenderError {
             }
             Self::RequestAdapter(error) => write!(formatter, "no usable adapter: {error}"),
             Self::RequestDevice(error) => write!(formatter, "no usable device: {error}"),
+            Self::BindGroupLimit(offered) => write!(
+                formatter,
+                "the adapter binds at most {offered} bind groups at once and the renderer needs {}",
+                gpu::REQUIRED_BIND_GROUPS
+            ),
             Self::Poll(error) => write!(formatter, "waiting for the queue failed: {error}"),
             Self::MapBuffer(error) => write!(formatter, "mapping the readback failed: {error}"),
             Self::MapRange(error) => {
