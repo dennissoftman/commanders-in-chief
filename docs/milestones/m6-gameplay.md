@@ -10,9 +10,10 @@ consumers exactly as the deferral intended.
 - Object templates: the data format defining what a unit or structure is. Deferred to here from M2 on
   purpose, because the format should be written once its consumers are known. **First slice done** —
   see [the specification](../formats/templates.md): identifier, kind, model, display-name key, with
-  scenario activation resolving every placement and faction against the set. Health, speed, cost,
-  weapons and footprints arrive with the mechanics that read them, for the same reason the format
-  itself waited.
+  scenario activation resolving every placement and faction against the set. Health, cost and
+  weapons arrive with the mechanics that read them, for the same reason the format itself waited;
+  `speed` arrived with movement and `footprint` and `passage` with the grid stamps, which is that
+  rule working three times rather than a promise about it.
 - Selection and orders: move, attack, attack-move, stop, hold, patrol, and formation movement.
   **First slice landed** — spawn, move, and stop, as `cic_sim::units`: command payloads decoded by the
   gameplay layer (the kernel keeps them opaque), ownership checked with rejections *counted and
@@ -35,10 +36,23 @@ consumers exactly as the deferral intended.
   coefficient that changes which way a unit goes changes the game. The grid's fingerprint is in the
   tick hash too.
 
-  **Dynamic obstruction and local avoidance are the parts still outstanding**, and both are waiting
-  on a producer rather than on a decision: a `footprint` and a `passage` stamp the grid when
-  something is built or destroyed, and nothing constructs anything yet. Repathing on a grid edit
-  (decision 7) arrives with the first edit for the same reason.
+  **Dynamic obstruction has landed too**, and it needed no new producer after all: scenario
+  activation already places structures, so the grid reads `Forces` as an earlier peer and stamps
+  what stands on it. Templates gained `footprint` — the ground an object denies — and `passage` —
+  the ground it grants, with a cost class — and the grid keeps the terrain's own derivation whole
+  underneath them, so a demolition restores what a building stood on rather than guessing. Routes
+  **replan on the tick the grid changes**, in identifier order, and a repath is counted and hashed
+  the same way an ignored order is. **Local avoidance is what is still outstanding**, and the record
+  defers it deliberately: units have no radius, and the intent is steering rather than crowd
+  simulation.
+
+  Stamping found a defect in the slice before it, which is the argument for building the two in this
+  order. String-pulling asked only whether a shortcut was *walkable*, which is the right question
+  until two adjacent cells cost different amounts — and `passage` is the first thing in the engine
+  that makes them. A route that went out of its way to reach a road was pulled straight back off it,
+  so A\* made the decision the cost ladder exists for and the next pass undid it. A shortcut now has
+  to cost no more than the chain it replaces; on ground of one class the two are always equal, so
+  nothing else moved.
 
   Two things this slice needed that were not pathfinding. A subsystem can now **read its peers**
   during a tick — immutably, with a peer registered earlier already advanced — because movement
@@ -63,7 +77,8 @@ consumers exactly as the deferral intended.
   and **two are built**: the cost ladder now runs metalled, graded, plain, mud, rubble, and a cell's
   class sets the pace on it as well as ranking the route across it — so grading is an income increase
   rather than a routing preference. The third, wrecks stamping a class rather than a footprint, waits
-  on combat producing a wreck.
+  on combat producing a wreck — but the mechanism it needs is no longer waiting on anything: a
+  wreck's class is a `passage` with a dear one, laid and lifted through the same reconcile a road is.
 
   Accepting the record fixed the design and did not schedule it. Its own build order is shared
   carriage first, faction divergence second, and decision 1 — gates, yards, carriage — is the minimum
