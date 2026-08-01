@@ -32,6 +32,14 @@ the same requirement: the same inputs must produce the same state on every machi
   diagnostics.
 - Subsystem state hashes are computed per tick and versioned, so a desync reports *which* subsystem
   diverged and on which tick rather than only that one did.
+- **A subsystem reads its peers and mutates only itself**, and registration order decides what a read
+  sees: a peer registered earlier has already advanced this tick, one registered later has not. Both
+  halves matter. Cross-subsystem writes would make "who changed this" depend on execution order in a
+  way no per-subsystem hash could attribute, which is the guarantee above. And a read whose answer
+  depended on registration order *without that order being part of the contract* is a simulation
+  whose result depends on how a host happened to assemble it. The kernel enforces the first half
+  structurally — it splits its own list around the subsystem it is running, so that one holds `&mut`
+  to itself and `&` to everything else, and the forbidden mutation cannot be written.
 - Floating-point behaviour is pinned where it reaches simulation state. Anything that cannot be
   pinned across platforms stays in presentation. **How** it is pinned is
   [ADR 0007](../adr/0007-simulation-arithmetic.md): simulation state is `f64`, only correctly-rounded
