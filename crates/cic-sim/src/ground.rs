@@ -20,6 +20,20 @@
 //! Floating point appears twice, both at the boundary and both correctly rounded: deriving the grid
 //! from the terrain's scales, and converting the cell chain back to world-space waypoints.
 //!
+//! # Where the algorithms come from
+//!
+//! Both are published and both are written here from their definitions, per the provenance rule in
+//! [LICENSING.md](../../../LICENSING.md): nothing in this file is ported, translated or transcribed
+//! from another game.
+//!
+//! - **A\*** — Hart, Nilsson and Raphael, *A Formal Basis for the Heuristic Determination of
+//!   Minimum Cost Paths*, IEEE Transactions on Systems Science and Cybernetics 4(2), 1968. The
+//!   octile heuristic and the `10`/`14` integer step pair are the standard grid specialisation of
+//!   it.
+//! - **Bresenham's line algorithm** — Bresenham, *Algorithm for Computer Control of a Digital
+//!   Plotter*, IBM Systems Journal 4(1), 1965. Used by [`Ground::walkable_line`] to enumerate the
+//!   cells a straight run passes through, which is what string-pulling rests on.
+//!
 //! # What is not here yet
 //!
 //! Template `footprint` and `passage` stamps (decision 4), repathing on grid edits (decision 7), and
