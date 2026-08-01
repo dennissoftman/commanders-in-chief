@@ -3,7 +3,7 @@
 ## Where the project is
 
 M0 through M2 are complete: the workspace and its invariants, the resource layer, and the native asset
-formats. **M3's charter and its exit condition are both met** — the renderer draws a lit, shadowed,
+formats — M2 on its read path, with the model and package writers waiting on M8's editor. **M3's charter and its exit condition are both met** — the renderer draws a lit, shadowed,
 occluded, textured scene with water and weather, both headlessly and in a window, and a visual regression
 harness compares captures against committed references **on the CI runner**, so a rendering regression now
 fails a build rather than only a developer's machine.
@@ -569,7 +569,7 @@ every committed water reference, so it is its own change. `water-sky-captured.pn
 **[M5, the simulation](docs/milestones/m5-simulation.md), is complete: the kernel mechanics and now
 scenario activation, so a map's declared players and placements construct into hashed, replayable
 kernel state.** The next milestone on the path to something playable is
-[M6, gameplay](docs/milestones/m6-gameplay.md) — its dependencies (M5, M9, M10) are all standing, and
+[M6, gameplay](docs/milestones/m6-gameplay.md) — its dependencies (M5 and M10) are both standing, and
 its first slice, **the template set, has landed**: what a `template:` id resolves to, with activation
 resolving every placement and faction against it — **the activated scenario is drawn**, headlessly
 in a capture test and live in the viewer — **and the first verbs work**: spawn, move, and stop, in

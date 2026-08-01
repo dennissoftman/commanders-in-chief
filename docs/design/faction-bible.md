@@ -6,9 +6,10 @@ structure. This document exists so that any writer or LLM producing briefing
 text, unit barks, UI copy, or mission framing produces output that sounds like
 it came from the same world.
 
-**Companion document:** `cic-audio-video-style.md` covers presentation — bark
-families, voice generation and locking, radio processing per faction, and the
-three diegetic footage formats. Character lives here; delivery lives there.
+**Companion document, not yet written:** `cic-audio-video-style.md` will cover
+presentation — bark families, voice generation and locking, radio processing per
+faction, and the three diegetic footage formats. Character lives here; delivery
+will live there.
 
 ---
 

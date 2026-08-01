@@ -12,8 +12,8 @@ consumers exactly as the deferral intended.
   see [the specification](../formats/templates.md): identifier, kind, model, display-name key, with
   scenario activation resolving every placement and faction against the set. Health, cost and
   weapons arrive with the mechanics that read them, for the same reason the format itself waited;
-  `speed` arrived with movement and `footprint` and `passage` with the grid stamps, which is that
-  rule working three times rather than a promise about it.
+  `speed` arrived with movement, `footprint` and `passage` with the grid stamps, and `radius` with
+  local avoidance, which is that rule working four times rather than a promise about it.
 - Selection and orders: move, attack, attack-move, stop, hold, patrol, and formation movement.
   **First slice landed** — spawn, move, and stop, as `cic_sim::units`: command payloads decoded by the
   gameplay layer (the kernel keeps them opaque), ownership checked with rejections *counted and

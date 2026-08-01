@@ -99,3 +99,8 @@ reproducibility problem as an accuracy problem.
   much better foundation than one debugged alongside the gameplay it runs.
 - No networking. Lockstep is M7 and needs this milestone's hashes to exist first.
 - No save and load of a running match. It needs a stable state layout, which follows M6.
+- No cross-platform determinism run. The hashes are exact-bit and the arithmetic is argued from the
+  standard, but the settling evidence — a recorded run replayed on another platform reproducing the
+  same per-tick hashes — needs CI runners on more than one platform, and none exists yet.
+  [M10](m10-scripting.md) carries the same item for scripts, and [M7](m7-network.md)'s exit condition
+  is what will force it.

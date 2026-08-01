@@ -1,6 +1,6 @@
 # ADR 3001: Pathfinding — derived passability, occluders and passage, integer-cost grid A*
 
-- Status: accepted and **implemented in full** — `cic_sim::ground` derives the grid, stamps it and
+- Status: accepted, implemented — in full: `cic_sim::ground` derives the grid, stamps it and
   searches it; `cic_sim::units` walks what it returns, re-plans when the ground under a route
   changes, and keeps units out of each other. Decision 6's string-pulling gained a corner-rounding
   pass this record did not describe, recorded as **amendment D** below rather than left as
