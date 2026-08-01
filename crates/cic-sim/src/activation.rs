@@ -448,6 +448,7 @@ mod tests {
             model: model.map(str::to_owned),
             name: None,
             speed: None,
+            radius: None,
             footprint: None,
             passage: None,
         };

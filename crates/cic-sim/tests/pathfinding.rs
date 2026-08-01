@@ -20,7 +20,7 @@ use cic_assets::terrain::Terrain;
 use cic_sim::command::{Command, PlayerId};
 use cic_sim::ground::{Ground, GroundRules};
 use cic_sim::kernel::{Kernel, KernelConfig, first_divergence};
-use cic_sim::units::{UNITS, Units, move_command, spawn_command};
+use cic_sim::units::{AvoidanceRules, UNITS, Units, move_command, spawn_command};
 
 /// Samples per axis. Sixty-five samples at eight metres is a 512-metre map — a quarter of the
 /// generated demo's, big enough to have separate regions and small enough to run in a unit test.
@@ -95,6 +95,9 @@ fn templates() -> TemplateSet {
             model: None,
             name: None,
             speed: Some(40.0),
+            // Four metres against eight-metre cells, so a scout is half a cell wide and a
+            // crowd of them ordered to one point genuinely has to spread out.
+            radius: Some(4.0),
             footprint: None,
             passage: None,
         }],
@@ -102,12 +105,18 @@ fn templates() -> TemplateSet {
 }
 
 fn kernel(terrain: &Terrain) -> Kernel {
+    kernel_avoiding(terrain, AvoidanceRules::default())
+}
+
+/// The same kernel under chosen avoidance coefficients, so a test can run one crowd twice and
+/// compare it against itself rather than against a number somebody wrote down.
+fn kernel_avoiding(terrain: &Terrain, avoidance: AvoidanceRules) -> Kernel {
     let mut kernel = Kernel::new(KernelConfig {
         seed: 4,
         ticks_per_second: 30,
     });
     kernel.add_subsystem(Box::new(Ground::derive(terrain, rules())));
-    kernel.add_subsystem(Box::new(Units::new(&templates())));
+    kernel.add_subsystem(Box::new(Units::new(&templates()).with_rules(avoidance)));
     kernel
 }
 
@@ -256,4 +265,198 @@ fn a_crowded_map_replays_identically() {
     let (ours, theirs) = (run(), run());
     assert_eq!(first_divergence(&ours, &theirs), None);
     assert_eq!(ours, theirs);
+}
+
+/// Every passable cell at least `reach` cells inside the map, with how much impassable ground sits
+/// within `reach` of it.
+///
+/// The two crowd tests below want opposite ends of this: one wants somewhere a crowd can spread out
+/// freely, and the other wants somewhere it gets pressed against the terrain. Picking either by
+/// hand would be a coordinate nobody could check, and picking "the first passable cell" would give
+/// whichever the scan happened to meet.
+fn musters(ground: &Ground, reach: u32) -> Vec<((u32, u32), usize)> {
+    (reach..ground.height() - reach)
+        .flat_map(|y| (reach..ground.width() - reach).map(move |x| (x, y)))
+        // Gatherable: a crowd has to be able to stand on the spot itself and step off it.
+        .filter(|(x, y)| {
+            [(0i32, 0i32), (1, 0), (-1, 0), (0, 1), (0, -1)]
+                .into_iter()
+                .all(|(dx, dy)| {
+                    ground.passable(x.wrapping_add_signed(dx), y.wrapping_add_signed(dy))
+                })
+        })
+        .map(|(x, y)| {
+            let blocked = (y - reach..=y + reach)
+                .flat_map(|ny| (x - reach..=x + reach).map(move |nx| (nx, ny)))
+                .filter(|(nx, ny)| !ground.passable(*nx, *ny))
+                .count();
+            ((x, y), blocked)
+        })
+        .collect()
+}
+
+/// How many pairs of units are standing in each other.
+fn overlapping_pairs(kernel: &Kernel) -> usize {
+    let bodies: Vec<([f64; 2], f64)> = units(kernel)
+        .units()
+        .values()
+        .map(|unit| (unit.position, unit.radius))
+        .collect();
+    let mut crowded = 0;
+    for (index, (here, near)) in bodies.iter().enumerate() {
+        for (there, far) in bodies.iter().skip(index + 1) {
+            let (dx, dy) = (there[0] - here[0], there[1] - here[1]);
+            let room = near + far;
+            // A hair of slack, because a pass that stops when the overlap is gone leaves the pair
+            // exactly touching and floating-point exactly is not a thing to assert against.
+            if dx * dx + dy * dy < room * room - 1e-6 {
+                crowded += 1;
+            }
+        }
+    }
+    crowded
+}
+
+#[test]
+fn a_crowd_ordered_to_one_point_stops_standing_in_itself() {
+    // ADR 3001 decision 10 at scale: sixteen units sent to the *same* cell, mustering on the most
+    // open ground the map has so that spreading out is the only thing being measured. The
+    // comparison is the crowd against itself with avoidance switched off, which is what makes this
+    // a statement about the mechanism rather than about a number somebody measured once.
+    //
+    // The impassable-ground assertion in here is a guard rather than a claim: nothing near this
+    // muster point is close enough to be pushed into, and deleting the grid check was measured
+    // leaving this test green. `a_crowd_pressed_against_the_terrain_is_never_pushed_over_it` is the
+    // one that can fail on it.
+    let terrain = rough_terrain();
+    let ground = Ground::derive(&terrain, rules());
+    let starts = scattered_starts(&ground, 16);
+    let (open, clear) = musters(&ground, 3)
+        .into_iter()
+        .min_by_key(|(cell, blocked)| (*blocked, *cell))
+        .expect("the fixture needs somewhere to muster");
+    assert_eq!(clear, 0, "the open muster point is not open");
+    let muster = ground.centre_of(open.0, open.1);
+
+    let run = |avoidance| {
+        let mut kernel = kernel_avoiding(&terrain, avoidance);
+        let spawns: Vec<Command> = starts
+            .iter()
+            .map(|start| Command {
+                tick: 0,
+                player: PlayerId(0),
+                payload: spawn_command("unit/scout", start[0], start[1]),
+            })
+            .collect();
+        kernel.advance(&spawns).expect("advances");
+        let orders: Vec<Command> = (0..starts.len())
+            .map(|index| Command {
+                tick: 1,
+                player: PlayerId(0),
+                payload: move_command(
+                    cic_sim::id::ObjectId(index as u64 + 1),
+                    muster[0],
+                    muster[1],
+                ),
+            })
+            .collect();
+        kernel.advance(&orders).expect("advances");
+        for tick in 2..400 {
+            kernel.advance(&[]).expect("advances");
+            for (id, unit) in units(&kernel).units() {
+                let (x, y) = ground.cell_at(unit.position).expect("on the grid");
+                assert!(
+                    ground.passable(x, y),
+                    "tick {tick}: unit {id:?} was pushed onto impassable ground at {:?}",
+                    unit.position
+                );
+            }
+        }
+        overlapping_pairs(&kernel)
+    };
+
+    let stacked = run(AvoidanceRules { separation: 0.0 });
+    let spread = run(AvoidanceRules::default());
+    assert!(
+        stacked > 40,
+        "only {stacked} of 120 pairs stacked with avoidance off, so the fixture never crowded and          cannot show avoidance working"
+    );
+    assert!(
+        spread * 4 < stacked,
+        "{spread} pairs still standing in each other against {stacked} with avoidance off"
+    );
+}
+
+#[test]
+fn a_crowd_pressed_against_the_terrain_is_never_pushed_over_it() {
+    // The other crowd, and the one the grid clamp exists for. The muster point is the passable cell
+    // with the *most* impassable ground around it that a unit can still stand on and step off, so
+    // sixteen eight-metre circles arriving at it have nowhere to spread but into the water and the
+    // cliffs — which is precisely the pressure a push that did not consult the grid would relieve
+    // by putting somebody in a lake.
+    //
+    // The open-ground crowd above cannot make this statement and was measured proving that it
+    // cannot: with the grid check deleted it still passed, because nothing there ever pushed
+    // anybody near anything.
+    let terrain = rough_terrain();
+    let ground = Ground::derive(&terrain, rules());
+    let starts = scattered_starts(&ground, 16);
+    let (tight, blocked) = musters(&ground, 3)
+        .into_iter()
+        .max_by_key(|(cell, blocked)| (*blocked, std::cmp::Reverse(*cell)))
+        .expect("the fixture needs somewhere to muster");
+    assert!(
+        blocked > 12,
+        "the tightest muster point has only {blocked} impassable cells around it, which is not a          crowd pressed against anything"
+    );
+    let muster = ground.centre_of(tight.0, tight.1);
+
+    let mut kernel = kernel(&terrain);
+    let spawns: Vec<Command> = starts
+        .iter()
+        .map(|start| Command {
+            tick: 0,
+            player: PlayerId(0),
+            payload: spawn_command("unit/scout", start[0], start[1]),
+        })
+        .collect();
+    kernel.advance(&spawns).expect("advances");
+    let orders: Vec<Command> = (0..starts.len())
+        .map(|index| Command {
+            tick: 1,
+            player: PlayerId(0),
+            payload: move_command(
+                cic_sim::id::ObjectId(index as u64 + 1),
+                muster[0],
+                muster[1],
+            ),
+        })
+        .collect();
+    kernel.advance(&orders).expect("advances");
+
+    for tick in 2..400 {
+        kernel.advance(&[]).expect("advances");
+        for (id, unit) in units(&kernel).units() {
+            let (x, y) = ground.cell_at(unit.position).expect("on the grid");
+            assert!(
+                ground.passable(x, y),
+                "tick {tick}: unit {id:?} was pushed onto impassable ground at {:?}",
+                unit.position
+            );
+        }
+    }
+
+    // And the crowd really did gather there, or the assertion above was about nothing.
+    let gathered = units(&kernel)
+        .units()
+        .values()
+        .filter(|unit| {
+            let (dx, dy) = (unit.position[0] - muster[0], unit.position[1] - muster[1]);
+            dx * dx + dy * dy < 40.0 * 40.0
+        })
+        .count();
+    assert!(
+        gathered >= 6,
+        "only {gathered} of sixteen units reached the muster point, so nothing was pressed against          anything"
+    );
 }

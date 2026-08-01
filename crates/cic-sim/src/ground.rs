@@ -45,15 +45,15 @@
 //!   Plotter*, IBM Systems Journal 4(1), 1965. Used by [`Ground::walkable_line`] to enumerate the
 //!   cells a straight run passes through, which is what string-pulling rests on.
 //!
-//! # What is not here yet
+//! # What is not here, and where the rest of the record lives
 //!
-//! Local avoidance (decision 10), which arrives with the mechanic that produces it: units have no
-//! radius, and the record's intent is steering rather than crowd simulation.
+//! Local avoidance (decision 10) is a *unit* against a *unit* rather than a unit against the
+//! ground, so it lives in [`crate::units`] with the roster it mutates. This module's only part in
+//! it is refusing a push that would put somebody where they could not have walked.
 //!
-//! What *is* here and has only one producer so far is stamping. The objects a scenario places are
-//! the first and currently the only thing that puts a footprint on the ground; construction,
-//! demolition and Concord's grading all land through the same [`Ground::reconcile`], and none of
-//! them exists yet.
+//! Stamping has one producer so far. The objects a scenario places are the first and currently the
+//! only thing that puts a footprint on the ground; construction, demolition and Concord's grading
+//! all land through the same [`Ground::reconcile`], and none of them exists yet.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap};
@@ -1422,6 +1422,7 @@ mod tests {
             model: Some("models/thing.glb".to_owned()),
             name: None,
             speed: None,
+            radius: None,
             footprint,
             passage,
         };

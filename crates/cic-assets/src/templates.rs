@@ -116,6 +116,15 @@ pub struct Template {
     /// for it to mean anything to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speed: Option<f32>,
+    /// How much room the unit takes up, as a radius in world units. Required for a `unit` and
+    /// refused for everything else, on the same rule as [`Self::speed`].
+    ///
+    /// This is what keeps units from standing in each other —
+    /// [ADR 3001](../../../docs/adr/3001-pathfinding.md) decision 10. A **standing** object's
+    /// occupancy is its [`Self::footprint`] instead: a structure denies whole cells and never moves,
+    /// so it belongs to the grid, while a mover is a circle that other movers push away from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radius: Option<f32>,
     /// The cells this object occupies. While it stands, they are impassable whatever the terrain
     /// says. Optional, and only a kind that [stamps](TemplateKind::stamps) may declare one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -196,20 +205,38 @@ impl TemplateSet {
                 }
                 _ => {}
             }
-            match (template.speed, template.kind) {
-                (None, TemplateKind::Unit) => {
+            // Speed and radius are the same rule twice, so the rule is written once: whichever way
+            // one of them can be wrong, the other can be wrong the same way, and two copies of a
+            // three-armed match are two things that can drift apart.
+            match mover_only(template.speed, template.kind) {
+                Some(MoverFault::Missing) => {
                     return Err(TemplateError::MissingSpeed(template.id.clone()));
                 }
-                (Some(speed), TemplateKind::Unit) if !(speed.is_finite() && speed > 0.0) => {
+                Some(MoverFault::Invalid(speed)) => {
                     return Err(TemplateError::InvalidSpeed {
                         id: template.id.clone(),
                         speed,
                     });
                 }
-                (Some(_), kind) if kind != TemplateKind::Unit => {
+                Some(MoverFault::Misplaced) => {
                     return Err(TemplateError::SpeedOnNonUnit(template.id.clone()));
                 }
-                _ => {}
+                None => {}
+            }
+            match mover_only(template.radius, template.kind) {
+                Some(MoverFault::Missing) => {
+                    return Err(TemplateError::MissingRadius(template.id.clone()));
+                }
+                Some(MoverFault::Invalid(radius)) => {
+                    return Err(TemplateError::InvalidRadius {
+                        id: template.id.clone(),
+                        radius,
+                    });
+                }
+                Some(MoverFault::Misplaced) => {
+                    return Err(TemplateError::RadiusOnNonUnit(template.id.clone()));
+                }
+                None => {}
             }
 
             let extents = [
@@ -240,6 +267,31 @@ impl TemplateSet {
     }
 }
 
+/// How a measurement only a `unit` may carry is wrong, if it is.
+enum MoverFault {
+    /// A unit declared none.
+    Missing,
+    /// A unit declared one that is zero, negative, or not a number.
+    Invalid(f32),
+    /// Something that is not a unit declared one.
+    Misplaced,
+}
+
+/// Checks a field that a `unit` must have a positive finite value for and nothing else may have.
+///
+/// `speed` and `radius` are both this rule; see the two call sites in [`TemplateSet::validate`] for
+/// why it is written here rather than twice.
+fn mover_only(value: Option<f32>, kind: TemplateKind) -> Option<MoverFault> {
+    match (value, kind) {
+        (None, TemplateKind::Unit) => Some(MoverFault::Missing),
+        (Some(value), TemplateKind::Unit) if !(value.is_finite() && value > 0.0) => {
+            Some(MoverFault::Invalid(value))
+        }
+        (Some(_), kind) if kind != TemplateKind::Unit => Some(MoverFault::Misplaced),
+        _ => None,
+    }
+}
+
 /// A structured failure while loading or validating a template set.
 #[derive(Debug)]
 pub enum TemplateError {
@@ -266,6 +318,17 @@ pub enum TemplateError {
     },
     /// Something that is not a unit declared a speed, which has no movement to mean anything to.
     SpeedOnNonUnit(String),
+    /// A unit declared no radius, so nothing knows how much room to keep around it.
+    MissingRadius(String),
+    /// A unit's radius was zero, negative, or not finite.
+    InvalidRadius {
+        /// The template.
+        id: String,
+        /// The offending value.
+        radius: f32,
+    },
+    /// Something that is not a unit declared a radius; a standing object occupies cells instead.
+    RadiusOnNonUnit(String),
     /// A kind that cannot stamp the grid declared a `footprint` or a `passage`.
     UnstampableKind(String),
     /// A `footprint` or `passage` declared a rectangle with a zero extent, which covers no ground.
@@ -301,6 +364,19 @@ impl std::fmt::Display for TemplateError {
             Self::SpeedOnNonUnit(id) => write!(
                 formatter,
                 "template `{id}` declares a speed but is not a unit"
+            ),
+            Self::MissingRadius(id) => write!(
+                formatter,
+                "unit `{id}` declares no radius, so nothing knows how much room to keep around it"
+            ),
+            Self::InvalidRadius { id, radius } => write!(
+                formatter,
+                "unit `{id}` declares radius {radius}, which is not a positive finite number"
+            ),
+            Self::RadiusOnNonUnit(id) => write!(
+                formatter,
+                "template `{id}` declares a radius but is not a unit; a standing object occupies \
+                 cells with a footprint instead"
             ),
             Self::UnstampableKind(id) => write!(
                 formatter,
@@ -340,8 +416,20 @@ mod tests {
             model: model.map(str::to_owned),
             name: None,
             speed: None,
+            radius: None,
             footprint: None,
             passage: None,
+        }
+    }
+
+    /// A legal one-unit set, with whatever the caller wants to break about it.
+    fn unit_set(speed: Option<f32>, radius: Option<f32>) -> TemplateSet {
+        let mut entry = template("unit/rifleman", TemplateKind::Unit, Some("models/r.glb"));
+        entry.speed = speed;
+        entry.radius = radius;
+        TemplateSet {
+            format_version: 1,
+            templates: vec![entry],
         }
     }
 
@@ -430,14 +518,7 @@ mod tests {
 
     #[test]
     fn a_unit_needs_a_positive_finite_speed_and_nothing_else_may_have_one() {
-        let unit = |speed: Option<f32>| {
-            let mut entry = template("unit/rifleman", TemplateKind::Unit, Some("models/r.glb"));
-            entry.speed = speed;
-            TemplateSet {
-                format_version: 1,
-                templates: vec![entry],
-            }
-        };
+        let unit = |speed| unit_set(speed, Some(2.0));
         assert!(unit(Some(3.5)).validate().is_ok());
         assert!(matches!(
             unit(None).validate(),
@@ -457,6 +538,40 @@ mod tests {
         assert!(matches!(
             rolling_depot.validate(),
             Err(TemplateError::SpeedOnNonUnit(id)) if id == "structure/depot"
+        ));
+    }
+
+    #[test]
+    fn a_unit_needs_a_positive_finite_radius_and_nothing_else_may_have_one() {
+        // The same rule as `speed`, asserted separately on purpose: the two share one check, and a
+        // shared check is worth having only if both sides of it are pinned. A radius of zero is the
+        // interesting refusal — it parses, it reads as "takes up no room", and what it would
+        // actually mean is a unit nothing can ever push, standing inside its neighbours for ever.
+        let unit = |radius| unit_set(Some(3.5), radius);
+        assert!(unit(Some(2.0)).validate().is_ok());
+        assert!(matches!(
+            unit(None).validate(),
+            Err(TemplateError::MissingRadius(id)) if id == "unit/rifleman"
+        ));
+        assert!(matches!(
+            unit(Some(0.0)).validate(),
+            Err(TemplateError::InvalidRadius { .. })
+        ));
+        assert!(matches!(
+            unit(Some(-1.0)).validate(),
+            Err(TemplateError::InvalidRadius { .. })
+        ));
+        assert!(matches!(
+            unit(Some(f32::INFINITY)).validate(),
+            Err(TemplateError::InvalidRadius { .. })
+        ));
+
+        // A structure keeps its room with a footprint, which is whole cells and does not move.
+        let mut wide_depot = set();
+        wide_depot.templates[1].radius = Some(4.0);
+        assert!(matches!(
+            wide_depot.validate(),
+            Err(TemplateError::RadiusOnNonUnit(id)) if id == "structure/depot"
         ));
     }
 
@@ -506,7 +621,10 @@ mod tests {
             let mut entry = template("thing", kind, model);
             entry.footprint = Some(Footprint { cells: [2, 2] });
             if kind == TemplateKind::Unit {
+                // Otherwise the unit is refused for the measurements it is missing and the
+                // footprint — the thing under test — never gets looked at.
                 entry.speed = Some(3.0);
+                entry.radius = Some(1.5);
             }
             TemplateSet {
                 format_version: 1,
