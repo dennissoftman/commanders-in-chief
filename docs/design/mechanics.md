@@ -383,6 +383,44 @@ and recovering wrecks is also how a blocked road gets cleared. Its salvage crews
 crews, so the faction that lives on throughput is paid to restore the throughput a battle destroyed.
 Nothing was added to make that true.
 
+#### Severance, and the detour it forces
+
+**The route graph is a graph, so flow reroutes.** When a link's capacity reaches zero, freight takes the
+next-best path through the graph if one exists — longer, and therefore slower and lower-capacity — and
+only accumulates upstream when there is no path at all. Carriage does the same thing for the same
+reason: a hauler paths over terrain, so a severed crossing is a longer drive rather than a stopped one.
+
+That single property is what makes **demolishing a bridge a different act from closing a road.**
+Interdiction and cratering reduce what a route carries. Severance *moves* the route.
+
+**A bridge is a neutral structure and destroying it does not interdict anything** — nothing owned was
+harmed, so no link shuts on the fighting rule. It severs, and the traffic goes the other way. The two
+mechanisms are cleanly separate and they compose.
+
+##### Shaping
+
+The composition is the interesting part, and it is a plan rather than a reaction:
+
+1. Work out where the traffic goes if a crossing is gone.
+2. Take that ground, and fortify it.
+3. **Then** drop the bridge.
+
+The detour is not a guess — it is the graph's next-best path, so it is knowable in advance. A player who
+has read the map can decide where an opponent's supply will be *before* forcing it there, and meet it
+with something already dug in. Cheaper than hunting convoys across the whole corridor, and it turns a
+demolition into an ambush with the ambush set up first.
+
+**AEC's lexicon already had the word for this.** The bible gives it *shaping operations* among its
+euphemisms, and this is what the phrase would mean if it meant anything: you do not attack the enemy's
+logistics, you rearrange the ground until the logistics come to you. The faction that talks like a
+staff college gets the mechanic its vocabulary was already describing.
+
+Three answers exist, so it is a decision and not a trap: rebuild the crossing, which costs an engineer
+standing under whatever is now overlooking it; clear the outpost; or accept the longer route and pay in
+income. **This is also the best argument for having kept the three mechanisms separate** — severance,
+occupation and interdiction chain into one operation precisely because they are three different things.
+One merged "the road is damaged" quantity could not have produced it.
+
 ### 2.7 Why expansion is a real decision
 
 The M6 charter asks for "a rate that makes expansion a real decision", so it is worth stating exactly
@@ -559,6 +597,13 @@ choosing to play it:
 | Yard count and placement | Where income has to be defended | Clustered yards make one fight decide everything |
 | Route node count | Meridian's income ceiling | Node-dense maps are a Meridian map, silently |
 | Convertible buildings | Meridian's production ceiling | A map with no town is a map Meridian cannot play |
+| **Bridges and their alternate paths** | Where a route can be *severed*, and where the traffic goes when it is | A graph with no redundancy turns one demolition into a win; one with too much makes severance pointless |
+
+The last row is the one that rewards the most thought, because it is the only knob that authors a
+*plan* rather than a quantity. Every crossing is a place an opponent can move somebody's supply to
+ground of their choosing ([§2.6](#26-what-stops-a-link)), so where the detours run is where the map's
+fights will be. A corridor with exactly one alternate path per crossing is a map with legible, arguable
+chokepoints; a lattice has none, and a single chain is a map decided by whoever blows the first bridge.
 
 The third and fourth rows are why per-map balance cannot be an afterthought: two of the three factions
 have their ceiling set by map authoring rather than by their own build order. A tournament map set has
@@ -614,6 +659,8 @@ one. This document is the same claim continued, and the list is short enough to 
 | Integer credit accumulation with retained remainder | `cic_sim` | No |
 | Per-link interdiction state, driven by damage events | `cic_sim` | No |
 | Upstream backlog with a cap, and the reopening surge | `cic_sim` | No |
+| Flow rerouting over the graph when a link is severed | `cic_sim` | No |
+| Destructible neutral crossings, and rebuilding them | `cic_sim`, templates | Partly — `passage` from ADR 3001 is what a bridge grants |
 | Wreck objects with decay, stamping a cost class | `cic_sim` | No — and see the ADR 3001 amendment |
 | Link capacity derived from road condition and obstruction | `cic_sim` | No |
 | Convertible neutral structures | `cic_sim`, templates | No |
@@ -625,8 +672,8 @@ one. This document is the same claim continued, and the list is short enough to 
 | Per-faction display strings for one currency | string table | Yes — exists |
 | Per-instance tint for recovered hulls | `cic-render` | Yes — exists |
 
-Six of eighteen are already promised or built, which is the argument for writing this now rather than
+Seven of twenty are already promised or built, which is the argument for writing this now rather than
 after M6's economy line is implemented: the cheap half of the list is cheap *because* the bible was
-written before the renderer. Three of the eighteen are amendments to an accepted record rather than new
+written before the renderer. Three of the twenty are amendments to an accepted record rather than new
 work, and all three were found by writing this document rather than by building anything — which is the
 other argument for the order.

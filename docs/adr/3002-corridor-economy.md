@@ -131,6 +131,12 @@ reasonable simplifications.
     capacity entirely, so it runs alongside the air bridge rather than instead of it — and it
     **refuses contested ground**, which no order overrides.
 
+21. **Flow reroutes around a severed link if the graph offers a path**, taking the next-best one at its
+    longer length and lower capacity, and accumulates upstream only when there is none. Carriage
+    reroutes for the same reason, since it paths over terrain. **A bridge is a neutral structure, so
+    demolishing it severs without interdicting** — nothing owned was harmed. Severance therefore
+    *moves* a route where interdiction and cratering only reduce what it carries.
+
 ## Rationale
 
 **Why carriage rather than a rate.** A per-second trickle for holding a point is cheaper to implement
@@ -216,6 +222,28 @@ the map author's chokepoints, which is a lever worth having deliberately.
 and one dead truck should not be one. What closes a road is accumulation, which is the thing that ought
 to be true, and it makes Meridian's recovery crews into the map's road-clearing crews without anybody
 adding a road-clearing mechanic.
+
+**Why flow reroutes rather than stopping, and what that turns severance into.** Decision 21 is what
+separates severing a route from closing one. Interdiction and cratering reduce what a link carries;
+severance *moves* the traffic, because the graph offers a next-best path and both the abstract flow and
+the player's carriage take it.
+
+The consequence is the strongest emergent play in this record, and it is a plan rather than a reaction:
+work out where the traffic goes if a crossing is gone, take and fortify that ground, and *then* drop the
+bridge. The detour is not a guess — it is the graph's next-best path — so a player who has read the map
+can decide where an opponent's supply will be before forcing it there. A demolition becomes an ambush
+with the ambush already built.
+
+Two things make that a decision rather than a trap. The victim has three answers — rebuild under fire,
+clear the outpost, or accept the longer route and pay in income — and none of them is upkeep. And
+**this is the payoff for keeping interdiction, condition and obstruction separate**: severance,
+occupation and interdiction chain into one operation *because* they are three different mechanisms
+acting on the same link. A single merged "the road is damaged" quantity could not have produced it,
+which is worth recording as an argument for the separation rather than only as a consequence of it.
+
+It also lands on a phrase the setting already owned. The bible gives AEC *shaping operations* among its
+euphemisms, and this is what the phrase means when it means anything: not attacking the enemy's
+logistics but rearranging the ground until the logistics arrive where you are waiting.
 
 **Why carriage is not bound to the route graph.** A trade route whose carriers run on rails — *Age of
 Empires III*'s is the clearest reference — is interceptable only on the rail, which deletes the spatial
@@ -323,7 +351,7 @@ economy that cannot survive peace — as arithmetic a player feels in their inco
 in a briefing. It also carries a balance obligation, since two anti-correlated curves cannot be swept
 one at a time.
 
-**What this obliges.** Eighteen engine requirements, listed with their homes in
+**What this obliges.** Twenty engine requirements, listed with their homes in
 [mechanics.md §10](../design/mechanics.md#10-what-this-document-obliges-the-engine-to-gain). Six are
 already promised or built — templates growing fields with the mechanics that read them, footprint and
 passage from ADR 3001, runtime cell-cost edits, the string table, per-instance tint, and standing orders

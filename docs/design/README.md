@@ -43,8 +43,8 @@ Per-instance model tint has the same origin: an army fielded from recovered enem
 under many markings.
 
 [mechanics.md](mechanics.md) continues that claim rather than restating it, and closes it with
-[its own list](mechanics.md#10-what-this-document-obliges-the-engine-to-gain) of eighteen requirements
-— six already promised or built, and three of them **amendments to an accepted record**, since writing
+[its own list](mechanics.md#10-what-this-document-obliges-the-engine-to-gain) of twenty requirements
+— seven already promised or built, and three of them **amendments to an accepted record**, since writing
 the economy against [ADR 3001](../adr/3001-pathfinding.md) found that its cost classes cannot express a
 road cheaper than plain ground. That defect would have flattened a whole faction's economy and it was
 found by writing prose, which is the argument for doing this before the milestone rather than after.

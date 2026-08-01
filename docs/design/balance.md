@@ -167,6 +167,8 @@ Balance is stated against one authored map, and every figure below is meaningles
 | Yards | 6 — two home, four contested |
 | Inflow per yard | 400 credits/min — total flow over yard count |
 | Route nodes | 8 |
+| Bridges | 3, each with exactly one alternate path |
+| Detour penalty per severed crossing | +40% round-trip time on the affected link |
 | Convertible buildings | 12, in two clusters |
 | Carrier capacity | 100 — one load |
 | Carrier round trip, reference distance | 240 ticks (8 s), so 750 credits/min |
@@ -226,6 +228,7 @@ These are set by sweeping until the stated target is met, and nobody may hand-pi
 | **Link capacity per road condition** | A metalled link carrying ≥ 2× a cratered one, and a plain link never below the gate rate feeding it |
 | **Cratering: damage per munition, and repair cost and time** | An artillery mission costing the attacker less credit than the repair costs the defender, and less time |
 | **Wreck cost class and decay** | A link needing the wreckage of ~a company before it closes, and clearing itself within ~90 s of the last loss |
+| **Bridge health, demolition cost, and rebuild cost and time** | Dropping a crossing costing meaningfully more than cratering, and a rebuild that an opponent overwatching the site can contest but not trivially deny |
 | **Duty against salvage, swept together** | Meridian's total income varying by ≤ 25% between a quiet map and a bloody one |
 
 The eighth row is the anti-snowball guard from
@@ -263,6 +266,8 @@ deliberately into **invariants that fail a build** and **statistics that are tra
 | **Interdiction needs an owner** | Damage to neutral scenery, props, wrecks and unclaimed buildings closes nothing. This is the rule most likely to be broken by a later refactor that makes everything damageable uniformly |
 | **Combat does not degrade the road** | A battle fought to completion on a stretch of road leaves that stretch's cost class unchanged. Only ordnance aimed at the road moves it |
 | **A cratered road still carries** | A link at the worst reachable road condition, with no fighting and no wreckage, has capacity above zero. Only a demolished structure or an obstructed roadway reaches zero |
+| **Severance reroutes** | With a bridge destroyed and an alternate path present, flow continues on the longer path and does *not* accumulate upstream. Upstream accumulation happens only when the graph offers no path at all |
+| **Severance does not interdict** | Demolishing a bridge with no owned asset nearby leaves every link's interdiction state clear. A bridge is neutral, so destroying it severs without triggering the fighting rule |
 | **Reachability** | Every template is buildable from a stock start on the reference map — no orphan tech |
 | **Economic benchmark** | Income at one, two and three worked yards is within tolerance of §5.2 |
 | **Role coverage** | Every faction has at least one template in every tactical role |
