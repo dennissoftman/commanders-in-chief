@@ -190,6 +190,12 @@ pub struct WaterMaterial {
     /// Separate from [`Self::foam_strength`] rather than a fraction of it: a lake laps at its edge
     /// and never breaks in the middle, and an ocean does both.
     pub whitecap: f32,
+    /// How far a wave face displaces the bed seen through it, in world units at full depth.
+    ///
+    /// This is refraction, and it is what makes a stone under a ripple wobble. Scaled down as the
+    /// water shallows, so a bed a hand's breadth under the surface is not slid out from under its own
+    /// shoreline. Zero renders the bed undisplaced, which is what every frame before this did.
+    pub refraction: f32,
 }
 
 impl WaterMaterial {
@@ -238,6 +244,9 @@ impl WaterMaterial {
             // None. Inland water with no fetch does not break, and a lake with whitecaps on it reads
             // as a photograph of a sea.
             whitecap: 0.0,
+            // A pond is clear and still enough to see a bed wobble through, which is most of
+            // what says the surface is moving when the waves are as small as a lake's.
+            refraction: 1.5,
         }
     }
 
@@ -286,6 +295,9 @@ impl WaterMaterial {
             // A little, for the standing water that breaks over a shallow. Well under an ocean's:
             // this is riffle rather than surf.
             whitecap: 0.25,
+            // The strongest of the three, because a river is the one kind whose bed is reliably
+            // close enough to the surface to be seen at all.
+            refraction: 2.2,
         }
     }
 
@@ -330,6 +342,10 @@ impl WaterMaterial {
             // navy. Whitecaps are the only high-frequency detail deep sea has at this distance —
             // everything else out there is the depth ramp, which is smooth by construction.
             whitecap: 0.95,
+            // Large in absolute terms and rarely visible: the swell is what displaces it, and
+            // the ramp has gone to near-black long before this could show in deep water. It reads on
+            // a sandbar, which is exactly where it should.
+            refraction: 2.5,
         }
     }
 }
@@ -438,6 +454,11 @@ impl WaterSurface {
             || !(0.0..=1.0).contains(&material.foam_strength)
             || !(0.0..=1.0).contains(&material.whitecap)
         {
+            return Err(RenderError::InvalidWater);
+        }
+        // Not a share, so bounded differently: a displacement in world units, which must be finite and
+        // may not pull the bed toward the camera.
+        if !material.refraction.is_finite() || material.refraction < 0.0 {
             return Err(RenderError::InvalidWater);
         }
         Ok(())
@@ -598,7 +619,10 @@ impl WaterBody {
                 material.foam_strength,
             ],
         );
-        push_vec4(&mut bytes, [material.whitecap, 0.0, 0.0, 0.0]);
+        push_vec4(
+            &mut bytes,
+            [material.whitecap, material.refraction, 0.0, 0.0],
+        );
         debug_assert_eq!(bytes.len(), WATER_UNIFORM_BYTES, "water uniform drifted");
         context.queue().write_buffer(&self.uniform, 0, &bytes);
     }

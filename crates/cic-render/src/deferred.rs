@@ -293,6 +293,18 @@ pub struct DeferredTargets {
     ao_blurred: wgpu::TextureView,
     motion: wgpu::TextureView,
     hdr: wgpu::TextureView,
+    /// The HDR texture itself, retained because the scene-colour copy needs a texture to read from
+    /// and `create_view` does not hand one back.
+    hdr_texture: wgpu::Texture,
+    /// The lit scene as it stood *before* water drew, and the texture the copy writes into.
+    ///
+    /// Water blends into the HDR target, so it cannot sample it: one pass cannot both write a texture
+    /// and read it. Anything water needs to know about what is behind or around it therefore has to
+    /// come from a copy taken between the lighting pass and the water pass. Both features that want it
+    /// -- the screen-space reflection provider and refraction -- want the same copy, which is why
+    /// there is one rather than one each.
+    scene_colour: wgpu::TextureView,
+    scene_colour_texture: wgpu::Texture,
     /// The temporal history: one two-layer texture, read as an array and written a layer at a time.
     ///
     /// One texture rather than two, so the resolve needs one bind group with the layer as a uniform instead
@@ -356,6 +368,8 @@ impl DeferredTargets {
         let screen = |label: &str, format: wgpu::TextureFormat| {
             sized(label, format, render_width, render_height)
         };
+        let (hdr_texture, hdr_view, scene_colour_texture, scene_colour_view) =
+            hdr_and_its_copy(device, render_width, render_height);
 
         let shadow = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("cic-render shadow cascades"),
@@ -408,7 +422,10 @@ impl DeferredTargets {
             ),
             ao_blurred: screen("cic-render ao blurred", AO_FORMAT),
             motion: screen("cic-render motion", MOTION_FORMAT),
-            hdr: screen("cic-render hdr scene", HDR_FORMAT),
+            hdr: hdr_view,
+            hdr_texture,
+            scene_colour: scene_colour_view,
+            scene_colour_texture,
             history: display
                 .needs_history()
                 .then(|| HistoryTargets::new(device, width, height)),
@@ -510,8 +527,12 @@ pub struct DeferredRenderer {
     model_masked_shadow_pipeline: wgpu::RenderPipeline,
     model_masked_gbuffer_pipeline: wgpu::RenderPipeline,
     material_layout: wgpu::BindGroupLayout,
-    water_pipeline: wgpu::RenderPipeline,
-    water_layout: wgpu::BindGroupLayout,
+    water: WaterStage,
+    /// Groups 0 and 2, retained for the same reason `sky_layout` is: the water pipeline is rebuilt
+    /// when the reflection provider changes, and a pipeline layout has to be rebuilt from the same
+    /// bind group layouts the bind groups were made against.
+    scene_layout: wgpu::BindGroupLayout,
+    shadow_layout: wgpu::BindGroupLayout,
     /// Group 3, and the group bound there when a frame carries no [`Sky`].
     ///
     /// The layout is held because a caller builds its [`Sky`] against it, exactly as it builds a
@@ -627,14 +648,13 @@ impl DeferredRenderer {
         let model_shader = shader_module(device, "model_gbuffer");
         let lighting_shader = shader_module(device, "lighting");
         let composite_shader = shader_module(device, "composite");
-        let water_shader = shader_module(device, "water");
+
         let ao_shader = shader_module(device, "terrain_ao");
         let temporal_uniform =
             uniform_buffer(device, "cic-render temporal", TEMPORAL_UNIFORM_BYTES);
 
         let (cascade_layout, cascade_uniforms, cascade_groups) = build_cascade_bindings(device);
         let material_layout = ModelBatch::material_layout(device);
-        let water_layout = WaterBody::layout(device);
         let sky_layout = Sky::layout(device);
         let analytic_sky = AnalyticSky::new(device, &sky_layout);
         // The scene and shadow layouts come back out rather than staying inside the stage, because the
@@ -704,15 +724,9 @@ impl DeferredRenderer {
             model_masked_shadow_pipeline: model.masked_shadow,
             model_masked_gbuffer_pipeline: model.masked_gbuffer,
             material_layout,
-            water_pipeline: build_water_pipeline(
-                device,
-                &scene_layout,
-                &water_layout,
-                &shadow_layout,
-                &sky_layout,
-                &water_shader,
-            ),
-            water_layout,
+            water: build_water_stage(device, &scene_layout, &shadow_layout, &sky_layout, targets),
+            scene_layout,
+            shadow_layout,
             sky_layout,
             analytic_sky,
             ao: build_ao(device, targets, &scene_uniform, &ao_shader),
@@ -801,7 +815,51 @@ impl DeferredRenderer {
     /// Shared for the same reason the material layout is.
     #[must_use]
     pub const fn water_layout(&self) -> &wgpu::BindGroupLayout {
-        &self.water_layout
+        &self.water.layout
+    }
+
+    /// Which chunk currently answers `reflection_colour` for the water pass.
+    #[must_use]
+    pub const fn reflection(&self) -> ReflectionProvider {
+        self.water.reflection
+    }
+
+    /// Rebuilds the water pipeline from a different reflection provider.
+    ///
+    /// A pipeline rebuild rather than a uniform, because a provider *is* a different composed shader —
+    /// which is what keeps the two callers of `reflection_colour` identical and what makes a ray-traced
+    /// provider a new chunk rather than a branch in an old one. It costs a shader compile, so this is a
+    /// settings change and not something to call per frame.
+    ///
+    /// Does nothing when the provider is already in force, so a caller may hand it a setting every
+    /// frame without paying for it.
+    pub fn set_reflection(
+        &mut self,
+        context: &GpuContext,
+        provider: ReflectionProvider,
+        targets: &DeferredTargets,
+    ) {
+        if provider == self.water.reflection {
+            return;
+        }
+        let device = context.device();
+        let shader = shader_module(device, provider.program());
+        self.water.pipeline = build_water_pipeline(
+            device,
+            &self.scene_layout,
+            &self.water.layout,
+            &self.shadow_layout,
+            &self.sky_layout,
+            &self.water.scene_colour_layout,
+            &shader,
+        );
+        self.water.scene_colour_group = build_scene_colour_group(
+            device,
+            &self.water.scene_colour_layout,
+            targets,
+            &self.water.scene_colour_sampler,
+        );
+        self.water.reflection = provider;
     }
 
     /// Returns the layout a [`Sky`] binds its environment through.
@@ -1158,29 +1216,8 @@ impl DeferredRenderer {
             self.time(&mut recorded, TimedPass::Lighting),
         );
 
-        // 6. Water, blended over the lit scene inside the HDR target.
-        //
-        // The target loads rather than clears, since the lighting result is what the water is
-        // transparent *against*. No depth attachment: the lighting group bound here already samples
-        // the scene depth, and one pass cannot both attach and sample the same texture — so
-        // `water_fragment` runs the depth comparison itself against the value it loads.
-        if !water.is_empty() {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("cic-render water"),
-                color_attachments: &[Some(load_attachment(&targets.hdr))],
-                depth_stencil_attachment: None,
-                multiview_mask: None,
-                timestamp_writes: self.time(&mut recorded, TimedPass::Water),
-                occlusion_query_set: None,
-            });
-            pass.set_pipeline(&self.water_pipeline);
-            pass.set_bind_group(0, &self.lighting.group, &[]);
-            pass.set_bind_group(2, &self.lighting.shadow_group, &[]);
-            pass.set_bind_group(3, sky_group, &[]);
-            for body in water {
-                body.draw(&mut pass);
-            }
-        }
+        // 5a and 6. The lit scene copied aside, then water drawn over it.
+        self.record_water(&mut encoder, water, sky_group, targets, &mut recorded);
 
         // 7 and 8. Tone map, downsample, sharpen, and optionally antialias.
         self.record_resolve(&mut encoder, targets, output, &mut recorded);
@@ -1192,6 +1229,55 @@ impl DeferredRenderer {
         }
 
         context.queue().submit([encoder.finish()]);
+    }
+
+    /// Records the scene-colour copy and the water pass, which only ever happen together.
+    ///
+    /// The copy is recorded only when there is water, because nothing else reads it and a
+    /// full-resolution HDR copy is real bandwidth to spend on a frame with no water in it. A
+    /// texture-to-texture copy rather than a blit pass: it is the same bytes either way and this needs
+    /// no pipeline, no bind group and no fullscreen triangle.
+    ///
+    /// The HDR target then loads rather than clears, since the lighting result is what the water is
+    /// transparent *against*. No depth attachment: the lighting group bound here already samples the
+    /// scene depth, and one pass cannot both attach and sample the same texture — so `water_fragment`
+    /// runs the depth comparison itself against the value it loads.
+    fn record_water(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        water: &[WaterBody],
+        sky_group: &wgpu::BindGroup,
+        targets: &DeferredTargets,
+        recorded: &mut Vec<TimedPass>,
+    ) {
+        if water.is_empty() {
+            return;
+        }
+        encoder.copy_texture_to_texture(
+            targets.hdr_texture.as_image_copy(),
+            targets.scene_colour_texture.as_image_copy(),
+            wgpu::Extent3d {
+                width: targets.render[0],
+                height: targets.render[1],
+                depth_or_array_layers: 1,
+            },
+        );
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("cic-render water"),
+            color_attachments: &[Some(load_attachment(&targets.hdr))],
+            depth_stencil_attachment: None,
+            multiview_mask: None,
+            timestamp_writes: self.time(recorded, TimedPass::Water),
+            occlusion_query_set: None,
+        });
+        pass.set_pipeline(&self.water.pipeline);
+        pass.set_bind_group(0, &self.lighting.group, &[]);
+        pass.set_bind_group(2, &self.lighting.shadow_group, &[]);
+        pass.set_bind_group(3, sky_group, &[]);
+        pass.set_bind_group(4, &self.water.scene_colour_group, &[]);
+        for body in water {
+            body.draw(&mut pass);
+        }
     }
 
     /// Records the four depth-only cascade passes.
@@ -2238,6 +2324,229 @@ fn build_temporal(
     }
 }
 
+/// The water pass: its pipeline, the layouts that pipeline was built from, and what it reads.
+///
+/// Grouped the way [`LightingStage`] and [`AoStage`] are, and for a sharper reason than either: the
+/// pipeline is rebuilt whenever the reflection provider changes, and everything needed to rebuild it
+/// has to survive together or the rebuild cannot happen.
+#[derive(Debug)]
+struct WaterStage {
+    pipeline: wgpu::RenderPipeline,
+    /// Group 1's layout, which a caller also builds its [`WaterBody`] against.
+    layout: wgpu::BindGroupLayout,
+    /// Group 4: the lit scene, read for refraction and — under the screen-space provider — for
+    /// reflection. The group is rebuilt with the targets; the layout and sampler are not.
+    scene_colour_layout: wgpu::BindGroupLayout,
+    scene_colour_sampler: wgpu::Sampler,
+    scene_colour_group: wgpu::BindGroup,
+    /// Which `reflection_*` chunk the pipeline was composed from. The pipeline carries no other
+    /// record of it.
+    reflection: ReflectionProvider,
+}
+
+fn build_water_stage(
+    device: &wgpu::Device,
+    scene_layout: &wgpu::BindGroupLayout,
+    shadow_layout: &wgpu::BindGroupLayout,
+    sky_layout: &wgpu::BindGroupLayout,
+    targets: &DeferredTargets,
+) -> WaterStage {
+    // Composed from whichever program the provider names, which is the entire swap.
+    let reflection = ReflectionProvider::default();
+    let shader = shader_module(device, reflection.program());
+    let layout = WaterBody::layout(device);
+    let scene_colour_layout = build_scene_colour_layout(device);
+    let scene_colour_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("cic-render scene colour sampler"),
+        // Clamped, so a refraction offset or a march that runs off the edge reads the border pixel
+        // rather than wrapping to the far side of the frame — which would put a stripe of the
+        // opposite shore along every edge of a lake.
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        ..Default::default()
+    });
+    WaterStage {
+        pipeline: build_water_pipeline(
+            device,
+            scene_layout,
+            &layout,
+            shadow_layout,
+            sky_layout,
+            &scene_colour_layout,
+            &shader,
+        ),
+        scene_colour_group: build_scene_colour_group(
+            device,
+            &scene_colour_layout,
+            targets,
+            &scene_colour_sampler,
+        ),
+        layout,
+        scene_colour_layout,
+        scene_colour_sampler,
+        reflection,
+    }
+}
+
+/// An HDR target kept as a texture as well as a view, with the copy usage a texture-to-texture pair
+/// needs.
+///
+/// Separate from the `sized` closure rather than folded into it because every other target is written
+/// by a pass and read by the next, and adding copy usage to all of them to serve two would be paying
+/// for a capability nine targets do not use.
+/// The HDR target and the copy of it the water pass reads, which only ever exist as a pair.
+///
+/// One function because the pair is the point: the copy is meaningless without the source, and the
+/// source only needs `COPY_SRC` because the copy exists.
+fn hdr_and_its_copy(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> (
+    wgpu::Texture,
+    wgpu::TextureView,
+    wgpu::Texture,
+    wgpu::TextureView,
+) {
+    let (hdr_texture, hdr_view) = copyable_target(
+        device,
+        "cic-render hdr scene",
+        width,
+        height,
+        wgpu::TextureUsages::COPY_SRC,
+    );
+    let (copy_texture, copy_view) = copyable_target(
+        device,
+        "cic-render scene colour",
+        width,
+        height,
+        wgpu::TextureUsages::COPY_DST,
+    );
+    (hdr_texture, hdr_view, copy_texture, copy_view)
+}
+
+fn copyable_target(
+    device: &wgpu::Device,
+    label: &str,
+    width: u32,
+    height: u32,
+    extra: wgpu::TextureUsages,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: HDR_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | extra,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}
+
+/// The layout group 4 is bound through: the lit scene and the sampler that reads it.
+///
+/// Filtering rather than nearest, because both callers want a value *between* pixels — a refraction
+/// offsets by a fraction of one, and a reflection march lands wherever it lands.
+fn build_scene_colour_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("cic-render scene colour layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    })
+}
+
+/// Binds the scene-colour copy from a given target set.
+///
+/// Rebuilt whenever the targets are, and held by the renderer rather than by a water body — which is
+/// the same reasoning that keeps a body's own group to its own uniform. A body outlives a resize; a
+/// view into a target does not, and `a_water_body_survives_the_chain_being_rebuilt` is the test that
+/// says so.
+fn build_scene_colour_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    targets: &DeferredTargets,
+    sampler: &wgpu::Sampler,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("cic-render scene colour bindings"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&targets.scene_colour),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+        ],
+    })
+}
+
+/// Which chunk answers `reflection_colour` for the water pass.
+///
+/// A selector over shader *composition*, not a runtime branch: each variant names a `reflection_*`
+/// chunk, exactly one is composed into the water program, and the two callers of `reflection_colour`
+/// are identical either way. That is the whole point of the arrangement — the seam was written in
+/// [ADR 4001](../../../docs/adr/4001-hdri-sky.md) for a second answer to the same question and has now
+/// carried three, without either call site changing.
+///
+/// Hardware ray tracing is the next one and is deliberately what this shape is for: a `Traced` variant
+/// is a fourth chunk, a fourth arm here, and its own bind group — not a rewrite of the water pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReflectionProvider {
+    /// The sky and nothing else. The cheapest, and what every other provider falls back to.
+    ///
+    /// Default because it is what every committed reference was captured through, and because it is
+    /// the only one that cannot fail to find something: a march that leaves the screen has no answer
+    /// and this always does.
+    #[default]
+    Sky,
+    /// The scene itself, marched in screen space, falling back to the sky on a miss.
+    ///
+    /// Reflects what is on screen — a shore, a hill, a unit standing in the shallows — and cannot
+    /// reflect what is not. See `reflection_screen.wgsl` for the three ways that shows.
+    ScreenSpace,
+}
+
+impl ReflectionProvider {
+    /// The composed program this provider's water pipeline is built from.
+    const fn program(self) -> &'static str {
+        match self {
+            Self::Sky => "water",
+            Self::ScreenSpace => "water_screen",
+        }
+    }
+}
+
 /// Builds the water pipeline.
 ///
 /// Not a [`fullscreen_pipeline`]: water has its own procedural grid rather than one covering triangle,
@@ -2248,6 +2557,7 @@ fn build_water_pipeline(
     water_layout: &wgpu::BindGroupLayout,
     shadow_layout: &wgpu::BindGroupLayout,
     sky_layout: &wgpu::BindGroupLayout,
+    scene_colour_layout: &wgpu::BindGroupLayout,
     water_shader: &wgpu::ShaderModule,
 ) -> wgpu::RenderPipeline {
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -2262,6 +2572,7 @@ fn build_water_pipeline(
             Some(water_layout),
             Some(shadow_layout),
             Some(sky_layout),
+            Some(scene_colour_layout),
         ],
         immediate_size: 0,
     });

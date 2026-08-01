@@ -1,7 +1,7 @@
 // The water surface: a bounded plane with procedural waves.
 //
-// A composition chunk. Requires `scene.wgsl`, `shadow.wgsl`, `sky.wgsl`, `atmosphere.wgsl` and
-// `reflection.wgsl` --
+// A composition chunk. Requires `scene.wgsl`, `scene_colour.wgsl`, `shadow.wgsl`, `sky.wgsl`,
+// `atmosphere.wgsl` and one `reflection_*.wgsl` provider --
 // which is the whole reason composition exists. Before it, water had to share one file with the lighting
 // and composite passes to reach `shadow_visibility` and `world_from_depth`, because WGSL has no include
 // mechanism.
@@ -35,10 +35,11 @@ struct Water {
     // xy the current the whole surface is carried along by, in world units per second, z the depth
     // over which shore foam fades out, w how much foam there is at all.
     current: vec4<f32>,
-    // x how much whitecap breaks on the tallest crests in open water, yzw reserved.
+    // x how much whitecap breaks on the tallest crests in open water, y how far the bed is displaced
+    // by refraction in world units, zw reserved.
     //
-    // A separate figure from the shore's share and not a fraction of it: a lake laps at its edge and
-    // never breaks in the middle, and an ocean does both, so one number cannot carry them.
+    // The whitecap share is separate from the shore's and not a fraction of it: a lake laps at its
+    // edge and never breaks in the middle, and an ocean does both, so one number cannot carry them.
     foam: vec4<f32>,
 }
 
@@ -155,6 +156,14 @@ const WATER_SPECULAR_STRENGTH: f32 = 1.4;
 // pixels or more across a wave -- the analytic normal is honest and is kept at full strength.
 const WATER_DETAIL_FADE_START: f32 = 0.25;
 const WATER_DETAIL_FADE_END: f32 = 0.5;
+
+// How deep the refraction offset keeps growing with, in world units.
+//
+// The lateral shift of a refracted ray goes as the distance it travels through the water, so it grows
+// with depth -- but only while the bed is still visible. Past this the tint has closed over it and a
+// larger offset would move a bed nobody can see, so the figure is where the effect stops mattering
+// rather than where the physics stops holding.
+const WATER_REFRACTION_DEPTH: f32 = 8.0;
 
 // Foam is not quite white. Sea foam is a froth of water and air and takes a little of the sky, and a
 // pure white band along a shore reads as a clipped highlight rather than as surf.
@@ -433,6 +442,38 @@ fn water_fragment(input: WaterVertexOutput) -> @location(0) vec4<f32> {
     let view_direction = normalize(camera.camera_position.xyz - input.world_position);
     let visibility = shadow_visibility(input.world_position, normal);
 
+    // What is under the surface, displaced by the wave normal.
+    //
+    // Water bends what it transmits, and a wave face is a lens that moves the bed sideways -- so a
+    // stone under a ripple wobbles. Without this the transmitted term is a flat tint over a bed that
+    // sits perfectly still under a moving surface, which is the most direct way to make water read as
+    // coloured glass laid over the ground rather than as a liquid.
+    //
+    // Snell's law is not evaluated here. The offset is proportional to the normal's horizontal part,
+    // which is its small-angle behaviour and is what the eye reads; a full refraction vector would
+    // need the bed's *distance* along it, which is the thing a depth buffer cannot answer without
+    // another march. The strength is in world units and is scaled down as the water shallows, because
+    // a bed a hand's breadth under the surface cannot be displaced a metre without sliding visibly
+    // out from under its own shoreline.
+    //
+    // The displacement is built in *world* space and then projected, rather than being added to a
+    // texture coordinate. A first attempt added it straight to the UV scaled by the reciprocal
+    // viewport, which silently treats a figure in world units as a figure in pixels -- the two differ
+    // by the projection and by the distance to the water, so the offset came out around a hundredth of
+    // a pixel and the whole term did nothing. Every reference image passed unchanged, which is exactly
+    // how a dimensional error hides.
+    //
+    // How far the bed moves goes as the depth: a wave face bends the ray by an angle, and an angle
+    // sweeps further the further it travels. Capped, because that relation holds for the shallows this
+    // is visible in and would put the bed of a deep lake tens of units sideways.
+    let bend = min(depth, WATER_REFRACTION_DEPTH) * water.foam.y;
+    let displaced = project_to_screen(bed - vec3<f32>(waves.gradient * bend, 0.0));
+    let own_uv = (vec2<f32>(pixel) + vec2<f32>(0.5)) * camera.viewport.zw;
+    // A displaced sample that left the frame falls back to this pixel's own bed. Clamping the
+    // coordinate instead would smear the border pixel along the edge of the water.
+    let bed_uv = select(own_uv, displaced.uv, displaced.on_screen);
+    let bed_colour = scene_colour_at(bed_uv);
+
     // The transmitted term, tinted by how much water the view looks through.
     let tint = mix(
         water.shallow.rgb,
@@ -523,16 +564,29 @@ fn water_fragment(input: WaterVertexOutput) -> @location(0) vec4<f32> {
         * smoothstep(WATER_WHITECAP_SLOPE_START, WATER_WHITECAP_SLOPE_END, steepness);
     let foam = clamp(max(shore_foam, whitecap), 0.0, 1.0);
 
-    var colour = mix(body, reflected, fresnel) + glitter;
-    colour = mix(colour, WATER_FOAM_COLOUR * lit, foam);
-    // Fogged like any other surface, and before the alpha is decided. Water that ignores fog while the
-    // shore beside it fades out is the most conspicuous way to break a foggy scene.
-    colour = apply_fog(colour, input.world_position);
+    var surface = mix(body, reflected, fresnel) + glitter;
+    surface = mix(surface, WATER_FOAM_COLOUR * lit, foam);
+    // Fogged like any other surface, and before the bed is mixed in. Water that ignores fog while the
+    // shore beside it fades out is the most conspicuous way to break a foggy scene -- and the bed is
+    // deliberately not fogged again here, having been fogged by the pass that drew it.
+    surface = apply_fog(surface, input.world_position);
+
     // Opacity is the greatest of what depth, reflectance and foam imply. A shallow edge seen from
-    // overhead is nearly clear, but the same edge seen at a grazing angle is a mirror, and an alpha
+    // overhead is nearly clear, but the same edge seen at a grazing angle is a mirror, and a figure
     // taken from depth alone would fade out the far shore of every lake. Foam is froth rather than
     // water and hides the bed under it outright, so it forces its own share opaque.
     let depth_alpha = clamp(depth / max(water.deep.w, 0.001), 0.0, 1.0);
-    let alpha = max(max(depth_alpha, fresnel), foam);
-    return vec4<f32>(colour, alpha);
+    let opacity = max(max(depth_alpha, fresnel), foam);
+
+    // Composited here rather than by the blender, and **that is what makes refraction possible at
+    // all**. Fixed-function blending can only ever take the destination at *this* pixel, and a
+    // displaced bed is by definition read from another one -- so the choice is between doing the
+    // composite in the shader and not bending the transmitted view.
+    //
+    // With a zero offset this is exactly what `SrcAlpha, OneMinusSrcAlpha` computed, because
+    // `scene_colour` is the same lit scene the destination held: the pass still blends, and the
+    // arithmetic has moved rather than changed. The output alpha is one because the mix is already
+    // done, and nothing downstream reads this target's alpha.
+    let colour = mix(bed_colour, surface, opacity);
+    return vec4<f32>(colour, 1.0);
 }

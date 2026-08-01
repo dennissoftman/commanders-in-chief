@@ -1,6 +1,11 @@
-// What a surface sees looking out along its mirror direction.
+// What a surface sees looking out along its mirror direction: the sky, and only the sky.
 //
-// A composition chunk. Requires `sky.wgsl` for `sky_reflection`, and must follow it.
+// A composition chunk, and **one of several that answer the same question**. Exactly one
+// `reflection_*` chunk is composed into a program, they all export `reflection_colour` with this
+// signature, and which one a pipeline gets is chosen on the Rust side by `ReflectionProvider`. This is
+// the cheapest of them and the one every program falls back to.
+//
+// Requires `sky.wgsl` for `sky_reflection`, and must follow it.
 //
 // # Why this is one function and not three lines at each site
 //
@@ -16,7 +21,7 @@
 // One function is the seam: a provider substitutes this chunk, keeps the signature, and both callers
 // follow.
 //
-// **That seam has now been used once, and it held.** A captured environment is exactly the second
+// **That seam has now been used twice, and it held both times.** A captured environment is exactly the second
 // answer it was written for, and wiring it took editing this function and nothing above it — the water
 // pass reflects an HDRI without knowing one exists. What the change did add is a `cone` parameter,
 // because the analytic sky had no detail for a spread lobe to average and a captured one has nothing

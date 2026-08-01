@@ -41,9 +41,17 @@ const CHUNKS: &[(&str, &str)] = &[
     ("lighting", include_str!("shaders/lighting.wgsl")),
     ("model_gbuffer", include_str!("shaders/model_gbuffer.wgsl")),
     ("motion", include_str!("shaders/motion.wgsl")),
-    ("reflection", include_str!("shaders/reflection.wgsl")),
+    (
+        "reflection_screen",
+        include_str!("shaders/reflection_screen.wgsl"),
+    ),
+    (
+        "reflection_sky",
+        include_str!("shaders/reflection_sky.wgsl"),
+    ),
     ("road_viewer", include_str!("shaders/road_viewer.wgsl")),
     ("scene", include_str!("shaders/scene.wgsl")),
+    ("scene_colour", include_str!("shaders/scene_colour.wgsl")),
     ("scenery", include_str!("shaders/scenery.wgsl")),
     ("shadow", include_str!("shaders/shadow.wgsl")),
     ("sky", include_str!("shaders/sky.wgsl")),
@@ -113,16 +121,40 @@ pub const PROGRAMS: &[Program] = &[
         chunks: &["scene", "taa"],
         staged: false,
     },
+    // Two water programs, differing in one chunk. That is the whole reflection-provider mechanism:
+    // every `reflection_*` chunk exports the same `reflection_colour`, exactly one is composed in, and
+    // `ReflectionProvider` picks which. A ray-traced provider is a third entry here and a third arm
+    // there rather than a change to either caller. See `reflection_sky.wgsl`.
+    //
+    // `scene_colour` is in both, because refraction reads it whichever provider is in force -- and
+    // because a binding declared inside a chunk that can be substituted disappears when it is.
     Program {
         name: "water",
-        // `reflection` after `sky`, because it calls `sky_reflection` from it, and before `water`,
+        // `reflection_sky` after `sky`, because it calls `sky_reflection` from it, and before `water`,
         // which calls `reflection_colour`.
         chunks: &[
             "scene",
+            "scene_colour",
             "shadow",
             "sky",
             "atmosphere",
-            "reflection",
+            "reflection_sky",
+            "water",
+        ],
+        staged: false,
+    },
+    Program {
+        name: "water_screen",
+        // `reflection_screen` needs `scene_colour` as well as `sky`, and still needs `sky`: a march
+        // that misses falls back to it, which is what makes an approximation that cannot see off-screen
+        // geometry acceptable.
+        chunks: &[
+            "scene",
+            "scene_colour",
+            "shadow",
+            "sky",
+            "atmosphere",
+            "reflection_screen",
             "water",
         ],
         staged: false,
@@ -263,11 +295,18 @@ mod tests {
         // oversight. Two have left the staged set since it was introduced -- `terrain_virtual` when the
         // page cache bound it and `ui` when M4's interface did -- and the three remaining are the viewer
         // passes M8's map editor wants.
+        //
+        // The thirteenth live program is the second *water* program. Those two differ in one chunk and
+        // are the reflection-provider mechanism: a provider is a program here rather than a branch in a
+        // shader, so a third one is a fourteenth entry. That is deliberate and this count is where it
+        // has to be admitted.
         let live = PROGRAMS.iter().filter(|entry| !entry.staged).count();
         let staged = PROGRAMS.iter().filter(|entry| entry.staged).count();
-        assert_eq!(live, 12, "live programs");
+        assert_eq!(live, 13, "live programs");
         assert_eq!(staged, 3, "staged programs");
-        assert_eq!(CHUNKS.len(), 23);
+        // Was 23. `reflection` became `reflection_sky`, `reflection_screen` joined it, and
+        // `scene_colour` carries the binding both of them and refraction read.
+        assert_eq!(CHUNKS.len(), 25);
     }
 
     #[test]

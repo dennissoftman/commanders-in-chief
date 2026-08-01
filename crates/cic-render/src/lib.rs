@@ -95,7 +95,9 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
 pub use culling::{CHUNK_CELLS, ChunkGrid, Frustum};
-pub use deferred::{DeferredFrame, DeferredRenderer, DeferredTargets, occlusion_size};
+pub use deferred::{
+    DeferredFrame, DeferredRenderer, DeferredTargets, ReflectionProvider, occlusion_size,
+};
 pub use display::{Antialiasing, DisplaySettings};
 pub use environment::{Clouds, Environment, Fog, Weather};
 pub use gpu::{Capture, CaptureTarget, GpuContext};
