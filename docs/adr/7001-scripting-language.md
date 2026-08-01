@@ -1,6 +1,6 @@
 # ADR 7001: A scripting language of this project's own
 
-- Status: accepted and **implemented**. The language, compiler, and machine are in.
+- Status: accepted, implemented. The language, compiler, and machine are in.
 - **An earlier draft of this record argued the opposite of decision 2** and was wrong. See
   [What the first draft got wrong](#what-the-first-draft-got-wrong).
 

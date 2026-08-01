@@ -560,15 +560,25 @@ having to pretend.
 ## Gate status
 
 Formatting, strict lints (`clippy::all` and `clippy::pedantic` as errors, plus `-D warnings` as CI runs
-it), and the full test suite all passes on the pinned toolchain: **847 tests across ten crates**, up from
-782 across eight. The ninth crate is `cic-math` — ADR 0007's arithmetic, extracted from `cic-script` so the
-kernel can share it — and its five new tests are its own copy of the decision-8 restriction scan plus a
-documentation example; the ten series tests moved with the code rather than being duplicated. The tenth is
-`cic-sim` at 44: the kernel mechanics' unit tests, another copy of the scan, the replay suite whose
-headline test is the milestone's exit condition run twice, and eleven activation tests spanning the
-one-moved-placement divergence and the template resolutions; the template format's own six live in
-`cic-assets`. The CI
-runner runs the same suite against Mesa's lavapipe.
+it), and the full test suite all pass on the pinned toolchain. The CI runner runs the same suite against
+Mesa's lavapipe.
+
+The two newest crates are the ones worth describing. **`cic-math`** holds ADR 0007's arithmetic, extracted
+from `cic-script` so the kernel can share it; it carries its own copy of the decision-8 restriction scan,
+and the series tests moved with the code rather than being duplicated. **`cic-sim`** carries the kernel
+mechanics' unit tests, another copy of the scan, the replay suite whose headline test is M5's exit
+condition run twice, and the activation tests — spanning the one-moved-placement divergence and the
+template resolutions. The template format's own tests live in `cic-assets`, beside the format.
+
+> **No test tally here, on purpose.** This paragraph used to open with a total and a per-crate
+> breakdown, and it had drifted by about ninety-five tests before anyone noticed — which is what a
+> hand-maintained inventory does. The rule this settles on: **a number in the tree's prose should be a
+> measurement that argues something, not an inventory that rots.** The frame times, the mip-chain border
+> values and the aliasing figures below all argue a point and stay true; a test count argues only that
+> tests exist, and is wrong a week later. Counts belong in a pull request body, which is a record of one
+> moment and never goes stale, or behind a generator that CI diffs — as the
+> [design documents' derived counts](docs/design/mechanics.md#10-what-this-document-obliges-the-engine-to-gain)
+> now are.
 
 **No reference moved for the page mip chain, which was not the expectation.** Every committed NVIDIA
 reference still matches within tolerance, including `terrain-from-pages.png` — the paged frame changed by a

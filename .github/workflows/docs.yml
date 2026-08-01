@@ -61,3 +61,11 @@ jobs:
       # root README, CONTRIBUTING, and the workflow skill.
       - name: every relative link and anchor resolves
         run: python3 tools/check-doc-links.py
+      # The ADR index is not decoration: the rule that a record adds its row in the same
+      # commit is the whole mechanism stopping two branches from silently claiming one
+      # number, and a table that has drifted is a mechanism nobody can trust. Six records
+      # read `accepted` in the index while their implementations had long landed, and two
+      # said different things in the two places — one of them while carrying a section
+      # describing its own implementation.
+      - name: the ADR index agrees with the records
+        run: python3 tools/check-adr-index.py

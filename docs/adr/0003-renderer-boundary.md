@@ -1,6 +1,6 @@
 # ADR 0003: Renderer boundary and validated shaders
 
-- Status: accepted
+- Status: accepted, implemented. All four decisions are in.
 
 ## Context
 

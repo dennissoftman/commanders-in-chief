@@ -1,6 +1,6 @@
 # ADR 0001: Native asset formats
 
-- Status: accepted
+- Status: accepted, implemented. Every format in the table is read by the engine.
 - Supersedes: nothing
 
 ## Context

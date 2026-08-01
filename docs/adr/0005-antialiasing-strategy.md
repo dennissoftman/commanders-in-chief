@@ -1,6 +1,6 @@
 # ADR 0005: Antialiasing strategy, and why not MSAA
 
-- Status: accepted and **fully implemented**. All five decisions are in.
+- Status: accepted, implemented. All five decisions are in.
 
 ## Context
 

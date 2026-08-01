@@ -1,6 +1,6 @@
 # ADR 3002: The corridor economy — one currency, three acquisitions, carriage on the map
 
-**Status:** proposed
+- Status: proposed
 
 Numbered in the `3xxx` family — simulation — because an economy is kernel state and follows the same
 determinism rules as everything else there. [ADR 3001](3001-pathfinding.md) set the precedent: a

@@ -1,6 +1,6 @@
 # ADR 2001: Block-compressed textures in DDS, and a converter to make them
 
-- Status: accepted
+- Status: accepted, implemented.
 - Extends: [ADR 0001](0001-native-asset-formats.md) (adds a row to the format table)
 - Takes up: [ADR 0004](0004-texture-arrays-and-world-space-tiling.md) (its own note that precomputed mips
   in the asset are the answer if CPU mip generation ever costs too much)

@@ -84,6 +84,12 @@ Details that actually bite:
   under `docs/adr/` changing that policy first.
 - **Fix formatting with `cargo fmt --all`,** not by hand-wrapping.
 - **Quote the real numbers** in the PR body — actual pass/fail counts, not "all green".
+- **But do not put a test tally in the tree's prose.** A pull request body is a record of one moment
+  and never goes stale; a document is read for years. A number in a tracked document should be a
+  measurement that argues something — a frame time, a byte-level difference — not an inventory that
+  rots. `CURRENT.md` carried "847 tests across ten crates" until it was ninety-five out. Where a count
+  in a document is genuinely wanted, generate it and let CI diff it, as
+  `tools/generate-doc-counts.py` does.
 
 Two standing rules the gate cannot enforce, both earned the hard way:
 

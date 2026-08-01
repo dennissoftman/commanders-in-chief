@@ -1,6 +1,6 @@
 # ADR 0002: Hand-written archive readers
 
-- Status: accepted
+- Status: accepted, implemented.
 
 ## Context
 

@@ -8,15 +8,22 @@ reverse by accident, or re-litigate from scratch, or mistake for an oversight.
 **Every ADR adds its row here in the same commit that adds the file.** That rule is the whole collision
 mechanism and it is explained below; adding a record without touching this table defeats it.
 
+**CI checks that this table agrees with the records** — `tools/check-adr-index.py`, run by
+`.github/workflows/docs.yml`. A record with no row, a row with no record, a status the process does not
+define, and a row whose status disagrees with the file all fail the build. That check exists because the
+table had drifted: six records read `accepted` here while their implementations had long landed, and two
+said different things in the two places. Free prose after the status is fine and several records use it —
+only the leading token has to agree.
+
 | Number | Decision | Status |
 |---|---|---|
-| [0001](0001-native-asset-formats.md) | Native asset formats rather than another game's | accepted |
-| [0002](0002-hand-written-archive-readers.md) | Hand-written archive readers | accepted |
-| [0003](0003-renderer-boundary.md) | The renderer boundary | accepted |
-| [0004](0004-texture-arrays-and-world-space-tiling.md) | Texture arrays and world-space tiling | accepted |
+| [0001](0001-native-asset-formats.md) | Native asset formats rather than another game's | accepted, implemented |
+| [0002](0002-hand-written-archive-readers.md) | Hand-written archive readers | accepted, implemented |
+| [0003](0003-renderer-boundary.md) | The renderer boundary | accepted, implemented |
+| [0004](0004-texture-arrays-and-world-space-tiling.md) | Texture arrays and world-space tiling | accepted, implemented |
 | [0005](0005-antialiasing-strategy.md) | Antialiasing strategy, and why not MSAA | accepted, implemented |
-| [0006](0006-atmosphere.md) | Atmosphere | accepted |
-| [0007](0007-simulation-arithmetic.md) | Simulation arithmetic: `f64` and a restricted operation set | accepted |
+| [0006](0006-atmosphere.md) | Atmosphere | accepted, implemented |
+| [0007](0007-simulation-arithmetic.md) | Simulation arithmetic: `f64` and a restricted operation set | accepted, implemented |
 | [0008](0008-physics-engine.md) | Physics is cosmetic, and Rapier rather than Jolt | accepted |
 | [2001](2001-block-compressed-textures.md) | Block-compressed textures in DDS, and a converter to make them | accepted, implemented |
 | [3001](3001-pathfinding.md) | Pathfinding: derived passability, occluders and passage, integer-cost grid A* | accepted; three amendments proposed |
@@ -95,3 +102,16 @@ follow the shape the existing records use:
 A record is written when the decision is made, not when the code lands. Status moves from `proposed` to
 `accepted` to `accepted, implemented`, and a superseded record is left in place with a line pointing at
 whatever replaced it.
+
+Three practical notes, each of them something that went wrong before it was written down:
+
+- **Write the status as `- Status: <token>`,** where the token is one of `proposed`, `accepted`,
+  `accepted, implemented`, or `superseded`, and put any explanation after it. The checker reads the
+  leading token and the index has to match it.
+- **Advance the status when the implementation lands**, in that commit. Nothing else will notice, and a
+  record that reads `accepted` long after its code shipped makes every other `accepted` ambiguous.
+- **When the implementation contradicts a decision, say so in the record** rather than quietly leaving
+  the decision standing. [ADR 0006](0006-atmosphere.md) is the worked example: its decision 6 was
+  reversed outright, and the record now carries both the original decision, struck through, and the
+  argument that overturned it. A reversal recorded is a decision the next person can re-open; a reversal
+  unrecorded is a document that lies.

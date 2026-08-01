@@ -1,6 +1,6 @@
 # ADR 0007: Simulation arithmetic — `f64`, a restricted operation set, and our own transcendentals
 
-- Status: accepted
+- Status: accepted, implemented. The arithmetic lives in `cic-math` and decision 8's scan runs in every crate that touches simulation state.
 
 ## Context
 
