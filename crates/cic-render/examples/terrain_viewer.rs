@@ -81,8 +81,8 @@ use cic_render::{
 use cic_sim::activation::FORCES;
 use cic_sim::units::UNITS;
 use cic_sim::{
-    Command, Forces, Ground, GroundRules, Kernel, KernelConfig, PlayerId, TickAccumulator, Units,
-    activate, move_command, spawn_command,
+    Command, Forces, Ground, GroundRules, Kernel, KernelConfig, ObjectId, PlayerId,
+    TickAccumulator, Units, activate, move_command, spawn_command,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -928,27 +928,91 @@ fn demo_orders(kernel: &Kernel, extent: [f32; 2]) -> Vec<Command> {
         .collect()
 }
 
-/// The units snapshot as instances: grounded on the terrain, tinted by owner, facing where they are
-/// going. The facing uses `atan2` freely — this is presentation, which ADR 0007 decision 9 leaves
-/// unrestricted, and nothing here feeds back into the simulation.
-fn unit_instances(units: &Units, terrain: &Terrain) -> Vec<ModelInstance> {
-    const TEAM_TINTS: [[f32; 4]; 2] = [[0.55, 0.70, 1.0, 1.0], [1.0, 0.62, 0.42, 1.0]];
+/// Where one unit stood at the end of a tick, and whose it is.
+#[derive(Debug, Clone, Copy)]
+struct UnitPose {
+    position: [f64; 2],
+    owner: u8,
+}
+
+/// Every unit's pose at the end of the tick just computed.
+fn unit_poses(units: &Units) -> BTreeMap<ObjectId, UnitPose> {
     units
         .units()
-        .values()
-        .filter_map(|unit| {
-            let [x, y] = [unit.position[0] as f32, unit.position[1] as f32];
+        .iter()
+        .map(|(id, unit)| {
+            (
+                *id,
+                UnitPose {
+                    position: unit.position,
+                    owner: unit.owner.0,
+                },
+            )
+        })
+        .collect()
+}
+
+/// How fast a unit may turn on screen, in radians a second.
+///
+/// [ADR 3001](../../../docs/adr/3001-pathfinding.md) decision 9: facing is derived from motion and
+/// smoothed with a turn-rate limit, in presentation floats, because the motion it is derived from is
+/// already deterministic. Without the limit a unit reaching a waypoint pivots between one frame and
+/// the next, which is most of what makes grid movement look mechanical.
+const TURN_RATE: f32 = 6.0;
+
+/// The units as instances, **interpolated between the last two ticks**.
+///
+/// The simulation runs at a fixed thirty ticks a second and the window draws at whatever rate it
+/// can; drawing the raw tick position means a unit that moves thirty times a second in front of
+/// somebody looking at a hundred and forty frames of it. `alpha` is where between the two ticks the
+/// current instant falls, which is the whole reason [`TickAccumulator::alpha`] exists.
+///
+/// Interpolating *between two computed ticks* rather than extrapolating past the latest one is the
+/// choice that keeps this honest: presentation shows a moment the simulation has already been
+/// through, one tick behind, and never a position the simulation did not compute.
+///
+/// The facing uses `atan2` freely — this is presentation, which ADR 0007 decision 9 leaves
+/// unrestricted, and nothing here feeds back into simulation state.
+fn unit_instances(
+    previous: &BTreeMap<ObjectId, UnitPose>,
+    current: &BTreeMap<ObjectId, UnitPose>,
+    headings: &mut BTreeMap<ObjectId, f32>,
+    terrain: &Terrain,
+    alpha: f32,
+    delta: f32,
+) -> Vec<ModelInstance> {
+    const TEAM_TINTS: [[f32; 4]; 2] = [[0.55, 0.70, 1.0, 1.0], [1.0, 0.62, 0.42, 1.0]];
+
+    headings.retain(|id, _| current.contains_key(id));
+    current
+        .iter()
+        .filter_map(|(id, pose)| {
+            // A unit that has just spawned has no previous pose, so it is drawn where it is rather
+            // than interpolated from nowhere.
+            let was = previous.get(id).unwrap_or(pose);
+            let step = [
+                pose.position[0] - was.position[0],
+                pose.position[1] - was.position[1],
+            ];
+            let x = (was.position[0] + step[0] * f64::from(alpha)) as f32;
+            let y = (was.position[1] + step[1] * f64::from(alpha)) as f32;
             let ground = terrain.elevation_at_world(x, y)?;
-            // The next waypoint, not the destination: a unit rounding an obstacle should face the
-            // corner it is walking to rather than the far side of the thing it is walking around.
-            let facing = unit.heading_for().map_or(0.0, |waypoint| {
-                let dy = (waypoint[1] - unit.position[1]) as f32;
-                let dx = (waypoint[0] - unit.position[0]) as f32;
-                dy.atan2(dx)
-            });
+
+            // Derived from the motion, which is what decision 9 says presentation does. A stationary
+            // unit keeps the heading it had rather than snapping to zero and facing east.
+            let heading = headings.entry(*id).or_insert(0.0);
+            if step[0] != 0.0 || step[1] != 0.0 {
+                let target = (step[1] as f32).atan2(step[0] as f32);
+                let mut difference = target - *heading;
+                let turn = std::f32::consts::TAU;
+                difference -= (difference / turn).round() * turn;
+                let allowed = TURN_RATE * delta;
+                *heading += difference.clamp(-allowed, allowed);
+            }
+
             Some(
-                ModelInstance::placed([x, y, ground], facing, 1.0)
-                    .with_tint(TEAM_TINTS[usize::from(unit.owner.0) % TEAM_TINTS.len()]),
+                ModelInstance::placed([x, y, ground], *heading, 1.0)
+                    .with_tint(TEAM_TINTS[usize::from(pose.owner) % TEAM_TINTS.len()]),
             )
         })
         .collect()
@@ -972,6 +1036,13 @@ struct Simulation {
     kernel: Kernel,
     accumulator: TickAccumulator,
     scout: Model,
+    /// Unit poses at the end of the tick before last, and at the end of the last one. Presentation
+    /// draws between them; see [`unit_instances`].
+    previous: BTreeMap<ObjectId, UnitPose>,
+    current: BTreeMap<ObjectId, UnitPose>,
+    /// The heading each unit is currently drawn at, turn-rate limited toward where it is moving.
+    /// Retained across frames because a turn rate is only meaningful against where it turned from.
+    headings: BTreeMap<ObjectId, f32>,
 }
 
 struct Active {
@@ -1377,10 +1448,20 @@ impl ApplicationHandler for Viewer {
                 }
             }
             let accumulator = TickAccumulator::new(kernel.tick_seconds(), 8);
+            // Both snapshots start at tick zero's state, so the first frame interpolates between a
+            // pose and itself rather than sliding every unit in from wherever an empty map put it.
+            let opening = kernel
+                .subsystem(UNITS)
+                .and_then(|subsystem| subsystem.as_any().downcast_ref::<Units>())
+                .map(unit_poses)
+                .unwrap_or_default();
             simulation = Some(Simulation {
                 kernel,
                 accumulator,
                 scout: scout_model(),
+                previous: opening.clone(),
+                current: opening,
+                headings: BTreeMap::new(),
             });
             batches
         } else {
@@ -1573,8 +1654,6 @@ impl Viewer {
                     .kernel
                     .advance(&orders)
                     .map_err(|error| error.to_string())?;
-            }
-            if ticks > 0 {
                 let Some(units) = simulation
                     .kernel
                     .subsystem(UNITS)
@@ -1582,18 +1661,39 @@ impl Viewer {
                 else {
                     return Err("the simulation lost its units".to_owned());
                 };
-                let instances = unit_instances(units, &self.terrain);
-                active.models.truncate(active.static_models);
-                if !instances.is_empty() {
-                    let batch = ModelBatch::new(
-                        &active.context,
-                        &simulation.scout,
-                        &instances,
-                        active.surface.material_layout(),
-                    )
-                    .map_err(|error| error.to_string())?;
-                    active.models.push(batch);
-                }
+                // The tick that just finished becomes the one being interpolated *towards*, and the
+                // one before it is what presentation draws from. Snapshotting inside the loop rather
+                // than after it keeps that true when a slow frame advances several ticks at once.
+                simulation.previous = std::mem::take(&mut simulation.current);
+                simulation.current = unit_poses(units);
+            }
+
+            // Rebuilt every frame, not only on the frames a tick landed on: the interpolation is the
+            // whole point, and it changes between two frames that share a tick. The batch is a
+            // handful of instances, so the cost is a small upload rather than a rebuild of anything.
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "an interpolation fraction is in [0, 1) and narrows exactly enough"
+            )]
+            let alpha = simulation.accumulator.alpha() as f32;
+            let instances = unit_instances(
+                &simulation.previous,
+                &simulation.current,
+                &mut simulation.headings,
+                &self.terrain,
+                alpha,
+                delta,
+            );
+            active.models.truncate(active.static_models);
+            if !instances.is_empty() {
+                let batch = ModelBatch::new(
+                    &active.context,
+                    &simulation.scout,
+                    &instances,
+                    active.surface.material_layout(),
+                )
+                .map_err(|error| error.to_string())?;
+                active.models.push(batch);
             }
         }
 
