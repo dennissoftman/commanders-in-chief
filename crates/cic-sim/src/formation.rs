@@ -108,11 +108,21 @@ const FAN: [[f64; 2]; 8] = [
 /// Returned in the order the members were given, because the assignment is the identity: member
 /// `i` gets slot `i`. See the module documentation for why that is the whole of "not random".
 ///
+/// `facing` is the direction the player dragged, if they dragged one — see [`turn_from`] for what
+/// it does and, in [ADR 3003](../../../docs/adr/3003-formation-movement.md)'s **amendment A**, why
+/// it is the only thing in here that ever rotates anything. `None` is a plain click, and a plain
+/// click never rearranges a formation.
+///
 /// `ground` is optional for the same reason it is everywhere else in this crate: a kernel that was
 /// never told about terrain has no ground to refuse a slot, and the answer is the translation
 /// alone.
 #[must_use]
-pub fn slots(members: &[Member], destination: [f64; 2], ground: Option<&Ground>) -> Vec<[f64; 2]> {
+pub fn slots(
+    members: &[Member],
+    destination: [f64; 2],
+    facing: Option<[f64; 2]>,
+    ground: Option<&Ground>,
+) -> Vec<[f64; 2]> {
     if members.is_empty() {
         return Vec::new();
     }
@@ -127,12 +137,24 @@ pub fn slots(members: &[Member], destination: [f64; 2], ground: Option<&Ground>)
         count += 1.0;
     }
     let centre = [sum[0] / count, sum[1] / count];
+    // The identity unless the player asked for something else, which is the whole of "a click does
+    // not rearrange your formation".
+    let turn = facing.map_or([1.0, 0.0], |facing| {
+        turn_from(
+            [destination[0] - centre[0], destination[1] - centre[1]],
+            facing,
+        )
+    });
     let mut slots: Vec<[f64; 2]> = members
         .iter()
         .map(|member| {
+            let offset = [
+                member.position[0] - centre[0],
+                member.position[1] - centre[1],
+            ];
             [
-                destination[0] + member.position[0] - centre[0],
-                destination[1] + member.position[1] - centre[1],
+                destination[0] + offset[0] * turn[0] - offset[1] * turn[1],
+                destination[1] + offset[0] * turn[1] + offset[1] * turn[0],
             ]
         })
         .collect();
@@ -146,6 +168,37 @@ pub fn slots(members: &[Member], destination: [f64; 2], ground: Option<&Ground>)
         settle(&mut slots, members, ground);
     }
     slots
+}
+
+/// The rotation that carries `from` onto `to`, as a `(cos, sin)` pair.
+///
+/// # Why there is no trigonometry in here
+///
+/// A facing is a *direction*, and the player gave it as one — the vector between the two points
+/// they dragged. Turning that into an angle and back again would need `atan2` on one side and a
+/// sine and cosine on the other, all three of them things [ADR
+/// 0007](../../../docs/adr/0007-simulation-arithmetic.md) decision 3 refuses, to arrive at exactly
+/// the number that was already in hand. The rotation from one unit vector to another *is* their
+/// complex quotient: with both normalised, `to × conj(from)` is the `(cos, sin)` of the difference,
+/// and applying it is four multiplies. Two square roots and two divisions, and nothing that a
+/// platform library gets to have an opinion about.
+///
+/// A direction of no length has no rotation, and the answer is the identity — which is what makes a
+/// group already standing on its destination, or one dragged nowhere, come through untouched.
+fn turn_from(from: [f64; 2], to: [f64; 2]) -> [f64; 2] {
+    let (Some(from), Some(to)) = (unit(from), unit(to)) else {
+        return [1.0, 0.0];
+    };
+    [
+        to[0] * from[0] + to[1] * from[1],
+        to[1] * from[0] - to[0] * from[1],
+    ]
+}
+
+/// A direction of length one, or `None` when there is no direction to be had.
+fn unit(vector: [f64; 2]) -> Option<[f64; 2]> {
+    let span = (vector[0] * vector[0] + vector[1] * vector[1]).sqrt();
+    (span > 0.0 && span.is_finite()).then(|| [vector[0] / span, vector[1] / span])
 }
 
 /// Opens the slots out until no two of them overlap, or until the rounds run out. Answers whether
@@ -396,7 +449,7 @@ mod tests {
         // A group of one is a plain move, and has to stay one: the centroid is the unit's own
         // position, so the offset is zero and the slot is the destination untouched.
         let alone = [member(3.0, 4.0, 0.5)];
-        assert_eq!(slots(&alone, [40.0, 60.0], None), vec![[40.0, 60.0]]);
+        assert_eq!(slots(&alone, [40.0, 60.0], None, None), vec![[40.0, 60.0]]);
     }
 
     #[test]
@@ -410,7 +463,7 @@ mod tests {
             member(14.0, 10.0, 0.5),
             member(10.0, 16.0, 0.5),
         ];
-        let placed = slots(&group, [100.0, 200.0], None);
+        let placed = slots(&group, [100.0, 200.0], None, None);
 
         let shift = [
             placed[0][0] - group[0].position[0],
@@ -429,7 +482,7 @@ mod tests {
             member(14.0, 10.0, 0.5),
             member(10.0, 16.0, 0.5),
         ];
-        let placed = slots(&group, [100.0, 200.0], None);
+        let placed = slots(&group, [100.0, 200.0], None, None);
         let centre = placed.iter().fold([0.0, 0.0], |sum, slot| {
             [sum[0] + slot[0] / 3.0, sum[1] + slot[1] / 3.0]
         });
@@ -442,7 +495,7 @@ mod tests {
         // no shape to carry, so they would arrive in exactly one place. They come out as a rosette
         // — a *structure*, not a scatter — and the group still lands where it was sent.
         let stacked: Vec<Member> = (0..5).map(|_| member(50.0, 50.0, 2.0)).collect();
-        let placed = slots(&stacked, [10.0, 10.0], None);
+        let placed = slots(&stacked, [10.0, 10.0], None, None);
         assert_eq!(placed.len(), 5);
         assert!(
             !crowded(&stacked, &placed),
@@ -480,7 +533,7 @@ mod tests {
         // The complement, and what stops the spread pass being a slow drift outward: nothing
         // overlaps, so nothing moves, and the translation is exact.
         let group = [member(0.0, 0.0, 0.5), member(20.0, 0.0, 0.5)];
-        let placed = slots(&group, [100.0, 100.0], None);
+        let placed = slots(&group, [100.0, 100.0], None, None);
         assert_eq!(placed, vec![[90.0, 100.0], [110.0, 100.0]]);
     }
 
@@ -499,7 +552,7 @@ mod tests {
         assert!(!ground.passable(8, 4), "the wall is where the test put it");
 
         let group = [member(0.0, 0.0, 0.4), member(2.0, 0.0, 0.4)];
-        let placed = slots(&group, [8.5, 4.5], Some(&ground));
+        let placed = slots(&group, [8.5, 4.5], None, Some(&ground));
         for slot in &placed {
             let cell = ground.cell_at(*slot).expect("on the grid");
             assert!(
@@ -594,8 +647,8 @@ mod tests {
 
         // The same two members, listed both ways round. The answer must depend on their sizes and
         // not on their places in the list.
-        let straight = slots(&[wide, narrow], target, Some(&ground));
-        let reversed = slots(&[narrow, wide], target, Some(&ground));
+        let straight = slots(&[wide, narrow], target, None, Some(&ground));
+        let reversed = slots(&[narrow, wide], target, None, Some(&ground));
 
         assert!(
             between(straight[0], near) < between(straight[1], near),
@@ -622,10 +675,113 @@ mod tests {
     }
 
     #[test]
-    fn a_group_of_none_is_no_slots_rather_than_a_panic() {
-        assert_eq!(slots(&[], [1.0, 2.0], None), Vec::<[f64; 2]>::new());
+    fn a_click_never_turns_a_formation() {
+        // The half of amendment A that matters most. Rearranging a shape nobody asked to have
+        // rearranged is the thing this whole record exists to avoid, so it is asserted as bit
+        // equality — and the destination is deliberately **off both axes**, because a group
+        // travelling due east comes through an accidental turn-to-travel unchanged and the
+        // assertion would then say nothing. That is exactly what the first version of it did, and
+        // the sabotage pass is what found it.
+        let line = [
+            member(0.0, -4.0, 0.5),
+            member(0.0, 0.0, 0.5),
+            member(0.0, 4.0, 0.5),
+        ];
         assert_eq!(
-            slots(&[], [1.0, 2.0], Some(&flat(9))),
+            slots(&line, [60.0, 80.0], None, None),
+            vec![[60.0, 76.0], [60.0, 80.0], [60.0, 84.0]],
+            "a click moved the formation as well as the group"
+        );
+    }
+
+    #[test]
+    fn a_drag_turns_the_formation_to_the_heading_it_asks_for() {
+        // The other half. The group is travelling east and the line is abreast of that; dragged
+        // north, the line has to come round with it and be abreast of *north* — a quarter turn,
+        // exactly, and asserted as one.
+        let line = [
+            member(0.0, -4.0, 0.5),
+            member(0.0, 0.0, 0.5),
+            member(0.0, 4.0, 0.5),
+        ];
+        let dragged = slots(&line, [100.0, 0.0], Some([0.0, 7.0]), None);
+        for (slot, expected) in dragged
+            .iter()
+            .zip([[104.0, 0.0], [100.0, 0.0], [96.0, 0.0]])
+        {
+            assert!(
+                between(*slot, expected) < 1e-9,
+                "dragged north the line should have turned: {dragged:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dragging_the_way_the_group_is_already_going_changes_nothing() {
+        // The identity case, and the one that says what a facing *means*: the shape is arranged for
+        // a heading, so asking for the heading it is already arranged for is not an order to move
+        // anybody. The drag is deliberately a different length from the trip, because only its
+        // direction may count.
+        let group = [member(3.0, 1.0, 0.5), member(-3.0, -1.0, 0.5)];
+        let target = [50.0, 0.0];
+        let clicked = slots(&group, target, None, None);
+        let dragged = slots(&group, target, Some([9.0, 0.0]), None);
+        for (click, drag) in clicked.iter().zip(&dragged) {
+            assert!(
+                between(*click, *drag) < 1e-9,
+                "{clicked:?} against {dragged:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_drag_of_no_length_is_a_click() {
+        let group = [member(0.0, -2.0, 0.5), member(0.0, 2.0, 0.5)];
+        let target = [30.0, 30.0];
+        let clicked = slots(&group, target, None, None);
+        assert_eq!(slots(&group, target, Some([0.0, 0.0]), None), clicked);
+        assert_eq!(slots(&group, target, Some([f64::NAN, 1.0]), None), clicked);
+        // And a group already standing on its destination has no direction of travel to turn from,
+        // so there is nothing a drag can mean and nothing it may do.
+        let standing = [member(0.0, -2.0, 0.5), member(0.0, 2.0, 0.5)];
+        assert_eq!(
+            slots(&standing, [0.0, 0.0], Some([1.0, 1.0]), None),
+            slots(&standing, [0.0, 0.0], None, None)
+        );
+    }
+
+    #[test]
+    fn turning_a_shape_does_not_change_it() {
+        // A rotation is a rigid motion, so every distance inside the formation has to survive it.
+        // This is what separates "the player chose an orientation" from "the game rearranged the
+        // squad", and it is the property an implementation that reached for a shape table would
+        // quietly lose.
+        let group = [
+            member(0.0, 0.0, 0.5),
+            member(5.0, 2.0, 0.5),
+            member(-3.0, 6.0, 0.5),
+            member(1.0, -4.0, 0.5),
+        ];
+        let target = [200.0, 90.0];
+        let clicked = slots(&group, target, None, None);
+        let dragged = slots(&group, target, Some([-2.0, 5.0]), None);
+        for first in 0..group.len() {
+            for second in first + 1..group.len() {
+                let before = between(clicked[first], clicked[second]);
+                let after = between(dragged[first], dragged[second]);
+                assert!(
+                    (before - after).abs() < 1e-9,
+                    "turning the shape stretched it: {before} became {after}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_group_of_none_is_no_slots_rather_than_a_panic() {
+        assert_eq!(slots(&[], [1.0, 2.0], None, None), Vec::<[f64; 2]>::new());
+        assert_eq!(
+            slots(&[], [1.0, 2.0], None, Some(&flat(9))),
             Vec::<[f64; 2]>::new()
         );
     }
@@ -639,8 +795,8 @@ mod tests {
             .map(|index| member(f64::from(index % 3), f64::from(index / 3), 1.0))
             .collect();
         let ground = flat(65);
-        let once = slots(&group, [30.5, 30.5], Some(&ground));
-        let twice = slots(&group, [30.5, 30.5], Some(&ground));
+        let once = slots(&group, [30.5, 30.5], None, Some(&ground));
+        let twice = slots(&group, [30.5, 30.5], None, Some(&ground));
         assert_eq!(once, twice);
     }
 }

@@ -125,8 +125,15 @@ pub struct Unit {
     pub template: String,
     /// Position on the ground plane, in metres. Elevation is presentation's to derive.
     pub position: [f64; 2],
-    /// Speed in metres per second, captured from the template at spawn.
+    /// Speed in metres per second, captured from the template at spawn. What the template says.
     pub speed: f64,
+    /// The speed it is actually walking at under its current order, in metres per second.
+    ///
+    /// Its own [`Self::speed`] unless a group order put it in step with a slower member, per
+    /// [ADR 3003](../../../docs/adr/3003-formation-movement.md)'s amendment B. Never faster than
+    /// the template allows, and reset by every order — a unit taken out of a column and sent
+    /// somewhere alone gets its own legs back.
+    pub march: f64,
     /// How much room it takes up, in metres, captured from the template at spawn.
     pub radius: f64,
     /// The waypoints still to walk, in order. Empty when holding.
@@ -361,6 +368,82 @@ impl Units {
         }
     }
 
+    /// One order for many units: each of them is given its own place in the shape the group is
+    /// already standing in, and the whole column is held to the pace of its slowest member.
+    ///
+    /// [ADR 3003](../../../docs/adr/3003-formation-movement.md), and the two amendments to it —
+    /// **A** for `facing`, which is the drag behind the click and the only thing that ever turns a
+    /// formation, and **B** for the pace.
+    fn order_group(
+        &mut self,
+        issuer: PlayerId,
+        units: &[u8],
+        destination: [f64; 2],
+        facing: Option<[f64; 2]>,
+        ground: Option<&Ground>,
+    ) {
+        if !(destination[0].is_finite() && destination[1].is_finite()) {
+            self.rejected += 1;
+            return;
+        }
+        // A facing of no length, or one that is not a number, needs no guard here: it *is* a click
+        // with no drag behind it, and `formation` answers the identity for both. Filtering it a
+        // second time was measured changing nothing, which is the definition of a rule in two
+        // places.
+        // Sorted and deduplicated, so the answer depends on the *set* of units and not on whatever
+        // order a host's selection happened to iterate in. Two clients that agree about who is
+        // selected then agree about where everybody goes, even if their lists came out in different
+        // orders — which is one fewer way for a lobby to desync.
+        let mut named: Vec<ObjectId> = units
+            .chunks_exact(8)
+            .filter_map(|bytes| Some(ObjectId(u64::from_le_bytes(bytes.try_into().ok()?))))
+            .collect();
+        named.sort_unstable();
+        named.dedup();
+
+        let mut group = Vec::with_capacity(named.len());
+        for id in named {
+            match self.roster.get(&id) {
+                Some(unit) if unit.owner == issuer => group.push((
+                    id,
+                    Member {
+                        position: unit.position,
+                        radius: unit.radius,
+                    },
+                )),
+                // Counted one by one rather than refusing the whole order: a selection with one
+                // dead unit in it is an ordinary thing for a client to send, and the rest of the
+                // group should still go.
+                _ => self.rejected += 1,
+            }
+        }
+        if group.is_empty() {
+            self.rejected += 1;
+            return;
+        }
+
+        let members: Vec<Member> = group.iter().map(|(_, member)| *member).collect();
+        let slots = formation::slots(&members, destination, facing, ground);
+        // The column's pace, per amendment B: a group ordered together should arrive together, and
+        // a unit that runs ahead of the group it was ordered with has left the formation the order
+        // was about. Taken over the members that are actually going, so somebody else's unit in the
+        // selection cannot slow you down.
+        let column = group
+            .iter()
+            .filter_map(|(id, _)| self.roster.get(id).map(|unit| unit.speed))
+            .fold(f64::INFINITY, f64::min);
+        for ((id, member), slot) in group.iter().zip(slots) {
+            let Some(subject) = self.roster.get_mut(id) else {
+                continue;
+            };
+            subject.route = match ground {
+                Some(ground) => ground.route(member.position, slot),
+                None => vec![slot],
+            };
+            subject.march = column.min(subject.speed);
+        }
+    }
+
     fn apply(
         &mut self,
         issuer: PlayerId,
@@ -386,6 +469,7 @@ impl Units {
                         template: template.to_owned(),
                         position: [x, y],
                         speed: mover.speed,
+                        march: mover.speed,
                         radius: mover.radius,
                         route: Vec::new(),
                     },
@@ -406,62 +490,23 @@ impl Units {
                             Some(ground) => ground.route(subject.position, [x, y]),
                             None => vec![[x, y]],
                         };
+                        // Ordered on its own, so it walks on its own legs again whatever column it
+                        // was in a moment ago.
+                        subject.march = subject.speed;
                     }
                     _ => self.rejected += 1,
                 }
             }
-            Some(Verb::MoveGroup { units, x, y }) => {
-                if !(x.is_finite() && y.is_finite()) {
-                    self.rejected += 1;
-                    return;
-                }
-                // Sorted and deduplicated, so the answer depends on the *set* of units and not on
-                // whatever order a host's selection happened to iterate in. Two clients that agree
-                // about who is selected then agree about where everybody goes, even if their lists
-                // came out in different orders — which is one fewer way for a lobby to desync.
-                let mut named: Vec<ObjectId> = units
-                    .chunks_exact(8)
-                    .filter_map(|bytes| Some(ObjectId(u64::from_le_bytes(bytes.try_into().ok()?))))
-                    .collect();
-                named.sort_unstable();
-                named.dedup();
-
-                let mut group = Vec::with_capacity(named.len());
-                for id in named {
-                    match self.roster.get(&id) {
-                        Some(unit) if unit.owner == issuer => group.push((
-                            id,
-                            Member {
-                                position: unit.position,
-                                radius: unit.radius,
-                            },
-                        )),
-                        // Counted one by one rather than refusing the whole order: a selection with
-                        // one dead unit in it is an ordinary thing for a client to send, and the
-                        // rest of the group should still go.
-                        _ => self.rejected += 1,
-                    }
-                }
-                if group.is_empty() {
-                    self.rejected += 1;
-                    return;
-                }
-
-                let members: Vec<Member> = group.iter().map(|(_, member)| *member).collect();
-                let slots = formation::slots(&members, [x, y], ground);
-                for ((id, member), slot) in group.iter().zip(slots) {
-                    let Some(subject) = self.roster.get_mut(id) else {
-                        continue;
-                    };
-                    subject.route = match ground {
-                        Some(ground) => ground.route(member.position, slot),
-                        None => vec![slot],
-                    };
-                }
-            }
+            Some(Verb::MoveGroup {
+                units,
+                x,
+                y,
+                facing,
+            }) => self.order_group(issuer, units, [x, y], facing, ground),
             Some(Verb::Stop { unit }) => match self.roster.get_mut(&unit) {
                 Some(subject) if subject.owner == issuer => {
                     subject.route.clear();
+                    subject.march = subject.speed;
                 }
                 _ => self.rejected += 1,
             },
@@ -511,7 +556,10 @@ impl Subsystem for Units {
             // ticks inside one cell, so the difference is unobservable and the simpler rule is the
             // one that can be reasoned about.
             let pace = ground.map_or(1.0, |ground| ground.pace_at(unit.position));
-            let mut reach = unit.speed * step * pace;
+            // `march` rather than `speed`, so a column moves at the pace of its slowest member —
+            // and the ground still multiplies it, so a road speeds the whole column rather than
+            // stretching it out again.
+            let mut reach = unit.march * step * pace;
             while reach > 0.0 && !unit.route.is_empty() {
                 let waypoint = unit.route[0];
                 let dx = waypoint[0] - unit.position[0];
@@ -547,6 +595,7 @@ impl Subsystem for Units {
             hasher.write_f64(unit.position[0]);
             hasher.write_f64(unit.position[1]);
             hasher.write_f64(unit.speed);
+            hasher.write_f64(unit.march);
             hasher.write_f64(unit.radius);
             // The whole remaining route, not just where it ends: two machines that agree about the
             // destination and disagree about the way there are diverged, and this is the tick to
@@ -621,6 +670,8 @@ enum Verb<'payload> {
         units: &'payload [u8],
         x: f64,
         y: f64,
+        /// The heading the group is to arrange for, or `None` for a click with no drag behind it.
+        facing: Option<[f64; 2]>,
     },
 }
 
@@ -672,7 +723,29 @@ pub fn move_command(unit: ObjectId, x: f64, y: f64) -> Vec<u8> {
 /// count is a `u16` and no selection is that size.
 #[must_use]
 pub fn move_group_command(units: &[ObjectId], x: f64, y: f64) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(3 + units.len() * 8 + 16);
+    group_payload(units, x, y, [0.0, 0.0])
+}
+
+/// Encodes a group move that also says which way to arrange: the order behind a click *and drag*.
+///
+/// `facing` is the drag, as a direction in world units — it is normalised on this side of the
+/// boundary, so its length carries no meaning and a host may pass the raw vector between the two
+/// points the player dragged. A facing of no length is the same order as [`move_group_command`],
+/// which is what a drag of zero pixels should mean.
+///
+/// See [ADR 3003](../../../docs/adr/3003-formation-movement.md)'s **amendment A** for what the
+/// facing does to the shape, and why it is a vector rather than an angle.
+///
+/// # Panics
+///
+/// Panics if more than 65535 units are named, for the same reason [`move_group_command`] does.
+#[must_use]
+pub fn move_group_facing_command(units: &[ObjectId], x: f64, y: f64, facing: [f64; 2]) -> Vec<u8> {
+    group_payload(units, x, y, facing)
+}
+
+fn group_payload(units: &[ObjectId], x: f64, y: f64, facing: [f64; 2]) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(3 + units.len() * 8 + 32);
     payload.push(TAG_MOVE_GROUP);
     payload.extend(
         u16::try_from(units.len())
@@ -684,6 +757,8 @@ pub fn move_group_command(units: &[ObjectId], x: f64, y: f64) -> Vec<u8> {
     }
     payload.extend(x.to_le_bytes());
     payload.extend(y.to_le_bytes());
+    payload.extend(facing[0].to_le_bytes());
+    payload.extend(facing[1].to_le_bytes());
     payload
 }
 
@@ -731,7 +806,14 @@ fn decode(payload: &[u8]) -> Option<Verb<'_>> {
             let (units, rest) = rest.split_at_checked(count.checked_mul(8)?)?;
             let (x, rest) = read_f64(rest)?;
             let (y, rest) = read_f64(rest)?;
-            rest.is_empty().then_some(Verb::MoveGroup { units, x, y })
+            let (fx, rest) = read_f64(rest)?;
+            let (fy, rest) = read_f64(rest)?;
+            rest.is_empty().then_some(Verb::MoveGroup {
+                units,
+                x,
+                y,
+                facing: Some([fx, fy]),
+            })
         }
         _ => None,
     }
@@ -755,7 +837,10 @@ mod tests {
     use cic_assets::templates::{Footprint, Passage, Template, TemplateKind, TemplateSet};
     use cic_assets::terrain::Terrain;
 
-    use super::{UNITS, Units, move_command, move_group_command, spawn_command, stop_command};
+    use super::{
+        UNITS, Units, move_command, move_group_command, move_group_facing_command, spawn_command,
+        stop_command,
+    };
     use crate::activation::activate;
     use crate::command::{Command, PlayerId};
     use crate::ground::{GROUND, Ground, GroundRules, METALLED, PLAIN};
@@ -1674,6 +1759,202 @@ mod tests {
             "the line did not arrive as a line centred on where it was sent"
         );
         assert_eq!(roster.rejected(), 0);
+    }
+
+    #[test]
+    fn a_group_marches_at_the_pace_of_its_slowest_member() {
+        // ADR 3003 amendment B. A rifleman at six metres a second and a sapper at four, ordered
+        // together: the rifleman is held to four, so the two of them arrive as a pair rather than
+        // as a fast one and a straggler. Measured as distance travelled rather than as a `march`
+        // field, so an implementation that set the number and never read it fails.
+        let mut kernel = kernel();
+        kernel
+            .advance(&[
+                command(0, 0, spawn_command("unit/rifleman", 0.0, 0.0)),
+                command(0, 0, spawn_command("unit/sapper", 0.0, 10.0)),
+            ])
+            .expect("advances");
+        kernel
+            .advance(&[command(
+                1,
+                0,
+                move_group_command(&[ObjectId(1), ObjectId(2)], 400.0, 5.0),
+            )])
+            .expect("advances");
+        for _ in 2..30 {
+            kernel.advance(&[]).expect("advances");
+        }
+
+        let roster = units(&kernel);
+        let (fast, slow) = (&roster.units()[&ObjectId(1)], &roster.units()[&ObjectId(2)]);
+        assert_eq!(fast.speed, 6.0, "the template still says what it says");
+        assert_eq!(fast.march, 4.0, "held to the sapper's pace");
+        assert!(
+            (fast.position[0] - slow.position[0]).abs() < 1e-9,
+            "the column strung out: {} against {}",
+            fast.position[0],
+            slow.position[0]
+        );
+        assert!(fast.position[0] > 0.0, "neither of them went anywhere");
+    }
+
+    #[test]
+    fn a_unit_ordered_on_its_own_gets_its_own_legs_back() {
+        // The release, which matters as much as the hold: a unit taken out of a column and sent
+        // somewhere alone must not still be walking at the pace of a sapper it has left behind.
+        let mut kernel = kernel();
+        kernel
+            .advance(&[
+                command(0, 0, spawn_command("unit/rifleman", 0.0, 0.0)),
+                command(0, 0, spawn_command("unit/sapper", 0.0, 10.0)),
+            ])
+            .expect("advances");
+        kernel
+            .advance(&[command(
+                1,
+                0,
+                move_group_command(&[ObjectId(1), ObjectId(2)], 400.0, 5.0),
+            )])
+            .expect("advances");
+        assert_eq!(units(&kernel).units()[&ObjectId(1)].march, 4.0);
+
+        kernel
+            .advance(&[command(2, 0, move_command(ObjectId(1), 400.0, 0.0))])
+            .expect("advances");
+        assert_eq!(units(&kernel).units()[&ObjectId(1)].march, 6.0);
+
+        // And a stop releases it too, so the pace never outlives the order that set it.
+        kernel
+            .advance(&[command(
+                3,
+                0,
+                move_group_command(&[ObjectId(1), ObjectId(2)], 0.0, 0.0),
+            )])
+            .expect("advances");
+        assert_eq!(units(&kernel).units()[&ObjectId(1)].march, 4.0);
+        kernel
+            .advance(&[command(4, 0, stop_command(ObjectId(1)))])
+            .expect("advances");
+        assert_eq!(units(&kernel).units()[&ObjectId(1)].march, 6.0);
+    }
+
+    #[test]
+    fn a_road_still_speeds_a_whole_column_rather_than_stretching_it() {
+        // The pace is a *base* speed, so the ground class still multiplies it — otherwise holding a
+        // column to its slowest member would quietly undo ADR 3001 amendment B, and paving a road
+        // would stop paying for anything a group walks on.
+        let terrain = flat_terrain(33);
+        let mut kernel = stamped_kernel(&terrain, vec![placement("structure/road", 15.5, 1.5)]);
+        kernel
+            .advance(&[
+                // The road took `ObjectId(1)` at activation. A metre and a half apart, because two
+                // half-metre units spawned on one spot would be shoved by avoidance and this test
+                // would then be measuring that instead.
+                command(0, 0, spawn_command("unit/rifleman", 0.5, 1.5)),
+                command(0, 0, spawn_command("unit/sapper", 2.0, 1.5)),
+            ])
+            .expect("advances");
+        kernel
+            .advance(&[command(
+                1,
+                0,
+                move_group_command(&[ObjectId(2), ObjectId(3)], 25.0, 1.5),
+            )])
+            .expect("advances");
+        for _ in 2..10 {
+            kernel.advance(&[]).expect("advances");
+        }
+
+        let roster = units(&kernel);
+        let held = &roster.units()[&ObjectId(2)];
+        assert_eq!(held.march, 4.0, "held to the sapper's pace");
+        // Nine steps of the sapper's four metres a second at three times the pace of a field.
+        let expected = 9.0 * 4.0 / 30.0 * 3.0;
+        let travelled = held.position[0] - 0.5;
+        assert!(
+            (travelled - expected).abs() < 1e-9,
+            "{travelled} metres of metalled road against the {expected} a held column should make"
+        );
+    }
+
+    #[test]
+    fn the_pace_a_unit_is_held_to_is_in_the_hash() {
+        // Isolated by building the roster directly, because through the verbs it cannot be: two
+        // units held to different paces are in different places one tick later, so the positions
+        // would carry the difference and the hash would look right whether or not the pace was in
+        // it. This was measured — deleting the write left the other hash test green.
+        let hash = |march: f64| {
+            let mut roster = Units::new(&templates());
+            roster.roster.insert(
+                ObjectId(1),
+                super::Unit {
+                    owner: PlayerId(0),
+                    template: "unit/rifleman".to_owned(),
+                    position: [1.0, 2.0],
+                    speed: 6.0,
+                    march,
+                    radius: 0.5,
+                    route: vec![[9.0, 9.0]],
+                },
+            );
+            let mut hasher = crate::hash::StateHasher::new();
+            roster.write_state(&mut hasher);
+            hasher.finish()
+        };
+        assert_eq!(hash(6.0), hash(6.0));
+        assert_ne!(
+            hash(6.0),
+            hash(4.0),
+            "two machines that disagree about how fast a column is marching will disagree about \
+             where it is a second later, and should say so on the tick it happened"
+        );
+    }
+
+    #[test]
+    fn a_dragged_facing_turns_the_formation_and_a_click_leaves_it_alone() {
+        // Amendment A through the kernel, so this is a statement about the verb and not only about
+        // the solver. Three units abreast of an eastward march; dragged north, they arrive abreast
+        // of north instead.
+        let run_to = |target: [f64; 2], facing: Option<[f64; 2]>| {
+            let mut kernel = kernel();
+            kernel
+                .advance(&[
+                    command(0, 0, spawn_command("unit/rifleman", 0.0, -6.0)),
+                    command(0, 0, spawn_command("unit/rifleman", 0.0, 0.0)),
+                    command(0, 0, spawn_command("unit/rifleman", 0.0, 6.0)),
+                ])
+                .expect("advances");
+            let group = [ObjectId(1), ObjectId(2), ObjectId(3)];
+            let payload = match facing {
+                Some(facing) => move_group_facing_command(&group, target[0], target[1], facing),
+                None => move_group_command(&group, target[0], target[1]),
+            };
+            kernel.advance(&[command(1, 0, payload)]).expect("advances");
+            group
+                .iter()
+                .map(|id| {
+                    units(&kernel).units()[id]
+                        .destination()
+                        .expect("a destination")
+                })
+                .collect::<Vec<_>>()
+        };
+
+        // The click's destination is off both axes on purpose: a group travelling due east would
+        // come through an accidental turn-to-travel unchanged, and the assertion would say nothing.
+        assert_eq!(
+            run_to([70.0, 40.0], None),
+            vec![[70.0, 34.0], [70.0, 40.0], [70.0, 46.0]],
+            "a click turned a formation nobody asked it to turn"
+        );
+        let turned = run_to([90.0, 0.0], Some([0.0, 1.0]));
+        for (slot, expected) in turned.iter().zip([[96.0, 0.0], [90.0, 0.0], [84.0, 0.0]]) {
+            let (dx, dy) = (slot[0] - expected[0], slot[1] - expected[1]);
+            assert!(
+                (dx * dx + dy * dy).sqrt() < 1e-9,
+                "dragged north, the line did not come round: {turned:?}"
+            );
+        }
     }
 
     #[test]

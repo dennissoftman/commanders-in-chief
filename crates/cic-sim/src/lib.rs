@@ -72,5 +72,6 @@ pub use scripts::{Mission, ScriptFault, ScriptLoadError, Scripts};
 pub use subsystem::{Subsystem, TickContext};
 pub use tick::TickAccumulator;
 pub use units::{
-    AvoidanceRules, Unit, Units, move_command, move_group_command, spawn_command, stop_command,
+    AvoidanceRules, Unit, Units, move_command, move_group_command, move_group_facing_command,
+    spawn_command, stop_command,
 };
