@@ -9,7 +9,7 @@ use crate::command::Command;
 use crate::hash::StateHasher;
 use crate::id::{IdAllocator, ObjectId};
 use crate::random::Streams;
-use crate::subsystem::{Subsystem, TickContext};
+use crate::subsystem::{Peers, Subsystem, TickContext};
 
 /// How a kernel is constructed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,15 +185,31 @@ impl Kernel {
             }
         }
 
-        let mut context = TickContext {
-            tick: self.tick,
-            tick_seconds: self.tick_seconds,
-            ids: &mut self.ids,
-            streams: &mut self.streams,
-            commands,
-        };
-        for subsystem in &mut self.subsystems {
-            subsystem.tick(&mut context);
+        // One context per subsystem rather than one per tick, because each carries a different view:
+        // the list is split around the subsystem being run, so it holds `&mut` to itself and `&` to
+        // its peers. Reborrowing the halves immutably is what makes "read a peer, mutate only
+        // yourself" a borrow-check rule instead of a convention. `ids` and `streams` are separate
+        // fields, so they stay mutably borrowed across the split without conflict.
+        for index in 0..self.subsystems.len() {
+            let (earlier, rest) = self.subsystems.split_at_mut(index);
+            // The index came from the list's own length, so the split always yields a subsystem to
+            // run. Written as a `let ... else` rather than an `expect` so that advancing a tick has
+            // no panicking path in it at all.
+            let Some((running, later)) = rest.split_first_mut() else {
+                break;
+            };
+            let mut context = TickContext {
+                tick: self.tick,
+                tick_seconds: self.tick_seconds,
+                ids: &mut self.ids,
+                streams: &mut self.streams,
+                commands,
+                peers: Peers {
+                    earlier,
+                    later: &*later,
+                },
+            };
+            running.tick(&mut context);
         }
 
         let record = self.hashes(commands);
@@ -367,6 +383,71 @@ mod tests {
             kernel.add_subsystem(Box::new(Counter { ticks: 0 }));
         }));
         assert!(result.is_err());
+    }
+
+    /// Records what the counter read as, every tick, from wherever it is registered.
+    struct Observer {
+        seen: Vec<u64>,
+    }
+
+    impl Subsystem for Observer {
+        fn name(&self) -> &'static str {
+            "observer"
+        }
+
+        fn tick(&mut self, context: &mut TickContext<'_>) {
+            let counter = context.peers.read::<Counter>("counter");
+            self.seen
+                .push(counter.map_or(u64::MAX, |counter| counter.ticks));
+        }
+
+        fn write_state(&self, hasher: &mut StateHasher) {
+            for seen in &self.seen {
+                hasher.write_u64(*seen);
+            }
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    fn observed(order: &[&str]) -> Vec<u64> {
+        let mut kernel = Kernel::new(KernelConfig {
+            seed: 7,
+            ticks_per_second: 30,
+        });
+        for name in order.iter().copied() {
+            match name {
+                "counter" => kernel.add_subsystem(Box::new(Counter { ticks: 0 })),
+                _ => kernel.add_subsystem(Box::new(Observer { seen: Vec::new() })),
+            }
+        }
+        kernel.advance(&[]).unwrap();
+        kernel.advance(&[]).unwrap();
+        kernel
+            .subsystem("observer")
+            .and_then(|subsystem| subsystem.as_any().downcast_ref::<Observer>())
+            .expect("the observer is registered")
+            .seen
+            .clone()
+    }
+
+    #[test]
+    fn registration_order_decides_how_far_through_the_tick_a_peer_is() {
+        // The same two subsystems, swapped. Reading a peer registered earlier sees this tick's
+        // value; reading one registered later sees last tick's. Both are correct and the difference
+        // is the contract, so it is asserted rather than left to whichever order a host happened to
+        // choose.
+        assert_eq!(observed(&["counter", "observer"]), vec![1, 2]);
+        assert_eq!(observed(&["observer", "counter"]), vec![0, 1]);
+    }
+
+    #[test]
+    fn an_absent_peer_reads_as_none_rather_than_panicking() {
+        // A kernel assembled without a peer is legitimate — the replay suite runs one — so the
+        // sentinel here stands for the `None` branch a subsystem must have.
+        assert_eq!(observed(&["observer"]), vec![u64::MAX; 2]);
     }
 
     #[test]

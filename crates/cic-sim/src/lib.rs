@@ -7,7 +7,8 @@
 //!   [`Kernel::advance`].
 //! - [`activation`] — a scenario's players and placements constructed into kernel state, in
 //!   authored order.
-//! - [`units`] — the first verbs: spawn, move, stop, with deterministic straight-line movement.
+//! - [`units`] — the first verbs: spawn, move, stop, walking routes at the template's speed.
+//! - [`ground`] — the passability grid derived from the heightfield, and integer A\* across it.
 //! - [`scripts`] — the event dispatcher: a scenario's scripts, in authored order, and the mission
 //!   state they keep on this side of the host boundary.
 //! - [`subsystem`] — the [`Subsystem`] trait and the [`TickContext`] a tick hands one.
@@ -29,9 +30,11 @@
 //!
 //! # What this crate is not
 //!
-//! No gameplay: units, orders, combat and economy are M6, built *on* this. No networking: lockstep
-//! sessions are M7, built on these hashes. No scenario activation yet — see
-//! [the milestone](../../../docs/milestones/m5-simulation.md) for what remains.
+//! No networking: lockstep sessions are M7, built on these hashes. Gameplay above the first verbs
+//! is M6 — combat, economy, construction, production, fog of war — and
+//! [that milestone](../../../docs/milestones/m6-gameplay.md) says which of its lines are standing.
+//! M5 itself is complete; [its milestone](../../../docs/milestones/m5-simulation.md) records what
+//! was deliberately left out.
 //!
 //! # Arithmetic
 //!
@@ -43,6 +46,7 @@
 
 pub mod activation;
 pub mod command;
+pub mod ground;
 pub mod hash;
 pub mod id;
 pub mod kernel;
@@ -54,6 +58,7 @@ pub mod units;
 
 pub use activation::{ActivationError, Forces, Placed, Player, activate};
 pub use command::{Command, CommandError, CommandLog, PlayerId};
+pub use ground::{GROUND, Ground, GroundRules};
 pub use hash::StateHasher;
 pub use id::{IdAllocator, ObjectId};
 pub use kernel::{

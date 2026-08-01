@@ -343,12 +343,53 @@ What works:
     Activation is inside the determinism claim: one moved placement diverges on tick zero, attributed
     to `forces`.
   - **The first verbs run inside it** ([`units`](crates/cic-sim/src/units.rs)): spawn, move, stop, as
-    command payloads this layer decodes while the kernel keeps them opaque. Movement is a straight
-    line in the permitted operation set — a `sqrt` and a division, no trigonometry, and units store no
+    command payloads this layer decodes while the kernel keeps them opaque. Movement is in the
+    permitted operation set — a `sqrt` and a division, no trigonometry, and units store no
     heading: presentation derives one from the motion it sees. An order for a unit you do not own and
     a payload that does not parse are both ignored *and counted, and the count is hashed* — every
     machine ignores identically, and one that did not diverges on the tick it happened. Six verbs
     scripted over ninety ticks replay to identical hashes.
+  - **And they path around ground they cannot cross** ([`ground`](crates/cic-sim/src/ground.rs)):
+    [ADR 3001](docs/adr/3001-pathfinding.md)'s grid and search. Passability is *derived* — slope
+    between adjacent samples against a grade, and a cell wholly under the water line — on the
+    heightfield's own grid, so there is no second resolution to keep registered and no authored layer
+    to go stale when the ground is edited. The search is **A\* with no floating point in it at all**:
+    `10` an orthogonal step and `14` a diagonal by default, ties broken on the lower cell index, no
+    diagonal cutting a corner past an impassable cell, a binary heap over flat arrays and not one
+    hashed container. ADR 0007 would have *permitted* `f64` costs; integers make the accumulation
+    question unaskable instead of manageable, which is the same shape as choosing integer turns for
+    angles.
+    - **An unreachable target does not fail.** The route ends at the nearest cell the search closed,
+      which is what a player asking for the far side of a wall means and costs nothing, because the
+      search already did the work.
+    - **A corner costs a unit no time.** Routes are string-pulled to straight runs and the stepper
+      spends one tick's travel across as many legs as it reaches. Without that, every turn would
+      strand a fraction of a step and the pathfinder would have made units worse at going places —
+      the test for it is pinned to an exact arrival tick, and it was rewritten once after the first
+      version turned out to pass with the carry-over deliberately removed.
+    - **And a corner is rounded rather than turned on the spot.** A string-pulled route still bends
+      at cell centres, which on an eight-metre grid is a 45° pivot every few strides and reads as
+      clockwork. Each interior corner is cut back and interpolated across a short quadratic Bézier —
+      and **every segment of the arc is checked against the grid, with the corner left sharp if any
+      of it would clip**, because a smoothing pass that ignored the grid would reintroduce exactly
+      the cut corners the search took care to avoid, at exactly the turns that exist to get around
+      something.
+    - **Every coefficient is a setting, and every setting is in the hash.** The grade that makes a
+      cliff, the water line, the cost class the derivation assigns, what a step costs, and how far
+      back a corner starts turning all live on `GroundRules` rather than in constants. They are
+      folded into the subsystem hash because they decide what the grid *means*: two machines playing
+      one match under different grades are playing two different games, and that should surface as a
+      divergence on tick zero rather than as somebody diffing configuration files. The heuristic
+      prices itself against the **cheapest class the grid actually holds** rather than assuming that
+      class is `1`, which is what keeps a renumbered ladder from quietly making A\* inadmissible —
+      ADR 3001's amendment A is now a test rather than a hazard.
+  - **A subsystem can now read its peers** ([`subsystem`](crates/cic-sim/src/subsystem.rs)), which is
+    what movement asking the ground where a unit may walk actually requires. Immutably, and only
+    peers: the kernel splits its own list around the subsystem it is running, so the running one holds
+    `&mut` to itself and `&` to everything else and the mutation the rule forbids cannot be spelled.
+    What a read *sees* is pinned by the order that already existed — a peer registered earlier has
+    advanced this tick, one registered later has not — so it is asserted both ways round rather than
+    left to whichever order a host happened to pick. M10's cross-subsystem verbs need the same seam.
 - Windowed presentation, driven by the reusable camera:
 
 ```bash
@@ -359,9 +400,19 @@ Pass a `.cicmap` path to view a real map; with no argument it generates terrain,
 from the heightfield's own low point, their surfaces — and **a scenario, activated through the kernel
 and running live**: two players' depots tinted by seat, neutral pines between them, and six scouts
 that spawn by command on tick zero and patrol a square around the map's middle on standing orders,
-crossing each other's paths. The kernel advances at its fixed 30 Hz from the accumulator whatever the
-frame rate does, the orders are host-side inputs of exactly the shape a network session would feed,
-and presentation derives each scout's facing from its motion — the simulation stores no heading. A
+crossing each other's paths and going round the lake rather than through it. The kernel advances at
+its fixed 30 Hz from the accumulator whatever the frame rate does, and the orders are host-side
+inputs of exactly the shape a network session would feed.
+
+**Presentation interpolates between the last two ticks**, which it did not, and that omission was
+the whole of a complaint that movement looked clunky: a unit whose position is read straight from
+the snapshot moves thirty times a second in front of somebody watching a hundred and forty frames of
+it. `TickAccumulator::alpha` had existed since M5, documented as "what a renderer interpolates by",
+with nothing calling it. Between two computed ticks rather than extrapolated past the latest one —
+presentation shows a moment the simulation has already been through, one tick behind, and never a
+position it did not compute. Facing is derived from that motion and **turn-rate limited**, which is
+[ADR 3001](docs/adr/3001-pathfinding.md) decision 9's own answer and the other half of the
+clockwork: without it a unit reaching a waypoint pivots between one frame and the next. A
 loaded package still shows the building scatter, because packages do not carry a template set yet —
 the demo path is exactly what they will reuse when they do. `T` toggles antialiasing and the bracket keys step the resolution scale, because what an
 edge does *as the camera moves* is the whole subject and no still capture reports it; `P` prints the
@@ -436,11 +487,31 @@ its first slice, **the template set, has landed**: what a `template:` id resolve
 resolving every placement and faction against it — **the activated scenario is drawn**, headlessly
 in a capture test and live in the viewer — **and the first verbs work**: spawn, move, and stop, in
 `cic_sim::units`, replay-identical over ninety ticks — **and the kernel ticks live in the viewer**,
-scouts patrolling on standing orders. Next M6 lines to choose from: pathfinding over the heightfield,
-or combat's first pass; and packages gaining a `templates.json` member so a real `.cicmap` runs the
-same way the generated demo does. Those verbs are also what
-[ADR 7002](docs/adr/7002-script-events.md)'s host surface and first real events hang off, so M6's
-opening work and the script-event implementation meet in the same place once that record is accepted.
+scouts patrolling on standing orders.
+
+**Pathfinding's first slice has landed on top of that**: `cic_sim::ground` derives the passability
+grid and searches it, and a move order is answered with a route rather than a straight line. On the
+viewer's generated terrain that is 8,661 impassable cells out of 65,536 — water and cliffs the scouts
+now walk around instead of through. What is *not* built is the half that needs a producer: a
+`footprint` that denies the ground a structure stands on and a `passage` that grants a bridge its
+crossing (ADR 3001 decision 4) both stamp the grid, and nothing constructs or destroys anything yet;
+repathing on a grid edit (decision 7) arrives with the first edit for the same reason. Local
+avoidance (decision 10) the record already defers.
+
+**One question is open and it is one constant wide.** ADR 3001's proposed amendment A renumbers the
+cost ladder so a metalled road can be cheaper than a field — as the accepted record stands, plain
+ground is class `1` and nothing can be cheaper than it, which would make Concord's paving pothole
+repair. The implementation follows the accepted text and puts the number in exactly one place,
+`ground::PLAIN`, so accepting the amendment is a one-line change. It is not implemented, because the
+amendment carries [ADR 3002](docs/adr/3002-corridor-economy.md)'s review and that record is still
+`proposed`.
+
+Next M6 lines to choose from: combat's first pass; packages gaining a `templates.json` member so a
+real `.cicmap` runs the same way the generated demo does; and
+[faction colour](https://github.com/dennissoftman/commanders-in-chief/issues/61), which is the one
+open issue. The verbs are also what [ADR 7002](docs/adr/7002-script-events.md)'s host surface and
+first real events hang off — and the peer-read seam that movement needed to consult the ground is the
+same one those verbs need, so it is now in place rather than ahead of them.
 
 The prerequisite decision earned its keep: [ADR 0007](docs/adr/0007-simulation-arithmetic.md) was
 settled before the kernel was written, so the kernel was written *inside* it — almost entirely integer,
@@ -543,12 +614,14 @@ at all, and *which ground has a page* is the residency decision nothing derives 
 residency map already ranks by projected size, so this is a small function over the frustum rather than a
 design.
 
-**Scripting needs host verbs, and they are blocked rather than deferred.** Spawn, order, count, query a
-zone, set an objective: every one is a call into a simulation kernel, so M10's remaining half waits on M5.
-The seam is ready — a kernel declares them on an `Interface` and implements one trait. The transcendentals
-trap ahead of it is already closed: the implementation moved to **`cic-math`**, one crate below both the
-VM and the kernel to come, so decision 4's `sin` has exactly one home and two implementations that could
-disagree can no longer exist.
+**Scripting needs host verbs, and what was blocking them has since been built.** Spawn, order, count,
+query a zone, set an objective: every one is a call into a simulation kernel, and M5 is complete. Two
+of the three things they wanted are now standing rather than pending — a kernel declares them on an
+`Interface` and implements one trait, and **a subsystem can read its peers during a tick**, which is
+the seam a verb reaching across subsystems needs and which pathfinding is the first thing to use. The
+transcendentals trap ahead of it was closed earlier: the implementation moved to **`cic-math`**, one
+crate below both the VM and the kernel, so decision 4's `sin` has exactly one home and two
+implementations that could disagree can no longer exist. What is left is writing the verbs.
 
 **Audio needs a device, and that is the one thing about it a green suite cannot establish.** The mixer
 produces correct frames and nothing hands them to hardware. This is the same lesson the standing constraint

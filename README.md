@@ -69,10 +69,12 @@ colour. Both were nearly free to design for and expensive to retrofit.
 ## Status
 
 Early. The foundation, resource layer, asset formats, and interface are complete, the renderer meets its
-exit condition, the audio layer mixes, and scenario behaviour can be written in a script. There is no
-playable game yet — nothing simulates, the audio does not yet reach a speaker, and the verbs a script
-would call wait on a simulation kernel. See [ROADMAP.md](ROADMAP.md) for the milestone ladder and
-[CURRENT.md](CURRENT.md) for what is being worked on now.
+exit condition, the audio layer mixes, scenario behaviour can be written in a script, and **the
+simulation kernel runs** — a scenario activates into it, units take orders, and they path around
+ground they cannot cross. There is no playable game yet: there is no combat, no economy, no
+construction and no opponent, and the audio does not yet reach a speaker. See
+[ROADMAP.md](ROADMAP.md) for the milestone ladder and [CURRENT.md](CURRENT.md) for what is being
+worked on now.
 
 ## Building
 
@@ -122,7 +124,7 @@ back, because a display change can leave the person who made it unable to see we
 | `cic-audio` | Mixer behind a replaceable backend, spatialisation, DSP, layered music, sound banks. No audio dependency at all. |
 | `cic-math` | ADR 0007's simulation arithmetic: the permitted operations and the turn-based transcendentals, shared by everything that runs inside the simulation. No dependencies. |
 | `cic-script` | A deterministic sandboxed language for scenario logic: `cic-math` arithmetic, no heap, fuel-metered. |
-| `cic-sim` | The deterministic fixed-tick kernel: ordered subsystems, stable ids, named random streams, command recording, replay, per-tick state hashes, scenario activation. |
+| `cic-sim` | The deterministic fixed-tick kernel: ordered subsystems that may read their peers but mutate only themselves, stable ids, named random streams, command recording, replay, per-tick state hashes, scenario activation — and gameplay above it: unit orders, and a passability grid searched with integer A\*. |
 
 ## Asset formats
 

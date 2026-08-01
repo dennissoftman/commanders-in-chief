@@ -121,7 +121,12 @@ The simulation kernel, `cic-sim`, for the reasons in
 [docs/invariants/determinism.md](docs/invariants/determinism.md) — and structurally where it can be:
 advancing state requires a `TickContext` only `Kernel::advance` constructs, identifiers come from a
 hashed counter, random streams are named and registered up front, and every subsystem's state is
-folded into a per-tick hash so the invariants are *checked* per tick rather than trusted.
+folded into a per-tick hash so the invariants are *checked* per tick rather than trusted. A subsystem
+may **read** its peers and mutate only itself, and that is a borrow rather than a convention: the
+kernel splits its own list around the subsystem it is running, so the running one holds `&mut` to
+itself and `&` to the rest. Gameplay is cross-subsystem by nature — movement asks the ground where a
+unit may walk — and the alternative to a read is merging subsystems, which would lose the
+per-subsystem hash that names which one drifted.
 
 **The scripting language**, which inherits ADR 0007 rather than restating it: scripts run inside the
 simulation, so the same restricted operation set binds them. Two mechanisms enforce it — the textual scan
