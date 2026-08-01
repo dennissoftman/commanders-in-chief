@@ -29,6 +29,7 @@ only the leading token has to agree.
 | [3001](3001-pathfinding.md) | Pathfinding: derived passability, occluders and passage, integer-cost grid A* | accepted and implemented but for local avoidance; five amendments, four of them built |
 | [3002](3002-corridor-economy.md) | The corridor economy: one currency, three acquisitions, carriage on the map | accepted |
 | [4001](4001-hdri-sky.md) | Captured skies: Radiance `.hdr`, an equirectangular lookup, and the light derived from it | accepted, implemented |
+| [4002](4002-water-kinds.md) | Three kinds of water: a spread wave train, kind presets, and normal level-of-detail | accepted, implemented |
 | [6001](6001-audio-backend-boundary.md) | Where the audio backend boundary goes | accepted, implemented |
 | [7001](7001-scripting-language.md) | A scripting language of this project's own | accepted, implemented |
 | [7002](7002-script-events.md) | Script events: subscription is a handler, scripts arrive with the scenario | accepted, implemented |

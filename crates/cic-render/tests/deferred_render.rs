@@ -29,7 +29,7 @@ use cic_render::terrain_virtual::VirtualPageView;
 use cic_render::{
     Antialiasing, Capture, CaptureTarget, Clouds, DeferredFrame, DeferredRenderer, DeferredTargets,
     DisplaySettings, Environment, Fog, FrameTimings, GpuContext, LayerMaterial, TerrainRenderer,
-    TextureImage, TimedPass, WaterBody, WaterMaterial, WaterSurface, Weather,
+    TextureImage, TimedPass, WaterBody, WaterKind, WaterMaterial, WaterSurface, Weather,
 };
 
 const WIDTH: u32 = 720;
@@ -922,6 +922,450 @@ fn the_water_surface_varies_rather_than_reading_as_a_flat_sheet() {
         spread > 0.10,
         "the water spans only {spread:.3} in luminance across {counted} pixels, \
          which is a flat sheet rather than a lit surface"
+    );
+}
+
+/// A camera over the near shore, pitched down at the water the way a playing one is.
+///
+/// [`pose`] stands far enough back that the whole lake is a few hundred pixels of near-uniform
+/// surface, which is the right camera for asking whether water drew at all and the wrong one for
+/// asking what kind of water it is. The reason is Fresnel and it took a capture to see: at ten degrees
+/// above the surface the reflected share is over two thirds everywhere, so all three kinds render as
+/// the same sky and their tints — the thing that most separates them — contribute almost nothing. This
+/// one looks down at about forty-five degrees at the near waterline, where the reflected share is
+/// two percent and the body colour is the whole of what is seen, and flattens out to a grazing view by
+/// the far shore. Both regimes are in one frame, which is also what makes it the right capture for
+/// judging the wave train: the near water resolves individual waves and the far water must not.
+fn shore_pose(terrain: &Terrain, level: f32) -> CameraPose {
+    let [extent_x, extent_y] = terrain.world_extent();
+    let focus = [extent_x * 0.5, extent_y * 0.40, level];
+    let eye = [extent_x * 0.5, extent_y * 0.195, level + 120.0];
+    CameraPose {
+        eye,
+        focus,
+        forward: [focus[0] - eye[0], focus[1] - eye[1], focus[2] - eye[2]],
+    }
+}
+
+/// The basin fixture seen from its own shore, and a level low enough to leave a broad shallow margin.
+///
+/// Shallower than [`water_scene`]'s. The tint ramp and the foam band are both keyed on depth, so a
+/// level that puts the shoreline against a steep part of the bowl compresses both into a few pixels
+/// and the three kinds then differ only in their deep-water colour.
+struct ShoreScene {
+    harness: Harness,
+    level: f32,
+    frame: DeferredFrame,
+}
+
+fn shore_scene(context: &GpuContext) -> ShoreScene {
+    let harness = harness_for(context, basin_terrain());
+    let (floor, rim) = world_elevation_range(&harness.terrain);
+    let level = floor + (rim - floor) * 0.30;
+    let frame = DeferredFrame::new(shore_pose(&harness.terrain, level), WIDTH, HEIGHT);
+    ShoreScene {
+        harness,
+        level,
+        frame,
+    }
+}
+
+/// One body of `material` over the whole map at the scene's level.
+fn shore_body(context: &GpuContext, scene: &ShoreScene, material: WaterMaterial) -> Vec<WaterBody> {
+    let [extent_x, extent_y] = scene.harness.terrain.world_extent();
+    vec![
+        WaterBody::new(
+            context,
+            WaterSurface::new([0.0, 0.0, extent_x, extent_y], scene.level).with_material(material),
+            scene.harness.deferred.water_layout(),
+        )
+        .expect("build water body"),
+    ]
+}
+
+/// Mean per-channel difference between two captures over the pixels a predicate accepts, in `0..=255`.
+///
+/// The predicate takes a pixel index rather than a coordinate pair, because every caller here is
+/// intersecting two masks that are already in that form.
+fn mean_difference_where(first: &Capture, second: &Capture, accept: impl Fn(usize) -> bool) -> f32 {
+    assert_eq!(first.rgba().len(), second.rgba().len(), "size mismatch");
+    let mut total = 0.0f64;
+    let mut counted = 0usize;
+    for pixel in 0..first.rgba().len() / 4 {
+        if !accept(pixel) {
+            continue;
+        }
+        for channel in 0..3 {
+            let a = f64::from(first.rgba()[pixel * 4 + channel]);
+            let b = f64::from(second.rgba()[pixel * 4 + channel]);
+            total += (a - b).abs();
+        }
+        counted += 3;
+    }
+    if counted == 0 {
+        return 0.0;
+    }
+    (total / counted as f64) as f32
+}
+
+/// A mask of where a body of water drew, taken as the pixels a flood changed.
+fn wet_mask(dry: &Capture, wet: &Capture) -> Vec<bool> {
+    dry.rgba()
+        .chunks_exact(4)
+        .zip(wet.rgba().chunks_exact(4))
+        .map(|(a, b)| a != b)
+        .collect()
+}
+
+#[test]
+fn the_three_kinds_of_water_are_told_apart_by_their_own_captures() {
+    // The images are the verification here more than anywhere else in this file. "A river looks like a
+    // river" is not a number, and the assertions below only bound the three properties that a careless
+    // retune could erase silently — the tint, the surf, and the current. Everything else about whether
+    // these read correctly is in the three captures.
+    //
+    // All three bodies span the whole map, which is what a lake and an ocean are and what a river is
+    // not: a real channel is a chain of narrow reaches, each carrying its own tangent as its flow. The
+    // fixture is showing the *material* rather than the channel, because a strip laid across this basin
+    // would be cut off by its own rectangle along both banks and the hard edge would be the most
+    // visible thing in the frame.
+    let Some(context) = context() else { return };
+    let scene = shore_scene(context);
+    let dry = render_water(context, &scene.harness, &[], scene.frame);
+    write_capture("water-kind-dry.png", &dry);
+
+    let kinds = [
+        ("lake", WaterKind::Lake),
+        ("river", WaterKind::River { flow: [7.0, 2.0] }),
+        ("ocean", WaterKind::Ocean { wind: [1.0, 0.35] }),
+    ];
+    let mut captures = Vec::new();
+    for (name, kind) in kinds {
+        let body = shore_body(context, &scene, kind.material());
+        let capture = render_water(context, &scene.harness, &body, scene.frame);
+        let file = format!("water-kind-{name}.png");
+        write_capture(&file, &capture);
+        captures.push((name, file, capture));
+    }
+    // All three at once rather than one call each, so a run against an adapter with no reference set
+    // writes all three and a change that moved all three reports all three. See `check_references`.
+    support::check_references(
+        context,
+        &captures
+            .iter()
+            .map(|(_, file, capture)| (file.as_str(), capture))
+            .collect::<Vec<_>>(),
+    );
+
+    // Compared pixel by pixel rather than as three mean colours, which is what a first attempt did and
+    // why it measured almost nothing: an ocean runs from turquoise over the bank to near-black in the
+    // middle and averages to very nearly the flat mid-blue of a lake, so the two came out 1.9 apart in
+    // 255 while looking nothing whatever alike. What separates the kinds is *where* the colour is, and
+    // a per-pixel difference is the statistic that says so.
+    let masks: Vec<Vec<bool>> = captures
+        .iter()
+        .map(|(_, _, capture)| wet_mask(&dry, capture))
+        .collect();
+    for (index, (name, _, capture)) in captures.iter().enumerate() {
+        let other = (index + 1) % captures.len();
+        let difference = mean_difference_where(capture, &captures[other].2, |pixel| {
+            masks[index][pixel] && masks[other][pixel]
+        });
+        assert!(
+            difference > 12.0,
+            "{name} and {} differ by {difference:.1} of 255 per channel over the water they share, \
+             which is too little to be two kinds of water rather than one",
+            captures[other].0
+        );
+    }
+
+    // The depth ramp, which is the other half of why the means were equal. An ocean's own water has to
+    // span a wide range — bright shallows against a near-black middle — where a lake's is nearly one
+    // colour throughout. This is the assertion the mean could not make.
+    let range = |capture: &Capture, mask: &[bool]| {
+        let (mut lowest, mut highest) = (f32::MAX, f32::MIN);
+        for (index, wet) in mask.iter().enumerate() {
+            if !*wet {
+                continue;
+            }
+            let pixel = &capture.rgba()[index * 4..index * 4 + 3];
+            let value = 0.2126 * f32::from(pixel[0])
+                + 0.7152 * f32::from(pixel[1])
+                + 0.0722 * f32::from(pixel[2]);
+            lowest = lowest.min(value);
+            highest = highest.max(value);
+        }
+        highest - lowest
+    };
+    let ocean_range = range(&captures[2].2, &masks[2]);
+    let lake_range = range(&captures[0].2, &masks[0]);
+    assert!(
+        ocean_range > lake_range * 1.5,
+        "the ocean spans {ocean_range:.1} in luminance against the lake's {lake_range:.1}, \
+         so its depth ramp is not carrying shallows against deep water"
+    );
+
+    // Surf. Counted as water pixels with every channel above 190, which is a level none of these
+    // tints reaches on its own however it is lit — the lake, whose foam is a tenth strength, has no
+    // pixel at all there. That is what foam is for: a band reading as white against a body that never
+    // does.
+    let frothy = |capture: &Capture, mask: &[bool]| {
+        mask.iter()
+            .enumerate()
+            .filter(|(_, wet)| **wet)
+            .filter(|(index, _)| {
+                capture.rgba()[index * 4..index * 4 + 3]
+                    .iter()
+                    .all(|channel| *channel > 190)
+            })
+            .count()
+    };
+    let (lake_foam, ocean_foam) = (
+        frothy(&captures[0].2, &masks[0]),
+        frothy(&captures[2].2, &masks[2]),
+    );
+    assert!(
+        ocean_foam > 400 && ocean_foam > lake_foam * 4,
+        "the ocean shows {ocean_foam} foam pixels against the lake's {lake_foam}, \
+         so the surf that is most of what reads as an ocean is not there"
+    );
+}
+
+/// A flood plain with one channel cut across it, meandering as it goes.
+///
+/// A river needs its own fixture and cannot borrow the basin. A body laid over a bowl clips to a disc
+/// however its material is set, and a disc of moving water is a lake with a grain in it; the thing
+/// that makes a river read as a river is that it is *narrow and continuous*, which is a property of
+/// the bed rather than of the water. Laying a map-sized body over this one clips it to a ribbon, which
+/// is exactly what the shoreline clip is for.
+///
+/// The channel meanders, so one body's single flow vector is tangent to it only near the middle. That
+/// is honest about the shape the renderer takes: a channel that bends is a chain of reaches, each
+/// carrying its own tangent, and this fixture is one of them stretched over a whole map.
+fn channel_terrain() -> Terrain {
+    let count = (SAMPLES * SAMPLES) as usize;
+    let mut elevations = Vec::with_capacity(count);
+    let last = (SAMPLES - 1) as f32;
+    for y in 0..SAMPLES {
+        for x in 0..SAMPLES {
+            let fx = x as f32 / last;
+            let fy = y as f32 / last;
+            // The centreline, and a trench that reaches full depth at it and nothing at the bank.
+            // Smoothstepped rather than linear so the banks meet the plain without a crease, which a
+            // grazing view down a channel would otherwise pick out as a hard line either side.
+            let centre = 0.5 + 0.10 * (fx * 6.0).sin();
+            let across = ((fy - centre).abs() / 0.055).min(1.0);
+            // Twenty world units deep across eighty-four of bank, which is a river rather than a
+            // gorge. The first attempt cut it four times deeper and produced a slot the water sat at
+            // the bottom of: the banks then rise a whole camera height either side, the shallow
+            // margin the foam and the tint ramp both live in is two units wide, and the only thing
+            // the capture shows is that something green is down there.
+            let trench = 40.0 * (1.0 - ramp(across, 0.0, 1.0));
+            // Relief on the plain, which makes the channel widen and narrow along its length as the
+            // ground either side of it rises and falls through the water level.
+            let plain = 300.0 + 18.0 * ((fx * 3.1).sin() * (fy * 2.7).cos());
+            elevations.push((plain - trench).round().clamp(0.0, 65_535.0) as u16);
+        }
+    }
+
+    let mut ground = Vec::with_capacity(count);
+    let mut rock = Vec::with_capacity(count);
+    for elevation in &elevations {
+        // Split across the banks rather than at the plain, so the cut reads as pale gravel and the
+        // flood plain as green. Straddling the plain's own elevation instead would dapple the whole
+        // map with the relief and leave the channel indistinguishable from the ground it is cut into
+        // — and putting the pale layer on the plain, which the first version did, blows the entire
+        // frame out to near-white under this sun and leaves nothing for the water to read against.
+        let into_rock = 1.0 - ramp(f32::from(*elevation), 220.0, 290.0);
+        ground.push(((1.0 - into_rock) * 255.0).round() as u8);
+        rock.push((into_rock * 255.0).round() as u8);
+    }
+
+    Terrain::new(
+        SAMPLES,
+        SAMPLES,
+        SPACING,
+        VERTICAL,
+        elevations,
+        vec![
+            TerrainLayer {
+                name: "ground".to_owned(),
+                weights: ground,
+            },
+            TerrainLayer {
+                name: "rock".to_owned(),
+                weights: rock,
+            },
+        ],
+    )
+    .expect("valid channel terrain")
+}
+
+/// Down at the channel from over the plain beside it, along a stretch of its length.
+///
+/// The eye sits over the plain rather than over the cut, or the near bank fills the lower half of the
+/// frame, and it looks along the channel rather than across it so several bends are in shot — a
+/// straight-on view of a river fifty units wide is a green stripe and says nothing about a current
+/// that runs down it. The focus is on the centreline at the far end of the view rather than on the
+/// middle row of the map, because the channel meanders by a tenth of the map and the middle row is
+/// bank half the time.
+///
+/// The pitch is thirty degrees and that figure is load-bearing. A river's chop is eleven units long,
+/// and a pixel's footprint along the view runs as the reciprocal of the sine of the pitch: at the
+/// twenty-two degrees the first version of this pose used, one pixel spanned nearly three world units
+/// and the normal level-of-detail correctly flattened six of the train's nine components, so the
+/// capture showed a smooth green ribbon and no amount of steepening the waves changed it. At thirty
+/// the footprint is under a unit and a half and most of the train survives. That is not a workaround:
+/// a river seen from far enough away at a shallow enough angle *is* smooth, and this camera is where
+/// a player looks at one.
+fn channel_pose(terrain: &Terrain, level: f32) -> CameraPose {
+    let [extent_x, extent_y] = terrain.world_extent();
+    let focus = [extent_x * 0.58, extent_y * 0.466, level];
+    let eye = [extent_x * 0.38, extent_y * 0.36, level + 200.0];
+    CameraPose {
+        eye,
+        focus,
+        forward: [focus[0] - eye[0], focus[1] - eye[1], focus[2] - eye[2]],
+    }
+}
+
+#[test]
+fn a_river_reads_as_a_channel_with_a_current_in_it() {
+    // The capture is the verification, and it is the one this whole change is for: a ribbon of silty
+    // water in a cut, streaked along its own length, with the bed showing through the shallows and the
+    // water piling pale against both banks.
+    //
+    // The assertion under it is about the current, which is the one part of a river nothing else in
+    // this file would notice going missing. A `current` that was never packed into the uniform leaves
+    // a body whose waves still travel, still animate, and still satisfy every other test here, while
+    // the water itself stands still — so it is measured against the same material with the current
+    // zeroed, which holds the wave speed the two share out of the comparison.
+    let Some(context) = context() else { return };
+    let harness = harness_for(context, channel_terrain());
+    let (floor, rim) = world_elevation_range(&harness.terrain);
+    let level = floor + (rim - floor) * 0.35;
+    let frame = DeferredFrame::new(channel_pose(&harness.terrain, level), WIDTH, HEIGHT);
+    let [extent_x, extent_y] = harness.terrain.world_extent();
+
+    // Downstream is +x, which is the axis the channel runs along.
+    let flowing = WaterKind::River { flow: [9.0, 0.0] }.material();
+    let bodies = |material: WaterMaterial| {
+        vec![
+            WaterBody::new(
+                context,
+                WaterSurface::new([0.0, 0.0, extent_x, extent_y], level).with_material(material),
+                harness.deferred.water_layout(),
+            )
+            .expect("build river body"),
+        ]
+    };
+
+    let river = bodies(flowing);
+    let capture = render_water(context, &harness, &river, frame);
+    write_capture("water-river-channel.png", &capture);
+    support::check_reference(context, "water-river-channel.png", &capture);
+
+    let dry = render_water(context, &harness, &[], frame);
+    let wet = wet_mask(&dry, &capture);
+    let covered = wet.iter().filter(|wet| **wet).count();
+    assert!(
+        covered > (WIDTH * HEIGHT) as usize / 60,
+        "the channel holds {covered} pixels of water, which is too few to see a river in"
+    );
+
+    // Measured as how far the water *moved*, in mean channels of 255, rather than as how many pixels
+    // changed at all. Counting pixels was the first attempt and it saturated: over a third of a second
+    // a still surface's own waves already alter very nearly every water pixel by something, so the two
+    // came out 4.96% against 5.79% and the comparison was reporting the size of the river rather than
+    // the speed of anything. The step is short for the same reason — over a long one both surfaces
+    // decorrelate completely and any statistic saturates.
+    let step = 0.35;
+    let moved = |material: WaterMaterial| {
+        let body = bodies(material);
+        let before = render_water(context, &harness, &body, frame.at_time(0.0));
+        let after = render_water(context, &harness, &body, frame.at_time(step));
+        mean_difference_where(&before, &after, |pixel| wet[pixel])
+    };
+    let with_current = moved(flowing);
+    let without = moved(WaterMaterial {
+        current: [0.0, 0.0],
+        ..flowing
+    });
+    assert!(
+        with_current > without * 1.4,
+        "a current moved the surface by {with_current:.2} of 255 over {step}s against \
+         {without:.2} without one, so the water is not being carried downstream"
+    );
+}
+
+#[test]
+fn the_far_water_is_smoother_than_the_near_water_rather_than_noisier() {
+    // The normal level-of-detail, stated as the property it exists to produce.
+    //
+    // Without it the shading normal carries every wave component at full strength however little of
+    // the train a pixel covers, so the *far* half of a body — where a pixel spans several waves — is
+    // the half that alternates hardest between the reflected sky and the dark body. That is backwards:
+    // detail a pixel cannot resolve has to go, or it comes back as noise. Under a captured sky the
+    // reflected term is bright enough for the difference to be several times over, which is why this
+    // is measured there and not against the analytic gradient.
+    //
+    // Measured as mean absolute difference between horizontally adjacent water pixels, which is the
+    // aliasing directly: a surface reading as a lit sheet has a low one, and a surface reading as
+    // speckle has a high one however plausible its mean colour.
+    let Some(context) = context() else { return };
+    let scene = water_scene_under_sky(context);
+    let sky = fixture_sky_bound(context, &scene.harness);
+    let water = water_body(context, &scene, scene.level);
+    let captured = render_water_under_sky(context, &scene.harness, &water, &sky, scene.frame);
+    write_capture("water-detail-falloff.png", &captured);
+
+    let dry = render_under_sky(context, &scene.harness, &sky, scene.frame);
+    let mask = wet_mask(&dry, &captured);
+    let rows: Vec<u32> = (0..HEIGHT)
+        .filter(|y| (0..WIDTH).any(|x| mask[(y * WIDTH + x) as usize]))
+        .collect();
+    assert!(
+        rows.len() > 40,
+        "the lake spans only {} rows, which is too few to split into near and far",
+        rows.len()
+    );
+
+    // In a frame with the horizon above the lake, a lower row is nearer. The two bands are the top and
+    // bottom thirds, so the middle third is not counted twice or argued over.
+    let third = rows.len() / 3;
+    let roughness = |band: &[u32]| {
+        let mut total = 0.0f64;
+        let mut counted = 0usize;
+        for y in band {
+            for x in 1..WIDTH {
+                let (here, left) = ((y * WIDTH + x) as usize, (y * WIDTH + x - 1) as usize);
+                if !mask[here] || !mask[left] {
+                    continue;
+                }
+                for channel in 0..3 {
+                    let a = f64::from(captured.rgba()[here * 4 + channel]);
+                    let b = f64::from(captured.rgba()[left * 4 + channel]);
+                    total += (a - b).abs();
+                }
+                counted += 3;
+            }
+        }
+        assert!(
+            counted > 500,
+            "only {counted} adjacent water pairs in a band"
+        );
+        total / counted as f64
+    };
+    let far = roughness(&rows[..third]);
+    let near = roughness(&rows[rows.len() - third..]);
+    // By half again, not merely by a hair. A bare `far < near` would be satisfied by noise, and the
+    // property is not marginal: on the reference adapter the two bands come out at 0.92 and 1.88.
+    assert!(
+        far * 1.5 < near,
+        "the far water is {far:.2} against the near water's {near:.2} in mean step between \
+         adjacent pixels, which is not the falloff a damped wave normal produces — an undamped \
+         one makes the far band the *rougher* of the two, because that is where a pixel spans \
+         several waves"
     );
 }
 
@@ -2820,15 +3264,17 @@ fn a_lake_reflects_the_captured_sky_rather_than_the_analytic_one() {
          {analytic_lake:?}"
     );
 
-    // A limit this capture shows and no assertion here bounds: the surface **sparkles**, with dark
-    // pixels scattered through the reflection. That is not the sky lookup — it survives forcing the
-    // reflection to any mip level, including one where the environment is a flat wash. It is the
-    // Fresnel term aliasing on the wave normals, and it is pre-existing: at a ten-degree grazing view a
-    // six-degree change in a wave's slope moves the reflected share from 0.19 to 0.72, so neighbouring
-    // pixels alternate between the bright sky and the dark water body. The analytic sky hid it by
-    // being nearly as dark as the body, so there was nothing to alternate *with*. Fixing it means
-    // damping the wave normal by the pixel's footprint in the water pass, which is a change to how
-    // water shades rather than to what it reflects.
+    // This capture used to show the surface **sparkling**, with dark pixels scattered through the
+    // reflection, and said so here because no assertion bounded it. It was the Fresnel term aliasing
+    // on the wave normals rather than anything to do with the sky lookup — it survived forcing the
+    // reflection to a mip level where the environment is a flat wash — and it was pre-existing: at a
+    // ten-degree grazing view a six-degree change in a wave's slope moves the reflected share from
+    // 0.19 to 0.72, so neighbouring pixels alternated between the bright sky and the dark body. The
+    // analytic sky had hidden it by being nearly as dark as the body, so there was nothing to
+    // alternate *with*. The water pass now damps each wave component of the shading normal by how much
+    // of it a pixel covers; `the_far_water_is_smoother_than_the_near_water_rather_than_noisier` is the
+    // assertion that was missing, and this capture is where it is visible.
+    //
     // And turning the sky moves what the lake reflects. This is what separates a reflection from a
     // tint: a Fresnel share of a constant would not care which way the environment is facing.
     let mut turned_sky = fixture_sky_bound(context, &scene.harness);
