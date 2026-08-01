@@ -1,15 +1,15 @@
 # ADR 3001: Pathfinding — derived passability, occluders and passage, integer-cost grid A*
 
-- Status: accepted, and **implemented but for decision 10** — `cic_sim::ground` derives the grid,
-  stamps it, and searches it, and `cic_sim::units` walks what it returns and re-plans when the
-  ground under a route changes. Decision 6's string-pulling gained a corner-rounding pass this
-  record did not describe, recorded as **amendment D** below rather than left as undocumented
-  behaviour, and stamping exposed a defect in the same pass, recorded as **amendment E**.
-  Decisions 1 through 9 are in the tree; decision 10 (local avoidance) is not, and is still waiting
-  on the mechanic that produces the thing it reacts to. **All five amendments below are accepted**
-  — A, B and C by Denys on 2026-08-01 together with [ADR 3002](3002-corridor-economy.md), which
-  raised them, and D and E with the passes that introduced them. A, B, D and E are implemented; C
-  has nothing to implement until combat produces a wreck.
+- Status: accepted and **implemented in full** — `cic_sim::ground` derives the grid, stamps it and
+  searches it; `cic_sim::units` walks what it returns, re-plans when the ground under a route
+  changes, and keeps units out of each other. Decision 6's string-pulling gained a corner-rounding
+  pass this record did not describe, recorded as **amendment D** below rather than left as
+  undocumented behaviour, and stamping exposed a defect in the same pass, recorded as **amendment
+  E**. Decision 10 reserved ground rather than designing it, so what was decided while building it
+  is written into that entry. **All five amendments below are accepted** — A, B and C by Denys on
+  2026-08-01 together with [ADR 3002](3002-corridor-economy.md), which raised them, and D and E
+  with the passes that introduced them. A, B, D and E are implemented; C has nothing to implement
+  until combat produces a wreck.
 
 ## Context
 
@@ -178,6 +178,53 @@ facing in particular needs to be reproducible and natural-looking, not a six-dec
     steering — push apart, slide along — not a reciprocal-velocity scheme; an RTS at this camera
     height needs units that do not stack, not crowd simulation. Ground reserved, not designed.
 
+    **Implemented, and the ground reserved here is what the rest of this entry now uses.** A unit is
+    a circle of `radius` metres; after every unit has stepped, each pair whose circles intersect
+    gives up half the overlap along the line between their centres, scaled by one coefficient. That
+    is "push apart". A push the grid refuses is retried one axis at a time, larger component first,
+    so a unit shoved into a wall travels along it instead of stopping dead — that is "slide along".
+    There is no negotiation between agents anywhere in it.
+
+    Six things the record left open, decided here rather than in the code:
+
+    - **`radius` is required for a `unit` and refused for everything else**, on the identical rule
+      as `speed`. A standing object's occupancy is its `footprint` — whole cells, on the grid,
+      never moving — and a mover's is a circle other movers push away from. The two are different
+      mechanisms for the same idea and a template declaring the wrong one is a mistake worth
+      refusing at load. The check is written once and used twice, because it is one rule.
+    - **Every push is measured before any is applied.** Resolving in place would be deterministic —
+      the roster is keyed by identifier — but it would give the lower identifier right of way, and
+      "the unit built first wins the shoving match" is a rule somebody would have to explain later.
+      Two passes cost one array of positions a tick and mean identifier order decides nothing.
+    - **Two units in exactly the same place have no line to push along**, so that tie *is* broken on
+      identifier order, along X. It is the only thing order decides here.
+    - **The clamp is about the unit's centre, not its circle.** Routes run through cell centres and
+      the stepper has always been a point on the grid; inflating obstacles by a radius is a real
+      design and this decision does not ask for one.
+    - **One coefficient**, `AvoidanceRules::separation` — how much of an overlap comes out of it per
+      tick — folded into the subsystem hash for the reason `GroundRules` folds its own in. `0.0` is
+      how "no avoidance" is spelled, rather than a second flag that could disagree with it.
+    - **A crowd is measured against itself.** Sixteen units ordered to one cell on the rough test
+      map end with 17 of 120 pairs overlapping, against **120 of 120** with the coefficient at
+      zero; on the tightest muster point the map has, nobody is ever pushed onto ground the grid
+      refuses.
+
+    **Two limitations, recorded rather than hidden.** Units walking directly into each other stall,
+    each pushing the other back as fast as it walks forward, because a head-on push has no sideways
+    component to slide on; fixing that means choosing a side, which means a rule about *which*
+    side, which is the negotiation this decision declined. And a crowd ordered to one point keeps
+    jostling rather than settling — the 17 pairs above are that, not a failure to converge — because
+    every unit is still walking at a point every other unit is standing on. The fix for the second
+    is **formation movement**, an [M6](../milestones/m6-gameplay.md) charter line in its own right:
+    sixteen units sent to one place should be given sixteen places.
+
+    **The quadratic is not the problem it looks like**, and is left alone on measurement rather than
+    on faith. One tick of `cic_sim::units` over units standing still — which is the pair loop plus a
+    stepper with nothing to do — costs **0.013 ms at 100 units, 0.14 ms at 500 and 0.49 ms at
+    1000**, against a 33 ms tick. A uniform spatial bin over the same cells the grid already has is
+    the recorded mitigation, in the same spirit as decision 5's coarsening: written down so it is
+    not reinvented, and not built until something measures a reason.
+
 ## Rationale
 
 **Derived passability, against an authored layer.** An authored layer was the credible alternative —
@@ -218,7 +265,7 @@ on screen is constrained by this; only the *stamp* is quantized.
 
 - `templates.json` gains `footprint`, `passage` (with a cost class), and later `radius` — each
   arriving with its consumer, per that format's growth rule. Structures acquire their first
-  simulation-side meaning. The first two have landed; `radius` waits for decision 10.
+  simulation-side meaning. All three have landed, `radius` with decision 10's separation pass.
 - The scenario/package layer must place structures on cell boundaries or accept quantization at
   activation. It accepts the quantization: a placement's position picks the cell it falls in and the
   rectangle is centred on that, so no authoring rule changed and nothing in the scenario format

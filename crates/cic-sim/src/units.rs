@@ -23,6 +23,20 @@
 //! the pathfinder would be worse than the straight line it replaced: a unit would walk confidently
 //! through a wall that went up in front of it, following a route that was correct when it was made.
 //!
+//! # And units do not stand in each other
+//!
+//! Decision 10, and it is deliberately the modest thing the record asks for: a unit is a circle,
+//! overlapping circles push apart, and a push the ground refuses slides along whichever axis is
+//! free. There is no reciprocal-velocity scheme and no crowd simulation here, because **an RTS at
+//! this camera height needs units that do not stack**, not agents that negotiate.
+//!
+//! Two properties are worth stating because they are what the implementation is shaped around.
+//! Every push is computed against the positions as they stood when the pass began and applied
+//! afterwards, so **identifier order decides nothing** — two units meeting push each other by the
+//! same amount whichever was spawned first. And a push is checked against the grid before it is
+//! taken, because the invariant that no unit ever stands on impassable ground is older than this
+//! pass and must survive it: a shove is not a licence to enter a building.
+//!
 //! # The arithmetic is inside ADR 0007 without needing `cic-math` yet
 //!
 //! One tick of movement is a subtraction, a `sqrt`, a division, and a multiply-add per axis — every
@@ -63,6 +77,33 @@ const TAG_MOVE: u8 = 2;
 /// The verb tag a stop payload starts with.
 const TAG_STOP: u8 = 3;
 
+/// Every coefficient local avoidance runs on.
+///
+/// One number, because [ADR 3001](../../../docs/adr/3001-pathfinding.md) decision 10 asks for the
+/// modest thing and the modest thing has one number in it. Gathered in a struct and folded into the
+/// subsystem hash for the reason `GroundRules` is: a coefficient that changes where units end up
+/// changes the game, and two machines running one match under different ones should find out on
+/// tick zero rather than by watching a formation drift apart.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AvoidanceRules {
+    /// How much of an overlap is taken out of it each tick, as a fraction of the whole.
+    ///
+    /// `1.0` separates two overlapping units completely in one tick, which is correct and looks
+    /// like a flinch; smaller values converge over a few ticks and read as shouldering past. `0.0`
+    /// switches avoidance off entirely, which is what a test wanting the pre-decision-10 behaviour
+    /// asks for — and the honest way to express "off", rather than a separate flag that could
+    /// disagree with the number beside it.
+    pub separation: f64,
+}
+
+impl Default for AvoidanceRules {
+    fn default() -> Self {
+        // Half the overlap a tick: at thirty ticks a second two units that walk into each other are
+        // clear inside a fifth of a second, and no single tick moves anybody a visible jump.
+        Self { separation: 0.5 }
+    }
+}
+
 /// One unit.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Unit {
@@ -74,6 +115,8 @@ pub struct Unit {
     pub position: [f64; 2],
     /// Speed in metres per second, captured from the template at spawn.
     pub speed: f64,
+    /// How much room it takes up, in metres, captured from the template at spawn.
+    pub radius: f64,
     /// The waypoints still to walk, in order. Empty when holding.
     ///
     /// A route rather than a point, because a unit going somewhere is going *by a way*: the
@@ -100,11 +143,24 @@ impl Unit {
     }
 }
 
+/// What a `unit` template measures out to: the two numbers a spawned unit carries with it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Mover {
+    /// Metres per second on the reference ground class.
+    speed: f64,
+    /// Metres of room to keep around it.
+    radius: f64,
+}
+
 /// The mobile roster: every unit, and the movement that advances them.
 #[derive(Debug, Clone)]
 pub struct Units {
-    /// Unit-kind template speeds, captured at construction. What a spawn resolves against.
-    speeds: BTreeMap<String, f64>,
+    /// What each unit-kind template measures out to, captured at construction. What a spawn
+    /// resolves against, and why a spawn of a template the set does not describe is a rejection
+    /// rather than a unit with made-up numbers.
+    movers: BTreeMap<String, Mover>,
+    /// The coefficients local avoidance runs on.
+    rules: AvoidanceRules,
     roster: BTreeMap<ObjectId, Unit>,
     /// Commands ignored so far — unknown templates, unowned units, unparseable bytes. Hashed, so a
     /// machine that ignored a different number of commands diverges on the tick it happened.
@@ -120,21 +176,44 @@ impl Units {
     /// A roster with no units, spawning from the given template set.
     #[must_use]
     pub fn new(templates: &TemplateSet) -> Self {
-        let speeds = templates
+        let movers = templates
             .templates
             .iter()
             .filter(|template| template.kind == TemplateKind::Unit)
             .filter_map(|template| {
-                let speed = template.speed?;
-                Some((template.id.clone(), f64::from(speed)))
+                // Both or neither. A validated set gives a unit both, and one that gives it only a
+                // speed is one this build will not spawn from rather than one it invents a size
+                // for — the same refusal, at the same place, as a template it has never heard of.
+                let (speed, radius) = (template.speed?, template.radius?);
+                Some((
+                    template.id.clone(),
+                    Mover {
+                        speed: f64::from(speed),
+                        radius: f64::from(radius),
+                    },
+                ))
             })
             .collect();
         Self {
-            speeds,
+            movers,
+            rules: AvoidanceRules::default(),
             roster: BTreeMap::new(),
             rejected: 0,
             repathed: 0,
         }
+    }
+
+    /// The same roster under different avoidance coefficients.
+    #[must_use]
+    pub fn with_rules(mut self, rules: AvoidanceRules) -> Self {
+        self.rules = rules;
+        self
+    }
+
+    /// The coefficients local avoidance runs on.
+    #[must_use]
+    pub const fn rules(&self) -> &AvoidanceRules {
+        &self.rules
     }
 
     /// The units, keyed by identifier.
@@ -184,6 +263,92 @@ impl Units {
         }
     }
 
+    /// Pushes overlapping units apart, without letting anybody be pushed somewhere they may not
+    /// stand.
+    ///
+    /// [ADR 3001](../../../docs/adr/3001-pathfinding.md) decision 10, and the whole of it. A unit
+    /// is a circle; two circles that intersect each give up half the overlap along the line between
+    /// their centres, scaled by [`AvoidanceRules::separation`]. That is the record's "push apart",
+    /// and it is all the record asks for — the alternative it names and rejects is a
+    /// reciprocal-velocity scheme, which negotiates *velocities* between agents and is a different
+    /// and much larger thing.
+    ///
+    /// # Two passes, because one would make the answer depend on who was spawned first
+    ///
+    /// Every push is measured against the positions as they stood when the pass began, and applied
+    /// afterwards. Resolving in place would work and would be deterministic — the roster is keyed
+    /// by identifier, so the order is fixed — but it would give the lower identifier right of way,
+    /// and "the unit built first wins the shoving match" is a rule somebody would eventually have
+    /// to explain. Measuring first costs one array of positions a tick and means the only thing
+    /// identifier order decides here is the summation order of the arithmetic.
+    ///
+    /// # A push is checked against the grid, and slides when it is refused
+    ///
+    /// `no unit ever stands on impassable ground` is older than this pass and has to survive it, so
+    /// a push is taken only if the run to where it lands crosses ground the unit could have walked.
+    /// When the whole push is refused, the larger of its two components is tried alone and then the
+    /// smaller — which is the record's "slide along", and the reason a unit shoved into a wall
+    /// travels down the wall instead of stopping dead against it.
+    ///
+    /// The clamp is about the unit's *centre*, not its circle: routes run through cell centres and
+    /// the stepper has always been a point on the grid. Inflating obstacles by a radius is a real
+    /// design and decision 10 does not ask for one.
+    ///
+    /// # What this does not do, on purpose
+    ///
+    /// Two units walking directly into each other stall, pushing each other back as fast as they
+    /// walk forward, because a head-on push has no sideways component to slide on. Fixing that
+    /// means choosing a side, which means a rule about *which* side, which is the negotiation the
+    /// record declined. Recorded rather than hidden: it is the known edge of the modest version.
+    fn separate(&mut self, ground: Option<&Ground>) {
+        let strength = self.rules.separation;
+        // Written positively so a coefficient that is not a number falls out as "do not avoid"
+        // rather than through a negated comparison, which for a partially ordered type reads as
+        // though NaN had been thought about when it had not.
+        let avoiding = strength > 0.0 && self.roster.len() >= 2;
+        if !avoiding {
+            return;
+        }
+
+        // Identifier order, from the map that is already in it.
+        let bodies: Vec<([f64; 2], f64)> = self
+            .roster
+            .values()
+            .map(|unit| (unit.position, unit.radius))
+            .collect();
+        let mut pushes = vec![[0.0_f64; 2]; bodies.len()];
+        for (first, &(here, near)) in bodies.iter().enumerate() {
+            for (second, &(there, far)) in bodies.iter().enumerate().skip(first + 1) {
+                let room = near + far;
+                let (dx, dy) = (there[0] - here[0], there[1] - here[1]);
+                // Squared, so the common case of two units nowhere near each other costs no `sqrt`.
+                let gap = dx * dx + dy * dy;
+                if gap >= room * room {
+                    continue;
+                }
+                let span = gap.sqrt();
+                let (away_x, away_y) = if span > 0.0 {
+                    (dx / span, dy / span)
+                } else {
+                    // Exactly coincident, so there is no line between them to push along. The tie
+                    // breaks on identifier order and steps them apart along X — the one place in
+                    // this pass where being spawned first decides anything, and all it decides is
+                    // which way two units standing in the very same spot step.
+                    (1.0, 0.0)
+                };
+                let share = (room - span) * 0.5 * strength;
+                pushes[first][0] -= away_x * share;
+                pushes[first][1] -= away_y * share;
+                pushes[second][0] += away_x * share;
+                pushes[second][1] += away_y * share;
+            }
+        }
+
+        for (unit, push) in self.roster.values_mut().zip(pushes) {
+            unit.position = shove(unit.position, push, ground);
+        }
+    }
+
     fn apply(
         &mut self,
         issuer: PlayerId,
@@ -193,7 +358,7 @@ impl Units {
     ) {
         match decode(payload) {
             Some(Verb::Spawn { template, x, y }) => {
-                let Some(&speed) = self.speeds.get(template) else {
+                let Some(&mover) = self.movers.get(template) else {
                     self.rejected += 1;
                     return;
                 };
@@ -208,7 +373,8 @@ impl Units {
                         owner: issuer,
                         template: template.to_owned(),
                         position: [x, y],
-                        speed,
+                        speed: mover.speed,
+                        radius: mover.radius,
                         route: Vec::new(),
                     },
                 );
@@ -304,6 +470,11 @@ impl Subsystem for Units {
                 }
             }
         }
+
+        // Last, because avoidance is about where everybody *ended up*: resolving overlaps before
+        // the step would separate units from where they were and then walk them back into each
+        // other, which is a jitter rather than an avoidance.
+        self.separate(ground);
     }
 
     fn write_state(&self, hasher: &mut StateHasher) {
@@ -315,6 +486,7 @@ impl Subsystem for Units {
             hasher.write_f64(unit.position[0]);
             hasher.write_f64(unit.position[1]);
             hasher.write_f64(unit.speed);
+            hasher.write_f64(unit.radius);
             // The whole remaining route, not just where it ends: two machines that agree about the
             // destination and disagree about the way there are diverged, and this is the tick to
             // say so rather than the tick the paths visibly part.
@@ -326,11 +498,44 @@ impl Subsystem for Units {
         }
         hasher.write_u64(self.rejected);
         hasher.write_u64(self.repathed);
+        // The coefficient, for the reason `GroundRules` folds its own in: it decides where units
+        // end up, so two machines set differently are playing two different games and should say so
+        // on tick zero rather than by drifting.
+        hasher.write_f64(self.rules.separation);
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+}
+
+/// Where a push actually lands: the whole of it if the ground allows, one axis of it if the ground
+/// allows only one, and nowhere if it allows neither.
+///
+/// The larger component is tried first, because a unit shoved mostly sideways into a wall should
+/// carry on mostly sideways. A tie goes to X, which decides nothing a player could see and is
+/// written down so that it is a choice rather than an accident.
+///
+/// With no grid registered there is nothing to refuse the push, which is the same answer this
+/// subsystem gives everywhere else: a kernel that was never told about terrain is not a kernel with
+/// impassable terrain in it.
+fn shove(from: [f64; 2], push: [f64; 2], ground: Option<&Ground>) -> [f64; 2] {
+    let moved = [from[0] + push[0], from[1] + push[1]];
+    if push == [0.0, 0.0] || !(moved[0].is_finite() && moved[1].is_finite()) {
+        return from;
+    }
+    let Some(ground) = ground else {
+        return moved;
+    };
+    let (long, short) = if push[0].abs() >= push[1].abs() {
+        ([from[0] + push[0], from[1]], [from[0], from[1] + push[1]])
+    } else {
+        ([from[0], from[1] + push[1]], [from[0] + push[0], from[1]])
+    };
+    [moved, long, short]
+        .into_iter()
+        .find(|candidate| ground.walkable_between(from, *candidate))
+        .unwrap_or(from)
 }
 
 /// A decoded verb.
@@ -450,6 +655,7 @@ mod tests {
     use crate::ground::{GROUND, Ground, GroundRules, METALLED, PLAIN};
     use crate::id::ObjectId;
     use crate::kernel::{Kernel, KernelConfig, first_divergence};
+    use crate::subsystem::Subsystem;
 
     /// A quarter of a revolution, in the binary turns simulation state stores a heading as.
     const QUARTER_TURN: u32 = 1 << 30;
@@ -464,6 +670,9 @@ mod tests {
                     model: Some("models/rifleman.glb".to_owned()),
                     name: None,
                     speed: Some(6.0),
+                    // Half a metre against fixtures a metre to the cell, so two units touching is
+                    // a visible overlap and one cell apart is clear of it.
+                    radius: Some(0.5),
                     footprint: None,
                     passage: None,
                 },
@@ -477,6 +686,7 @@ mod tests {
                     model: Some("models/sapper.glb".to_owned()),
                     name: None,
                     speed: Some(4.0),
+                    radius: Some(0.5),
                     footprint: None,
                     passage: None,
                 },
@@ -493,6 +703,7 @@ mod tests {
             model: Some("models/road.glb".to_owned()),
             name: None,
             speed: None,
+            radius: None,
             footprint: None,
             passage: Some(Passage {
                 cells: [32, 1],
@@ -505,6 +716,7 @@ mod tests {
             model: Some("models/wall.glb".to_owned()),
             name: None,
             speed: None,
+            radius: None,
             footprint: Some(Footprint { cells: [1, 9] }),
             passage: None,
         });
@@ -1087,6 +1299,198 @@ mod tests {
         assert_eq!(
             walked, expected,
             "route of {length} metres in {walked} ticks"
+        );
+    }
+
+    /// A kernel with the units subsystem under the given avoidance coefficients.
+    fn kernel_avoiding(rules: super::AvoidanceRules) -> Kernel {
+        let mut kernel = Kernel::new(KernelConfig {
+            seed: 21,
+            ticks_per_second: 30,
+        });
+        kernel.add_subsystem(Box::new(Units::new(&templates()).with_rules(rules)));
+        kernel
+    }
+
+    #[test]
+    fn two_units_in_one_place_step_apart_and_a_third_across_the_map_does_not() {
+        // Spawned on top of each other, which is the case with no line between the two centres to
+        // push along and therefore the one that has to be decided rather than computed. Half a
+        // metre of radius each and half the overlap a tick puts them a quarter of a metre either
+        // side, exactly, so this pins the tie-break *and* the share of the overlap at once.
+        let mut kernel = kernel_avoiding(super::AvoidanceRules::default());
+        kernel
+            .advance(&[
+                command(0, 0, spawn_command("unit/rifleman", 5.0, 5.0)),
+                command(0, 0, spawn_command("unit/rifleman", 5.0, 5.0)),
+                command(0, 0, spawn_command("unit/rifleman", 90.0, 90.0)),
+            ])
+            .expect("advances");
+
+        let roster = units(&kernel);
+        assert_eq!(roster.units()[&ObjectId(1)].position, [4.75, 5.0]);
+        assert_eq!(roster.units()[&ObjectId(2)].position, [5.25, 5.0]);
+        assert_eq!(
+            roster.units()[&ObjectId(3)].position,
+            [90.0, 90.0],
+            "a unit nowhere near anybody must not be nudged, or every position in the game is \
+             approximate"
+        );
+
+        // And they keep going until they are clear, rather than settling still overlapped.
+        for _ in 1..40 {
+            kernel.advance(&[]).expect("advances");
+        }
+        let roster = units(&kernel);
+        let (first, second) = (
+            roster.units()[&ObjectId(1)].position,
+            roster.units()[&ObjectId(2)].position,
+        );
+        let apart = (second[0] - first[0]).abs();
+        assert!(
+            apart > 0.99,
+            "two half-metre units settled {apart} apart, which is still standing in each other"
+        );
+    }
+
+    #[test]
+    fn a_push_moves_both_units_by_the_same_amount() {
+        // Symmetry is the property the two-pass shape exists for: the push is measured against the
+        // positions as they stood when the pass began, so being spawned first buys nothing. A
+        // resolve-in-place implementation gives the lower identifier right of way and fails here.
+        let mut kernel = kernel_avoiding(super::AvoidanceRules::default());
+        kernel
+            .advance(&[
+                command(0, 0, spawn_command("unit/rifleman", 10.0, 4.0)),
+                command(0, 0, spawn_command("unit/rifleman", 10.6, 4.0)),
+            ])
+            .expect("advances");
+        let roster = units(&kernel);
+        let left = 10.0 - roster.units()[&ObjectId(1)].position[0];
+        let right = roster.units()[&ObjectId(2)].position[0] - 10.6;
+        assert!(left > 0.0, "the left unit was not pushed left at all");
+        assert!(
+            (left - right).abs() < 1e-12,
+            "the left unit gave {left} and the right one {right}"
+        );
+    }
+
+    #[test]
+    fn switching_separation_off_leaves_units_standing_in_each_other() {
+        // The coefficient is real, and `0.0` is how the behaviour before decision 10 is spelled.
+        let mut kernel = kernel_avoiding(super::AvoidanceRules { separation: 0.0 });
+        kernel
+            .advance(&[
+                command(0, 0, spawn_command("unit/rifleman", 5.0, 5.0)),
+                command(0, 0, spawn_command("unit/rifleman", 5.0, 5.0)),
+            ])
+            .expect("advances");
+        for _ in 1..40 {
+            kernel.advance(&[]).expect("advances");
+        }
+        let roster = units(&kernel);
+        assert_eq!(roster.units()[&ObjectId(1)].position, [5.0, 5.0]);
+        assert_eq!(roster.units()[&ObjectId(2)].position, [5.0, 5.0]);
+    }
+
+    #[test]
+    fn a_push_may_not_put_a_unit_where_it_could_not_have_walked() {
+        // `no unit ever stands on impassable ground` is older than avoidance and has to survive it.
+        // Two units shoulder to shoulder against the wall: the one pushed away from it moves, and
+        // the one pushed into it stays exactly where it was, because a shove is not a licence to
+        // enter a building.
+        let terrain = walled_terrain();
+        let mut kernel = kernel_on(&terrain);
+        kernel
+            .advance(&[
+                command(0, 0, spawn_command("unit/rifleman", 2.9, 2.5)),
+                command(0, 0, spawn_command("unit/rifleman", 2.95, 2.5)),
+            ])
+            .expect("advances");
+
+        let ground = ground_of(&kernel);
+        assert!(!ground.passable(3, 2), "the wall is where the test put it");
+        let roster = units(&kernel);
+        assert!(
+            roster.units()[&ObjectId(1)].position[0] < 2.9,
+            "the unit with room behind it should have taken the whole push"
+        );
+        assert_eq!(
+            roster.units()[&ObjectId(2)].position,
+            [2.95, 2.5],
+            "the unit against the wall was pushed into it"
+        );
+    }
+
+    #[test]
+    fn a_push_a_wall_refuses_slides_along_it() {
+        // The other half of "push apart, slide along". The push here is up and to the right, the
+        // right of it is a wall, and the up of it is open — so the unit travels up the wall instead
+        // of stopping dead against it. Asserted as an exact non-move in X and a real move in Y,
+        // because "it moved a bit" would also be satisfied by taking a fraction of the whole push.
+        let terrain = walled_terrain();
+        let mut kernel = kernel_on(&terrain);
+        kernel
+            .advance(&[
+                command(0, 0, spawn_command("unit/rifleman", 2.9, 2.4)),
+                command(0, 0, spawn_command("unit/rifleman", 2.95, 2.5)),
+            ])
+            .expect("advances");
+
+        let against_the_wall = &units(&kernel).units()[&ObjectId(2)];
+        assert_eq!(
+            against_the_wall.position[0], 2.95,
+            "the blocked component was taken anyway"
+        );
+        assert!(
+            against_the_wall.position[1] > 2.5,
+            "the free component was not taken, so the unit stopped dead instead of sliding: {:?}",
+            against_the_wall.position
+        );
+        let cell = ground_of(&kernel)
+            .cell_at(against_the_wall.position)
+            .expect("on the grid");
+        assert!(ground_of(&kernel).passable(cell.0, cell.1));
+    }
+
+    #[test]
+    fn how_much_room_a_unit_takes_is_in_the_hash_and_so_is_the_coefficient() {
+        let hash = |rules| {
+            let mut hasher = crate::hash::StateHasher::new();
+            Units::new(&templates())
+                .with_rules(rules)
+                .write_state(&mut hasher);
+            hasher.finish()
+        };
+        let base = super::AvoidanceRules::default();
+        assert_eq!(hash(base), hash(base));
+        assert_ne!(hash(base), hash(super::AvoidanceRules { separation: 0.0 }));
+        assert_ne!(hash(base), hash(super::AvoidanceRules { separation: 1.0 }));
+
+        // And the radius itself, which is per unit rather than per subsystem. Avoidance is switched
+        // off in both runs so the two units stand in exactly the same place and the *only* thing
+        // that differs is how much room each claims — otherwise this would pass on the positions
+        // diverging and say nothing about whether the radius reached the hash at all.
+        let spawned = |radius: f32| {
+            let mut set = templates();
+            set.templates[0].radius = Some(radius);
+            let mut kernel = Kernel::new(KernelConfig {
+                seed: 21,
+                ticks_per_second: 30,
+            });
+            kernel.add_subsystem(Box::new(
+                Units::new(&set).with_rules(super::AvoidanceRules { separation: 0.0 }),
+            ));
+            kernel
+                .advance(&[command(0, 0, spawn_command("unit/rifleman", 5.0, 5.0))])
+                .expect("advances")
+        };
+        assert_eq!(spawned(0.5), spawned(0.5));
+        assert_ne!(
+            spawned(0.5),
+            spawned(1.5),
+            "two machines that disagree about how much room a unit takes will disagree about where \
+             everybody ends up, and should say so on the tick it happened"
         );
     }
 

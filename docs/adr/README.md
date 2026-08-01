@@ -26,7 +26,7 @@ only the leading token has to agree.
 | [0007](0007-simulation-arithmetic.md) | Simulation arithmetic: `f64` and a restricted operation set | accepted, implemented |
 | [0008](0008-physics-engine.md) | Physics is cosmetic, and Rapier rather than Jolt | accepted |
 | [2001](2001-block-compressed-textures.md) | Block-compressed textures in DDS, and a converter to make them | accepted, implemented |
-| [3001](3001-pathfinding.md) | Pathfinding: derived passability, occluders and passage, integer-cost grid A* | accepted and implemented but for local avoidance; five amendments, four of them built |
+| [3001](3001-pathfinding.md) | Pathfinding: derived passability, occluders and passage, integer-cost grid A* | accepted and implemented in full; five amendments, four of them built |
 | [3002](3002-corridor-economy.md) | The corridor economy: one currency, three acquisitions, carriage on the map | accepted |
 | [4001](4001-hdri-sky.md) | Captured skies: Radiance `.hdr`, an equirectangular lookup, and the light derived from it | accepted, implemented |
 | [4002](4002-water-kinds.md) | Three kinds of water: a spread wave train, kind presets, and normal level-of-detail | accepted, implemented |

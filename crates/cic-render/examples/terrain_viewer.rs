@@ -795,11 +795,15 @@ fn demo_scenario(terrain: &Terrain) -> (Scenario, TemplateSet) {
         model: model.map(str::to_owned),
         name: None,
         speed: None,
+        radius: None,
         footprint: None,
         passage: None,
     };
     let mut scout = template("unit/scout", TemplateKind::Unit, Some("models/scout.glb"));
     scout.speed = Some(26.0);
+    // The scout stand-in is a box 6.8 units across, so this is the model's own half-width: two
+    // scouts crossing paths now pass each other rather than through each other.
+    scout.radius = Some(3.4);
     let mut depot = template(
         "structure/depot",
         TemplateKind::Structure,
