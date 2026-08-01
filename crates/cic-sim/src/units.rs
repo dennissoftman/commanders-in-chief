@@ -218,7 +218,15 @@ impl Subsystem for Units {
             // unit would forfeit the remainder of its step at every waypoint, so a route with
             // corners in it would be slower than the same distance in a straight line — and the
             // pathfinder would have made units worse at going places.
-            let mut reach = unit.speed * step;
+            //
+            // The ground under the unit scales that travel, per ADR 3001 amendment B: a class ranks
+            // routes and sets the pace on them, or grading the map would change which way a unit
+            // went and not how long it took. Sampled once, from where the unit stands at the start
+            // of the tick, rather than per leg — at thirty ticks a second a unit spends tens of
+            // ticks inside one cell, so the difference is unobservable and the simpler rule is the
+            // one that can be reasoned about.
+            let pace = ground.map_or(1.0, |ground| ground.pace_at(unit.position));
+            let mut reach = unit.speed * step * pace;
             while reach > 0.0 && !unit.route.is_empty() {
                 let waypoint = unit.route[0];
                 let dx = waypoint[0] - unit.position[0];
@@ -627,6 +635,48 @@ mod tests {
         }
         let unit = &units(&kernel).units()[&ObjectId(1)];
         assert_eq!(unit.position, [6.5, 0.5], "it arrived, the long way");
+    }
+
+    #[test]
+    fn better_ground_carries_a_unit_faster() {
+        // ADR 3001 amendment B: a cell's class scales the rate, not only the ranking. Nothing stamps
+        // a road yet, so the two grids differ in what their *open ground* derives to — one map paved
+        // and one not — which exercises the same arithmetic the first graded road will.
+        let terrain = walled_terrain();
+        let travelled = |plain_class| {
+            let mut kernel = Kernel::new(KernelConfig {
+                seed: 21,
+                ticks_per_second: 30,
+            });
+            kernel.add_subsystem(Box::new(Ground::derive(
+                &terrain,
+                crate::ground::GroundRules {
+                    plain_class,
+                    ..crate::ground::GroundRules::default()
+                }
+                .with_sharp_corners(),
+            )));
+            kernel.add_subsystem(Box::new(Units::new(&templates())));
+            kernel
+                .advance(&[command(0, 0, spawn_command("unit/rifleman", 0.5, 7.5))])
+                .expect("advances");
+            kernel
+                .advance(&[command(1, 0, move_command(ObjectId(1), 7.5, 7.5))])
+                .expect("advances");
+            for _ in 2..10 {
+                kernel.advance(&[]).expect("advances");
+            }
+            units(&kernel).units()[&ObjectId(1)].position[0] - 0.5
+        };
+
+        // Metalled is class 1 against a reference of 3, so three times the pace of plain ground.
+        let plain = travelled(crate::ground::PLAIN);
+        let metalled = travelled(crate::ground::METALLED);
+        assert!(plain > 0.0, "the unit on plain ground did not move at all");
+        assert!(
+            (metalled - plain * 3.0).abs() < 1e-9,
+            "metalled {metalled} against plain {plain} is not the three-to-one the ladder sets"
+        );
     }
 
     #[test]

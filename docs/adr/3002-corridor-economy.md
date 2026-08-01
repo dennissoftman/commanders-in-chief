@@ -1,6 +1,10 @@
 # ADR 3002: The corridor economy — one currency, three acquisitions, carriage on the map
 
-- Status: proposed
+- Status: accepted by Denys on 2026-08-01. Nothing here is implemented; the three amendments it
+  raises against [ADR 3001](3001-pathfinding.md) were accepted with it and **two of those are built**.
+  Accepting this record fixes the design rather than scheduling it: decision 1 — gates, yards and
+  carriage — is the minimum viable version, and the build order is shared carriage first, faction
+  divergence second, per *The unwelcome consequence* at the end.
 
 Numbered in the `3xxx` family — simulation — because an economy is kernel state and follows the same
 determinism rules as everything else there. [ADR 3001](3001-pathfinding.md) set the precedent: a
@@ -378,7 +382,7 @@ homes in [mechanics.md §10](../design/mechanics.md#10-what-this-document-oblige
 which is the one place they are enumerated — these numbers are generated from that table and the list
 is deliberately not repeated here, because a second copy is a second thing to keep true.
 
-<!--count:promised-->Seven<!--/count--> are already promised or built: templates growing fields with the
+<!--count:promised-->Nine<!--/count--> are already promised or built: templates growing fields with the
 mechanics that read them, footprint and passage from ADR 3001, runtime cell-cost edits, the string
 table, per-instance tint, standing orders that a carrier round trip extends rather than invents, and
 `passage` again as what a bridge grants. The rest are new, and

@@ -27,7 +27,7 @@ only the leading token has to agree.
 | [0008](0008-physics-engine.md) | Physics is cosmetic, and Rapier rather than Jolt | accepted |
 | [2001](2001-block-compressed-textures.md) | Block-compressed textures in DDS, and a converter to make them | accepted, implemented |
 | [3001](3001-pathfinding.md) | Pathfinding: derived passability, occluders and passage, integer-cost grid A* | accepted; grid and search implemented, stamps not, three amendments proposed |
-| [3002](3002-corridor-economy.md) | The corridor economy: one currency, three acquisitions, carriage on the map | proposed |
+| [3002](3002-corridor-economy.md) | The corridor economy: one currency, three acquisitions, carriage on the map | accepted |
 | [6001](6001-audio-backend-boundary.md) | Where the audio backend boundary goes | accepted, implemented |
 | [7001](7001-scripting-language.md) | A scripting language of this project's own | accepted, implemented |
 | [7002](7002-script-events.md) | Script events: subscription is a handler, scripts arrive with the scenario | accepted, implemented |
