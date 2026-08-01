@@ -382,10 +382,12 @@ homes in [mechanics.md §10](../design/mechanics.md#10-what-this-document-oblige
 which is the one place they are enumerated — these numbers are generated from that table and the list
 is deliberately not repeated here, because a second copy is a second thing to keep true.
 
-<!--count:promised-->Nine<!--/count--> are already promised or built: templates growing fields with the
+<!--count:promised-->Ten<!--/count--> are already promised or built: templates growing fields with the
 mechanics that read them, footprint and passage from ADR 3001, runtime cell-cost edits, the string
-table, per-instance tint, standing orders that a carrier round trip extends rather than invents, and
-`passage` again as what a bridge grants. The rest are new, and
+table, per-instance tint, standing orders that a carrier round trip extends rather than invents,
+`passage` again as what a bridge grants, and — since decision 4 landed — the stamping mechanism a
+wreck's cost class needs, leaving that row waiting on combat rather than on pathfinding. The rest
+are new, and
 <!--count:amendments-->three<!--/count--> of the total are amendments to an accepted record rather than
 work of their own.
 

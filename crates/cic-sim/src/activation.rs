@@ -448,6 +448,8 @@ mod tests {
             model: model.map(str::to_owned),
             name: None,
             speed: None,
+            footprint: None,
+            passage: None,
         };
         TemplateSet {
             format_version: 1,

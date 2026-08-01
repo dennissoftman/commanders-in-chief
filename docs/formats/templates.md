@@ -15,7 +15,14 @@ model a placed object wears.
   "format_version": 1,
   "templates": [
     { "id": "prop/pine", "kind": "prop", "model": "models/pine.glb" },
-    { "id": "structure/depot", "kind": "structure", "model": "models/depot.glb", "name": "template.depot" },
+    {
+      "id": "structure/depot", "kind": "structure", "model": "models/depot.glb",
+      "name": "template.depot", "footprint": { "cells": [5, 5] }
+    },
+    {
+      "id": "structure/bridge", "kind": "structure", "model": "models/bridge.glb",
+      "passage": { "cells": [2, 9], "class": 2 }
+    },
     { "id": "faction/vanguard", "kind": "faction", "name": "faction.vanguard" }
   ]
 }
@@ -31,13 +38,42 @@ model a placed object wears.
 | `templates[].model` | for placeable kinds | absent | Package-relative `.glb` path. Required for `unit`, `structure`, `prop`; refused for `faction`, which has no pose to draw at. |
 | `templates[].name` | no | absent | String-table key for the display name. |
 | `templates[].speed` | for `unit` | absent | World units per second, finite and positive. Required for a `unit` — one that cannot move is a structure wearing the wrong kind — and refused for every other kind, which has no movement for it to mean anything to. |
+| `templates[].footprint` | no | absent | `{ "cells": [x, y] }` — the ground this object *denies*, in whole pathfinding cells. Both extents non-zero. Allowed on `structure` and `prop` only. |
+| `templates[].passage` | no | absent | `{ "cells": [x, y], "class": n }` — the ground this object *grants*, and what crossing it costs. Both extents non-zero, class non-zero. Allowed on `structure` and `prop` only. |
+
+## Footprint and passage
+
+[ADR 3001](../adr/3001-pathfinding.md) decision 4. A structure denies the ground it stands on; a
+bridge grants passage over water it spans. Both are rectangles of whole cells measured along the
+template's own axes, and both are optional — a template may declare either, both, or neither.
+
+- **Precedence is derivation, then passage, then occlusion.** Passage replaces what the terrain
+  derived, so a bridge crosses a river; a footprint beats everything, so a depot raised at a
+  bridgehead denies the bridgehead — including its own template's passage, which is how a gatehouse
+  works.
+- **The cost class ladder** is `cic_sim::ground`'s: `1` metalled, `2` graded, `3` plain, `4` mud,
+  `5` rubble, and `0` impassable. A `passage` of class `0` is refused, because something that denies
+  ground declares a `footprint`; that is what the word means, and the two are not interchangeable.
+- **Where the rectangle lands.** The placement's position picks the cell it falls in, and the
+  rectangle is centred on that cell — an even extent taking the extra cell on the high side, because
+  a rectangle with an even side has no cell at its centre and something has to break the tie. A
+  rectangle that runs off the map is clipped where it leaves, not slid inward.
+- **Rotation is quantized to quarter turns, and only for the stamp.** A placement's `rotation` is
+  rounded to the nearest right angle, which swaps the two extents for a quarter or three-quarter
+  turn and does nothing for a half. What is *drawn* rotates freely: rasterizing a rectangle at 37°
+  deterministically is solvable and buys nothing for a genre whose buildings have snapped to grids
+  since it existed.
+- **A `unit` may not declare either.** A mover's own occupancy is ADR 3001 decision 10's `radius`
+  and the steering that reads it, not a grid stamp — a footprint that moved would have to be lifted
+  and re-laid every tick. A `faction` may not either, having no ground to stand on.
 
 ## Deliberately minimal, and how it grows
 
-Health, cost, weapons, footprints: none are here yet, and that is the point rather than an oversight. A
+Health, cost, weapons: none are here yet, and that is the point rather than an oversight. A
 field nothing consumes is a field nothing tests, which is the same argument that deferred the whole
-format from M2. Each arrives with the M6 mechanic that reads it — `speed` is the first to have done so,
-arriving with movement exactly as this paragraph promised. Adding an optional field later does not
+format from M2. Each arrives with the M6 mechanic that reads it — `speed` was the first to do so,
+arriving with movement, and `footprint` and `passage` the next, arriving with the grid stamps of
+[ADR 3001](../adr/3001-pathfinding.md) decision 4. Adding an optional field later does not
 break existing files; changing what an existing field means takes a version bump.
 
 ## One document, overridden wholesale

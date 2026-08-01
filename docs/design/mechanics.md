@@ -680,26 +680,26 @@ one. This document is the same claim continued, and the list is short enough to 
 |---|---|---|
 | Scenario `routes`, `gates`, `yards` | [scenario.md](../formats/scenario.md) | No — additive fields, needs a format decision |
 | Template `health`, `cost`, `build_time`, `weapons`, `armour_class`, `vision`, `capacity` | [templates.md](../formats/templates.md) | Yes — "each arrives with the M6 mechanic that reads it" |
-| Template `footprint`, `passage` | same | Yes — [ADR 3001](../adr/3001-pathfinding.md) consequences |
+| Template `footprint`, `passage` | same | Yes — built, [ADR 3001](../adr/3001-pathfinding.md) decision 4 |
 | Carrier round trips as standing orders | `cic_sim` | Partly — standing orders exist |
 | Off-map sortie slots with recovery timers | `cic_sim` | No |
 | Integer credit accumulation with retained remainder | `cic_sim` | No |
 | Per-link interdiction state, driven by damage events | `cic_sim` | No |
 | Upstream backlog with a cap, and the reopening surge | `cic_sim` | No |
 | Flow rerouting over the graph when a link is severed | `cic_sim` | No |
-| Destructible neutral crossings, and rebuilding them | `cic_sim`, templates | Partly — `passage` from ADR 3001 is what a bridge grants |
-| Wreck objects with decay, stamping a cost class | `cic_sim` | No — ADR 3001 amendment C is accepted, but nothing stamps until combat makes a wreck |
+| Destructible neutral crossings, and rebuilding them | `cic_sim`, templates | Partly — `passage` is built and grants the crossing; destroying and rebuilding one is not |
+| Wreck objects with decay, stamping a cost class | `cic_sim` | Partly — ADR 3001 amendment C is accepted and the stamping mechanism is built; the wreck waits on combat |
 | Link capacity derived from road condition and obstruction | `cic_sim` | No |
 | Convertible neutral structures | `cic_sim`, templates | No |
 | Detection as an axis beside vision | `cic_sim` fog | No |
-| Runtime cell-cost edits for grading, cratering and repair | `cic_sim` pathfinding | Yes — ADR 3001 decision 7's spike |
+| Runtime cell-cost edits for grading, cratering and repair | `cic_sim` pathfinding | Yes — built, ADR 3001 decisions 4 and 7; what edits the cells is not |
 | A cell's cost class reaching **movement rate**, not only path ranking | `cic_sim` units | Yes — built, ADR 3001 amendment B |
 | Cost classes that can express better-than-ground | ADR 3001 | Yes — built, ADR 3001 amendment A |
 | Cosmetic corridor traffic | `cic-render` | No — presentation only, no simulation state |
 | Per-faction display strings for one currency | string table | Yes — exists |
 | Per-instance tint for recovered hulls | `cic-render` | Yes — exists |
 
-<!--count:promised-->Nine<!--/count--> of <!--count:total-->twenty<!--/count--> are already promised
+<!--count:promised-->Ten<!--/count--> of <!--count:total-->twenty<!--/count--> are already promised
 or built, which is the argument for writing this now rather than after M6's economy line is
 implemented: the cheap half of the list is cheap *because* the bible was written before the renderer.
 <!--count:amendments-->Three<!--/count--> of the <!--count:total-->twenty<!--/count--> are amendments to

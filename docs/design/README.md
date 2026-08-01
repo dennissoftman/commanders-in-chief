@@ -44,7 +44,7 @@ under many markings.
 
 [mechanics.md](mechanics.md) continues that claim rather than restating it, and closes it with
 [its own list](mechanics.md#10-what-this-document-obliges-the-engine-to-gain) of
-<!--count:total-->twenty<!--/count--> requirements — <!--count:promised-->nine<!--/count--> already
+<!--count:total-->twenty<!--/count--> requirements — <!--count:promised-->ten<!--/count--> already
 promised or built, and <!--count:amendments-->three<!--/count--> of them
 **amendments to an accepted record**, since writing
 the economy against [ADR 3001](../adr/3001-pathfinding.md) found that its cost classes cannot express a

@@ -79,7 +79,7 @@ use std::time::Instant;
 use cic_assets::model::{Model, ModelImage, ModelMaterial, ModelPrimitive, ModelVertex};
 use cic_assets::scenario::{ObjectPlacement, PlayerSlot, Position, Scenario, TerrainReference};
 use cic_assets::sky::{SkyAsset, SkyLimits, decode_radiance};
-use cic_assets::templates::{Template, TemplateKind, TemplateSet};
+use cic_assets::templates::{Footprint, Template, TemplateKind, TemplateSet};
 use cic_assets::texture::{TextureAsset, TextureLimits};
 use cic_assets::{MapPackage, PackageLimits, Terrain, TerrainLayer, resolve_terrain_textures};
 use cic_camera::{RtsCamera, RtsCameraProfile};
@@ -795,23 +795,39 @@ fn demo_scenario(terrain: &Terrain) -> (Scenario, TemplateSet) {
         model: model.map(str::to_owned),
         name: None,
         speed: None,
+        footprint: None,
+        passage: None,
     };
     let mut scout = template("unit/scout", TemplateKind::Unit, Some("models/scout.glb"));
     scout.speed = Some(26.0);
+    let mut depot = template(
+        "structure/depot",
+        TemplateKind::Structure,
+        Some("models/depot.glb"),
+    );
+    // Thirty-six metres of building over an eight-metre grid, so five cells square covers it.
+    // ADR 3001 decision 4: a structure denies the ground it stands on, and the scouts patrolling
+    // past it now walk round rather than through.
+    depot.footprint = Some(Footprint { cells: [5, 5] });
     let templates = TemplateSet {
         format_version: 1,
         templates: vec![
-            template(
-                "structure/depot",
-                TemplateKind::Structure,
-                Some("models/depot.glb"),
-            ),
+            depot,
             template("prop/pine", TemplateKind::Prop, Some("models/pine.glb")),
             template("faction/vanguard", TemplateKind::Faction, None),
             scout,
         ],
     };
     (scenario, templates)
+}
+
+/// How many cells the grid refuses, which is worth printing twice: once for what the terrain
+/// derived and once after the placements have stamped it, because the difference is the mechanic.
+fn impassable_cells(ground: &Ground) -> usize {
+    (0..ground.height())
+        .flat_map(|y| (0..ground.width()).map(move |x| (x, y)))
+        .filter(|(x, y)| !ground.passable(*x, *y))
+        .count()
 }
 
 /// The snapshot-to-instances translation: group the forces by template, ground each object on the
@@ -1535,16 +1551,14 @@ impl ApplicationHandler for Viewer {
             // registered earlier as they stand this tick. Registered the other way round, a unit
             // would path against the previous tick's ground — correct today, when nothing edits it,
             // and wrong the moment something does.
-            let ground = Ground::derive(&self.terrain, GroundRules::derived(&self.terrain));
+            let ground = Ground::derive(&self.terrain, GroundRules::derived(&self.terrain))
+                .with_templates(templates);
+            let derived_impassable = impassable_cells(&ground);
             eprintln!(
-                "ground: {}x{} cells at {:.1} m, {} impassable",
+                "ground: {}x{} cells at {:.1} m, {derived_impassable} impassable",
                 ground.width(),
                 ground.height(),
                 ground.cell_size(),
-                (0..ground.height())
-                    .flat_map(|y| (0..ground.width()).map(move |x| (x, y)))
-                    .filter(|(x, y)| !ground.passable(*x, *y))
-                    .count()
             );
             kernel.add_subsystem(Box::new(ground));
             kernel.add_subsystem(Box::new(Units::new(templates)));
@@ -1552,6 +1566,18 @@ impl ApplicationHandler for Viewer {
             // draw loop advances the kernel at its fixed rate, whatever the frame rate does.
             if let Err(error) = kernel.advance(&demo_spawns(scenario)) {
                 return self.fail(event_loop, error.to_string());
+            }
+            // And tick zero is also when the depots stamp their footprints, because the grid reads
+            // what stands on it through a peer and a peer is only readable inside a tick.
+            if let Some(stamped) = kernel
+                .subsystem(cic_sim::GROUND)
+                .and_then(|subsystem| subsystem.as_any().downcast_ref::<Ground>())
+            {
+                eprintln!(
+                    "ground: {} impassable once the placements stamped, {} newly denied",
+                    impassable_cells(stamped),
+                    impassable_cells(stamped) - derived_impassable,
+                );
             }
             let Some(forces) = kernel
                 .subsystem(FORCES)
