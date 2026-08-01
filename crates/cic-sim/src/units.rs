@@ -45,23 +45,33 @@
 //! facing angle. The search that produced the route has no floating point in it at all. Units
 //! deliberately store no heading: presentation derives one from the motion it sees, freely.
 //!
-//! # Commands are bytes, and this module owns their meaning
+//! # And a group ordered somewhere arrives as a group
 //!
-//! The kernel treats command payloads as opaque; this is the layer that gives them one. The encoding
-//! is fixed-width little-endian after a one-byte verb tag, built by [`spawn_command`],
-//! [`move_command`] and [`stop_command`] so hosts never hand-assemble bytes.
+//! [ADR 3003](../../../docs/adr/3003-formation-movement.md). [`move_group_command`] is one order
+//! for many units rather than many orders that share a destination, and that difference is the
+//! whole feature: a group knows its own shape, so [`crate::formation`] can carry that shape to the
+//! destination instead of sending everybody to one point and letting avoidance sort out the pile.
+//! The per-unit [`move_command`] is untouched and still means exactly what it did.
 //!
 //! **A rejected command is counted, and the count is hashed.** An order for a unit you do not own, a
 //! spawn of a template that cannot move, a payload that does not parse: each is ignored
 //! deterministically — every machine sees the identical bytes and ignores identically — and the
 //! counter makes the ignoring *visible*, so two machines that somehow disagree about a rejection
 //! diverge on that tick instead of silently drifting apart.
+//!
+//! # Commands are bytes, and this module owns their meaning
+//!
+//! The kernel treats command payloads as opaque; this is the layer that gives them one. The encoding
+//! is fixed-width little-endian after a one-byte verb tag, built by [`spawn_command`],
+//! [`move_command`], [`move_group_command`] and [`stop_command`] so hosts never hand-assemble
+//! bytes.
 
 use std::collections::BTreeMap;
 
 use cic_assets::templates::{TemplateKind, TemplateSet};
 
 use crate::command::PlayerId;
+use crate::formation::{self, Member};
 use crate::ground::{GROUND, Ground};
 use crate::hash::StateHasher;
 use crate::id::{IdAllocator, ObjectId};
@@ -76,6 +86,8 @@ const TAG_SPAWN: u8 = 1;
 const TAG_MOVE: u8 = 2;
 /// The verb tag a stop payload starts with.
 const TAG_STOP: u8 = 3;
+/// The verb tag a group-move payload starts with.
+const TAG_MOVE_GROUP: u8 = 4;
 
 /// Every coefficient local avoidance runs on.
 ///
@@ -398,6 +410,55 @@ impl Units {
                     _ => self.rejected += 1,
                 }
             }
+            Some(Verb::MoveGroup { units, x, y }) => {
+                if !(x.is_finite() && y.is_finite()) {
+                    self.rejected += 1;
+                    return;
+                }
+                // Sorted and deduplicated, so the answer depends on the *set* of units and not on
+                // whatever order a host's selection happened to iterate in. Two clients that agree
+                // about who is selected then agree about where everybody goes, even if their lists
+                // came out in different orders — which is one fewer way for a lobby to desync.
+                let mut named: Vec<ObjectId> = units
+                    .chunks_exact(8)
+                    .filter_map(|bytes| Some(ObjectId(u64::from_le_bytes(bytes.try_into().ok()?))))
+                    .collect();
+                named.sort_unstable();
+                named.dedup();
+
+                let mut group = Vec::with_capacity(named.len());
+                for id in named {
+                    match self.roster.get(&id) {
+                        Some(unit) if unit.owner == issuer => group.push((
+                            id,
+                            Member {
+                                position: unit.position,
+                                radius: unit.radius,
+                            },
+                        )),
+                        // Counted one by one rather than refusing the whole order: a selection with
+                        // one dead unit in it is an ordinary thing for a client to send, and the
+                        // rest of the group should still go.
+                        _ => self.rejected += 1,
+                    }
+                }
+                if group.is_empty() {
+                    self.rejected += 1;
+                    return;
+                }
+
+                let members: Vec<Member> = group.iter().map(|(_, member)| *member).collect();
+                let slots = formation::slots(&members, [x, y], ground);
+                for ((id, member), slot) in group.iter().zip(slots) {
+                    let Some(subject) = self.roster.get_mut(id) else {
+                        continue;
+                    };
+                    subject.route = match ground {
+                        Some(ground) => ground.route(member.position, slot),
+                        None => vec![slot],
+                    };
+                }
+            }
             Some(Verb::Stop { unit }) => match self.roster.get_mut(&unit) {
                 Some(subject) if subject.owner == issuer => {
                     subject.route.clear();
@@ -553,6 +614,14 @@ enum Verb<'payload> {
     Stop {
         unit: ObjectId,
     },
+    /// One order for several units, kept as the raw identifier block rather than a `Vec` so
+    /// decoding stays allocation-free like the rest of this file. `apply` is what turns it into a
+    /// sorted, deduplicated set.
+    MoveGroup {
+        units: &'payload [u8],
+        x: f64,
+        y: f64,
+    },
 }
 
 /// Encodes a spawn: create a unit of `template` at `(x, y)` for the issuing seat.
@@ -584,6 +653,35 @@ pub fn move_command(unit: ObjectId, x: f64, y: f64) -> Vec<u8> {
     let mut payload = Vec::with_capacity(25);
     payload.push(TAG_MOVE);
     payload.extend(unit.0.to_le_bytes());
+    payload.extend(x.to_le_bytes());
+    payload.extend(y.to_le_bytes());
+    payload
+}
+
+/// Encodes a group move: send every named unit toward `(x, y)`, keeping the shape they are in.
+///
+/// One order for many units, rather than many orders that happen to share a destination — see
+/// [ADR 3003](../../../docs/adr/3003-formation-movement.md) for why the difference matters. The
+/// order the identifiers are listed in does not affect the result: `apply` sorts and deduplicates
+/// them, so the same *set* of units always lands the same way whatever a host's selection happened
+/// to iterate in.
+///
+/// # Panics
+///
+/// Panics if more than 65535 units are named, which is a programming error rather than data — the
+/// count is a `u16` and no selection is that size.
+#[must_use]
+pub fn move_group_command(units: &[ObjectId], x: f64, y: f64) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(3 + units.len() * 8 + 16);
+    payload.push(TAG_MOVE_GROUP);
+    payload.extend(
+        u16::try_from(units.len())
+            .expect("a selection fits in a u16")
+            .to_le_bytes(),
+    );
+    for unit in units {
+        payload.extend(unit.0.to_le_bytes());
+    }
     payload.extend(x.to_le_bytes());
     payload.extend(y.to_le_bytes());
     payload
@@ -627,6 +725,14 @@ fn decode(payload: &[u8]) -> Option<Verb<'_>> {
                 unit: ObjectId(unit),
             })
         }
+        TAG_MOVE_GROUP => {
+            let (count, rest) = rest.split_at_checked(2)?;
+            let count = usize::from(u16::from_le_bytes(count.try_into().ok()?));
+            let (units, rest) = rest.split_at_checked(count.checked_mul(8)?)?;
+            let (x, rest) = read_f64(rest)?;
+            let (y, rest) = read_f64(rest)?;
+            rest.is_empty().then_some(Verb::MoveGroup { units, x, y })
+        }
         _ => None,
     }
 }
@@ -649,7 +755,7 @@ mod tests {
     use cic_assets::templates::{Footprint, Passage, Template, TemplateKind, TemplateSet};
     use cic_assets::terrain::Terrain;
 
-    use super::{UNITS, Units, move_command, spawn_command, stop_command};
+    use super::{UNITS, Units, move_command, move_group_command, spawn_command, stop_command};
     use crate::activation::activate;
     use crate::command::{Command, PlayerId};
     use crate::ground::{GROUND, Ground, GroundRules, METALLED, PLAIN};
@@ -1492,6 +1598,209 @@ mod tests {
             "two machines that disagree about how much room a unit takes will disagree about where \
              everybody ends up, and should say so on the tick it happened"
         );
+    }
+
+    /// The per-subsystem state hashes of a run, without the combined hash.
+    ///
+    /// `TickHashes::combined` folds the tick's *commands* as well as its state, which is right —
+    /// a replay is the inputs and the outcome together. It makes it the wrong thing to compare when
+    /// the question is "did these two runs reach the same place", because the two runs got there
+    /// from deliberately different bytes. The entries are the state alone.
+    fn states(run: &[crate::kernel::TickHashes]) -> Vec<Vec<(&'static str, u64)>> {
+        run.iter()
+            .map(|tick| {
+                tick.entries
+                    .iter()
+                    .map(|entry| (entry.name, entry.hash))
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_group_of_one_is_a_plain_move() {
+        // The floor of the whole feature: a group with one unit in it has no shape to carry, so its
+        // slot is the destination and nothing about the answer may differ from the per-unit verb.
+        // Asserted as byte-identical hashes rather than as positions, which also catches a group
+        // order that quietly counted itself as a rejection.
+        let run = |order: fn(ObjectId, f64, f64) -> Vec<u8>| {
+            let mut kernel = kernel();
+            kernel
+                .advance(&[command(0, 0, spawn_command("unit/rifleman", 10.0, 10.0))])
+                .expect("advances");
+            let hashes: Vec<_> = (1..20)
+                .map(|tick| {
+                    let this_tick = if tick == 1 {
+                        vec![command(1, 0, order(ObjectId(1), 40.0, 70.0))]
+                    } else {
+                        Vec::new()
+                    };
+                    kernel.advance(&this_tick).expect("advances")
+                })
+                .collect();
+            hashes
+        };
+        let single = run(move_command);
+        let group = run(|unit, x, y| move_group_command(&[unit], x, y));
+        assert_eq!(states(&single), states(&group));
+    }
+
+    #[test]
+    fn a_group_keeps_its_shape_and_lands_on_where_it_was_sent() {
+        // Three units in a line, ordered as one group across the map. Each arrives at its own place
+        // in the same line rather than all three at the point that was clicked — which is the
+        // difference between formation movement and three move orders.
+        let mut kernel = kernel();
+        kernel
+            .advance(&[
+                command(0, 0, spawn_command("unit/rifleman", 0.0, 0.0)),
+                command(0, 0, spawn_command("unit/rifleman", 0.0, 4.0)),
+                command(0, 0, spawn_command("unit/rifleman", 0.0, 8.0)),
+            ])
+            .expect("advances");
+        let group = [ObjectId(1), ObjectId(2), ObjectId(3)];
+        kernel
+            .advance(&[command(1, 0, move_group_command(&group, 60.0, 24.0))])
+            .expect("advances");
+
+        let roster = units(&kernel);
+        let targets: Vec<[f64; 2]> = group
+            .iter()
+            .map(|id| roster.units()[id].destination().expect("a route"))
+            .collect();
+        assert_eq!(
+            targets,
+            vec![[60.0, 20.0], [60.0, 24.0], [60.0, 28.0]],
+            "the line did not arrive as a line centred on where it was sent"
+        );
+        assert_eq!(roster.rejected(), 0);
+    }
+
+    #[test]
+    fn the_order_the_identifiers_arrive_in_does_not_change_the_outcome() {
+        // A selection is a set, and two clients that agree about who is in it must agree about
+        // where everybody goes even if their lists came out in different orders. This is the
+        // property the sort inside `apply` exists for, and without it a lobby could desync on
+        // nothing worse than iteration order.
+        let run = |group: &[ObjectId]| {
+            let mut kernel = kernel();
+            kernel
+                .advance(&[
+                    command(0, 0, spawn_command("unit/rifleman", 0.0, 0.0)),
+                    command(0, 0, spawn_command("unit/rifleman", 5.0, 1.0)),
+                    command(0, 0, spawn_command("unit/rifleman", 2.0, 6.0)),
+                ])
+                .expect("advances");
+            kernel
+                .advance(&[command(1, 0, move_group_command(group, 80.0, 90.0))])
+                .expect("advances")
+        };
+        let forwards = states(&[run(&[ObjectId(1), ObjectId(2), ObjectId(3)])]);
+        let backwards = states(&[run(&[ObjectId(3), ObjectId(2), ObjectId(1)])]);
+        let doubled = states(&[run(&[
+            ObjectId(2),
+            ObjectId(1),
+            ObjectId(2),
+            ObjectId(3),
+            ObjectId(1),
+        ])]);
+        assert_eq!(forwards, backwards);
+        assert_eq!(
+            forwards, doubled,
+            "naming a unit twice should be the same selection, not a heavier one"
+        );
+    }
+
+    #[test]
+    fn a_group_order_moves_the_units_you_own_and_counts_the_rest() {
+        // A selection with somebody else's unit and a dead one in it is an ordinary thing for a
+        // client to send. The rest of the group still goes, and the two that did not are counted.
+        let mut kernel = kernel();
+        kernel
+            .advance(&[
+                command(0, 0, spawn_command("unit/rifleman", 0.0, 0.0)),
+                command(0, 1, spawn_command("unit/rifleman", 4.0, 0.0)),
+            ])
+            .expect("advances");
+        kernel
+            .advance(&[command(
+                1,
+                0,
+                move_group_command(&[ObjectId(1), ObjectId(2), ObjectId(99)], 50.0, 50.0),
+            )])
+            .expect("advances");
+
+        let roster = units(&kernel);
+        assert_eq!(
+            roster.units()[&ObjectId(1)].destination(),
+            Some([50.0, 50.0]),
+            "the one unit the issuer owns should have been sent, alone and so uncentred"
+        );
+        assert_eq!(roster.units()[&ObjectId(2)].destination(), None);
+        assert_eq!(
+            roster.rejected(),
+            2,
+            "the other seat's unit and the absent one"
+        );
+    }
+
+    #[test]
+    fn a_group_order_naming_nobody_at_all_is_counted_not_a_fault() {
+        let mut kernel = kernel();
+        kernel
+            .advance(&[
+                command(0, 0, move_group_command(&[], 5.0, 5.0)),
+                command(0, 0, move_group_command(&[ObjectId(7)], 5.0, 5.0)),
+                // A payload whose identifier block is shorter than its count claims.
+                command(0, 0, vec![4, 2, 0, 1, 2, 3, 4, 5, 6, 7, 8]),
+            ])
+            .expect("a rejected command must not stop the tick");
+        assert_eq!(
+            units(&kernel).rejected(),
+            4,
+            "empty, absent, absent, unparseable"
+        );
+    }
+
+    #[test]
+    fn a_group_walks_round_a_wall_to_slots_it_can_stand_on() {
+        // Formation against the two things it has to survive: terrain between the group and its
+        // destination, and a destination whose own ground refuses part of the shape.
+        let terrain = walled_terrain();
+        let mut kernel = kernel_on(&terrain);
+        kernel
+            .advance(&[
+                command(0, 0, spawn_command("unit/rifleman", 1.5, 0.5)),
+                command(0, 0, spawn_command("unit/rifleman", 1.5, 1.5)),
+            ])
+            .expect("advances");
+        kernel
+            .advance(&[command(
+                1,
+                0,
+                move_group_command(&[ObjectId(1), ObjectId(2)], 6.5, 1.0),
+            )])
+            .expect("advances");
+
+        let ground = ground_of(&kernel);
+        for unit in units(&kernel).units().values() {
+            let slot = unit.destination().expect("a route");
+            let cell = ground.cell_at(slot).expect("on the grid");
+            // A guard rather than a claim: this group's slots both land on open ground beside the
+            // wall, so deleting the settle pass was measured leaving it green.
+            // `formation::tests::a_slot_the_ground_refuses_is_moved_onto_ground_it_does_not` is
+            // what can fail on that.
+            assert!(
+                ground.passable(cell.0, cell.1),
+                "a slot landed on ground nothing can stand on: {slot:?}"
+            );
+            assert!(
+                unit.route.len() > 1,
+                "the straight line crosses the wall, so a one-leg route is a unit walking through \
+                 it: {:?}",
+                unit.route
+            );
+        }
     }
 
     #[test]

@@ -20,7 +20,9 @@ use cic_assets::terrain::Terrain;
 use cic_sim::command::{Command, PlayerId};
 use cic_sim::ground::{Ground, GroundRules};
 use cic_sim::kernel::{Kernel, KernelConfig, first_divergence};
-use cic_sim::units::{AvoidanceRules, UNITS, Units, move_command, spawn_command};
+use cic_sim::units::{
+    AvoidanceRules, UNITS, Units, move_command, move_group_command, spawn_command,
+};
 
 /// Samples per axis. Sixty-five samples at eight metres is a 512-metre map — a quarter of the
 /// generated demo's, big enough to have separate regions and small enough to run in a unit test.
@@ -458,5 +460,82 @@ fn a_crowd_pressed_against_the_terrain_is_never_pushed_over_it() {
     assert!(
         gathered >= 6,
         "only {gathered} of sixteen units reached the muster point, so nothing was pressed against          anything"
+    );
+}
+
+#[test]
+fn one_group_order_beats_sixteen_orders_to_the_same_point() {
+    // [ADR 3003](../../../docs/adr/3003-formation-movement.md) against the case ADR 3001 decision
+    // 10 named as its own limitation. Sixteen units sent to one cell by sixteen separate orders end
+    // up jostling, because every one of them is walking at a point every other one is standing on;
+    // sent as *one* order they are given sixteen places and simply stand in them.
+    //
+    // The comparison is the same crowd, the same map and the same tick budget, differing only in
+    // whether the destination was one point or a formation — so the number below is about the
+    // mechanism rather than about a tolerance somebody chose.
+    let terrain = rough_terrain();
+    let ground = Ground::derive(&terrain, rules());
+    let starts = scattered_starts(&ground, 16);
+    let (open, clear) = musters(&ground, 3)
+        .into_iter()
+        .min_by_key(|(cell, blocked)| (*blocked, *cell))
+        .expect("the fixture needs somewhere to muster");
+    assert_eq!(clear, 0, "the open muster point is not open");
+    let muster = ground.centre_of(open.0, open.1);
+    let group: Vec<cic_sim::id::ObjectId> = (0..starts.len())
+        .map(|index| cic_sim::id::ObjectId(index as u64 + 1))
+        .collect();
+
+    let run = |together: bool| {
+        let mut kernel = kernel(&terrain);
+        let spawns: Vec<Command> = starts
+            .iter()
+            .map(|start| Command {
+                tick: 0,
+                player: PlayerId(0),
+                payload: spawn_command("unit/scout", start[0], start[1]),
+            })
+            .collect();
+        kernel.advance(&spawns).expect("advances");
+        let orders: Vec<Command> = if together {
+            vec![Command {
+                tick: 1,
+                player: PlayerId(0),
+                payload: move_group_command(&group, muster[0], muster[1]),
+            }]
+        } else {
+            group
+                .iter()
+                .map(|id| Command {
+                    tick: 1,
+                    player: PlayerId(0),
+                    payload: move_command(*id, muster[0], muster[1]),
+                })
+                .collect()
+        };
+        kernel.advance(&orders).expect("advances");
+        for tick in 2..400 {
+            kernel.advance(&[]).expect("advances");
+            for (id, unit) in units(&kernel).units() {
+                let (x, y) = ground.cell_at(unit.position).expect("on the grid");
+                assert!(
+                    ground.passable(x, y),
+                    "tick {tick}: unit {id:?} stood on impassable ground at {:?}",
+                    unit.position
+                );
+            }
+        }
+        overlapping_pairs(&kernel)
+    };
+
+    let separately = run(false);
+    let together = run(true);
+    assert!(
+        separately > 8,
+        "only {separately} pairs jostled when sent separately, so the fixture cannot show a          formation helping"
+    );
+    assert!(
+        together * 4 < separately,
+        "{together} pairs still standing in each other after a group order, against {separately}          after sixteen separate ones"
     );
 }
