@@ -35,6 +35,11 @@ struct Water {
     // xy the current the whole surface is carried along by, in world units per second, z the depth
     // over which shore foam fades out, w how much foam there is at all.
     current: vec4<f32>,
+    // x how much whitecap breaks on the tallest crests in open water, yzw reserved.
+    //
+    // A separate figure from the shore's share and not a fraction of it: a lake laps at its edge and
+    // never breaks in the middle, and an ocean does both, so one number cannot carry them.
+    foam: vec4<f32>,
 }
 
 // Group 1. It was group 2 before composition existed, because water then shared a module with the
@@ -46,21 +51,50 @@ struct Water {
 
 // Components in the summed train.
 //
-// Nine rather than five. Five is enough to make a surface that *moves* and visibly too few to make one
-// that does not read as a pattern: with only five the sum has a short beat, and the capture of a still
-// lake showed unmistakable diagonal banding across the whole body. The cost is nine sines and nine
-// cosines per vertex and per shaded pixel, which is nothing against the two texture loads and the
-// shadow lookup the same fragment already pays for.
-const WATER_WAVE_COUNT: i32 = 9;
+// Twelve rather than five. Five is enough to make a surface that *moves* and visibly too few to make
+// one that does not read as a pattern: with only five the sum has a short beat, and the capture of a
+// still lake showed unmistakable diagonal banding across the whole body. Nine fixed the banding and
+// left the surface reading as *too even* — real water is not a tidy superposition, and the three
+// components past nine are what carry the fine ripple a near camera resolves. They are also the
+// answer to wanting a detail normal map: the same detail, from the same generator, with no texture to
+// author, no tiling to hide, and the level-of-detail below already knowing how to remove it with
+// distance. The cost is twelve sine-cosine pairs per vertex and per shaded pixel, against two texture
+// loads and a shadow lookup the same fragment already pays for.
+const WATER_WAVE_COUNT: i32 = 12;
 
-// Reciprocal of the nine wavelength shares summed, which is each component's steepness: crest height
+// Reciprocal of the twelve wavelength shares summed, which is each component's steepness: crest height
 // over wavelength.
 //
 // Amplitudes are `steepness * wavelength` rather than a second table. Holding the ratio constant is
 // what keeps the short chop from standing near-vertical, and deriving one table from the other makes
 // that structural instead of a claim two tables have to keep agreeing about. Normalising by the sum is
 // what makes `wave_height` the crest height it says it is rather than a figure the sum overshoots.
-const WATER_STEEPNESS: f32 = 0.241556;
+const WATER_STEEPNESS: f32 = 0.226474;
+
+// How deep the wave groups cut, and how long they are relative to the component they modulate.
+//
+// This is the answer to a summed sine train reading as corduroy however many components it has. Real
+// water arrives in *groups*: a set of crests builds, runs, and fades, and a crest has a finite length
+// along its own ridge rather than running unbroken to the horizon. A pure sum has neither property —
+// every component is an infinite plane wave of constant amplitude, so the sum is exactly as strong
+// everywhere and its crests never end. That is what "too regular" is, and adding components does not
+// touch it, because the sum of any number of infinite plane waves is still stationary.
+//
+// So each component carries a slow envelope, and the envelope varies mostly *across* the direction of
+// travel — which is what breaks a ridge into segments rather than merely making the whole train pulse.
+// A depth of 0.4 takes a component down to a fifth of its amplitude at the quietest and never above
+// its nominal one, so the envelope only ever removes energy. The scale is the envelope's wavenumber as
+// a fraction of the component's own: at 0.19 a group runs about five crests, which is roughly what a
+// real sea does.
+const WATER_GROUP_DEPTH: f32 = 0.40;
+const WATER_GROUP_SCALE: f32 = 0.19;
+// A little of the envelope runs *along* travel too, so groups advance instead of standing as fixed
+// lanes on the map.
+const WATER_GROUP_ALONG: f32 = 0.37;
+// How fast the envelope drifts, against the wave's own phase speed. Well under one: a group travels at
+// the group velocity, which for deep-water gravity waves is half the phase velocity, and slower still
+// reads better because a group that keeps pace with its own crests is not a group.
+const WATER_GROUP_SPEED: f32 = 0.35;
 
 // The fraction the component directions are spread by, and the one their phases are offset by.
 //
@@ -91,12 +125,19 @@ const WATER_F0: f32 = 0.02;
 
 // RMS slope of the wave train, in units of crest height over dominant wavelength.
 //
-// A derived figure rather than a tuned one. Every component contributes the same slope, because they
-// share `WATER_STEEPNESS`: `steepness * TAU * height / length`. Nine independent sinusoids sum in
-// quadrature to `sqrt(9 / 2)` of one, so the total is
-// `0.241556 * 6.283185 * 2.12132 = 3.22`. It moved from 4.23 when the count moved from five, because
-// normalising nine amplitudes to the same total makes each of them smaller.
-const WATER_SLOPE_RMS: f32 = 3.22;
+// A derived figure rather than a tuned one, and it has moved twice for reasons worth keeping. Every
+// component contributes the same slope, because they share `WATER_STEEPNESS`:
+// `steepness * TAU * height / length`. Twelve independent sinusoids sum in quadrature to
+// `sqrt(12 / 2)` of one, giving `0.226474 * 6.283185 * 2.449490 = 3.485`.
+//
+// The group envelope then takes energy out and never adds it, so the figure has to come down by the
+// envelope's own RMS: a term running `1 - d + d * cos` has mean square `(1 - d)^2 + d^2 / 2`, which at
+// `d = 0.40` is `0.36 + 0.08 = 0.44` and an RMS of 0.663. So `3.485 * 0.663 = 2.31`.
+//
+// What that neglects is the slope of the envelope itself, which is real and is second order: the
+// envelope's wavenumber is `WATER_GROUP_SCALE` of the component's, so its contribution is under a
+// tenth of the component's own and lands inside the quadrature sum rather than beside it.
+const WATER_SLOPE_RMS: f32 = 2.31;
 
 // The reflection half-angle a fully rough surface spans, in radians. About twenty degrees, which is the
 // lobe the gloss exponents below describe at the rough end.
@@ -119,13 +160,39 @@ const WATER_DETAIL_FADE_END: f32 = 0.5;
 // pure white band along a shore reads as a clipped highlight rather than as surf.
 const WATER_FOAM_COLOUR: vec3<f32> = vec3<f32>(0.92, 0.95, 0.96);
 
-// Where along the wave the shore foam appears, as a fraction of crest-to-trough.
+// Where along the wave the foam appears, as a fraction of crest-to-trough with the mean surface at a
+// half. Both windows are placed against the *distribution* of that figure rather than against its
+// range, and getting that wrong is why the first attempt at whitecaps put one speck on a whole sea.
+//
+// The sum of twelve enveloped components is very far from uniform over `0..=1`: it is a sum of
+// independent terms, so it piles up around the mean, and its standard deviation works out at about
+// 0.086 of the range. A threshold at 0.78 is therefore past three sigma — a figure the surface
+// reaches on a handful of pixels in a frame.
 //
 // Below the first figure the water is in a trough and drawing back, above the second it is under a
 // crest and breaking. The band between them is what makes the foam pulse along the shoreline instead
 // of ringing it evenly.
-const WATER_FOAM_CREST_START: f32 = 0.30;
-const WATER_FOAM_CREST_END: f32 = 0.75;
+const WATER_FOAM_CREST_START: f32 = 0.35;
+const WATER_FOAM_CREST_END: f32 = 0.62;
+
+// Where a whitecap breaks, on the same scale. Deliberately above the shore band: at the shore any
+// crest arriving is a crest breaking, and in open water only the ones standing well above the rest
+// are. Two sigma to three, so a few percent of the surface is breaking at any moment.
+const WATER_WHITECAP_START: f32 = 0.62;
+const WATER_WHITECAP_END: f32 = 0.74;
+
+// And how steep that crest has to be, as a multiple of the train's own RMS slope.
+//
+// Height alone is not enough and the capture said so: keyed on height only, an ocean's whitecaps come
+// out the size of the swell that carries them — hundred-unit blobs that read as ice floes rather than
+// as broken water. The reason is that height is dominated by the longest components, so a "high"
+// region is a whole crest wide.
+//
+// Slope is the physical criterion anyway. A wave breaks when its face is too steep to stand, not when
+// it is tall, and the gradient carries every component — so gating on it fragments the patch down to
+// the scale of the chop riding on the swell, which is the scale whitecaps actually have.
+const WATER_WHITECAP_SLOPE_START: f32 = 1.15;
+const WATER_WHITECAP_SLOPE_END: f32 = 1.85;
 
 struct WaveSample {
     height: f32,
@@ -185,7 +252,7 @@ fn wave_sample(xy: vec2<f32>, time: f32, footprint: f32) -> WaveSample {
     // one the first version had: stepping by a fixed 0.61 makes neighbours irrational but leaves the
     // pair 1 and 0.372 close enough to 8:3 to beat visibly across a map. The band spans about 7:1, so
     // a 24-unit dominant wavelength carries chop down to three and a half units.
-    var lengths = array<f32, 9>(
+    var lengths = array<f32, 12>(
         1.0,
         0.786151,
         0.618034,
@@ -195,6 +262,9 @@ fn wave_sample(xy: vec2<f32>, time: f32, footprint: f32) -> WaveSample {
         0.236068,
         0.185575,
         0.145898,
+        0.114692,
+        0.090170,
+        0.070880,
     );
 
     var result: WaveSample;
@@ -223,19 +293,52 @@ fn wave_sample(xy: vec2<f32>, time: f32, footprint: f32) -> WaveSample {
         let phase_speed = speed * sqrt(share);
         let offset = TAU * fract(f32(index) * WATER_PHASE_FRACTION);
         let phase = wavenumber * (dot(direction, position) - phase_speed * time) + offset;
+        let phase_sin = sin(phase);
+        let phase_cos = cos(phase);
+        // The harmonic by the double-angle identities rather than by two more transcendentals. The
+        // arithmetic is exactly `sin(2p)` and `cos(2p)`, and it is four multiplies against a pair of
+        // sines the shader takes twelve times over.
+        let double_sin = 2.0 * phase_sin * phase_cos;
+        let double_cos = 1.0 - 2.0 * phase_sin * phase_sin;
+
+        // The group envelope. Its wavevector runs mostly *across* the component's travel, so what it
+        // cuts is the length of a crest rather than the strength of the whole train -- a ridge that
+        // fades out and picks up again further along, which is what stops a summed train reading as
+        // corduroy. A little of it runs along travel as well, so the groups drift instead of standing
+        // as fixed lanes over the map, and the second irrational offsets each component's envelope
+        // from the others so they do not all fade together.
+        let across = vec2<f32>(-direction.y, direction.x);
+        let group_number = wavenumber * WATER_GROUP_SCALE;
+        let group_vector = group_number * (across + WATER_GROUP_ALONG * direction);
+        let group_phase = dot(group_vector, position)
+            - group_number * phase_speed * WATER_GROUP_SPEED * time
+            + offset * 2.0;
+        // Between `1 - 2 * depth` and one, so the envelope only ever removes energy -- which is what
+        // keeps `wave_height` an upper bound on the crest rather than a figure the groups overshoot.
+        let envelope = 1.0 - WATER_GROUP_DEPTH + WATER_GROUP_DEPTH * cos(group_phase);
+        let envelope_slope = -WATER_GROUP_DEPTH * sin(group_phase);
 
         // A second-order Stokes wave rather than a plain sine: the harmonic sharpens the crest and
         // flattens the trough, which is what a steep gravity wave actually does and what separates an
         // ocean swell from a pond ripple in silhouette. It shifts neither the mean surface nor the
         // crest-to-trough height, so `wave_height` still means what it says.
-        result.height += wave_amplitude * (sin(phase) - peak * cos(2.0 * phase));
+        let profile = phase_sin - peak * double_cos;
+        result.height += wave_amplitude * envelope * profile;
+
+        // The product rule, because the envelope is a function of position too. Dropping its term
+        // would leave the normal describing a surface the height field no longer has -- subtly, and
+        // exactly at the edges of a group where the envelope moves fastest.
+        //
         // The harmonic has twice the wavenumber, so it stops being resolvable at twice the distance
-        // and is damped against half the wavelength.
+        // and is damped against half the wavelength. The envelope has a fraction of it and outlives
+        // both, which is right: a group is still visible long after the crests inside it are not.
         let detail = wave_detail(footprint, wave_length);
         let harmonic_detail = wave_detail(footprint, wave_length * 0.5);
-        let slope = wave_amplitude * wavenumber
-            * (detail * cos(phase) + harmonic_detail * 2.0 * peak * sin(2.0 * phase));
-        result.gradient += direction * slope;
+        let group_detail = wave_detail(footprint, wave_length / WATER_GROUP_SCALE);
+        let profile_slope = detail * phase_cos + harmonic_detail * 2.0 * peak * double_sin;
+        result.gradient += wave_amplitude
+            * (direction * (wavenumber * envelope * profile_slope)
+                + group_vector * (group_detail * envelope_slope * profile));
     }
     return result;
 }
@@ -400,11 +503,25 @@ fn water_fragment(input: WaterVertexOutput) -> @location(0) vec4<f32> {
     // piling against its banks, and both want a fraction of the same term rather than a different one.
     let shore = 1.0 - smoothstep(0.0, max(water.current.z, 0.001), depth);
     let crest = clamp(waves.height / max(water.waves.x, 0.001) * 0.5 + 0.5, 0.0, 1.0);
-    let foam = clamp(
-        water.current.w * shore * smoothstep(WATER_FOAM_CREST_START, WATER_FOAM_CREST_END, crest),
-        0.0,
-        1.0
-    );
+    let shore_foam =
+        water.current.w * shore * smoothstep(WATER_FOAM_CREST_START, WATER_FOAM_CREST_END, crest);
+
+    // Whitecaps, which are the same froth in open water, on the crests that are both tall *and* steep.
+    // The group envelope is what makes the first half read: crests without one all reach the same
+    // height, so a threshold near the top either catches all of them or none. The second half is what
+    // makes them the right size -- see the slope constants.
+    //
+    // The slope is measured against what this material's train would give on average, so the gate
+    // means "steeper than this water usually is" rather than a figure in radians that would mean
+    // something different for a pond and for a swell. The damped gradient is the honest one to use:
+    // whitecaps a pixel cannot resolve should go the same way the normal did, or they come back as
+    // exactly the sparkle this pass spent so much effort removing.
+    let expected_slope = WATER_SLOPE_RMS * water.waves.x / max(water.waves.y, 0.001);
+    let steepness = length(waves.gradient) / max(expected_slope, 0.0001);
+    let whitecap = water.foam.x
+        * smoothstep(WATER_WHITECAP_START, WATER_WHITECAP_END, crest)
+        * smoothstep(WATER_WHITECAP_SLOPE_START, WATER_WHITECAP_SLOPE_END, steepness);
+    let foam = clamp(max(shore_foam, whitecap), 0.0, 1.0);
 
     var colour = mix(body, reflected, fresnel) + glitter;
     colour = mix(colour, WATER_FOAM_COLOUR * lit, foam);

@@ -40,7 +40,9 @@
 //! - **Directional spread.** A river's train is collimated down the channel, an ocean's fans out about
 //!   the wind, and a lake's is isotropic. This is the figure that makes a river look like moving water
 //!   from directly above, where nothing else does.
-//! - **Shore foam.** Surf is most of what reads as an ocean; a lake gets a faint lap of the same term.
+//! - **Foam.** Surf at the shore is most of what reads as an ocean, and whitecaps breaking on the
+//!   tallest crests are most of what stops open water reading as a smooth gradient. A lake gets a
+//!   faint lap of the first and none of the second.
 //! - **Wave scale, current and crest peaking.**
 //!
 //! A river is one body per straight reach. A channel that bends is a chain of them, each with the flow
@@ -49,18 +51,20 @@
 //!
 //! # The wave model
 //!
-//! Nine directional waves summed, related the way deep-water gravity waves are: phase speed goes as
+//! Twelve directional waves summed, related the way deep-water gravity waves are: phase speed goes as
 //! the square root of wavelength, so the long swell outruns the short chop instead of the whole sum
 //! sliding rigidly across the map. Amplitude scales with wavelength, which holds steepness constant
-//! across the nine, and the amplitudes are normalised so `wave_height` is the crest height it claims to
-//! be. Each is a second-order Stokes wave rather than a sine, so crests sharpen and troughs flatten as
-//! the peaking rises.
+//! across the twelve, and the amplitudes are normalised so `wave_height` is the crest height it claims
+//! to be. Each is a second-order Stokes wave rather than a sine, so crests sharpen and troughs flatten
+//! as the peaking rises.
 //!
-//! Three choices exist purely to stop the sum reading as a tiled texture, and all three were arrived at
-//! by looking at the capture rather than by reasoning ahead:
+//! Four choices exist purely to stop the sum reading as manufactured, and all four were arrived at by
+//! looking at the capture rather than by reasoning ahead:
 //!
-//! - **Nine components, not five.** Five have a short enough beat to band a still lake diagonally
-//!   across its whole width, which the reference capture showed plainly.
+//! - **Twelve components, not five.** Five have a short enough beat to band a still lake diagonally
+//!   across its whole width, which the reference capture showed plainly. The last three of the twelve
+//!   are the fine ripple a near camera resolves, and are why no detail normal map is wanted: the same
+//!   detail, from the same generator, with nothing to author and no tiling to hide.
 //! - **Wavelengths in irrational powers of the golden ratio.** Near-harmonic ratios reinforce at
 //!   regular intervals, and that interference is the visible lattice. The first attempt used 1, ½, ⅓, ⅙
 //!   and produced an unmistakable diamond grid; the second stepped by a flat 0.61, which left the pair
@@ -68,19 +72,23 @@
 //! - **Directions spread by a low-discrepancy fraction of the arc, not by a fixed step around it.** Any
 //!   fixed step eventually puts two waves on one axis, and a shared axis is what a lattice is built
 //!   from.
+//! - **Every component carries a group envelope**, running mostly across its own travel, so a crest
+//!   has a finite length and fades in and out along its ridge. This is the one that separates "water"
+//!   from "corduroy", and no number of components substitutes for it: a sum of infinite plane waves is
+//!   exactly as strong everywhere however many there are, and real water arrives in sets.
 //!
-//! Normals are analytic — the derivative of that same sum — rather than sampled from a normal map or
-//! taken by finite difference. That costs nine cosines the height already needed and buys a normal
-//! exact at any tessellation, which matters because the grid density is chosen from the wavelength
-//! rather than fixed. The fragment stage damps each component of that derivative by how much of it one
-//! pixel covers; see `wave_detail` in `water.wgsl` for why an undamped analytic normal makes a distant
+//! Normals are analytic — the derivative of that same sum, envelope included by the product rule —
+//! rather than sampled from a normal map or taken by finite difference. That buys a normal exact at any
+//! tessellation, which matters because the grid density is chosen from the wavelength rather than
+//! fixed. The fragment stage damps each component of that derivative by how much of it one pixel
+//! covers; see `wave_detail` in `water.wgsl` for why an undamped analytic normal makes a distant
 //! surface sparkle.
 
 use crate::RenderError;
 use crate::deferred::{buffer_entry, push_vec4, uniform_buffer, uniform_entry};
 
-/// Bytes in the `Water` uniform block: seven `vec4`s.
-const WATER_UNIFORM_BYTES: usize = 7 * 16;
+/// Bytes in the `Water` uniform block: eight `vec4`s.
+const WATER_UNIFORM_BYTES: usize = 8 * 16;
 
 /// Grid cells spanning one dominant wavelength.
 ///
@@ -177,6 +185,11 @@ pub struct WaterMaterial {
     pub foam_depth: f32,
     /// How much foam there is at the waterline, in `0..=1`.
     pub foam_strength: f32,
+    /// How much whitecap breaks on the tallest crests in open water, in `0..=1`.
+    ///
+    /// Separate from [`Self::foam_strength`] rather than a fraction of it: a lake laps at its edge
+    /// and never breaks in the middle, and an ocean does both.
+    pub whitecap: f32,
 }
 
 impl WaterMaterial {
@@ -191,8 +204,13 @@ impl WaterMaterial {
     pub fn lake() -> Self {
         Self {
             shallow: [0.16, 0.34, 0.36],
-            deep: [0.02, 0.07, 0.13],
-            depth_scale: 12.0,
+            // Not quite the near-black it was. A lake is shallow enough that its bed still returns
+            // something from the middle, and a deep tint that bottoms out leaves the whole body one
+            // dead navy with nothing in it to catch a wave.
+            deep: [0.03, 0.09, 0.15],
+            // Longer than it was, so the ramp is still doing something out in the middle rather than
+            // reaching its far end a few units from the bank and leaving the rest flat.
+            depth_scale: 20.0,
             // Shorter than `depth_scale`: opacity should arrive well before the tint finishes
             // ramping, or the shallows read as fog over the bed instead of as clear water above it.
             edge_feather: 3.0,
@@ -201,8 +219,8 @@ impl WaterMaterial {
             // Almost still is not glassy, though: at half this steepness the surface came out as a
             // sheet of coloured plastic, because the only variation a lake has to offer is the sky
             // its wave faces catch.
-            wave_height: 0.20,
-            wave_length: 13.0,
+            wave_height: 0.28,
+            wave_length: 10.0,
             wave_speed: 1.2,
             // Low, so the glitter is a tight highlight. Water is among the smoothest surfaces a map
             // contains, and a broad highlight on it reads as wet plastic.
@@ -217,6 +235,9 @@ impl WaterMaterial {
             // whatever reads as water cut out with a cookie cutter.
             foam_depth: 0.6,
             foam_strength: 0.10,
+            // None. Inland water with no fetch does not break, and a lake with whitecaps on it reads
+            // as a photograph of a sea.
+            whitecap: 0.0,
         }
     }
 
@@ -262,6 +283,9 @@ impl WaterMaterial {
             // less than surf, over a band as shallow as the river itself.
             foam_depth: 1.2,
             foam_strength: 0.40,
+            // A little, for the standing water that breaks over a shallow. Well under an ocean's:
+            // this is riffle rather than surf.
+            whitecap: 0.25,
         }
     }
 
@@ -302,6 +326,10 @@ impl WaterMaterial {
             // where there *is* foam and not a decision to whiten the whole shore.
             foam_depth: 2.5,
             foam_strength: 1.0,
+            // The figure that stops open water reading as an airbrushed gradient from turquoise to
+            // navy. Whitecaps are the only high-frequency detail deep sea has at this distance —
+            // everything else out there is the depth ramp, which is smooth by construction.
+            whitecap: 0.95,
         }
     }
 }
@@ -408,6 +436,7 @@ impl WaterSurface {
         if !(0.0..=1.0).contains(&material.roughness)
             || !(0.0..=1.0).contains(&material.peaking)
             || !(0.0..=1.0).contains(&material.foam_strength)
+            || !(0.0..=1.0).contains(&material.whitecap)
         {
             return Err(RenderError::InvalidWater);
         }
@@ -569,6 +598,7 @@ impl WaterBody {
                 material.foam_strength,
             ],
         );
+        push_vec4(&mut bytes, [material.whitecap, 0.0, 0.0, 0.0]);
         debug_assert_eq!(bytes.len(), WATER_UNIFORM_BYTES, "water uniform drifted");
         context.queue().write_buffer(&self.uniform, 0, &bytes);
     }
@@ -604,9 +634,9 @@ mod tests {
 
     #[test]
     fn the_uniform_block_matches_the_shader_declaration() {
-        // Seven `vec4`s in the WGSL `Water` struct. A mismatch does not fail validation — it silently
+        // Eight `vec4`s in the WGSL `Water` struct. A mismatch does not fail validation — it silently
         // misaligns every field past the drift — so it is asserted here as well as at upload.
-        assert_eq!(WATER_UNIFORM_BYTES, 112);
+        assert_eq!(WATER_UNIFORM_BYTES, 128);
     }
 
     #[test]
@@ -741,6 +771,15 @@ mod tests {
             lake.foam_strength,
             river.foam_strength,
             ocean.foam_strength
+        );
+        // And only open water breaks in the middle. A lake with whitecaps on it is a photograph of a
+        // sea, which is the one way this figure can be wrong that still looks like water.
+        assert!(
+            lake.whitecap == 0.0 && river.whitecap < ocean.whitecap,
+            "whitecaps: lake {} river {} ocean {}",
+            lake.whitecap,
+            river.whitecap,
+            ocean.whitecap
         );
         // You see a river's bed, you do not see the sea's.
         assert!(

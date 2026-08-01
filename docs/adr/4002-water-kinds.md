@@ -31,9 +31,9 @@ train, and how much of it should survive to a pixel.
 
 ## Decision
 
-1. **Nine components rather than five, in irrational powers of the golden ratio.** Wavelength shares are
-   `golden^(-index/2)`, so the ratio between *any* two is irrational and no two ever line up again after
-   the origin. The band spans about 7:1.
+1. **Twelve components rather than five, in irrational powers of the golden ratio.** Wavelength shares
+   are `golden^(-index/2)`, so the ratio between *any* two is irrational and no two ever line up again
+   after the origin. The band spans about 14:1.
 2. **Amplitudes are derived from the wavelengths rather than tabled beside them.** Each component's
    amplitude is `steepness * wavelength` for one shared steepness, which is the reciprocal of the shares
    summed. Constant steepness across the train was already the intent; it is now structural rather than a
@@ -44,19 +44,59 @@ train, and how much of it should survive to a pixel.
    the wind, and a lake is isotropic.
 5. **Each component is a second-order Stokes wave, not a sine**, with the harmonic coefficient exposed as
    a peaking in `0..=1` — one being the coefficient at which the trough goes exactly flat.
-6. **The whole surface is advected by a current**, separately from the speed its waves travel at.
-7. **Shore foam**, keyed on depth and gated on the wave train's own height.
-8. **`WaterKind` names the three bodies and resolves to a whole `WaterMaterial`.** It is a selector, not
+6. **Each component carries a group envelope**, an amplitude modulation whose wavevector runs mostly
+   *across* that component's travel, so a crest has a finite length and fades in and out along its own
+   ridge. The envelope only ever removes energy, and its own slope enters the analytic gradient by the
+   product rule.
+7. **The whole surface is advected by a current**, separately from the speed its waves travel at.
+8. **Shore foam**, keyed on depth and gated on the wave train's own height, and **whitecaps** in open
+   water on crests that are both tall and steeper than the train's own RMS slope. The two are separate
+   strengths on the material rather than one figure, because a lake laps at its edge and never breaks
+   in the middle.
+9. **`WaterKind` names the three bodies and resolves to a whole `WaterMaterial`.** It is a selector, not
    stored state, and nothing downstream branches on it.
-9. **Each wave component's contribution to the shading normal is damped by how much of its own wavelength
-   one pixel covers**, from a quarter to a half of it. The footprint comes from `dpdx`/`dpdy` of the
-   interpolated world position. Height is not damped: geometry is not a shading question.
+10. **Each wave component's contribution to the shading normal is damped by how much of its own
+    wavelength one pixel covers**, from a quarter to a half of it. The footprint comes from
+    `dpdx`/`dpdy` of the interpolated world position. Height is not damped: geometry is not a shading
+    question.
 
 ## Rationale
 
-**Nine and not more.** The cost is nine sines and nine cosines per vertex and per shaded pixel, against
-two texture loads and a shadow lookup the same fragment already pays for. The count was raised until the
-beat stopped being visible in a capture and not further.
+**Twelve and not more.** The cost is twelve sine-cosine pairs per vertex and per shaded pixel, against
+two texture loads and a shadow lookup the same fragment already pays for. Nine was where the *beat*
+stopped being visible; the last three were added later, for a different reason, and they are the answer
+to wanting a tiling detail normal map. They carry the fine ripple a near camera resolves — the same
+detail a texture would have supplied, from the generator already present, with nothing to author, no
+tiling to hide, and a level-of-detail that already knows how to remove them with distance. A detail
+normal map remains an option and is now a much smaller one.
+
+**The group envelope is the decision that separates water from corduroy, and no component count
+substitutes for it.** This is worth stating plainly because the first two attempts both tried to fix
+regularity by adding components, and both failed for the same structural reason: every component is an
+infinite plane wave of constant amplitude, so a sum of them is exactly as strong everywhere and its
+crests never end, however many there are. Real water arrives in *sets* — a group builds, runs and fades
+— and a crest has a finite length along its ridge. The envelope's wavevector therefore runs mostly
+across travel rather than along it: modulating along travel alone makes the whole train pulse, which is
+a different and less useful thing than breaking a ridge into segments.
+
+Its slope enters the gradient by the product rule rather than being neglected. Dropping that term would
+leave the normal describing a surface the height field no longer has — subtly, and exactly at the edges
+of a group, where the envelope moves fastest and the eye is most likely to be looking.
+
+**Whitecaps are gated on slope as well as height, and the capture is why.** Keyed on height alone they
+come out the size of the swell that carries them, because height is dominated by the longest components,
+so a "high" region is a whole crest wide — an ocean rendered with hundred-unit white blobs that read as
+ice floes. Slope is the physical criterion in any case: a wave breaks when its face is too steep to
+stand, not when it is tall. The gradient carries every component, so gating on it fragments the patch
+down to the scale of the chop riding on the swell, which is the scale whitecaps have. The slope is
+measured against what the material's own train would give on average, so the threshold means "steeper
+than this water usually is" rather than a figure in radians that would mean different things for a pond
+and for a swell.
+
+**Both foam windows are placed against the crest *distribution*, not its range.** A sum of twelve
+enveloped components piles up around its mean with a standard deviation of about 0.086 of the range, so
+a threshold at 0.78 is past three sigma. The first attempt at whitecaps used one and put a single speck
+on an entire sea.
 
 **Golden-ratio powers rather than another arithmetic step.** The property wanted is that no pair of
 components has a rational wavelength ratio, and taking powers of one irrational gives it for every pair at
@@ -127,7 +167,7 @@ the other, and averaging leaves the long axis aliasing — which is the axis the
 
 - **Every committed water reference moved**, on every adapter, and three new scenes were added. The wave
   train, the tints and the shading all changed; that is what the record is about.
-- **The uniform block grew from five `vec4`s to seven.** Both the shader struct and the packing assert the
+- **The uniform block grew from five `vec4`s to eight.** Both the shader struct and the packing assert the
   size, because a mismatch does not fail validation — it silently misaligns every field past the drift.
 - **`WaterMaterial::default()` is now a lake** and its figures are not the old shared ones. Callers that
   took the default and overrode a field or two keep compiling and render differently, which is intended:
