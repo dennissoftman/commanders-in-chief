@@ -71,11 +71,50 @@ fn instance() -> wgpu::Instance {
     wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env())
 }
 
-/// Builds a device descriptor asking for whichever optional features this adapter has.
+/// Bind groups the renderer's deepest pipeline needs bound at once.
+///
+/// The water pass is that pipeline: the scene and its G-buffer, its own uniform, the shadow cascades,
+/// the environment, and — once a reflection provider samples the lit scene — a fifth group for what it
+/// reads. `wgpu::Limits::default()` stops at four, which is one short, and four is not an arbitrary
+/// default: it is Vulkan's own guaranteed minimum for `maxBoundDescriptorSets`.
+///
+/// So this is a real requirement rather than a preference, and it is stated as a constant so a device
+/// that cannot meet it fails at creation with a reason rather than at pipeline creation with a
+/// validation message that names a layout instead of a cause.
+pub(crate) const REQUIRED_BIND_GROUPS: u32 = 5;
+
+/// Refuses a device that cannot bind what the deepest pipeline needs.
+///
+/// Checked against the *device* rather than the adapter, because the device is what a pipeline is
+/// created on and the two can differ — the descriptor asks for what the adapter offers, and a backend
+/// is free to hand back less.
+fn check_bind_groups(device: &wgpu::Device) -> Result<(), RenderError> {
+    let offered = device.limits().max_bind_groups;
+    if offered < REQUIRED_BIND_GROUPS {
+        return Err(RenderError::BindGroupLimit(offered));
+    }
+    Ok(())
+}
+
+/// Builds a device descriptor asking for whichever optional features this adapter has, and for as many
+/// bind groups as it will give.
+///
+/// Taken from the adapter rather than written as a number, which is what makes the raise cost nothing:
+/// the device asks for exactly what the hardware already reports, so no adapter that worked before
+/// stops working. Every desktop backend answers eight here — the figure wgpu itself caps at — and the
+/// two this project is tested on, an RTX 4080 and Mesa's lavapipe, both do.
+///
+/// Every other limit stays at its default deliberately. Raising one because a pass needs it is a
+/// different thing from raising all of them because they were there for the taking, and the second is
+/// how a renderer quietly acquires a hardware requirement nobody decided on.
 fn device_descriptor<'a>(adapter: &wgpu::Adapter, label: &'a str) -> wgpu::DeviceDescriptor<'a> {
     wgpu::DeviceDescriptor {
         label: Some(label),
         required_features: adapter.features() & OPTIONAL_FEATURES,
+        required_limits: wgpu::Limits {
+            max_bind_groups: adapter.limits().max_bind_groups,
+            ..wgpu::Limits::default()
+        },
         ..Default::default()
     }
 }
@@ -107,6 +146,7 @@ impl GpuContext {
             .request_device(&device_descriptor(&adapter, "cic-render device"))
             .await
             .map_err(RenderError::RequestDevice)?;
+        check_bind_groups(&device)?;
         Ok(Self {
             device,
             queue,
@@ -154,6 +194,7 @@ impl GpuContext {
             ))
             .await
             .map_err(RenderError::RequestDevice)?;
+        check_bind_groups(&device)?;
         Ok((
             Self {
                 device,
