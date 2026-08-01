@@ -383,6 +383,34 @@ What works:
       prices itself against the **cheapest class the grid actually holds** rather than assuming that
       class is `1`, which is what keeps a renumbered ladder from quietly making A\* inadmissible —
       ADR 3001's amendment A is now a test rather than a hazard.
+    - **And objects stamp it.** [ADR 3001](docs/adr/3001-pathfinding.md) decision 4: templates carry
+      a `footprint` — the ground an object denies — and a `passage` — the ground it grants, at a
+      cost class — both rectangles of whole cells, both optional, and neither allowed on a unit,
+      whose own occupancy is decision 10's business. Precedence is derivation, then passage, then
+      occlusion, so a bridge crosses a river and a depot raised at the bridgehead denies it. Nothing
+      constructs anything yet and none was needed: scenario activation already places structures, so
+      `Ground` reads `Forces` as an earlier peer and reconciles once a tick — construction,
+      demolition and movement are one comparison rather than four call sites.
+      - **The grid is layered rather than overwritten, and that is the whole difficulty.** The
+        terrain's own derivation is kept whole underneath, and the classes the search reads are
+        computed from it plus the stamps, because *an object's death has to restore what was under
+        it*. A grid that wrote over its classes could only guess on removal, and the guess is wrong
+        exactly where it matters: a depot raised on a shoreline, destroyed, leaving walkable water.
+        The test puts one footprint over lake bed and open ground at once and requires each cell to
+        come back as itself — the wrong implementation gets two of three right.
+      - **Routes replan on the tick the grid changes** (decision 7), in identifier order, and a
+        repath is counted and hashed the same way an ignored order is. The intersection test is an
+        over-approximation — a leg is checked by the bounding box of the cells its ends fall in — so
+        it can cost a repath that returns the same route and it cannot miss one, which is why the
+        record's "a unit whose next step is blocked" fallback turned out to have nothing to catch.
+      - **Stamping found a defect in the slice before it.** String-pulling asked only whether a
+        shortcut was walkable — the right question until two adjacent cells cost different amounts,
+        and `passage` is the first thing in the engine that makes them. A route that went four rows
+        out of its way to reach a road was pulled straight back off it, so A\* made the decision the
+        cost ladder exists for and the next pass silently undid it. A shortcut now has to cost no
+        more than the chain it replaces, priced on the walk that was already checking passability;
+        on ground of one class the two are always equal, because a Bresenham line takes the
+        octile-optimal mix of steps and that is what A\* found, so no existing route moved.
   - **A subsystem can now read its peers** ([`subsystem`](crates/cic-sim/src/subsystem.rs)), which is
     what movement asking the ground where a unit may walk actually requires. Immutably, and only
     peers: the kernel splits its own list around the subsystem it is running, so the running one holds
@@ -400,7 +428,10 @@ Pass a `.cicmap` path to view a real map; with no argument it generates terrain,
 from the heightfield's own low point, their surfaces — and **a scenario, activated through the kernel
 and running live**: two players' depots tinted by seat, neutral pines between them, and six scouts
 that spawn by command on tick zero and patrol a square around the map's middle on standing orders,
-crossing each other's paths and going round the lake rather than through it. The kernel advances at
+crossing each other's paths and going round the lake rather than through it. **The depots now deny
+the ground they stand on** — five cells square against the eight-metre grid — and the viewer prints
+the grid twice, before and after the placements stamp it, because the difference between the two
+numbers is the only part of this a still image cannot show. The kernel advances at
 its fixed 30 Hz from the accumulator whatever the frame rate does, and the orders are host-side
 inputs of exactly the shape a network session would feed.
 
@@ -534,14 +565,20 @@ in a capture test and live in the viewer — **and the first verbs work**: spawn
 `cic_sim::units`, replay-identical over ninety ticks — **and the kernel ticks live in the viewer**,
 scouts patrolling on standing orders.
 
-**Pathfinding's first slice has landed on top of that**: `cic_sim::ground` derives the passability
-grid and searches it, and a move order is answered with a route rather than a straight line. On the
-viewer's generated terrain that is 8,661 impassable cells out of 65,536 — water and cliffs the scouts
-now walk around instead of through. What is *not* built is the half that needs a producer: a
-`footprint` that denies the ground a structure stands on and a `passage` that grants a bridge its
-crossing (ADR 3001 decision 4) both stamp the grid, and nothing constructs or destroys anything yet;
-repathing on a grid edit (decision 7) arrives with the first edit for the same reason. Local
-avoidance (decision 10) the record already defers.
+**Pathfinding has landed on top of that, all but its last decision**: `cic_sim::ground` derives the
+passability grid, stamps it, and searches it, and a move order is answered with a route rather than
+a straight line. On the viewer's generated terrain the derivation is 8,661 impassable cells out of
+65,536 — water and cliffs the scouts walk around instead of through — and the four placed depots
+stamp it to **8,718**, denying 57 cells that were not already denied. That difference is the
+mechanic and the layering at once: four five-cell-square footprints cover a hundred cells, and
+forty-three of them were water or cliff the terrain had already refused, which the grid knows
+because it kept the derivation whole underneath rather than writing over it.
+
+So decision 4 is built — `footprint` denies, `passage` grants at a cost class, precedence runs
+derivation, then passage, then occlusion — and so is decision 7, routes replanning on the tick the
+grid changes. Neither needed a construction mechanic in the end: scenario activation already places
+structures, and `Ground` reads them from `Forces` as an earlier peer. **Local avoidance (decision
+10) is what remains**, and the record already defers it.
 
 **The economy is decided, and so is the cost ladder.** Denys accepted
 [ADR 3002](docs/adr/3002-corridor-economy.md) on 2026-08-01, together with the three amendments it
@@ -556,9 +593,10 @@ raised against [ADR 3001](docs/adr/3001-pathfinding.md). Two of those are now bu
   say what "three times" is measured *against*, and something has to: `reference_class` declares
   which rung a template's authored `speed` is the speed for, kept separate from `plain_class` because
   what the terrain derives to and what a speed means are different questions.
-- **C**, wrecks stamping a cost class rather than a footprint, has nothing to implement — there is no
-  combat, so there are no wrecks. It is accepted so the first one is not made a wall by whoever
-  writes it.
+- **C**, wrecks stamping a cost class rather than a footprint, still has nothing to implement —
+  there is no combat, so there are no wrecks. What has changed is that the mechanism is no longer
+  waiting either: a wreck's class is a `passage` with a dear one, laid and lifted through the same
+  reconcile a road is. It is accepted so the first one is not made a wall by whoever writes it.
 
 Accepting 3002 fixes the design and does not schedule it. Nothing of the economy is built, the record
 names decision 1 — gates, yards, carriage — as the minimum viable version, and its own build order is

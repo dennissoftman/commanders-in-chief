@@ -95,6 +95,8 @@ fn templates() -> TemplateSet {
             model: None,
             name: None,
             speed: Some(40.0),
+            footprint: None,
+            passage: None,
         }],
     }
 }

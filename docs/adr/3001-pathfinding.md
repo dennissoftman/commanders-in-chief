@@ -1,14 +1,15 @@
 # ADR 3001: Pathfinding — derived passability, occluders and passage, integer-cost grid A*
 
-- Status: accepted, and **implemented in part** — `cic_sim::ground` derives the grid and searches
-  it, and `cic_sim::units` walks what it returns. Decision 6's string-pulling gained a corner-rounding
-  pass this record did not describe, recorded as **amendment D** below rather than left as
-  undocumented behaviour. Decisions 1, 2, 3, 5, 6, 8 and 9 are in the tree;
-  decisions 4 (footprint and passage stamps), 7 (repathing on grid edits) and 10 (local avoidance)
-  are not, each waiting on the mechanic that produces the thing it reacts to. **All four amendments
-  below are accepted** — A, B and C by Denys on 2026-08-01 together with
-  [ADR 3002](3002-corridor-economy.md), which raised them, and D with the pass that introduced it.
-  A and B are implemented; C has nothing to implement until combat produces a wreck.
+- Status: accepted, and **implemented but for decision 10** — `cic_sim::ground` derives the grid,
+  stamps it, and searches it, and `cic_sim::units` walks what it returns and re-plans when the
+  ground under a route changes. Decision 6's string-pulling gained a corner-rounding pass this
+  record did not describe, recorded as **amendment D** below rather than left as undocumented
+  behaviour, and stamping exposed a defect in the same pass, recorded as **amendment E**.
+  Decisions 1 through 9 are in the tree; decision 10 (local avoidance) is not, and is still waiting
+  on the mechanic that produces the thing it reacts to. **All five amendments below are accepted**
+  — A, B and C by Denys on 2026-08-01 together with [ADR 3002](3002-corridor-economy.md), which
+  raised them, and D and E with the passes that introduced them. A, B, D and E are implemented; C
+  has nothing to implement until combat produces a wreck.
 
 ## Context
 
@@ -86,6 +87,26 @@ facing in particular needs to be reproducible and natural-looking, not a six-dec
      Stamping an arbitrarily rotated rectangle means rasterizing it deterministically, which is real
      work purchasing nothing a quarter-turn RTS footprint does not already deliver.
 
+   **Implemented.** `templates.json` carries `footprint` and `passage`, both a rectangle in whole
+   cells and the second with a class; only a `structure` or a `prop` may declare either, because a
+   mover's own occupancy is decision 10's `radius` and a footprint that moved would be lifted and
+   re-laid every tick. The grid keeps the derivation whole underneath and computes the classes the
+   search reads from it plus the stamps, which is what makes "an object's death restores what the
+   layers beneath it say" true rather than approximated — the test that matters puts one footprint
+   over lake bed *and* open ground and requires each cell to come back as itself, because an
+   implementation that wrote over the classes and restored plain ground gets two of three right and
+   leaves a walkable lake. Two settlements the record left open: an even extent takes the extra cell
+   on the high side of the cell its owner stands in, and a rectangle at the map edge is **clipped**
+   rather than slid inward, so a building's footprint stays where its model is. Overlapping passages
+   resolve to the cheapest class, which is order-independent so that which object was built first
+   decides nothing.
+
+   The one producer so far is scenario activation: `Ground` reads `Forces` as an earlier peer and
+   reconciles once a tick, so construction, demolition, movement and Concord's grading all arrive
+   through one comparison rather than through four call sites. A consequence worth stating because
+   it surprised the first test written against it: **the stamps land on tick zero, not at
+   registration** — a peer is only readable inside a tick.
+
 5. **The algorithm is A\* on the 8-connected grid, in integer arithmetic throughout.** An orthogonal
    step costs `10 ×` the destination's cell class, a diagonal `14 ×` — the classic integer
    approximation of √2, chosen not for accuracy but because *consistency is the requirement and
@@ -117,11 +138,31 @@ facing in particular needs to be reproducible and natural-looking, not a six-dec
    many units inside one tick; that spike is accepted now and amortizing it (a deterministic repath
    queue spread over ticks) is recorded as the option if profiling objects.
 
+   **Implemented, and the fallback turned out to be unnecessary.** `Ground` reports the rectangles
+   it changed and clears them at the top of every tick, so an edit is news exactly once; `Units`
+   runs after it, and every unit whose remaining route crosses one plans again from where it stands
+   to where it was going. The intersection test is an **over-approximation** — a leg is tested by
+   the bounding box of the cells its ends fall in, which contains every cell the leg actually
+   crosses — so it can cost a repath that returns the same route and it cannot miss one. The
+   "next step is blocked" clause above was written as a safety net for what the test misses; a test
+   that cannot miss leaves it nothing to catch, and adding it anyway would have made a unit ordered
+   into a cell that is impassable and its own re-search the same answer every tick for ever.
+
+   A repath is **counted and hashed**, the same way an ignored command is: it changes where a unit
+   goes with no order having been given, so two machines that repathed a different number of units
+   diverge on the tick it happened rather than where the paths visibly part.
+
 8. **The grid hashes incrementally.** A fingerprint of the derived grid folds into the subsystem hash
    at activation, and every stamp folds in as it is applied — because rehashing tens of millions of
    cells per tick is not a price any other subsystem pays, and the grid's state is a pure function of
    activation plus the stamps the command log already records. `first_divergence` therefore still
    names the tick a machine stamped differently.
+
+   **Implemented as a chain**, which is what "folds in as it is applied" means and is worth stating
+   plainly: the fingerprint records the *history* of edits and not only their sum, so lifting a
+   stamp restores every cell and does not restore the number the grid had before it was laid. That
+   catches strictly more than a state hash would, and nothing here needs to recognise a grid it has
+   seen before.
 
 9. **Facing stays out of simulation state until a mechanic reads it.** Presentation already derives a
    heading from motion, and with waypointed routes it keeps doing exactly that, smoothed with a
@@ -177,9 +218,11 @@ on screen is constrained by this; only the *stamp* is quantized.
 
 - `templates.json` gains `footprint`, `passage` (with a cost class), and later `radius` — each
   arriving with its consumer, per that format's growth rule. Structures acquire their first
-  simulation-side meaning.
+  simulation-side meaning. The first two have landed; `radius` waits for decision 10.
 - The scenario/package layer must place structures on cell boundaries or accept quantization at
-  activation. Activation gains the stamp pass and the grid fingerprint.
+  activation. It accepts the quantization: a placement's position picks the cell it falls in and the
+  rectangle is centred on that, so no authoring rule changed and nothing in the scenario format
+  needed a new field.
 - A new `cic-sim` subsystem owns the grid, its edits, and pathing requests; `units` consumes routes
   instead of raw targets. The move verb's payload is unchanged.
 - Water level must be visible to the simulation. Today the viewer derives a water table
@@ -273,12 +316,18 @@ behaviour worth having: a sustained battle chokes the corridor with its own casu
 choking outlives the shooting. Ordinary decay clears it, and Meridian recovering the wrecks clears it
 faster — so the faction that lives on throughput is paid to restore it.
 
-**Nothing to implement.** There is no combat, so there are no wrecks, and a wreck stamps through the
-same mechanism decision 4 describes — which is itself unbuilt. Accepted now so that whoever writes
-the first wreck does not have to decide it again, and does not reach for a footprint because a
-footprint is the easier thing to reach for.
+**Nothing to implement, but the mechanism it needs now exists.** There is no combat, so there are no
+wrecks. Decision 4 is built, so a wreck's cost class is a `passage` with a dear one — rubble at `5`
+rather than a road at `1` — laid and lifted through the same reconcile everything else uses.
+Accepted now so that whoever writes the first wreck does not have to decide it again, and does not
+reach for a footprint because a footprint is the easier thing to reach for.
 
-## Amendment — implemented, raised by watching it
+One question this leaves for that record rather than answering here: `passage` **overrides the
+derivation**, so a wreck stamped on ground the terrain called impassable would make it crossable.
+That is right for a bridge and wrong for a burnt-out truck in a river, and the difference is a
+mechanic's to settle, not this one's.
+
+## Amendments — implemented, each raised by building the one before it
 
 ### D. A route's corners are rounded, and the rounding is checked against the grid
 
@@ -314,3 +363,36 @@ interpolating between the last two ticks — `TickAccumulator::alpha`, which had
 documented as "what a renderer interpolates by" with nothing calling it. Worth recording here
 because the symptom was indistinguishable from a pathfinding fault and the cause was in a different
 crate.
+
+### E. String-pulling was cost-blind, and the first cheaper-than-ground cell is what showed it
+
+**The defect.** Decision 6 says a route is "string-pulled", and decision 5 says a shortcut may not
+cut a corner past an impassable cell — so the smoothing pass asked one question of each candidate
+line: *can a unit walk it?* That is the right question on a grid where every passable cell costs the
+same, and it is the wrong one the moment they do not. A route that goes four rows out of its way to
+reach a metalled road is **shorter in cost and longer in metres**, so a walkability-only pass pulls
+it straight back off the road — A\* makes the decision the whole cost ladder exists for and the next
+pass silently undoes it.
+
+Nothing could have caught this before now, and that is the point of recording it rather than fixing
+it quietly. `GroundRules::plain_class` could already be renumbered, but only for the *whole map*, so
+no route ever crossed a cost gradient; decision 4's `passage` is the first thing in the engine that
+puts one cell next to a cheaper one. Amendments A and B were about the ladder meaning something, and
+this is the third place it had to reach.
+
+**The fix, which changes no format and adds no arithmetic.** A waypoint is dropped when the straight
+line is walkable **and costs no more than the chain it replaces**. The line's cells are already
+being walked to check they are passable, so they are priced on the same walk, at the search's own
+`10`/`14` against the entered cell's class; the chain's own cost comes from a prefix sum over the
+cells A\* closed. Integers throughout, comparable with an accumulated `g` by construction.
+
+**Why this is not a behaviour change anywhere else.** On ground of one class the two costs are
+always *equal* — a Bresenham line between two cells takes `min(dx, dy)` diagonal steps and
+`|dx − dy|` orthogonal ones, which is the octile-optimal mix, which is what A\* found — so every
+shortcut that used to be taken is still taken. A\* returns a minimum-cost chain, so a straight line
+can never come in under it; the only shortcuts now refused are the ones that would have cost the
+unit something. `a_route_across_open_ground_is_one_straight_run` did not move.
+
+**Corner rounding is deliberately left cost-blind.** Amendment D's arcs are checked for
+walkability only. Rounding perturbs a route by a few metres at a corner, it exists to make walking
+look like walking, and pricing it would buy nothing a player could see.

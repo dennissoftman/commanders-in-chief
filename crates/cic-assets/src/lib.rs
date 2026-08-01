@@ -42,7 +42,7 @@ pub use scenario::{
 pub use sky::{
     SKY_CHANNELS, ScanlineFault, SkyAsset, SkyError, SkyLighting, SkyLimits, decode_radiance,
 };
-pub use templates::{Template, TemplateError, TemplateKind, TemplateSet};
+pub use templates::{Footprint, Passage, Template, TemplateError, TemplateKind, TemplateSet};
 pub use terrain::{
     Terrain, TerrainError, TerrainLayer, TerrainLimits, decode_terrain, resolve_terrain_textures,
 };
