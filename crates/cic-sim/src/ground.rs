@@ -56,14 +56,32 @@ pub const GROUND: &str = "ground";
 /// The cost class of a cell nothing may enter: a cliff, or ground under water.
 pub const IMPASSABLE: u8 = 0;
 
-/// The cost class ADR 3001 decision 3 gives plain ground, and [`GroundRules`]'s default for it.
+/// Metalled road: the best ground there is, and three times as quick as a field.
 ///
-/// A default rather than a rule: the class the derivation assigns is [`GroundRules::plain_class`],
-/// and this is only what that field starts at. Decision 3 sets plain ground at `1`; its **proposed
-/// amendment A** renumbers the ladder so a metalled road can be cheaper than a field, which changes
-/// this number and nothing else — nothing in the search assumes it, because the heuristic keys off
-/// the cheapest class the grid actually holds.
-pub const PLAIN: u8 = 1;
+/// The whole ladder below is [ADR 3001](../../../docs/adr/3001-pathfinding.md)'s **amendment A**,
+/// accepted 2026-08-01. The record as first written put plain ground at `1` with `0` reserved for
+/// impassable, which left nothing cheaper than a field — so grading could restore mud and never
+/// improve past it, and Concord's rising income curve was pothole repair. Plain ground moving to `3`
+/// is the entire fix; `10`/`14` stays the octile pair, and no arithmetic changes.
+///
+/// Three times open ground is aggressive on purpose. A road twenty percent better than a field is
+/// not a thing three factions go to war over, and this one is the premise.
+pub const METALLED: u8 = 1;
+
+/// Graded road: what Concord's engineering leaves behind, twice the speed of a field.
+pub const GRADED: u8 = 2;
+
+/// Plain ground, and what [`GroundRules::plain_class`] starts at.
+///
+/// The reference rung: a template's authored speed is the speed it makes *here*, and every other
+/// class is a ratio against it.
+pub const PLAIN: u8 = 3;
+
+/// Mud, and the first rung that costs rather than pays.
+pub const MUD: u8 = 4;
+
+/// Rubble: passable, slow, and what a road chokes with as wreckage accumulates on it.
+pub const RUBBLE: u8 = 5;
 
 /// Every coefficient the ground layer runs on: what makes a cell impassable, what a step costs, and
 /// how sharply a route may turn.
@@ -89,8 +107,20 @@ pub struct GroundRules {
     /// The cost class the derivation assigns to ground it finds walkable.
     ///
     /// The only class the derivation produces, because the terrain says nothing about roads or
-    /// rubble — those are *stamps*, and a stamp arrives with the mechanic that applies it.
+    /// rubble — those are *stamps*, and a stamp arrives with the mechanic that applies it. Defaults
+    /// to [`PLAIN`]; a map whose open ground is all metalled is a legitimate thing to declare.
     pub plain_class: u8,
+    /// The class a template's authored `speed` is the speed for.
+    ///
+    /// [ADR 3001](../../../docs/adr/3001-pathfinding.md)'s **amendment B**: a cell's class scales
+    /// how fast a unit crosses it and not only which route wins, so something has to say which rung
+    /// means "the speed on the tin". Every other class is a ratio against this one — at the default
+    /// ladder a metalled road is three times [`PLAIN`] and rubble is three fifths of it.
+    ///
+    /// Separate from [`Self::plain_class`] because they answer different questions: one is what the
+    /// terrain derives to, the other is what a speed means. They are equal by default and a map that
+    /// paved its open ground would move the first without touching the second.
+    pub reference_class: u8,
     /// What one orthogonal step through a cell of class `1` costs.
     pub orthogonal_step: u32,
     /// What one diagonal step through a cell of class `1` costs: the integer approximation of √2
@@ -115,6 +145,7 @@ impl Default for GroundRules {
             maximum_grade: 1.0,
             water_level: None,
             plain_class: PLAIN,
+            reference_class: PLAIN,
             orthogonal_step: 10,
             diagonal_step: 14,
             corner_radius: 6.0,
@@ -308,6 +339,30 @@ impl Ground {
             }
         };
         Some((axis(world[0], self.width), axis(world[1], self.height)))
+    }
+
+    /// How fast a unit crosses the ground here, as a multiple of its authored speed.
+    ///
+    /// [ADR 3001](../../../docs/adr/3001-pathfinding.md)'s **amendment B**. A cell's class ranks
+    /// routes *and* sets the pace on them: without this half, grading the whole map would change
+    /// which way a unit went and not how long it took, so Concord's paving would be a routing
+    /// preference rather than the income increase its doctrine is built on.
+    ///
+    /// The ratio is [`GroundRules::reference_class`] over the cell's class — a correctly-rounded
+    /// division of two small integers, inside ADR 0007's permitted set. Off the grid, on a grid with
+    /// no cells, or standing on ground that has turned impassable underneath it, a unit keeps its
+    /// authored speed: there is no sensible ratio in any of those cases, and the last one has to let
+    /// the unit walk off rather than divide by zero.
+    #[must_use]
+    pub fn pace_at(&self, world: [f64; 2]) -> f64 {
+        let Some((x, y)) = self.cell_at(world) else {
+            return 1.0;
+        };
+        let class = self.class(x, y);
+        if class == IMPASSABLE || self.rules.reference_class == IMPASSABLE {
+            return 1.0;
+        }
+        f64::from(self.rules.reference_class) / f64::from(class)
     }
 
     /// The world position at the centre of a cell.
@@ -792,7 +847,7 @@ fn fingerprint(width: u32, height: u32, cell_size: f64, classes: &[u8], rules: G
         }
         None => hasher.write_bytes(&[0]),
     }
-    hasher.write_bytes(&[rules.plain_class, rules.corner_steps]);
+    hasher.write_bytes(&[rules.plain_class, rules.reference_class, rules.corner_steps]);
     hasher.write_u64(u64::from(rules.orthogonal_step));
     hasher.write_u64(u64::from(rules.diagonal_step));
     hasher.write_f64(rules.corner_radius);
@@ -1001,9 +1056,17 @@ mod tests {
         assert_ne!(
             hash(base),
             hash(GroundRules {
-                plain_class: 3,
+                plain_class: super::GRADED,
                 ..base
             })
+        );
+        assert_ne!(
+            hash(base),
+            hash(GroundRules {
+                reference_class: super::GRADED,
+                ..base
+            }),
+            "the class a speed is measured against decides how fast everything moves"
         );
         assert_eq!(
             hash(base),
