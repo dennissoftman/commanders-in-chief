@@ -22,9 +22,25 @@ consumers exactly as the deferral intended.
   is what proves the command-to-motion pipe end to end. The template set gained `speed`, the first
   field to arrive with the mechanic that reads it.
 - Pathfinding over the heightfield, with terrain passability, dynamic obstruction from structures, and
-  local avoidance between units. **Decided, not yet built** — [ADR 3001](../adr/3001-pathfinding.md):
-  passability derived from the heightfield, occluder and passage footprints on templates, and A* on an
-  integer-cost grid.
+  local avoidance between units. **First slice landed** — [ADR 3001](../adr/3001-pathfinding.md)'s
+  grid and search, as `cic_sim::ground`: passability derived from the heightfield by slope and water
+  line, one cell per sample interval, and A\* on an 8-connected integer-cost grid with ties broken on
+  cell index, no diagonal cutting a corner, and an unreachable target degrading to the nearest cell
+  the search closed. Routes are string-pulled and `cic_sim::units` walks them, spending one tick's
+  travel across as many legs as it reaches — so a corner costs a unit no time, and the move verb's
+  encoding did not change. The grid's fingerprint is in the tick hash.
+
+  **Dynamic obstruction and local avoidance are the parts still outstanding**, and both are waiting
+  on a producer rather than on a decision: a `footprint` and a `passage` stamp the grid when
+  something is built or destroyed, and nothing constructs anything yet. Repathing on a grid edit
+  (decision 7) arrives with the first edit for the same reason.
+
+  Two things this slice needed that were not pathfinding. A subsystem can now **read its peers**
+  during a tick — immutably, with a peer registered earlier already advanced — because movement
+  asking the ground where a unit may walk is the first cross-subsystem read the kernel has, and it
+  is the same seam [M10](m10-scripting.md)'s host verbs need. And the **water table moved into
+  `cic-assets`**: presentation floods a map to that line and the simulation refuses to walk under
+  it, so two derivations of it would be a unit wading through what the player sees as a lake.
 - Combat: weapons, ranges, damage types, armour classes, health, death. **Specified, not yet built** —
   [mechanics.md §3](../design/mechanics.md#3-combat): integers throughout, four damage types against
   five armour classes as integer percentages, and no multiplier anywhere in the table equal to zero,

@@ -1,7 +1,12 @@
 # ADR 3001: Pathfinding — derived passability, occluders and passage, integer-cost grid A*
 
-- Status: accepted. Three amendments are **proposed** below, raised by
-  [ADR 3002](3002-corridor-economy.md) and carrying its review.
+- Status: accepted, and **implemented in part** — `cic_sim::ground` derives the grid and searches
+  it, and `cic_sim::units` walks what it returns. Decisions 1, 2, 3, 5, 6, 8 and 9 are in the tree;
+  decisions 4 (footprint and passage stamps), 7 (repathing on grid edits) and 10 (local avoidance)
+  are not, each waiting on the mechanic that produces the thing it reacts to. Three amendments are
+  **proposed** below, raised by [ADR 3002](3002-corridor-economy.md) and carrying its review;
+  none of them is implemented, and the one that touches shipped code is amendment A, which moves a
+  single constant.
 
 ## Context
 
