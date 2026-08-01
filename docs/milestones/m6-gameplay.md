@@ -15,7 +15,19 @@ consumers exactly as the deferral intended.
   `speed` arrived with movement and `footprint` and `passage` with the grid stamps, which is that
   rule working three times rather than a promise about it.
 - Selection and orders: move, attack, attack-move, stop, hold, patrol, and formation movement.
-  **First slice landed** — spawn, move, and stop, as `cic_sim::units`: command payloads decoded by the
+  **The movement half is done** — spawn, move, stop, and now **formation movement**
+  ([ADR 3003](../adr/3003-formation-movement.md)): `move_group` names a set of units and one
+  destination, and each of them is given its own place in the shape the group is already standing
+  in. Free, because nothing is imposed — no box, no wedge, no lattice — and not random, because the
+  assignment is the identity, so on open ground the whole group translates rigidly and no two units
+  cross. Slots that would overlap are opened out radius-aware; a slot the ground refuses is
+  re-placed **widest member first**, so the object that has the hardest time fitting gets first
+  refusal on the roomy ground. Sixteen units sent to one cell as a group end with **zero**
+  overlapping pairs against twelve for sixteen separate orders, which closes the limitation
+  [ADR 3001](../adr/3001-pathfinding.md) decision 10 recorded against itself. What is left on this
+  line is *attack*, *attack-move*, *hold* and *patrol* — order kinds that arrive with combat — and
+  selection itself, which is input rather than simulation. The first slice, below, was spawn, move
+  and stop, as `cic_sim::units`: command payloads decoded by the
   gameplay layer (the kernel keeps them opaque), ownership checked with rejections *counted and
   hashed* so an ignored order is visible rather than silent drift, and straight-line movement in the
   permitted operation set only — a `sqrt` and a division, no trigonometry, arrival snapping exactly to
@@ -46,15 +58,15 @@ consumers exactly as the deferral intended.
   **replan on the tick the grid changes**, in identifier order, and a repath is counted and hashed
   the same way an ignored order is.
 
-  **Local avoidance closes the charter line**, and it is the modest thing the record asked for: a
+  **Local avoidance closes this charter line**, and it is the modest thing the record asked for: a
   unit is a circle, overlapping circles push apart, and a push the ground refuses slides along
   whichever axis is free. Every push is measured before any is applied, so which unit was spawned
   first decides nothing; every push is checked against the grid, so a shove is not a licence to walk
   into a building. Sixteen units ordered to one cell end with 17 of 120 pairs overlapping against
   **120 of 120** with the coefficient at zero. Two limitations are recorded rather than hidden — a
-  head-on pair stalls, and a crowd converging on one point keeps jostling, which is what
-  **formation movement**, the charter line above, exists to fix by giving sixteen units sixteen
-  places to stand.
+  head-on pair stalls, and a crowd converging on one point keeps jostling — which is what
+  **formation movement** now fixes, by giving sixteen units sixteen places to stand
+  ([ADR 3003](../adr/3003-formation-movement.md), and the charter line above).
 
   Stamping found a defect in the slice before it, which is the argument for building the two in this
   order. String-pulling asked only whether a shortcut was *walkable*, which is the right question
