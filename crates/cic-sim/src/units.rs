@@ -15,6 +15,14 @@
 //! 3001](../../../docs/adr/3001-pathfinding.md) decision 6 could change what the move verb means
 //! without changing what it encodes: walking a route is walking to a point, repeatedly.
 //!
+//! # And a route is re-decided when the ground under it changes
+//!
+//! Decision 7. A route is a plan made once against the grid as it stood, so the tick something
+//! stamps that grid — a structure raised, a bridge lost — every unit whose remaining way crosses
+//! the stamped cells plans again, in identifier order, before anybody takes a step. Without that
+//! the pathfinder would be worse than the straight line it replaced: a unit would walk confidently
+//! through a wall that went up in front of it, following a route that was correct when it was made.
+//!
 //! # The arithmetic is inside ADR 0007 without needing `cic-math` yet
 //!
 //! One tick of movement is a subtraction, a `sqrt`, a division, and a multiply-add per axis — every
@@ -101,6 +109,11 @@ pub struct Units {
     /// Commands ignored so far — unknown templates, unowned units, unparseable bytes. Hashed, so a
     /// machine that ignored a different number of commands diverges on the tick it happened.
     rejected: u64,
+    /// Routes recomputed so far because the ground under them was edited. Hashed for the same
+    /// reason as [`Self::rejected`]: a repath changes where a unit goes without any order having
+    /// been given, so two machines that repathed a different number of units have already parted
+    /// company and this is the tick to say so.
+    repathed: u64,
 }
 
 impl Units {
@@ -120,6 +133,7 @@ impl Units {
             speeds,
             roster: BTreeMap::new(),
             rejected: 0,
+            repathed: 0,
         }
     }
 
@@ -133,6 +147,41 @@ impl Units {
     #[must_use]
     pub fn rejected(&self) -> u64 {
         self.rejected
+    }
+
+    /// How many routes have been recomputed because the ground beneath them was edited.
+    #[must_use]
+    pub fn repathed(&self) -> u64 {
+        self.repathed
+    }
+
+    /// Recomputes the route of every unit whose remaining way crosses ground stamped this tick.
+    ///
+    /// [ADR 3001](../../../docs/adr/3001-pathfinding.md) decision 7. **In identifier order**,
+    /// because a repath is a search and a search reads the same grid for everybody — the order
+    /// decides nothing today and would decide everything the moment a repath could see another
+    /// unit, and an unspecified order is exactly the nondeterminism this subsystem is written to
+    /// avoid.
+    ///
+    /// A unit repaths to where it was already going, from where it now stands. A route that comes
+    /// back empty is a unit that has been walled in, and it stops — which is the honest answer,
+    /// and better than the alternative of keeping a route that leads through the new wall.
+    ///
+    /// Worst case one edit repaths the whole roster inside one tick. The record accepts that spike
+    /// and names a deterministic repath queue as the mitigation if profiling ever objects.
+    fn repath_over_edits(&mut self, ground: &Ground) {
+        if ground.edits().is_empty() {
+            return;
+        }
+        for unit in self.roster.values_mut() {
+            let Some(destination) = unit.destination() else {
+                continue;
+            };
+            if ground.route_crosses_an_edit(unit.position, &unit.route) {
+                unit.route = ground.route(unit.position, destination);
+                self.repathed += 1;
+            }
+        }
     }
 
     fn apply(
@@ -212,6 +261,15 @@ impl Subsystem for Units {
             self.apply(command.player, &command.payload, context.ids, ground);
         }
 
+        // Then the repath, after the orders rather than before them, so that "every route in the
+        // roster was computed against this tick's grid" holds with no exceptions to remember. The
+        // cost of putting it here is that a unit ordered on the same tick something was built
+        // searches twice and gets the same answer; the cost of putting it first would be a rule
+        // with an "unless" in it.
+        if let Some(ground) = ground {
+            self.repath_over_edits(ground);
+        }
+
         let step = context.tick_seconds;
         for unit in self.roster.values_mut() {
             // One tick's travel, spent across as many legs as it reaches. Without the carry-over a
@@ -267,6 +325,7 @@ impl Subsystem for Units {
             }
         }
         hasher.write_u64(self.rejected);
+        hasher.write_u64(self.repathed);
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -381,13 +440,19 @@ fn read_f64(bytes: &[u8]) -> Option<(f64, &[u8])> {
 mod tests {
     #![allow(clippy::float_cmp)]
 
-    use cic_assets::templates::{Template, TemplateKind, TemplateSet};
+    use cic_assets::scenario::{ObjectPlacement, Position, Scenario, TerrainReference};
+    use cic_assets::templates::{Footprint, Passage, Template, TemplateKind, TemplateSet};
+    use cic_assets::terrain::Terrain;
 
     use super::{UNITS, Units, move_command, spawn_command, stop_command};
+    use crate::activation::activate;
     use crate::command::{Command, PlayerId};
-    use crate::ground::{GROUND, Ground};
+    use crate::ground::{GROUND, Ground, GroundRules, METALLED, PLAIN};
     use crate::id::ObjectId;
     use crate::kernel::{Kernel, KernelConfig, first_divergence};
+
+    /// A quarter of a revolution, in the binary turns simulation state stores a heading as.
+    const QUARTER_TURN: u32 = 1 << 30;
 
     fn templates() -> TemplateSet {
         TemplateSet {
@@ -399,6 +464,8 @@ mod tests {
                     model: Some("models/rifleman.glb".to_owned()),
                     name: None,
                     speed: Some(6.0),
+                    footprint: None,
+                    passage: None,
                 },
                 // Four metres a second is a fixture choice, not a design one: at thirty ticks it
                 // gives a step that divides none of the leg lengths below, which is what makes the
@@ -407,12 +474,104 @@ mod tests {
                 Template {
                     id: "unit/sapper".to_owned(),
                     kind: TemplateKind::Unit,
-                    model: None,
+                    model: Some("models/sapper.glb".to_owned()),
                     name: None,
                     speed: Some(4.0),
+                    footprint: None,
+                    passage: None,
                 },
             ],
         }
+    }
+
+    /// The same set, plus a metalled road thirty-two cells long and one wide, and a wall.
+    fn stamping_templates() -> TemplateSet {
+        let mut set = templates();
+        set.templates.push(Template {
+            id: "structure/road".to_owned(),
+            kind: TemplateKind::Structure,
+            model: Some("models/road.glb".to_owned()),
+            name: None,
+            speed: None,
+            footprint: None,
+            passage: Some(Passage {
+                cells: [32, 1],
+                class: METALLED,
+            }),
+        });
+        set.templates.push(Template {
+            id: "structure/wall".to_owned(),
+            kind: TemplateKind::Structure,
+            model: Some("models/wall.glb".to_owned()),
+            name: None,
+            speed: None,
+            footprint: Some(Footprint { cells: [1, 9] }),
+            passage: None,
+        });
+        set.validate().expect("the fixture is a legal template set");
+        set
+    }
+
+    /// Flat ground, `size` samples square, one metre a sample.
+    fn flat_terrain(size: u32) -> Terrain {
+        Terrain::new(
+            size,
+            size,
+            1.0,
+            1.0,
+            vec![0u16; (size * size) as usize],
+            Vec::new(),
+        )
+        .expect("a valid terrain")
+    }
+
+    /// One placement, on the ground plane and unrotated.
+    fn placement(template: &str, x: f32, y: f32) -> ObjectPlacement {
+        ObjectPlacement {
+            template: template.to_owned(),
+            position: Position { x, y, z: 0.0 },
+            rotation: 0.0,
+            scale: 1.0,
+            owner: None,
+        }
+    }
+
+    /// A kernel holding an activated scenario, then the grid, then the units.
+    ///
+    /// The registration order is the whole chain: `Forces` first so the grid reads the objects as
+    /// they stand this tick, the grid second so the units path over it as it stands this tick.
+    fn stamped_kernel(terrain: &Terrain, placements: Vec<ObjectPlacement>) -> Kernel {
+        let templates = stamping_templates();
+        let scenario = Scenario {
+            format_version: 1,
+            name: "stamps".to_owned(),
+            description: String::new(),
+            terrain: TerrainReference {
+                path: "terrain/fixture.cict".to_owned(),
+            },
+            players: Vec::new(),
+            objects: placements,
+            waypoints: Vec::new(),
+            scripts: Vec::new(),
+        };
+        let mut kernel = Kernel::new(KernelConfig {
+            seed: 21,
+            ticks_per_second: 30,
+        });
+        activate(&mut kernel, &scenario, &templates).expect("the fixture scenario activates");
+        kernel.add_subsystem(Box::new(
+            Ground::derive(terrain, GroundRules::default().with_sharp_corners())
+                .with_templates(&templates),
+        ));
+        kernel.add_subsystem(Box::new(Units::new(&templates)));
+        kernel
+    }
+
+    fn ground_of(kernel: &Kernel) -> &Ground {
+        kernel
+            .subsystem(GROUND)
+            .and_then(|subsystem| subsystem.as_any().downcast_ref::<Ground>())
+            .expect("ground registered")
     }
 
     /// A kernel with the units subsystem, at thirty ticks a second.
@@ -638,44 +797,231 @@ mod tests {
     }
 
     #[test]
-    fn better_ground_carries_a_unit_faster() {
-        // ADR 3001 amendment B: a cell's class scales the rate, not only the ranking. Nothing stamps
-        // a road yet, so the two grids differ in what their *open ground* derives to — one map paved
-        // and one not — which exercises the same arithmetic the first graded road will.
-        let terrain = walled_terrain();
-        let travelled = |plain_class| {
-            let mut kernel = Kernel::new(KernelConfig {
-                seed: 21,
-                ticks_per_second: 30,
-            });
-            kernel.add_subsystem(Box::new(Ground::derive(
-                &terrain,
-                crate::ground::GroundRules {
-                    plain_class,
-                    ..crate::ground::GroundRules::default()
-                }
-                .with_sharp_corners(),
-            )));
-            kernel.add_subsystem(Box::new(Units::new(&templates())));
-            kernel
-                .advance(&[command(0, 0, spawn_command("unit/rifleman", 0.5, 7.5))])
-                .expect("advances");
-            kernel
-                .advance(&[command(1, 0, move_command(ObjectId(1), 7.5, 7.5))])
-                .expect("advances");
-            for _ in 2..10 {
-                kernel.advance(&[]).expect("advances");
-            }
-            units(&kernel).units()[&ObjectId(1)].position[0] - 0.5
-        };
+    fn a_road_carries_a_unit_faster_than_the_field_beside_it() {
+        // ADR 3001 amendment B, and the whole chain that decision 4 opened: a template declares a
+        // `passage`, a scenario places one, activation makes it an object, the grid stamps a
+        // metalled lane where it stands, and a unit on that lane moves three times as fast as an
+        // identical unit two dozen cells away on the ground it did not pave.
+        //
+        // This test used to vary what the *whole map's* open ground derived to — one map paved and
+        // one not — because nothing could stamp a road. That version could not tell a road from a
+        // renumbered ladder, which is the difference the entire mechanic is about.
+        let terrain = flat_terrain(33);
+        let mut kernel = stamped_kernel(&terrain, vec![placement("structure/road", 15.5, 1.5)]);
 
-        // Metalled is class 1 against a reference of 3, so three times the pace of plain ground.
-        let plain = travelled(crate::ground::PLAIN);
-        let metalled = travelled(crate::ground::METALLED);
-        assert!(plain > 0.0, "the unit on plain ground did not move at all");
+        assert_eq!(
+            ground_of(&kernel).class(0, 1),
+            PLAIN,
+            "the stamp lands on the first tick, not at registration — the grid reads its peer, and \
+             a peer is only readable inside a tick"
+        );
+        kernel
+            .advance(&[
+                command(0, 0, spawn_command("unit/rifleman", 0.5, 1.5)),
+                command(0, 0, spawn_command("unit/rifleman", 0.5, 30.5)),
+            ])
+            .expect("advances");
+
+        let ground = ground_of(&kernel);
+        assert_eq!(
+            ground.class(0, 1),
+            METALLED,
+            "the road is where the test put it"
+        );
+        assert_eq!(
+            ground.class(31, 1),
+            METALLED,
+            "and it runs the width of the map"
+        );
+        assert_eq!(
+            ground.class(0, 30),
+            PLAIN,
+            "the field beside it is ordinary ground"
+        );
+        // The road is the scenario's first placement, so activation gave it `ObjectId(1)` and the
+        // two spawns that follow take the next two.
+        kernel
+            .advance(&[
+                command(1, 0, move_command(ObjectId(2), 31.5, 1.5)),
+                command(1, 0, move_command(ObjectId(3), 31.5, 30.5)),
+            ])
+            .expect("advances");
+        for _ in 2..10 {
+            kernel.advance(&[]).expect("advances");
+        }
+
+        let roster = units(&kernel);
+        let road = roster.units()[&ObjectId(2)].position[0] - 0.5;
+        let field = roster.units()[&ObjectId(3)].position[0] - 0.5;
+        assert!(field > 0.0, "the unit in the field did not move at all");
         assert!(
-            (metalled - plain * 3.0).abs() < 1e-9,
-            "metalled {metalled} against plain {plain} is not the three-to-one the ladder sets"
+            roster.units()[&ObjectId(3)].position[1] == 30.5,
+            "the field unit strayed off its row, so it is not measuring the field"
+        );
+        assert!(
+            (road - field * 3.0).abs() < 1e-9,
+            "{road} metres of road against {field} of field is not the three-to-one the ladder sets"
+        );
+    }
+
+    #[test]
+    fn only_the_units_the_edit_touched_repath_and_only_on_that_tick() {
+        // ADR 3001 decision 7 through the kernel, which is what makes it a statement about
+        // `Units::tick` rather than about a method nothing calls. The stamp lands on the tick the
+        // scenario activates; the unit whose route runs along the stamped row plans again, the one
+        // twenty-nine rows away does not, and the tick after there is no news for either.
+        let terrain = flat_terrain(33);
+        let mut kernel = stamped_kernel(&terrain, vec![placement("structure/road", 15.5, 1.5)]);
+        kernel
+            .advance(&[
+                command(0, 0, spawn_command("unit/rifleman", 0.5, 1.5)),
+                command(0, 0, spawn_command("unit/rifleman", 0.5, 30.5)),
+                // The road took `ObjectId(1)` at activation; these two are the spawns above.
+                command(0, 0, move_command(ObjectId(2), 31.5, 1.5)),
+                command(0, 0, move_command(ObjectId(3), 31.5, 30.5)),
+            ])
+            .expect("advances");
+        assert_eq!(
+            units(&kernel).repathed(),
+            1,
+            "exactly the unit standing on the new road should have replanned"
+        );
+
+        kernel.advance(&[]).expect("advances");
+        assert_eq!(
+            units(&kernel).repathed(),
+            1,
+            "an edit is news for one tick, or every unit replans for ever"
+        );
+    }
+
+    #[test]
+    fn a_wall_stamped_across_a_route_sends_the_unit_around_it() {
+        // The behaviour decision 7 exists for. Nothing constructs anything yet, so the only way to
+        // put a wall across a route already in progress is to hand the grid the object a
+        // construction subsystem will hand it — which is exactly what `Ground::tick` does with the
+        // `Forces` snapshot, one call further in.
+        let terrain = flat_terrain(17);
+        let templates = stamping_templates();
+        let mut ground = Ground::derive(&terrain, GroundRules::default().with_sharp_corners())
+            .with_templates(&templates);
+        let mut roster = Units::new(&templates);
+        let mut ids = crate::id::IdAllocator::new();
+
+        let start = [0.5, 8.5];
+        roster.apply(
+            PlayerId(0),
+            &spawn_command("unit/rifleman", start[0], start[1]),
+            &mut ids,
+            Some(&ground),
+        );
+        roster.apply(
+            PlayerId(0),
+            &move_command(ObjectId(1), 15.5, 8.5),
+            &mut ids,
+            Some(&ground),
+        );
+        assert_eq!(
+            roster.units()[&ObjectId(1)].route,
+            vec![[15.5, 8.5]],
+            "over open ground the plan is a straight line, which is what the wall has to spoil"
+        );
+
+        ground.reconcile(
+            &std::iter::once((
+                ObjectId(9),
+                crate::activation::Placed {
+                    owner: None,
+                    template: "structure/wall".to_owned(),
+                    position: [8.5, 8.5, 0.0],
+                    rotation: 0,
+                    scale: 1.0,
+                },
+            ))
+            .collect(),
+        );
+        assert!(!ground.passable(8, 8), "the wall is where the test put it");
+        assert!(ground.passable(8, 3), "and it has an end to walk round");
+
+        roster.repath_over_edits(&ground);
+        assert_eq!(roster.repathed(), 1);
+
+        let unit = &roster.units()[&ObjectId(1)];
+        assert_eq!(
+            unit.destination(),
+            Some([15.5, 8.5]),
+            "a repath goes where the unit was already going"
+        );
+        assert!(
+            unit.route.len() > 1,
+            "the unit is still planning to walk through the wall: {:?}",
+            unit.route
+        );
+        let mut previous = start;
+        for waypoint in &unit.route {
+            assert!(
+                ground.walkable_between(previous, *waypoint),
+                "leg {previous:?} -> {waypoint:?} crosses the wall"
+            );
+            previous = *waypoint;
+        }
+    }
+
+    #[test]
+    fn a_unit_cut_off_by_a_stamp_gives_up_the_far_side() {
+        // The other half of the rule, where the repath changes the *destination* rather than the
+        // way to it. A wall goes up right across the map between a unit and where it was going, so
+        // the best it can now do is the near side — which is what an order to the far side of a
+        // wall has meant since decision 5, arriving here by a different road.
+        let terrain = flat_terrain(17);
+        let templates = stamping_templates();
+        let mut ground = Ground::derive(&terrain, GroundRules::default().with_sharp_corners())
+            .with_templates(&templates);
+        let mut roster = Units::new(&templates);
+        let mut ids = crate::id::IdAllocator::new();
+        roster.apply(
+            PlayerId(0),
+            &spawn_command("unit/rifleman", 8.5, 15.5),
+            &mut ids,
+            Some(&ground),
+        );
+        roster.apply(
+            PlayerId(0),
+            &move_command(ObjectId(1), 8.5, 0.5),
+            &mut ids,
+            Some(&ground),
+        );
+        assert_eq!(
+            roster.units()[&ObjectId(1)].destination(),
+            Some([8.5, 0.5]),
+            "the plan starts out reaching the far side"
+        );
+
+        // Two nine-cell walls, each stood on end by a quarter turn, laid across the whole map.
+        let wall = |x: f64| crate::activation::Placed {
+            owner: None,
+            template: "structure/wall".to_owned(),
+            position: [x, 12.5, 0.0],
+            rotation: QUARTER_TURN,
+            scale: 1.0,
+        };
+        ground.reconcile(
+            &[(ObjectId(9), wall(4.5)), (ObjectId(10), wall(11.5))]
+                .into_iter()
+                .collect(),
+        );
+        assert!(
+            (0..16).all(|x| !ground.passable(x, 12)),
+            "the fixture needs a wall with no way round it, or it cannot fail"
+        );
+
+        roster.repath_over_edits(&ground);
+        let unit = &roster.units()[&ObjectId(1)];
+        assert_eq!(roster.repathed(), 1);
+        assert!(
+            unit.destination().is_some_and(|end| end[1] > 12.0),
+            "the unit is still planning to arrive on the far side of a wall it cannot cross: {:?}",
+            unit.route
         );
     }
 

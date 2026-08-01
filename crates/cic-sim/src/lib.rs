@@ -58,7 +58,7 @@ pub mod units;
 
 pub use activation::{ActivationError, Forces, Placed, Player, activate};
 pub use command::{Command, CommandError, CommandLog, PlayerId};
-pub use ground::{GROUND, Ground, GroundRules};
+pub use ground::{CellRect, GROUND, Ground, GroundRules};
 pub use hash::StateHasher;
 pub use id::{IdAllocator, ObjectId};
 pub use kernel::{

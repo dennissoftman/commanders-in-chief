@@ -192,6 +192,8 @@ fn demo(terrain: &Terrain) -> (Scenario, TemplateSet) {
         model: model.map(str::to_owned),
         name: None,
         speed: None,
+        footprint: None,
+        passage: None,
     };
     let templates = TemplateSet {
         format_version: 1,
