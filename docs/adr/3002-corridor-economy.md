@@ -137,6 +137,13 @@ reasonable simplifications.
     demolishing it severs without interdicting** — nothing owned was harmed. Severance therefore
     *moves* a route where interdiction and cratering only reduce what it carries.
 
+22. **A crossing can always be rebuilt, expensively and slowly, and the rebuild is a build site.** Any
+    faction with an engineering capability can do it and Concord does it best. Because it is a build
+    site it inherits decision-free behaviour from the construction rules: **anyone can interrupt it**,
+    killing the engineer stops work with the invested progress retained on the site, and destroying the
+    site itself refunds nothing where cancelling would refund the unspent remainder. A crossing is
+    therefore a place contested repeatedly rather than an event that happens once.
+
 ## Rationale
 
 **Why carriage rather than a rate.** A per-second trickle for holding a point is cheaper to implement
@@ -234,8 +241,9 @@ bridge. The detour is not a guess — it is the graph's next-best path — so a 
 can decide where an opponent's supply will be before forcing it there. A demolition becomes an ambush
 with the ambush already built.
 
-Two things make that a decision rather than a trap. The victim has three answers — rebuild under fire,
-clear the outpost, or accept the longer route and pay in income — and none of them is upkeep. And
+Two things make that a decision rather than a trap. The victim has three answers — rebuild the
+crossing, clear the outpost, or accept the longer route and pay in income — and none of them is upkeep.
+And
 **this is the payoff for keeping interdiction, condition and obstruction separate**: severance,
 occupation and interdiction chain into one operation *because* they are three different mechanisms
 acting on the same link. A single merged "the road is damaged" quantity could not have produced it,
@@ -244,6 +252,20 @@ which is worth recording as an argument for the separation rather than only as a
 It also lands on a phrase the setting already owned. The bible gives AEC *shaping operations* among its
 euphemisms, and this is what the phrase means when it means anything: not attacking the enemy's
 logistics but rearranging the ground until the logistics arrive where you are waiting.
+
+**Why a rebuild is interruptible, and why that was free.** Decision 22 adds no mechanism: a rebuild is a
+build site, and the construction rules already say a build site is a real object that can be attacked,
+with cancelling refunding the unspent remainder and nothing more. Everything wanted falls out of that.
+Interruption costs the *tempo* rather than the investment, because progress stays on the site, so an
+interrupted rebuild is a setback rather than a wasted commitment — which is the difference between a
+decision and a punishment for trying. Levelling the works is the harsher option and correctly costs the
+attacker a repeat visit.
+
+The consequence is that a crossing is **a place rather than an event**, contested across a match by
+whoever wants the route to exist. It is also what makes the shaping outpost worth more than one ambush:
+the same ground covers the detour and denies the repair, so taking it wins both halves of the argument
+and retaking it is the owner's necessary first move. A fight over terrain neither side wants for its
+own sake is exactly what a corridor should generate.
 
 **Why carriage is not bound to the route graph.** A trade route whose carriers run on rails — *Age of
 Empires III*'s is the clearest reference — is interceptable only on the rail, which deletes the spatial
@@ -351,13 +373,17 @@ economy that cannot survive peace — as arithmetic a player feels in their inco
 in a briefing. It also carries a balance obligation, since two anti-correlated curves cannot be swept
 one at a time.
 
-**What this obliges.** Twenty engine requirements, listed with their homes in
-[mechanics.md §10](../design/mechanics.md#10-what-this-document-obliges-the-engine-to-gain). Six are
-already promised or built — templates growing fields with the mechanics that read them, footprint and
-passage from ADR 3001, runtime cell-cost edits, the string table, per-instance tint, and standing orders
-that a carrier round trip extends rather than invents. Five are new: scenario `routes`/`gates`/`yards`,
-integer credit accumulation, wreck objects with decay, convertible neutral structures, and detection as
-an axis beside vision.
+**What this obliges.** <!--count:total-->Twenty<!--/count--> engine requirements, listed with their
+homes in [mechanics.md §10](../design/mechanics.md#10-what-this-document-obliges-the-engine-to-gain),
+which is the one place they are enumerated — these numbers are generated from that table and the list
+is deliberately not repeated here, because a second copy is a second thing to keep true.
+
+<!--count:promised-->Seven<!--/count--> are already promised or built: templates growing fields with the
+mechanics that read them, footprint and passage from ADR 3001, runtime cell-cost edits, the string
+table, per-instance tint, standing orders that a carrier round trip extends rather than invents, and
+`passage` again as what a bridge grants. The rest are new, and
+<!--count:amendments-->three<!--/count--> of the total are amendments to an accepted record rather than
+work of their own.
 
 **A scenario format change.** `map.json` gains three optional members. Additive, so existing maps stay
 valid, and the package loader is where cross-references are checked — the same reasoning that already

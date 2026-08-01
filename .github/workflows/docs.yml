@@ -1,0 +1,50 @@
+name: Docs
+
+# A separate workflow because `ci.yml` cannot host this. That workflow sets `paths-ignore`
+# for `**/*.md` at the workflow level, so a documentation-only change skips every job it
+# defines — which is exactly the change this check exists to catch. A job added there would
+# be silently absent on the pull requests that need it most.
+#
+# This one uses `paths` where `ci.yml` deliberately uses `paths-ignore`, and the reasoning
+# inverts with the subject. `ci.yml` cannot enumerate everything that might affect a build,
+# so it names what cannot and lets anything unanticipated run. This job checks documents
+# against a table inside a document; that set is closed and known, so naming it is precise
+# rather than a guess. A target added outside these paths fails the generator itself, which
+# refuses a target file containing no spans, rather than passing quietly.
+#
+# The two path lists are identical and kept in sync by hand, for the reason `ci.yml` already
+# records: GitHub Actions does not expand YAML anchors.
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**/*.md'
+      - 'tools/generate-doc-counts.py'
+      - '.github/workflows/docs.yml'
+  pull_request:
+    paths:
+      - '**/*.md'
+      - 'tools/generate-doc-counts.py'
+      - '.github/workflows/docs.yml'
+
+jobs:
+  counts:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # Several documents quote how many engine requirements the mechanics design obliges,
+      # and those numbers are derived from one table in `docs/design/mechanics.md`. Every
+      # one of them was wrong at least once while the design was being written, because
+      # adding a row to a table in one file does not remind anybody to edit a sentence in
+      # two others. Generating them and diffing turns that into a failing check, the same
+      # shape as the NOTICES.md step in `ci.yml`.
+      #
+      # `--check` runs first because it names the stale files and the command that fixes
+      # them, which is more use in a log than a bare diff. The regenerate-and-diff after it
+      # is belt and braces: it catches a generator that reported clean while writing
+      # nothing.
+      - name: derived counts are in step with their source table
+        run: |
+          python3 tools/generate-doc-counts.py --check
+          python3 tools/generate-doc-counts.py
+          git diff --exit-code -- docs/

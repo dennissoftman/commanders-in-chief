@@ -21,7 +21,7 @@ requirement here are all repository facts rather than defaults.
 | Merge style | merge commit, `Merge pull request #N from <owner>/<branch>` |
 | Sign-off | **required on every commit** — `git commit -s` |
 | Toolchain | pinned `1.93.0` in `rust-toolchain.toml` |
-| CI | one job, `rust` on `ubuntu-latest`, in `.github/workflows/ci.yml` |
+| CI | two workflows: `rust` in `.github/workflows/ci.yml`, and `counts` in `.github/workflows/docs.yml`. Their path filters are complements — see the CI section |
 
 ## Read before changing anything
 
@@ -199,15 +199,25 @@ what stale content was removed.
 
 ## CI
 
-- **Documentation-only changes skip the job by design.** `ci.yml` sets `paths-ignore` for
-  `**/*.md`, `.claude/**`, and `.gitignore`, so a PR touching only those reports no checks at
-  all. That is expected, not a stuck run — do not wait on it and do not re-push to trigger it.
-  Anything outside that list still runs, and a PR mixing code with docs runs it too, because
-  `pull_request` evaluates the filter over the whole diff.
+- **Two workflows with complementary filters, so most PRs run exactly one of them.**
+  - `ci.yml` (`rust`) sets `paths-ignore` for `**/*.md`, `.claude/**`, and `.gitignore`, so a
+    documentation-only PR does not run it. That is expected, not a stuck run — do not wait on it
+    and do not re-push to trigger it.
+  - `docs.yml` (`counts`) is the inverse: it runs on `**/*.md`, on the generator, and on itself.
+    It regenerates the derived counts in the design documents from their source table and fails
+    on a diff. A code-only PR does not run it.
+  - A PR mixing code and docs runs both, because `pull_request` evaluates each filter over the
+    whole diff.
+  - **A PR touching neither still reports no checks**, which is correct rather than broken.
+- **A stale count is fixed by running the generator, not by editing the sentence.** Several
+  documents quote how many engine requirements the mechanics design obliges; those numbers live
+  inside `<!--count:...-->` spans and are generated. Run `python3 tools/generate-doc-counts.py`
+  and commit what it writes. Editing the number by hand puts the build back where it was.
 - The local gate is the real gate, and it is not conditional on file type. Run it before every
-  push, including on branches CI will skip.
+  push, including on branches CI will skip. If the change touches documents, run the counts
+  generator too — `--check` reports staleness without writing.
 - `gh pr checks <n> --watch` after pushing. Do not mark a draft ready or merge while red.
-- Failures are almost always one of the three gate commands, so reproduce locally with the exact
+- Failures in `rust` are almost always one of the three gate commands, so reproduce locally with the exact
   command from the log rather than guessing. `gh run view <id> --log-failed` reads a failure
   without scrolling the whole log.
 
