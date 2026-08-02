@@ -96,9 +96,11 @@ another subsystem — see [Remaining](#remaining).
   precisely so it is hashed and replayed ([ADR 7002](../adr/7002-script-events.md) decision 7).
   - **What is left is the verbs that reach another subsystem** — spawn, order, count, query a zone,
     set an objective, show a briefing. Those are no longer blocked on M5, which has landed; they are
-    blocked on a question M5 did not have to answer, namely how one subsystem reaches another's state
-    during a tick. The answer must not be "a script forges a player's command", which would put
-    scripted and human orders in the same channel and make a mod indistinguishable from a player.
+    waiting on the typed query-and-effect contract proposed in
+    [ADR 3008](../adr/3008-deterministic-task-execution.md). Immutable peer reads provide the query
+    half; the owning subsystem must apply the write half at a stable commit point. The answer is not
+    "a script forges a player's command", which would put scripted and human orders in the same
+    channel and make a mod indistinguishable from a player.
 - **Scripts in the map package.** **Done.** `map.json` carries an ordered `scripts` array, every entry
   is compiled at load against the kernel's interface, and dispatch order is authored order — see the
   [scenario format](../formats/scenario.md#scripts). A script the scenario does not name does not run,
